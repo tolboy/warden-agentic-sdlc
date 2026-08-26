@@ -1,0 +1,72 @@
+workflow:
+  name: warden-machine-gates
+  description: Validate a project task and run deterministic machine gates; stop before a human.
+  version: 0.1.0
+  entry_point: validate_task
+  input:
+    task:
+      type: string
+      required: true
+    run_id:
+      type: string
+      required: true
+  limits:
+    max_iterations: 4
+    timeout_seconds: 900
+  runtime:
+    checkpoint:
+      every_agent: true
+
+agents:
+  - name: validate_task
+    type: script
+    command: bin/warden.cmd
+    args: ["validate", "{{ workflow.input.task }}"]
+    working_dir: "{{ workflow.dir }}/.."
+    timeout: 60
+    routes:
+      - to: machine_gates
+        when: "{{ validate_task.output.ok == true and validate_task.output.exit_code == 0 }}"
+      - to: invalid_task
+
+  - name: machine_gates
+    type: script
+    command: bin/warden.cmd
+    args: ["gates", "{{ workflow.input.task }}", "--run-id", "{{ workflow.input.run_id }}"]
+    working_dir: "{{ workflow.dir }}/.."
+    timeout: 720
+    routes:
+      - to: human_approval
+        when: "{{ machine_gates.output.ok == true and machine_gates.output.exit_code == 0 }}"
+      - to: gates_failed
+
+  - name: human_approval
+    type: human_gate
+    prompt: "Machine gates passed. Inspect the diff and .warden/runs/{{ workflow.input.run_id }}/machine-gate.json."
+    options:
+      - label: Reject
+        value: reject
+        route: rejected
+      - label: Approve for manual landing
+        value: approve
+        route: approved
+
+  - name: approved
+    type: terminate
+    status: success
+    reason: Human approval recorded. Warden still performs no merge or push.
+
+  - name: invalid_task
+    type: terminate
+    status: failed
+    reason: Task contract validation failed.
+
+  - name: gates_failed
+    type: terminate
+    status: failed
+    reason: Machine gates failed; inspect the evidence report.
+
+  - name: rejected
+    type: terminate
+    status: failed
+    reason: Human approval was not granted.

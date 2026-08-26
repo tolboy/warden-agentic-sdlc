@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+WARDEN_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+exec java -cp "$WARDEN_HOME/out/classes" dev.warden.Main "$@"

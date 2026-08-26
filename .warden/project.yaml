@@ -1,0 +1,26 @@
+version: 1
+project: warden
+base_ref: HEAD
+
+checks:
+  fast: ["test.cmd"]
+
+scopes:
+  platform:
+    - ".warden"
+    - "bin"
+    - "docs"
+    - "spec"
+    - "src"
+    - ".gitignore"
+    - "README.md"
+    - "build.cmd"
+    - "build.sh"
+    - "test.cmd"
+    - "test.sh"
+
+defaults:
+  checks: fast
+  risk: medium
+  max_fix_attempts: 2
+  timeout_minutes: 10
