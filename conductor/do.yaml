@@ -1,0 +1,70 @@
+workflow:
+  name: warden-do
+  description: Isolate, lint, run the bounded role loop, stop at a fail-closed human gate. Never lands.
+  version: 0.1.0
+  entry_point: do_task
+  input:
+    goal:
+      type: string
+      required: true
+    project_dir:
+      type: string
+      required: true
+    scope:
+      type: string
+      required: false
+    run_id:
+      type: string
+      required: false
+  limits:
+    max_iterations: 4
+    timeout_seconds: 7800
+  runtime:
+    checkpoint:
+      every_agent: true
+
+agents:
+  - name: do_task
+    type: script
+    command: java
+    args:
+      - "-cp"
+      - "{{ workflow.dir }}/../out/classes"
+      - "dev.warden.Main"
+      - "do"
+      - "--project"
+      - "{{ workflow.input.project_dir }}"
+      - "--goal"
+      - "{{ workflow.input.goal }}"
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 7200
+    routes:
+      - to: human_approval
+        when: "{{ do_task.output.ok == true }}"
+      - to: do_failed
+
+  - name: human_approval
+    type: human_gate
+    prompt: "Warden stopped before landing. Inspect {{ workflow.input.project_dir }}/.warden/runs and the worktree diff."
+    options:
+      - label: Reject
+        value: reject
+        route: rejected
+      - label: Approve for manual landing
+        value: approve
+        route: approved
+
+  - name: approved
+    type: terminate
+    status: success
+    reason: Human approval recorded. Warden still performs no merge or push.
+
+  - name: do_failed
+    type: terminate
+    status: failed
+    reason: warden do stopped before the human gate; inspect the JSON and the evidence ledger.
+
+  - name: rejected
+    type: terminate
+    status: failed
+    reason: Human approval was not granted.
