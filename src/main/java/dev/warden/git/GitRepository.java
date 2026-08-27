@@ -34,17 +34,16 @@ public final class GitRepository {
     }
 
     public Set<String> changedPaths() throws IOException, InterruptedException {
-        ProcessRunner.Result result = git(List.of("status", "--porcelain=v1", "-z", "--untracked-files=all"));
-        String[] fields = result.stdout().split("\0", -1);
         Set<String> paths = new LinkedHashSet<>();
-        for (int index = 0; index < fields.length; index++) {
-            String field = fields[index];
-            if (field.length() < 4) continue;
-            String status = field.substring(0, 2);
-            paths.add(normalize(field.substring(3)));
-            if ((status.indexOf('R') >= 0 || status.indexOf('C') >= 0) && index + 1 < fields.length) {
-                paths.add(normalize(fields[++index]));
-            }
+        // Content changes vs HEAD. Do not use `status --porcelain`: on Windows a file can be
+        // "modified" in the index/worktree because of CRLF after `npm install` while
+        // `git diff --name-only HEAD` is empty. That false dirty bit stopped a live
+        // `warden do` before review — the implementer had only edited an in-scope CSS file.
+        for (String path : git(List.of("diff", "--name-only", "-z", "HEAD", "--")).stdout().split("\0", -1)) {
+            if (!path.isBlank()) addChangedPath(paths, path);
+        }
+        for (String path : git(List.of("ls-files", "-o", "--exclude-standard", "-z")).stdout().split("\0", -1)) {
+            if (!path.isBlank()) addChangedPath(paths, path);
         }
         return paths;
     }
@@ -54,7 +53,7 @@ public final class GitRepository {
         Set<String> paths = new LinkedHashSet<>();
         String[] committedAndWorking = git(List.of("diff", "--name-only", "-z", mergeBase, "--"))
                 .stdout().split("\0", -1);
-        for (String path : committedAndWorking) if (!path.isBlank()) paths.add(normalize(path));
+        for (String path : committedAndWorking) if (!path.isBlank()) addChangedPath(paths, path);
         paths.addAll(changedPaths());
         return paths;
     }
@@ -117,4 +116,14 @@ public final class GitRepository {
     }
 
     private static String normalize(String path) { return path.replace('\\', '/').replaceFirst("^\\./", ""); }
+
+    private static void addChangedPath(Set<String> paths, String rawPath) {
+        String path = normalize(rawPath);
+        // The .warden tree is Warden-owned (contract, tasks, evidence). Task blast radius
+        // is the project's source. Contract mutation is a separate hashed check; counting
+        // a freshly written project.yaml as "out of scope" made `warden do` fail closed
+        // on its own init files.
+        if (path.equals(".warden") || path.startsWith(".warden/")) return;
+        paths.add(path);
+    }
 }

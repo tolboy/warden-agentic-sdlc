@@ -51,6 +51,16 @@ public final class RuntimeTest implements Suite {
             check.that("machine gate passes in-scope change", passed.ok());
             check.that("machine gate report written", Files.isRegularFile(passed.report()));
             check.that("ignored-path limitation disclosed", passed.data().containsKey("does_not_cover"));
+            check.that("managed run evidence does not poison later blast radius",
+                    git.changedPaths().stream().noneMatch(path -> path.startsWith(".warden/runs/")));
+            Files.writeString(repository.resolve(".warden/tasks/extra.yaml"), "version: 1\nid: extra\ngoal: g\nscope: code\n");
+            check.that("untracked Warden contract files are not a blast-radius violation",
+                    git.changedPaths().stream().noneMatch(path -> path.startsWith(".warden/")));
+
+            ConfigLoader.Loaded visual = new ConfigLoader().load(repository, "needs-eyes");
+            GateRunner.Outcome eyes = new GateRunner(runner).run(visual, "test-visual");
+            check.that("machine gates no longer stand in for visual QA",
+                    !"visual_qa_unavailable".equals(eyes.code()));
 
             Files.writeString(repository.resolve("outside.txt"), "outside\n");
             GateRunner.Outcome refused = new GateRunner(runner).run(loaded, "test-refuse");
@@ -95,6 +105,15 @@ public final class RuntimeTest implements Suite {
                 budgets:
                   max_role_runs: 3
                   max_cost_usd: 1.0
+                """);
+        Files.writeString(root.resolve(".warden/tasks/needs-eyes.yaml"), """
+                version: 1
+                id: needs-eyes
+                goal: a task that requires visual QA
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios: ["main-menu"]
                 """);
         command(root, "git", "init", "-b", "main");
         command(root, "git", "add", ".");
