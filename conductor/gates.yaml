@@ -10,6 +10,9 @@ workflow:
     run_id:
       type: string
       required: true
+    project_dir:
+      type: string
+      required: true
   limits:
     max_iterations: 4
     timeout_seconds: 900
@@ -20,9 +23,9 @@ workflow:
 agents:
   - name: validate_task
     type: script
-    command: bin/warden.cmd
-    args: ["validate", "{{ workflow.input.task }}"]
-    working_dir: "{{ workflow.dir }}/.."
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "validate", "{{ workflow.input.task }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
     timeout: 60
     routes:
       - to: machine_gates
@@ -31,9 +34,9 @@ agents:
 
   - name: machine_gates
     type: script
-    command: bin/warden.cmd
-    args: ["gates", "{{ workflow.input.task }}", "--run-id", "{{ workflow.input.run_id }}"]
-    working_dir: "{{ workflow.dir }}/.."
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "gates", "{{ workflow.input.task }}", "--run-id", "{{ workflow.input.run_id }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
     timeout: 720
     routes:
       - to: human_approval
@@ -42,7 +45,7 @@ agents:
 
   - name: human_approval
     type: human_gate
-    prompt: "Machine gates passed. Inspect the diff and .warden/runs/{{ workflow.input.run_id }}/machine-gate.json."
+    prompt: "Machine gates passed. Inspect the diff and {{ workflow.input.project_dir }}/.warden/runs/{{ workflow.input.run_id }}/machine-gate.json."
     options:
       - label: Reject
         value: reject
