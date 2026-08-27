@@ -30,14 +30,14 @@ public record TaskSpec(
         Long timeoutMinutes) {
 
     public record Authority(boolean workspaceWrite, boolean network, boolean land) {}
-    public record VisualQa(boolean required, List<String> scenarios) {}
+    public record VisualQa(boolean required, List<String> scenarios, String start, String url) {}
     public record Budget(long maxRoleRuns, double maxCostUsd) {}
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance",
             "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
-    private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios");
+    private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios", "start", "url");
     private static final Set<String> BUDGET_KEYS = Set.of("max_role_runs", "max_cost_usd");
 
     public static TaskSpec parse(String yamlText, String source) {
@@ -73,7 +73,9 @@ public record TaskSpec(
         Values visualNode = root.optMap("visual_qa").rejectUnknownKeys(VISUAL_KEYS);
         VisualQa visualQa = new VisualQa(
                 visualNode.optBool("required", false),
-                visualNode.optStringList("scenarios", List.of()));
+                visualNode.optStringList("scenarios", List.of()),
+                visualNode.optString("start", null),
+                visualNode.optString("url", null));
         if (visualQa.required() && visualQa.scenarios().isEmpty()) {
             root.collector().add("visual_qa.scenarios must not be empty when visual QA is required");
         }

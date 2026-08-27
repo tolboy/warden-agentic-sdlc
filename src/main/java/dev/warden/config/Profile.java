@@ -28,16 +28,42 @@ public record Profile(
         String jsonSchema,
         boolean enforceSchema,
         List<String> requiredArtifactFields,
+        List<String> quotaSignatures,
+        String promptDelivery,
+        String attachmentFlag,
+        String runner,
         boolean verified) {
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "command", "args", "read_only",
-            "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "verification", "notes");
+            "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
+            "prompt_delivery", "attachments", "runner", "verification", "notes");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
+    private static final Set<String> QUOTA = Set.of("signatures");
+    private static final Set<String> ATTACHMENTS = Set.of("flag");
     private static final Set<String> VERIFICATION = Set.of("verified_on", "status", "probe", "what_to_check", "note");
 
     public static final Set<String> ROLES = Set.of("implementer", "reviewer", "architect", "visual_qa");
+
+    /**
+     * How the prompt reaches the vendor.
+     *
+     * `argv` renders it into an argument via `{{prompt}}`, or passes a path via
+     * `{{prompt_file}}`. `stdin` writes it to the child's standard input, which is the only
+     * channel that survives a Windows `.cmd` shim: cmd.exe truncates a multi-line argument at
+     * its first newline and silently discards every argument after it, so an inline prompt
+     * reaches an npm-installed vendor as one line with the flags stripped off.
+     */
+    public static final Set<String> PROMPT_DELIVERY = Set.of("argv", "stdin");
+
+    /**
+     * How the role is launched. {@code direct} is a vendor CLI in this process. {@code orca}
+     * is a supervised worker inside the current Orca worktree — Warden never creates that
+     * worktree. {@code local} is a named intent for a future in-process runner and is refused
+     * at resolve time until it exists.
+     */
+    public static final Set<String> RUNNERS = Set.of("direct", "orca", "local");
 
     public static Profile parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -66,11 +92,29 @@ public record Profile(
         Values artifact = root.optMap("artifact").rejectUnknownKeys(ARTIFACT);
         List<String> requiredFields = artifact.optStringList("required_fields", List.of());
 
+        // Phrases this vendor uses when the subscription is spent. Added to the built-in
+        // defaults, never substituted for them: a vendor-specific wording learned here must
+        // not silently disable the wordings learned from another vendor.
+        Values quota = root.optMap("quota").rejectUnknownKeys(QUOTA);
+        List<String> quotaSignatures = quota.optStringList("signatures", List.of());
+
+        String promptDelivery = root.requireEnum("prompt_delivery", PROMPT_DELIVERY, "argv");
+
+        // How a file the role must LOOK at reaches the vendor. Screenshots are the case that
+        // forced this: a visual reviewer that only receives paths is reading a filename, not
+        // an image. `flag` is repeated once per file (codex: `-i shot.png -i after.png`).
+        // A vendor without such a flag still gets the paths in its prompt and can open them
+        // with its own read tool, so the field is optional rather than required.
+        Values attachments = root.optMap("attachments").rejectUnknownKeys(ATTACHMENTS);
+        String attachmentFlag = attachments.optString("flag", null);
+        String runner = root.requireEnum("runner", RUNNERS, "direct");
+
         Values verification = root.optMap("verification").rejectUnknownKeys(VERIFICATION);
         boolean verified = verification.has("verified_on");
 
         root.throwIfAny();
         return new Profile(name, role, vendor, model, command, args, readOnly, wallClock,
-                promptTemplate, jsonSchema, enforceSchema, requiredFields, verified);
+                promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
+                promptDelivery, attachmentFlag, runner, verified);
     }
 }

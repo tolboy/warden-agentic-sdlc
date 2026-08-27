@@ -122,6 +122,15 @@ public final class YamlTest implements Suite {
         check.rejects("top level must be a mapping", "expected a mapping",
                 () -> Yaml.parseMapping("- one\n- two\n"));
 
+        // A flow collection split across lines is a real thing people write. It is refused
+        // with a message rather than half-parsed: a profile whose args list is silently
+        // truncated would run a vendor with the wrong flags.
+        check.rejects("multi-line flow sequence refused", "unexpected end of flow collection",
+                () -> Yaml.parse("args: [\"a\",\n       \"b\"]\n"));
+        check.eq("the block form is the supported way to write a long list",
+                List.of("a", "b"),
+                Yaml.parseMapping("args:\n  - \"a\"\n  - \"b\"\n").get("args"));
+
         check.eq("empty document is an empty mapping", Map.of(), Yaml.parse("# only a comment\n"));
     }
 }

@@ -129,6 +129,7 @@ public final class ConfigTest implements Suite {
         check.eq("profile vendor", "grok", reviewer.vendor());
         check.eq("args preserved", 3, reviewer.args().size());
         check.that("read_only defaults to true", reviewer.readOnly());
+        check.eq("runner defaults to direct", "direct", reviewer.runner());
         check.that("unverified profile is flagged", !reviewer.verified());
 
         Profile implementer = Profile.parse("""
@@ -148,6 +149,8 @@ public final class ConfigTest implements Suite {
                 () -> Profile.parse("version: 1\nprofile: p\nrole: reviewer\nvendor: v\ncommand: c\nreadonly: false\n", "p.yaml"));
         check.rejects("unknown role refused", "must be one of",
                 () -> Profile.parse("version: 1\nprofile: p\nrole: janitor\nvendor: v\ncommand: c\n", "p.yaml"));
+        check.rejects("unknown runner refused", "must be one of",
+                () -> Profile.parse("version: 1\nprofile: p\nrole: reviewer\nvendor: v\ncommand: c\nrunner: kubernetes\n", "p.yaml"));
 
         Policy policy = Policy.parse("""
                 version: 1

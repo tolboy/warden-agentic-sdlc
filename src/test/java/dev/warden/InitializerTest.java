@@ -33,5 +33,18 @@ public final class InitializerTest implements Suite {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
             }
         }
+
+        Path makeOnly = Files.createTempDirectory("warden-init-make-");
+        try {
+            Files.writeString(makeOnly.resolve("Makefile"), "test:\n\t@echo ok\n");
+            new ProjectInitializer().initialize(makeOnly, "HEAD");
+            ConfigLoader.Loaded loaded = new ConfigLoader().load(makeOnly, "example");
+            check.eq("file-only fallback scope is valid", java.util.List.of("Makefile"),
+                    loaded.resolved().scopePaths());
+        } finally {
+            try (var paths = Files.walk(makeOnly)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+            }
+        }
     }
 }

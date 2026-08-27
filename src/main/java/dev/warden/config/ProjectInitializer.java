@@ -26,7 +26,10 @@ public final class ProjectInitializer {
         for (String candidate : List.of("src", "test", "tests", "app", "lib", "docs", "scripts")) {
             if (Files.exists(root.resolve(candidate))) scopes.add(candidate);
         }
-        if (scopes.isEmpty()) scopes.add(".");
+        if (scopes.isEmpty()) {
+            if (Files.isRegularFile(root.resolve("Makefile"))) scopes.add("Makefile");
+            else scopes.add("src");
+        }
 
         Files.createDirectories(warden.resolve("tasks"));
         Files.createDirectories(warden.resolve("runs"));
@@ -64,8 +67,16 @@ public final class ProjectInitializer {
                 max_fix_attempts: 2
                 timeout_minutes: 30
                 """, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
-        Files.writeString(warden.resolve("runs/.gitignore"), "*\n!.gitignore\n",
+        Files.writeString(warden.resolve("runs/.gitignore"), """
+                *
+                !*/
+                !*.json
+                !*.jsonl
+                !.gitignore
+                """,
                 StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
+        // Never claim successful initialization for a contract Warden itself cannot load.
+        new ConfigLoader().load(root, "example");
         return new Result(projectFile, task, detection.name(), detection.checks());
     }
 
