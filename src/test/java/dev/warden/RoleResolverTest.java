@@ -44,6 +44,27 @@ public final class RoleResolverTest implements Suite {
         check.rejects("independence and verification fail closed", "no eligible profile", () ->
                 resolver.resolve("reviewer", policy, profiles, "openai", 0,
                         profile -> !profile.name().equals("grok")));
+
+        profiles.put("claude", profile("claude", "anthropic", "2026-08-26"));
+        profiles.put("local-only", Profile.parse("""
+                version: 1
+                profile: local-only
+                role: reviewer
+                vendor: local
+                command: opencode
+                runner: local
+                verification:
+                  verified_on: "2026-08-27"
+                """, "local-only.yaml"));
+        Policy localPolicy = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer:
+                    profiles: [local-only]
+                    strategy: first
+                """, "policy.yaml");
+        check.rejects("an unimplemented runner is skipped, not launched as direct CLI", "runner_unimplemented",
+                () -> resolver.resolve("reviewer", localPolicy, profiles, null, 0, profile -> true));
     }
 
     private static Profile profile(String name, String vendor, String verifiedOn) {
