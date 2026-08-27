@@ -3,12 +3,13 @@ project: warden
 base_ref: HEAD
 
 checks:
-  fast: ["test.cmd"]
+  fast: [".\\test.cmd"]
 
 scopes:
   platform:
     - ".warden"
     - "bin"
+    - "conductor"
     - "docs"
     - "spec"
     - "src"
