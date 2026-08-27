@@ -26,8 +26,27 @@ public final class ProcessRunner {
 
     public Result run(List<String> command, Path workingDirectory, Duration timeout, int captureBytes)
             throws IOException, InterruptedException {
+        return run(command, workingDirectory, timeout, captureBytes, null);
+    }
+
+    /**
+     * @param stdinText written to the child's standard input before it is closed, or null to
+     *                  close it immediately. Some vendors accept a prompt only this way, and on
+     *                  Windows it is the only channel that survives a `.cmd` shim intact.
+     */
+    public Result run(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
+                      String stdinText) throws IOException, InterruptedException {
         long started = System.nanoTime();
         Process process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start();
+        // No command executed by Warden is interactive. Leaving stdin open makes CLIs that
+        // probe it wait forever for input that can never arrive — so it is always closed,
+        // whether or not something was written to it first.
+        try (var input = process.getOutputStream()) {
+            if (stdinText != null) input.write(stdinText.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException childClosedEarly) {
+            // A vendor that refuses before reading its input is a normal outcome, not a fault
+            // of this runner; the exit code and captured streams still describe what happened.
+        }
         LimitedBuffer stdout = new LimitedBuffer(captureBytes);
         LimitedBuffer stderr = new LimitedBuffer(captureBytes);
         Thread outReader = Thread.ofVirtual().start(() -> drain(process.getInputStream(), stdout));

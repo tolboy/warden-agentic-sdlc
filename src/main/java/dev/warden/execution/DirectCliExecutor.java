@@ -1,0 +1,454 @@
+package dev.warden.execution;
+
+import dev.warden.config.Profile;
+import dev.warden.git.GitRepository;
+import dev.warden.json.Json;
+import dev.warden.json.Schema;
+import dev.warden.process.ProcessRunner;
+import dev.warden.role.PromptRenderer;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Runs a vendor CLI directly. The simplest adapter, and the one that has to be right first:
+ * every other execution surface is a variation on it.
+ *
+ * Four guarantees hold regardless of which vendor is behind the command, because none of
+ * them can be delegated to a vendor flag:
+ *
+ *  1. The exact prompt and the raw output are written to the run directory before anything
+ *     is judged. Without them a malformed answer is undiagnosable after the fact.
+ *  2. A read-only role is verified by comparing a CONTENT fingerprint of the worktree before
+ *     and after. Comparing path names fails open the moment the tree is already dirty, which
+ *     is the normal state after an implementer has run.
+ *  3. Required artifact fields are checked before the artifact is accepted; an artifact that
+ *     fails is not written at all.
+ *  4. Arguments are passed as an argv array, never through a shell, so nothing inside a
+ *     prompt can be interpreted as a command.
+ *  5. A failure is classified before it is reported. An exhausted subscription and a broken
+ *     flag both exit 1, and only one of them is worth retrying elsewhere — see
+ *     {@link QuotaSignal}.
+ */
+public final class DirectCliExecutor implements RoleExecutor {
+
+    /** Envelope keys vendors use for the model's answer, most specific first. */
+    private static final List<String> ENVELOPE_KEYS = List.of(
+            "structuredOutput", "structured_output", "result", "output", "response", "content", "data", "text");
+
+    private final ProcessRunner processes;
+    private final GitRepository git;
+
+    public DirectCliExecutor(ProcessRunner processes, GitRepository git) {
+        this.processes = processes;
+        this.git = git;
+    }
+
+    @Override
+    public Result execute(Request request) throws Exception {
+        Profile profile = request.profile();
+        Path runDirectory = request.runDirectory();
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("role", request.role());
+        evidence.put("profile", profile.name());
+        evidence.put("vendor", profile.vendor());
+        evidence.put("model", profile.model());
+        evidence.put("read_only", profile.readOnly());
+
+        String mergeBase = git.mergeBase(request.task().baseRef());
+        String fingerprintBefore = profile.readOnly() ? git.fingerprint(mergeBase) : null;
+
+        String schemaJson = "";
+        if (request.schemaFile() != null && Files.isRegularFile(request.schemaFile())) {
+            schemaJson = Json.write(Json.parse(Files.readString(request.schemaFile())));
+        }
+        Map<String, String> argumentValues = new LinkedHashMap<>();
+        argumentValues.put("prompt_file", request.promptFile().toAbsolutePath().toString());
+        argumentValues.put("prompt", Files.readString(request.promptFile()));
+        argumentValues.put("schema_json", schemaJson);
+        argumentValues.put("repo_root", request.projectRoot().toAbsolutePath().toString());
+        argumentValues.put("run_id", request.runId());
+        argumentValues.put("task_id", request.task().id());
+        // Without this, `model:` was a label the ledger reported and the vendor never saw:
+        // the run used whatever the CLI defaults to while the evidence named something else.
+        // Each vendor spells the flag differently, so the profile still writes the flag out
+        // (`args: ["--model", "{{model}}"]`); what is provided here is the value.
+        argumentValues.put("model", profile.model() == null ? "" : profile.model());
+
+        List<String> command = new ArrayList<>();
+        command.add(resolveExecutable(profile.command(), request.projectRoot()));
+        for (String argument : profile.args()) {
+            command.add(PromptRenderer.render(argument, argumentValues, "profile " + profile.name() + " args"));
+        }
+        // Files the role has to look at rather than read about. The flag is repeated per
+        // file because that is how the vendors that accept images spell it; a profile with
+        // no flag still gets the paths in its prompt and opens them with its own tools.
+        List<String> attached = new ArrayList<>();
+        if (profile.attachmentFlag() != null && request.attachments() != null) {
+            for (Path attachment : request.attachments()) {
+                if (!Files.isRegularFile(attachment)) continue;
+                command.add(profile.attachmentFlag());
+                command.add(attachment.toAbsolutePath().toString());
+                attached.add(attachment.toAbsolutePath().toString());
+            }
+        }
+        evidence.put("attachments", attached);
+        evidence.put("attachments_offered", request.attachments() == null ? List.of()
+                : request.attachments().stream().map(path -> path.toAbsolutePath().toString()).toList());
+        // The prompt can be enormous; record a readable command without inlining it.
+        evidence.put("command", command.stream()
+                .map(part -> part.equals(argumentValues.get("prompt")) ? "<prompt>" : part).toList());
+
+        String stdinText = profile.promptDelivery().equals("stdin") ? argumentValues.get("prompt") : null;
+        evidence.put("prompt_delivery", profile.promptDelivery());
+
+        Map<String, Object> deliverable = deliverabilityCheck(command);
+        evidence.put("argument_delivery_check", deliverable);
+        if (Boolean.FALSE.equals(deliverable.get("deliverable"))) {
+            evidence.put("failure", "role_prompt_undeliverable");
+            return new Result(false, "role_prompt_undeliverable", Duration.ZERO, "", null, evidence);
+        }
+
+        ProcessRunner.Result process;
+        try {
+            process = processes.run(command, request.projectRoot(),
+                    Duration.ofMinutes(profile.wallClockMinutes()), 4 * 1024 * 1024, stdinText);
+        } catch (IOException cannotStart) {
+            // A vendor that will not start is a configuration fault, not a vendor failure, and
+            // deliberately does not fail over: routing around a broken profile would hide it.
+            // It is still returned as a role outcome rather than thrown, so the run leaves a
+            // report behind instead of a stack trace with nothing recorded.
+            evidence.put("failure", "role_command_failed");
+            evidence.put("exit_code", -1L);
+            evidence.put("start_error", String.valueOf(cannotStart.getMessage()));
+            return new Result(false, "role_command_failed", Duration.ZERO, "", null, evidence);
+        }
+
+        Path rawDirectory = runDirectory.resolve("raw");
+        Files.createDirectories(rawDirectory);
+        Path stdoutFile = rawDirectory.resolve(request.evidenceName() + ".stdout.txt");
+        Files.writeString(stdoutFile, process.stdout(), StandardCharsets.UTF_8);
+        Files.writeString(rawDirectory.resolve(request.evidenceName() + ".stderr.txt"),
+                process.stderr(), StandardCharsets.UTF_8);
+        evidence.put("raw_stdout", runDirectory.relativize(stdoutFile).toString().replace('\\', '/'));
+        evidence.put("exit_code", (long) process.exitCode());
+        evidence.put("timed_out", process.timedOut());
+        evidence.put("duration_millis", process.durationMillis());
+
+        Duration duration = Duration.ofMillis(process.durationMillis());
+
+        if (profile.readOnly()) {
+            String fingerprintAfter = git.fingerprint(mergeBase);
+            boolean unchanged = fingerprintBefore.equals(fingerprintAfter);
+            Map<String, Object> check = new LinkedHashMap<>();
+            check.put("method", "worktree_content_fingerprint");
+            check.put("covers", "tracked edits, deletes, renames and untracked file contents");
+            check.put("does_not_cover", "paths ignored by .gitignore");
+            check.put("matched", unchanged);
+            evidence.put("read_only_check", check);
+            if (!unchanged) {
+                evidence.put("failure", "role_violated_read_only");
+                return new Result(false, "role_violated_read_only", duration, process.stdout(), null, evidence);
+            }
+        }
+
+        if (process.timedOut()) {
+            evidence.put("failure", "role_timeout");
+            return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
+        }
+        if (process.exitCode() != 0) {
+            Result quota = quotaFailure(request, process, duration, evidence);
+            if (quota != null) return quota;
+            evidence.put("failure", "role_command_failed");
+            // Both streams: the Codex usage-limit message arrives on stdout while stderr
+            // carries unrelated transport noise, so quoting stderr alone hid the cause.
+            evidence.put("stderr_tail", tail(process.stderr(), 2000));
+            evidence.put("stdout_tail", tail(process.stdout(), 2000));
+            return new Result(false, "role_command_failed", duration, process.stdout(), null, evidence);
+        }
+
+        Map<String, Object> envelope = Json.findLastObject(process.stdout());
+        if (envelope != null) collectTelemetry(envelope, evidence);
+        noteModelMismatch(profile, evidence);
+        // Codex --json is JSONL: the last object is usually turn.completed (usage), while
+        // the model's answer is an earlier item.completed / agent_message. Prefer that
+        // message when it is itself JSON; otherwise unwrap the last envelope as before.
+        Map<String, Object> fromJsonl = extractJsonlAgentMessage(process.stdout());
+        Map<String, Object> artifact = fromJsonl != null ? unwrap(fromJsonl) : unwrap(envelope);
+        if (artifact == null || isEventEnvelope(artifact)) {
+            artifact = unwrap(envelope);
+        }
+        if (artifact == null || isEventEnvelope(artifact)) {
+            Result quota = quotaFailure(request, process, duration, evidence);
+            if (quota != null) return quota;
+            evidence.put("failure", "role_artifact_unparseable");
+            evidence.put("stdout_tail", tail(process.stdout(), 2000));
+            return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
+        }
+
+        artifact.putIfAbsent("role", request.role());
+        artifact.putIfAbsent("task_id", request.task().id());
+        artifact.putIfAbsent("run_id", request.runId());
+
+        List<String> missing = new ArrayList<>();
+        for (String field : profile.requiredArtifactFields()) {
+            if (!artifact.containsKey(field)) missing.add(field);
+        }
+        if (!missing.isEmpty()) {
+            evidence.put("failure", "role_artifact_incomplete");
+            evidence.put("missing_fields", missing);
+            evidence.put("received_keys", new ArrayList<>(artifact.keySet()));
+            return new Result(false, "role_artifact_incomplete", duration, process.stdout(), null, evidence);
+        }
+
+        List<String> schemaErrors = schemaErrors(profile, request, artifact);
+        if (!schemaErrors.isEmpty()) {
+            evidence.put("failure", "role_artifact_schema_violation");
+            evidence.put("schema_errors", schemaErrors.stream().limit(40).toList());
+            return new Result(false, "role_artifact_schema_violation", duration, process.stdout(), null, evidence);
+        }
+
+        evidence.put("verdict", artifact.get("verdict"));
+        return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+    }
+
+    /** Conformance is ours, even when the vendor claimed to enforce the schema. */
+    static List<String> schemaErrors(Profile profile, Request request, Map<String, Object> artifact)
+            throws Exception {
+        if (!profile.enforceSchema() || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
+            return List.of();
+        }
+        Object schema = Json.parse(Files.readString(request.schemaFile()));
+        return Schema.validate(artifact, schema);
+    }
+
+    /**
+     * Classifies a failed run as an exhausted subscription, or returns null to let the caller
+     * report the generic failure. Only ever consulted for a run that already failed: a vendor
+     * that produced a usable artifact is never reclassified on the strength of its prose.
+     */
+    private static Result quotaFailure(Request request, ProcessRunner.Result process,
+                                       Duration duration, Map<String, Object> evidence) {
+        QuotaSignal.Detection detection = QuotaSignal.detect(
+                request.profile().quotaSignatures(), process.stdout(), process.stderr());
+        if (!detection.matched()) return null;
+        evidence.put("failure", "role_quota_exhausted");
+        evidence.put("quota", detection.report());
+        evidence.put("stderr_tail", tail(process.stderr(), 2000));
+        evidence.put("stdout_tail", tail(process.stdout(), 2000));
+        return new Result(false, "role_quota_exhausted", duration, process.stdout(), null, evidence);
+    }
+
+    /**
+     * Refuses a command whose arguments cannot survive the channel they are about to go
+     * through, rather than letting the vendor answer a corrupted question.
+     *
+     * Windows cannot start a `.cmd` or `.bat` directly; it runs them through cmd.exe, whose
+     * command line is line-oriented. A multi-line argument is cut at its first newline and
+     * every argument after it is dropped, with no error anywhere. Measured on this host:
+     *
+     * <pre>
+     * argv given:     [exec, "# Reviewer line one\nsecond line\nthird line", --json]
+     * argv received:  ARG1[exec]  ARG2[# Reviewer line one]  COUNT=2
+     * </pre>
+     *
+     * The same argv reaches an `.exe` intact, which is why a vendor shipping a single binary
+     * never showed the problem, and an npm-installed one silently reviewed a one-line prompt
+     * with its output flags stripped off. Paying for that answer and then judging it is worse
+     * than not running: use `prompt_delivery: stdin`, or a vendor flag that takes a file path.
+     *
+     * What this does not cover: cmd.exe also expands `%NAME%` inside an argument when that
+     * variable exists in the environment. Warden does not scan for that, and the check says so
+     * in every report rather than leaving the gap to be discovered.
+     */
+    public static Map<String, Object> deliverabilityCheck(List<String> command) {
+        String executable = command.get(0).toLowerCase();
+        boolean shim = executable.endsWith(".cmd") || executable.endsWith(".bat");
+        List<String> multiline = new ArrayList<>();
+        if (shim) {
+            for (int index = 1; index < command.size(); index++) {
+                String argument = command.get(index);
+                if (argument.contains("\n") || argument.contains("\r")) {
+                    multiline.add("argv[" + index + "] (" + argument.length() + " chars)");
+                }
+            }
+        }
+        Map<String, Object> check = new LinkedHashMap<>();
+        check.put("executable_is_batch_shim", shim);
+        check.put("covers", "multi-line arguments passed through cmd.exe, which truncates them "
+                + "at the first newline and drops every argument after it");
+        check.put("does_not_cover", "cmd.exe expansion of %NAME% inside an argument");
+        check.put("deliverable", multiline.isEmpty());
+        if (!multiline.isEmpty()) {
+            check.put("undeliverable_arguments", multiline);
+            check.put("resolution", "set prompt_delivery: stdin on this profile, or pass "
+                    + "{{prompt_file}} to a vendor flag that reads the prompt from a path");
+        }
+        return check;
+    }
+
+    /** Extensions Windows will actually start as a process, most specific first. */
+    private static final List<String> WINDOWS_EXECUTABLE_SUFFIXES =
+            List.of(".exe", ".cmd", ".bat", ".com");
+
+    /**
+     * Java resolves a bare command against PATH but does not apply PATHEXT for `.cmd` on
+     * Windows, so a working `grok` on the command line can still fail here. Falling back to
+     * a shell would reintroduce quoting of prompts, so resolve explicitly instead.
+     *
+     * Taking the first line `where.exe` prints is not enough. An npm-installed CLI puts two
+     * entries on PATH — an extensionless shell shim and the `.cmd` beside it — and the shim
+     * comes first:
+     *
+     * <pre>
+     * $ where.exe codex
+     * C:\Users\...\npm\codex        &lt;- a POSIX shell script: CreateProcess error=193
+     * C:\Users\...\npm\codex.cmd
+     * </pre>
+     *
+     * Warden picked the shim and the role died before the vendor was ever reached, on the
+     * first live run that used an npm-installed vendor. Grok had hidden the bug by shipping a
+     * single `grok.exe`. So the choice is made by extension, not by the order `where.exe`
+     * happens to print.
+     */
+    public static String resolveExecutable(String command, Path workingDirectory) {
+        if (command.contains("/") || command.contains("\\")) return command;
+        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return command;
+        try {
+            ProcessRunner.Result lookup = new ProcessRunner()
+                    .run(List.of("where.exe", command), workingDirectory, Duration.ofSeconds(10));
+            if (lookup.ok()) {
+                List<String> candidates = new ArrayList<>();
+                for (String line : lookup.stdout().split("\\R")) {
+                    if (!line.isBlank()) candidates.add(line.strip());
+                }
+                for (String suffix : WINDOWS_EXECUTABLE_SUFFIXES) {
+                    for (String candidate : candidates) {
+                        if (candidate.toLowerCase().endsWith(suffix)) return candidate;
+                    }
+                }
+                if (!candidates.isEmpty()) return candidates.get(0);
+            }
+        } catch (IOException | InterruptedException ignored) {
+            if (Thread.interrupted()) Thread.currentThread().interrupt();
+        }
+        return command;
+    }
+
+    /**
+     * Codex {@code exec --json} writes one event per line. The last line is typically
+     * {@code turn.completed} with usage; the model's answer, if it printed JSON, is in an
+     * {@code item.completed} event of type {@code agent_message}. Recovered from a live
+     * gpt-5.4-mini probe, not from documentation.
+     */
+    public static Map<String, Object> extractJsonlAgentMessage(String stdout) {
+        if (stdout == null || stdout.isBlank()) return null;
+        Map<String, Object> last = null;
+        for (String line : stdout.split("\\R")) {
+            String trimmed = line.strip();
+            if (!trimmed.startsWith("{")) continue;
+            Map<String, Object> event;
+            try {
+                event = Json.parseObject(trimmed);
+            } catch (Json.JsonException ignored) {
+                continue;
+            }
+            if (!"item.completed".equals(event.get("type"))) continue;
+            Object item = event.get("item");
+            if (!(item instanceof Map<?, ?> map)) continue;
+            if (!"agent_message".equals(map.get("type"))) continue;
+            Object text = map.get("text");
+            if (!(text instanceof String body) || body.isBlank()) continue;
+            Map<String, Object> parsed = Json.findLastObject(body);
+            if (parsed != null) last = parsed;
+        }
+        return last;
+    }
+
+    /** JSONL lifecycle events must not be accepted as the role artifact. */
+    static boolean isEventEnvelope(Map<String, Object> candidate) {
+        if (candidate == null) return true;
+        Object type = candidate.get("type");
+        if (!(type instanceof String name)) return false;
+        return name.startsWith("turn.") || name.startsWith("thread.") || name.startsWith("item.")
+                || "error".equals(name);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> unwrap(Map<String, Object> envelope) {
+        if (envelope == null) return null;
+        for (String key : ENVELOPE_KEYS) {
+            Object inner = envelope.get(key);
+            if (inner instanceof Map<?, ?> map) return unwrap(new LinkedHashMap<>((Map<String, Object>) map));
+            if (inner instanceof String text) {
+                Map<String, Object> reparsed = Json.findLastObject(text);
+                if (reparsed != null) return unwrap(reparsed);
+            }
+        }
+        return envelope;
+    }
+
+    /**
+     * Records the case where the profile names one model and the vendor reports another.
+     *
+     * Not a failure: a vendor may report an internal build name for the model it was asked
+     * for. It is evidence, because an experiment that compares two models is worthless if the
+     * ledger's `model` column is a wish rather than an observation.
+     */
+    public static void noteModelMismatch(Profile profile, Map<String, Object> evidence) {
+        Object reported = evidence.get("model_reported");
+        String declared = profile.model();
+        if (declared == null || declared.isBlank() || !(reported instanceof String actual)) return;
+        if (actual.equals(declared)) return;
+        Map<String, Object> mismatch = new LinkedHashMap<>();
+        mismatch.put("declared", declared);
+        mismatch.put("reported", actual);
+        mismatch.put("note", "the profile declares one model and the vendor reported another. If the "
+                + "profile's args do not pass {{model}} to the vendor's own flag, the declared name "
+                + "is a label and the run used the CLI's default.");
+        evidence.put("model_mismatch", mismatch);
+    }
+
+    /** Cost and usage the vendor volunteered. No experiment is needed to learn what a run costs. */
+    public static void collectTelemetry(Map<String, Object> envelope, Map<String, Object> evidence) {
+        Object cost = firstPresent(envelope, "total_cost_usd", "totalCostUsd", "cost_usd");
+        if (cost instanceof Number number) evidence.put("cost_usd", number.doubleValue());
+        Object turns = firstPresent(envelope, "num_turns", "numTurns");
+        if (turns instanceof Number number) evidence.put("num_turns", number.longValue());
+        Object stop = firstPresent(envelope, "stopReason", "stop_reason");
+        if (stop != null) evidence.put("stop_reason", stop);
+        Object session = firstPresent(envelope, "sessionId", "session_id");
+        if (session != null) evidence.put("session_id", session);
+        if (envelope.get("usage") instanceof Map<?, ?> usage) {
+            Map<String, Object> tokens = new LinkedHashMap<>();
+            tokens.put("input", usage.get("input_tokens") != null ? usage.get("input_tokens") : usage.get("inputTokens"));
+            tokens.put("output", usage.get("output_tokens") != null ? usage.get("output_tokens") : usage.get("outputTokens"));
+            tokens.put("total", usage.get("total_tokens") != null ? usage.get("total_tokens") : usage.get("totalTokens"));
+            evidence.put("tokens", tokens);
+        }
+        Object modelUsage = envelope.get("modelUsage");
+        if (modelUsage instanceof Map<?, ?> map && !map.isEmpty()) {
+            evidence.put("model_reported", map.keySet().iterator().next());
+        }
+    }
+
+    private static Object firstPresent(Map<String, Object> map, String... keys) {
+        for (String key : keys) {
+            Object value = map.get(key);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private static String tail(String text, int limit) {
+        if (text == null) return "";
+        return text.length() <= limit ? text : text.substring(text.length() - limit);
+    }
+}

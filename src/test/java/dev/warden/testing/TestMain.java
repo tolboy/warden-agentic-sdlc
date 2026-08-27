@@ -16,6 +16,7 @@ public final class TestMain {
                 new dev.warden.ConfigTest(),
                 new dev.warden.RuntimeTest(),
                 new dev.warden.RoleResolverTest(),
+                new dev.warden.QuotaSignalTest(),
                 new dev.warden.OrcaClientTest(),
                 new dev.warden.LedgerTest(),
                 new dev.warden.InitializerTest()
