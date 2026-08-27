@@ -11,6 +11,7 @@ public final class TestMain {
     public static void main(String[] args) {
         List<Suite> suites = List.of(
                 new dev.warden.JsonTest(),
+                new dev.warden.SchemaTest(),
                 new dev.warden.YamlTest(),
                 new dev.warden.ConfigTest(),
                 new dev.warden.RuntimeTest(),
