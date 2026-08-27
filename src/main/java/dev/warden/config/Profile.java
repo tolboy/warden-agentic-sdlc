@@ -32,6 +32,8 @@ public record Profile(
         String promptDelivery,
         String attachmentFlag,
         String runner,
+        String verificationProbe,
+        List<String> verificationChecks,
         boolean verified) {
 
     private static final Set<String> TOP_LEVEL = Set.of(
@@ -111,10 +113,15 @@ public record Profile(
 
         Values verification = root.optMap("verification").rejectUnknownKeys(VERIFICATION);
         boolean verified = verification.has("verified_on");
+        // Kept, not discarded: "why is this profile not eligible" is answered by the exact
+        // command that would settle it, and `warden profiles --verify` runs that command
+        // rather than making the operator retype it from a comment.
+        String probe = verification.optString("probe", null);
+        List<String> whatToCheck = verification.optStringList("what_to_check", List.of());
 
         root.throwIfAny();
         return new Profile(name, role, vendor, model, command, args, readOnly, wallClock,
                 promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
-                promptDelivery, attachmentFlag, runner, verified);
+                promptDelivery, attachmentFlag, runner, probe, whatToCheck, verified);
     }
 }

@@ -205,6 +205,7 @@ review:
 ```
 warden setup                создать стартовый ~/.warden; ничего не перезаписывает
 warden profiles             какие профили грузятся, какие пригодны и почему нет
+warden profiles --verify N  прогнать пробу профиля N; --confirm проставляет verified_on
 warden init                 создать .warden/project.yaml, угадав checks по package.json,
                             build.gradle(.kts), pom.xml, Cargo.toml, Makefile
 warden doctor               что установлено, что аутентифицировано, что настроено неверно
@@ -228,6 +229,12 @@ Java, project contract, загрузку профилей и политики, �
 
 `warden gates` ничего не тратит: это способ проверить, что проект вообще подключён, не запуская
 ни одного агента.
+
+`warden profiles --verify` запускает `verification.probe` самого профиля, сохраняет транскрипт
+в `~/.warden/verification/` и печатает `what_to_check`. Дату он по нулевому коду возврата **не**
+проставляет: тогда `verified_on` означало бы «бинарник запустился», а это ровно та догадка,
+ради предотвращения которой поле существует. `--confirm` — отдельный шаг, и он работает только
+если проба прошла в этом же вызове.
 
 ---
 

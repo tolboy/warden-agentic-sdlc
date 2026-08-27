@@ -53,9 +53,41 @@ warden profiles
 ```
 
 Только профиль Grok помечен проверенным, потому что только его флаги были **установлены
-запуском**, а не вычитаны из документации. У двух других вместо даты лежит точная команда
+запуском**, а не вычитаны из документации. У остальных вместо даты лежит точная команда
 проверки, и резолвер их не выпустит, пока дата не проставлена. Угадывание флагов Grok уже
 стоило трёх неудачных прогонов; теперь это состояние видно, а не выясняется в середине петли.
+
+Пробу не надо переписывать руками — она запускается своей же командой:
+
+```
+warden profiles --verify claude-review
+```
+
+```json
+{"ok":true,"code":"probe_passed","exit_code":0,"stamped":false,
+ "transcript":"~/.warden/verification/claude-review.txt",
+ "what_to_check":["exits 0 without opening an interactive session",
+                  "stdout is a JSON envelope; note which key carries the answer",
+                  "--allowedTools is accepted and the run still completes",
+                  "whether a cost figure is reported, and under which key"],
+ "next":"read the transcript against what_to_check above. If every point holds, run:
+         warden profiles --verify claude-review --confirm"}
+```
+
+Обратите внимание на `stamped: false`. Проба прошла — дата не проставлена. `verified_on` —
+единственное поле во всей конфигурации, которое записывает **суждение человека**, а не факт,
+установленный машиной, и стоит оно перед ролью с правом записи в репозиторий. Проставлять его
+по нулевому коду возврата значило бы заменить «человек посмотрел и подтвердил четыре пункта»
+на «бинарник запустился» — то есть ровно ту догадку, ради предотвращения которой поле и
+заведено. Убрана перепечатка команды и ручная правка YAML, а не чтение.
+
+```
+warden profiles --verify claude-review --confirm
+→ {"ok":true,"code":"verified","verified_on":"2026-08-27","stamped":true}
+```
+
+Дата дописывается в конец блока `verification:`, комментарии оператора остаются на месте: в
+этих профилях они и есть самое ценное — это флаги, установленные запуском.
 
 ---
 

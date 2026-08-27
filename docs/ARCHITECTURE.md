@@ -28,7 +28,7 @@ not trusted policy.
 | Where | What it decides |
 |---|---|
 | `~/.warden/policy.yaml` | which profiles may fill `implementer`, `reviewer`, `visual_qa`; rotation; whether a reviewer must be an independent vendor; which risks pay for review |
-| `~/.warden/profiles/*.yaml` | one vendor filling one role: command, args, `runner`, `prompt_delivery`, `attachments.flag`, `quota.signatures`, `model`, and the `verification` block the resolver refuses without |
+| `~/.warden/profiles/*.yaml` | one vendor filling one role: command, args, `runner`, `prompt_delivery`, `attachments.flag`, `quota.signatures`, `model`, and the `verification` block the resolver refuses without. `warden profiles --verify <name>` runs that block's probe and keeps the transcript; `--confirm` stamps the date, and only after the probe passed in the same invocation |
 | `<project>/.warden/` | what "done" means: checks, scopes, task contracts, `visual_qa` scenarios |
 
 `model:` is passed to the vendor only if the profile's args use `{{model}}` — each vendor

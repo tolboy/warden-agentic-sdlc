@@ -160,9 +160,10 @@ public final class UserSetup {
               required_fields: [role, task_id, status, verdict, summary, findings]
 
             verification:
-              # UNVERIFIED. The resolver refuses this profile until verified_on is filled in.
-              # Run the probe, confirm the four points below, then set the date.
-              probe: 'claude -p "Reply with exactly: ok" --output-format json --max-turns 1'
+              # The resolver refuses any profile without verified_on. Run
+              #   warden profiles --verify claude-review
+              # read the transcript against what_to_check, then add --confirm.
+              probe: 'claude -p "Reply with exactly: ok" --output-format json --max-turns 1 --allowedTools Read'
               what_to_check:
                 - "exits 0 without opening an interactive session"
                 - "stdout is a JSON envelope; note which key carries the answer"
@@ -208,8 +209,9 @@ public final class UserSetup {
               signatures: []
 
             verification:
-              # UNVERIFIED, and the riskiest profile to guess at: it runs with write access.
-              # Probe it standalone before letting a loop drive it.
+              # The riskiest profile to guess at: it runs with write access. Probe it
+              # standalone before letting a loop drive it:
+              #   warden profiles --verify codex-implement
               probe: 'codex exec "Reply with exactly: ok" --json --skip-git-repo-check'
               what_to_check:
                 - "exits 0 without prompting for approval"
@@ -246,8 +248,9 @@ public final class UserSetup {
               required_fields: [role, task_id, status, verdict, summary, findings]
 
             verification:
-              # UNVERIFIED. Until verified_on is set the resolver refuses it, and the loop
-              # falls back to the machine harness alone.
+              # Until verified_on is set the resolver refuses it and the loop falls back to
+              # the machine harness alone:
+              #   warden profiles --verify codex-visual-qa
               probe: 'codex exec "Describe this image in one sentence." -i some-screenshot.png --json --skip-git-repo-check'
               what_to_check:
                 - "the image is actually read: the answer describes THIS screenshot, not a generic one"

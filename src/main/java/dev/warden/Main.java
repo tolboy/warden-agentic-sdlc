@@ -2,6 +2,7 @@ package dev.warden;
 
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
+import dev.warden.config.ProfileVerifier;
 import dev.warden.config.ProjectInitializer;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
@@ -16,7 +17,9 @@ import dev.warden.run.DoCommand;
 import dev.warden.run.TaskLoop;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -51,7 +54,7 @@ public final class Main {
                 case "gates" -> gates(args);
                 case "visual-qa" -> visualQa(args);
                 case "setup" -> setup();
-                case "profiles" -> profiles();
+                case "profiles" -> profiles(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
                 case "do" -> doIntent(args);
@@ -158,7 +161,10 @@ public final class Main {
      * What the resolver can see. An unverified profile is listed with the probe that would
      * verify it, because "why did nothing run" is the question this command exists to answer.
      */
-    private static int profiles() throws Exception {
+    private static int profiles(String[] args) throws Exception {
+        String verify = option(args, "--verify", null);
+        if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"));
+
         UserConfig user = UserConfig.load();
         List<Object> rows = new ArrayList<>();
         for (Profile profile : user.profiles().values()) {
@@ -174,6 +180,10 @@ public final class Main {
             if (!profile.verified()) {
                 row.put("blocked_because", "profile is unverified; fill verification.verified_on "
                         + "only after running its probe");
+                // The exact command that would settle it, next to the reason it is blocked.
+                // Making an operator find it in the file is how it gets retyped wrong.
+                row.put("probe", profile.verificationProbe());
+                row.put("verify_with", "warden profiles --verify " + profile.name());
             }
             rows.add(row);
         }
@@ -187,6 +197,68 @@ public final class Main {
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
         System.out.println(Json.write(result));
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
+    }
+
+    /**
+     * Run a profile's own verification probe, and stamp the date only when asked separately.
+     *
+     * `verified_on` is the one field in the whole configuration that records a human
+     * judgement: that someone ran the probe and confirmed the points in `what_to_check` —
+     * which envelope key carries the answer, whether it exits without asking for approval,
+     * whether a cost figure appears at all. Stamping that automatically on a zero exit code
+     * would replace the judgement with "the binary ran", and this profile is the gate in front
+     * of a role that writes to the repository.
+     *
+     * So the command removes the retyping and the hand-edited YAML, and leaves the reading.
+     */
+    private static int verifyProfile(String name, boolean confirm) throws Exception {
+        UserConfig user = UserConfig.load();
+        Profile profile = user.profiles().get(name);
+        if (profile == null) {
+            Map<String, Object> unknown = new LinkedHashMap<>();
+            unknown.put("ok", false);
+            unknown.put("code", "profile_not_found");
+            unknown.put("profile", name);
+            unknown.put("known_profiles", List.copyOf(user.profiles().keySet()));
+            unknown.put("problems", user.problems());
+            System.out.println(Json.write(unknown));
+            return 1;
+        }
+
+        ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner());
+        ProfileVerifier.Probe probe = verifier.run(profile, user.home(), Duration.ofMinutes(10));
+        Map<String, Object> result = new LinkedHashMap<>(ProfileVerifier.report(profile, probe));
+        result.put("already_verified", profile.verified());
+
+        if (!probe.ok()) {
+            result.put("ok", false);
+            result.put("code", "probe_failed");
+            result.put("next", "fix the profile's args or authentication and run this again; "
+                    + "nothing was stamped");
+            System.out.println(Json.write(result));
+            return 1;
+        }
+
+        if (!confirm) {
+            result.put("ok", true);
+            result.put("code", "probe_passed");
+            result.put("next", "read the transcript against what_to_check above. If every point "
+                    + "holds, run: warden profiles --verify " + name + " --confirm");
+            result.put("stamped", false);
+            System.out.println(Json.write(result));
+            return 0;
+        }
+
+        Path file = user.home().resolve("profiles").resolve(name + ".yaml");
+        ProfileVerifier.Stamp stamp = verifier.stamp(file, profile, LocalDate.now());
+        result.put("ok", stamp.written());
+        result.put("code", stamp.code());
+        result.put("message", stamp.message());
+        result.put("profile_file", stamp.profileFile().toString());
+        result.put("stamped", stamp.written());
+        if (stamp.written()) result.put("verified_on", stamp.date());
+        System.out.println(Json.write(result));
+        return stamp.written() ? 0 : 1;
     }
 
     /**
@@ -359,6 +431,7 @@ public final class Main {
                   warden setup                 create a starter ~/.warden (never overwrites)
                   warden doctor                verify Java, vendor profiles and live Orca readiness
                   warden profiles              which profiles load, which are eligible, and why not
+                  warden profiles --verify N   run profile N's own probe; --confirm stamps the date
                   warden init [--base-ref REF] create a conservative project starter config
                   warden validate <task>       validate and resolve the project task contract
                   warden gates <task>          preflight and machine gates only; spends nothing

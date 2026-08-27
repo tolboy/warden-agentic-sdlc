@@ -15,6 +15,7 @@ public final class TestMain {
                 new dev.warden.YamlTest(),
                 new dev.warden.ConfigTest(),
                 new dev.warden.RuntimeTest(),
+                new dev.warden.ProfileVerifierTest(),
                 new dev.warden.RoleResolverTest(),
                 new dev.warden.QuotaSignalTest(),
                 new dev.warden.RoleRunnerTest(),
