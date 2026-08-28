@@ -85,6 +85,24 @@ public final class RuntimeTest implements Suite {
             check.contains("and that is reported as a removal, not a modification",
                     String.valueOf(removed.data().get("configuration_changed")), "(removed)");
 
+            // Two questions, two scopes. A read-only role writing a task file is a violation,
+            // so `.warden` is in that fingerprint. A human accepting a candidate is accepting
+            // a source change, so it is not in that one — a run whose own log lived under
+            // `.warden` invalidated its own acceptance the moment the log was written.
+            String base = git.mergeBase("HEAD");
+            String beforeSource = git.sourceFingerprint(base);
+            String beforeAll = git.fingerprint(base);
+            Files.writeString(repository.resolve(".warden/operator-note.txt"), "written mid-run\n");
+            check.eq("a change under .warden leaves the candidate fingerprint alone",
+                    beforeSource, git.sourceFingerprint(base));
+            check.that("but the read-only fingerprint still sees it",
+                    !beforeAll.equals(git.fingerprint(base)));
+            Files.writeString(repository.resolve("src/value.txt"), "changed again\n");
+            check.that("and a real source edit moves the candidate fingerprint",
+                    !beforeSource.equals(git.sourceFingerprint(base)));
+            Files.delete(repository.resolve(".warden/operator-note.txt"));
+            Files.writeString(repository.resolve("src/value.txt"), "changed\n");
+
             ConfigLoader.Loaded visual = new ConfigLoader().load(repository, "needs-eyes");
             GateRunner.Outcome eyes = new GateRunner(runner).run(visual, "test-visual");
             check.that("machine gates no longer stand in for visual QA",

@@ -204,7 +204,7 @@ public final class TaskLoop {
         // What the human is being asked to accept is what actually executed.
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
                 "every stage that ran passed: " + String.join(", ", executedStages(steps)),
-                file, git.fingerprint(diffBaseCommit));
+                file, git.sourceFingerprint(diffBaseCommit));
         addDecision(summary, root, decision);
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
@@ -693,7 +693,7 @@ public final class TaskLoop {
         Path root = ledger.projectRoot();
         Object base = summary.get("diff_base_commit");
         String fingerprint = base instanceof String commit
-                ? new GitRepository(root, processes).fingerprint(commit) : null;
+                ? new GitRepository(root, processes).sourceFingerprint(commit) : null;
         // A spent subscription with a named successor is a different question from a failure:
         // nothing is wrong with the work, and what is being asked is who may finish it.
         Map<String, Object> pending = pendingFailover(steps);

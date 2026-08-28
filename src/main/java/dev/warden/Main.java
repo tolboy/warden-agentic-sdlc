@@ -618,7 +618,8 @@ public final class Main {
                     throw new ApprovalException("candidate_unverifiable",
                             "task summary has no immutable diff_base_commit");
                 }
-                String current = new dev.warden.git.GitRepository(root, new ProcessRunner()).fingerprint(commit);
+                String current = new dev.warden.git.GitRepository(root, new ProcessRunner())
+                        .sourceFingerprint(commit);
                 if (!pending.candidateFingerprint().equals(current)) {
                     throw new ApprovalException("candidate_changed",
                             "worktree fingerprint changed after the decision was shown; run gates again");

@@ -59,12 +59,38 @@ public final class GitRepository {
     }
 
     public String fingerprint(String mergeBase) throws IOException, InterruptedException {
+        return fingerprint(mergeBase, false);
+    }
+
+    /**
+     * The fingerprint of the source change alone, with Warden's own `.warden` tree left out.
+     *
+     * Two different questions want two different scopes, and conflating them cost a real
+     * acceptance. "Did this read-only role touch anything?" must include `.warden`: a
+     * reviewer writing a task file is a violation. "Is this the candidate the human was
+     * shown?" must not: the operator accepts a source change, and Warden's own evidence,
+     * logs and config are not part of what will be landed. A run whose log file happened to
+     * live under `.warden` invalidated its own acceptance the moment the log was written —
+     * the guard fired correctly over the wrong set of files.
+     *
+     * Contract integrity is not weakened by this. Any change under `.warden` during the run
+     * is already `contract_mutated`, checked against a content snapshot after every role and
+     * around every gate command.
+     */
+    public String sourceFingerprint(String mergeBase) throws IOException, InterruptedException {
+        return fingerprint(mergeBase, true);
+    }
+
+    private String fingerprint(String mergeBase, boolean sourceOnly)
+            throws IOException, InterruptedException {
         MessageDigest digest = sha256();
         // Raw metadata catches deletion, rename and mode/status changes. File bytes catch
         // edits to already-dirty and binary files without decoding a binary patch as text.
         digest.update(git(List.of("diff", "--raw", "-z", mergeBase, "--"))
                 .stdout().getBytes(StandardCharsets.UTF_8));
-        List<String> changed = changedPaths(mergeBase).stream().sorted().toList();
+        Set<String> paths = changedPaths(mergeBase);
+        if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
+        List<String> changed = paths.stream().sorted().toList();
         for (String relative : changed) {
             digest.update((byte) 0);
             digest.update(normalize(relative).getBytes(StandardCharsets.UTF_8));

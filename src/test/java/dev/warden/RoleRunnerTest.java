@@ -274,6 +274,14 @@ public final class RoleRunnerTest implements Suite {
         check.eq("a quote-free argument still goes through", Boolean.TRUE,
                 DirectCliExecutor.deliverabilityCheck(prefixed("C:\\tools\\vendor.exe",
                         List.of("-p", "no quotes here at all"))).get("deliverable"));
+        // Both halves of the rule are needed, and the second half is why. The JVM wraps an
+        // argument only when it holds whitespace, so a quote in a value it never wrapped
+        // survives — and this exact flag has been reaching Codex intact for months. A check
+        // that refuses it is a false alarm that stops a working profile, which a first
+        // version of this rule did on a live run.
+        check.eq("a quoted config flag with no whitespace is left alone", Boolean.TRUE,
+                DirectCliExecutor.deliverabilityCheck(prefixed("C:\\tools\\vendor.exe",
+                        List.of("-c", "model_reasoning_effort=\"high\""))).get("deliverable"));
 
         // And the channel that survives a shim actually carries the prompt.
         Files.deleteIfExists(project.resolve("src/result.txt"));

@@ -297,7 +297,9 @@ public final class DirectCliExecutor implements RoleExecutor {
      * from there, so an argument carrying JSON arrives as a dozen arguments. Measured: a
      * visual-QA prompt with the harness report inlined reached `claude.exe` as
      * `error: unknown option '->'`, having been torn apart at the first quote in the report.
-     * That is not a shim problem and no shim check would ever have seen it.
+     * That is not a shim problem and no shim check would ever have seen it. The whitespace
+     * half of the rule matters as much as the quote half: without it this check refuses
+     * `-c model_reasoning_effort="high"`, an argument that has always worked.
      *
      * What this does not cover: cmd.exe also expands `%NAME%` inside an argument when that
      * variable exists in the environment. Warden does not scan for that, and the check says so
@@ -313,16 +315,16 @@ public final class DirectCliExecutor implements RoleExecutor {
             if (shim && (argument.contains("\n") || argument.contains("\r"))) {
                 undeliverable.add("argv[" + index + "] is multi-line ("
                         + argument.length() + " chars) and goes through cmd.exe");
-            } else if (windows && argument.indexOf('"') >= 0) {
-                undeliverable.add("argv[" + index + "] contains a double quote ("
-                        + argument.length() + " chars)");
+            } else if (windows && argument.indexOf('"') >= 0 && hasWhitespace(argument)) {
+                undeliverable.add("argv[" + index + "] contains both whitespace and a double "
+                        + "quote (" + argument.length() + " chars)");
             }
         }
         Map<String, Object> check = new LinkedHashMap<>();
         check.put("executable_is_batch_shim", shim);
         check.put("covers", windows
-                ? "multi-line arguments through cmd.exe, and double quotes inside any Windows "
-                  + "argument, which the JVM does not escape"
+                ? "multi-line arguments through cmd.exe, and Windows arguments carrying both "
+                  + "whitespace and a double quote, which the JVM quotes but does not escape"
                 : "multi-line arguments passed through cmd.exe, which truncates them at the "
                   + "first newline and drops every argument after it");
         check.put("does_not_cover", "cmd.exe expansion of %NAME% inside an argument");
@@ -333,6 +335,20 @@ public final class DirectCliExecutor implements RoleExecutor {
                     + "{{prompt_file}} to a vendor flag that reads the prompt from a path");
         }
         return check;
+    }
+
+    /**
+     * Both conditions are needed, and the second one is why. The JVM wraps an argument in
+     * quotes only when it contains whitespace; a quote inside a value it did not wrap is
+     * passed through untouched. `-c model_reasoning_effort="high"` has been reaching Codex
+     * intact for months for exactly that reason, and refusing it would be a false alarm on a
+     * flag that works.
+     */
+    private static boolean hasWhitespace(String argument) {
+        for (int index = 0; index < argument.length(); index++) {
+            if (Character.isWhitespace(argument.charAt(index))) return true;
+        }
+        return false;
     }
 
     /** Extensions Windows will actually start as a process, most specific first. */
