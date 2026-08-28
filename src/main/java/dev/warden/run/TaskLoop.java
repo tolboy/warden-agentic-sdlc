@@ -144,6 +144,21 @@ public final class TaskLoop {
         summary.put("workflow", workflow.toList());
         summary.put("steps", steps);
 
+        // Asked before the first dispatch, not after it. A worktree that was already dirty
+        // outside the task's scope — a setup step that touched a lockfile, a half-finished
+        // edit from yesterday — is the operator's to resolve, and no implementer can resolve
+        // it: those paths are outside the blast radius it is allowed to touch. Discovering
+        // that at the gates stage means having paid a vendor to find out.
+        List<String> alreadyOutside = git.outsideScope(
+                WardenTree.sourcePaths(git.changedPaths(diffBaseCommit)), task.scopePaths());
+        if (!dryRun && !alreadyOutside.isEmpty()) {
+            summary.put("preexisting_violations", alreadyOutside);
+            summary.put("resolution", "these paths were already changed before this run started "
+                    + "and are outside the task's scope " + task.scopePaths() + ". Revert them, "
+                    + "commit them, or widen the scope — an implementer cannot touch them.");
+            return stop(ledger, summary, "preflight_outside_scope", steps, 0, budget);
+        }
+
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk);
         try {
@@ -198,6 +213,19 @@ public final class TaskLoop {
         ledger.append("task_run", summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
     }
+
+    /**
+     * Gate failures an implementer is structurally unable to fix. Each names something
+     * outside the work: a tree that was dirty before the run, a base ref that does not
+     * resolve, configuration that moved while the run was in flight, or the gate runner
+     * itself falling over.
+     */
+    private static final java.util.Set<String> OPERATOR_MUST_RESOLVE = java.util.Set.of(
+            "preflight_outside_scope",
+            "base_ref_unresolvable",
+            "contract_mutated",
+            "gate_interrupted",
+            "gate_internal_error");
 
     /**
      * Raised by a stage that has run out of options. It carries the reason an operator greps
@@ -426,13 +454,19 @@ public final class TaskLoop {
         }
 
         /**
-         * `visual_qa_unavailable` and `visual_qa_port_occupied` are excluded on purpose: no
-         * implementer can install a browser or evict another project's dev server, and asking
-         * one to try spends a role run on the operator's configuration.
+         * Which failures may be handed back to an implementer at all.
+         *
+         * The excluded ones are not about the work. No implementer can install a browser,
+         * evict another project's dev server, resolve a base ref, or revert a file outside
+         * the blast radius it was given — and asking one to try spends a role run on the
+         * operator's configuration and then fails the same way.
          */
         private boolean fixable(Object outcome) {
             if (outcome instanceof VisualQaRunner.Outcome visual) {
                 return "visual_qa_failed".equals(visual.code());
+            }
+            if (outcome instanceof GateRunner.Outcome gate) {
+                return !OPERATOR_MUST_RESOLVE.contains(gate.code());
             }
             return true;
         }

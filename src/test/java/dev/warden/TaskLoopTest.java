@@ -140,6 +140,21 @@ public final class TaskLoopTest implements Suite {
             check.contains("the vendor's own message reaches the summary",
                     Json.write(steps(ranOut)), "try again at 9:21 PM");
 
+            // A tree that was already dirty outside the task's scope is the operator's
+            // problem, and the run must find that out before it pays anyone to discover it.
+            Path dirty = newProject(sandbox, "dirty-before-start");
+            writeProfiles(home, sandbox, "dirty-before-start", 1, 1);
+            Files.writeString(dirty.resolve("README.md"), "edited before the run\n");
+            TaskLoop.Outcome refusedEarly = loop(dirty, home, "p1");
+            check.that("a pre-existing out-of-scope change stops the run", !refusedEarly.ok());
+            check.eq("and says so as a preflight failure",
+                    "preflight_outside_scope", refusedEarly.reason());
+            check.eq("before a single vendor was dispatched",
+                    0L, refusedEarly.summaryReport().get("role_runs"));
+            check.eq("naming the path nobody in this run touched",
+                    List.of("README.md"), refusedEarly.summaryReport().get("preexisting_violations"));
+            check.that("no role step was recorded at all", steps(refusedEarly).isEmpty());
+
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);

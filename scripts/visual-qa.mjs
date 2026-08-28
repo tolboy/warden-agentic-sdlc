@@ -9,6 +9,7 @@
  *     --scenario "700x400: text=Create visible" \
  *     --scenario "1280x720: css=.settings-panel visible" \
  *     --scenario "1280x720: testid=save click -> css=.saved visible" \
+ *     --scenario "1280x720: css=canvas click@0.5,0.86 -> text=Placed visible" \
  *     --scenario "1280x720: no-console-errors"
  *
  * Scenario grammar
@@ -18,7 +19,10 @@
  *   matcher    text=Label | css=SELECTOR | testid=VALUE | role=ROLE
  *              A bare label is read as text=Label, so the older
  *              "700x400:Create visible" still means what it did.
- *   assertion  visible | hidden | click
+ *   assertion  visible | hidden | click | click@FX,FY
+ *              click@0.5,0.86 presses that fraction across and down the element's
+ *              own box instead of its centre. For a full-window canvas the centre
+ *              is the only point a plain `click` can ever reach.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -81,6 +85,14 @@ function fail(code, message, extra = {}) {
 // ---------------------------------------------------------------- scenarios
 
 const ASSERTIONS = new Set(["visible", "hidden", "click"]);
+/**
+ * `click` may name where inside the element to press, as a fraction of its box:
+ * `click@0.5,0.86` is halfway across and most of the way down. A canvas is one
+ * element the size of the window, so without this the only reachable point is its
+ * centre — which for a landscape is whatever happens to be in the middle of the
+ * frame, and never the water, the sky or the shore a scenario means to test.
+ */
+const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
 
 /**
  * Splits "css=.panel > .row visible" into a matcher and an assertion. The
@@ -92,8 +104,22 @@ function parseStep(raw, fallbackAssertion = "visible") {
   if (!text) return null;
   const words = text.split(/\s+/);
   let assertion = fallbackAssertion;
+  let at = null;
   let body = text;
-  if (words.length > 1 && ASSERTIONS.has(words[words.length - 1].toLowerCase())) {
+  const last = words.length > 1 ? words[words.length - 1].toLowerCase() : "";
+  const point = last.match(CLICK_AT);
+  if (point) {
+    const fx = Number(point[1]);
+    const fy = Number(point[2]);
+    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) {
+      throw new Error(`scenario "${text}": click@x,y takes fractions of the element box `
+        + `between 0 and 1, got ${point[1]},${point[2]}`);
+    }
+    assertion = "click";
+    at = { fx, fy };
+    words.pop();
+    body = words.join(" ");
+  } else if (words.length > 1 && ASSERTIONS.has(last)) {
     assertion = words.pop().toLowerCase();
     body = words.join(" ");
   }
@@ -101,7 +127,7 @@ function parseStep(raw, fallbackAssertion = "visible") {
   const kind = typed ? typed[1].toLowerCase() : "text";
   const value = typed ? typed[2].trim() : body.trim();
   if (!value) return null;
-  return { kind, value, assertion, raw: text };
+  return { kind, value, assertion, at, raw: text };
 }
 
 function parseScenario(raw) {
@@ -397,8 +423,10 @@ async function runStep(cdp, step, outDir, label) {
   }
 
   const before = info.digest;
-  const x = Math.round((found.x || 0) + (found.width || 0) / 2);
-  const y = Math.round((found.y || 0) + (found.height || 0) / 2);
+  const fx = step.at ? step.at.fx : 0.5;
+  const fy = step.at ? step.at.fy : 0.5;
+  const x = Math.round((found.x || 0) + (found.width || 0) * fx);
+  const y = Math.round((found.y || 0) + (found.height || 0) * fy);
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
