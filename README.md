@@ -260,12 +260,24 @@ implement → gates → [fix ≤ N] → review → [fix ≤ N]
 ```
 
 Команды: `do`, `setup`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
-`doctor`, `ledger`.
+`doctor`, `ledger`, `report`, `status`, `approve`.
 
-Не выдаются за готовые: live-прогон Orca-адаптера end-to-end, live-прогон роли `visual_qa` на
-настоящем вендоре, visual QA pixel-diff и совмещённый `run` implement+review на двух живых
-вендорах в одном прогоне. Точная матрица:
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), разбор на живом прогоне:
+Прогнано вживую на настоящем проекте (SvelteKit, Orca 1.4.190, Windows) — стенограмма в
+[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md):
+
+- `warden do` создал worktree через Orca от **фактической** текущей ветки и разрешил всю цепочку;
+- цикл `gates → review → browser` целиком зелёный: `npm run check` и `npm run build`, ревью
+  Grok 4.6 (`verdict: pass`, $0.0835, 104042/13006 токенов), шесть браузерных сценариев на
+  трёх виюпортах, включая клик и переход в режим студии;
+- отчёт с метриками вендора и `decision.json` в состоянии `pending` — приёмку тул не делает;
+- исчерпанная подписка Codex дала `quota_exhausted`, а не «упавший реализатор», с дословным
+  сообщением вендора в уликах;
+- пустой каталог: `git init`, контракт без выдуманной команды проверки, черновик задачи.
+
+Не выдаются за готовые: полный цикл с живым реализатором до зелёного (упёрся в квоту),
+live-прогон Orca-адаптера как исполнителя роли, live-прогон роли `visual_qa` на настоящем
+вендоре и visual QA pixel-diff. Точная матрица:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), разбор на подставных вендорах:
 [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md), повторяемая настройка:
 [`docs/SETUP.md`](docs/SETUP.md).
 

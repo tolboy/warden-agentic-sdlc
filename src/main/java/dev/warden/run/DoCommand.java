@@ -159,12 +159,13 @@ public final class DoCommand {
                 : "do-" + taskId + "-" + Long.toUnsignedString(System.currentTimeMillis(), 36);
 
         OrcaIsolation.Placement placement;
+        String isolateFrom = options.baseRef();
         if (options.inPlace()) {
             placement = OrcaIsolation.Placement.inPlace(requested);
         } else {
             try {
-                placement = new OrcaIsolation(processes).isolate(requested, "w-" + taskId,
-                        options.baseRef());
+                isolateFrom = branchToIsolateFrom(requested, options.baseRef());
+                placement = new OrcaIsolation(processes).isolate(requested, "w-" + taskId, isolateFrom);
             } catch (OrcaIsolation.IsolationException isolation) {
                 return fail(isolation.code(), requested, requested, taskId, isolation.getMessage());
             }
@@ -217,7 +218,7 @@ public final class DoCommand {
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
         if (options.conductor()) {
             return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
-                    runId, scope, risk);
+                    runId, scope, risk, isolateFrom);
         }
         TaskLoop.Outcome loop = new TaskLoop(processes).run(loaded, user, runId, options.dryRun());
 
@@ -233,7 +234,7 @@ public final class DoCommand {
         report.put("worktree", String.valueOf(root));
         report.put("isolated", placement.isolated());
         report.put("isolation", placement.reason());
-        report.put("worktree_start_ref", options.baseRef());
+        report.put("worktree_start_ref", isolateFrom);
         report.put("diff_base_ref", loaded.resolved().baseRef());
         report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
         report.put("scope", scope);
@@ -253,7 +254,7 @@ public final class DoCommand {
     private Outcome runWithConductor(Options options, Path requested, Path root,
                                      OrcaIsolation.Placement placement, TaskDraft.Written drafted,
                                      ConfigLoader.Loaded loaded, String taskId, String runId,
-                                     String scope, String risk) throws Exception {
+                                     String scope, String risk, String isolateFrom) throws Exception {
         if (options.dryRun()) {
             return fail("conductor_dry_run_unsupported", requested, root, taskId,
                     "use ordinary `warden do --dry-run`; Conductor exists to present a real human gate");
@@ -287,7 +288,7 @@ public final class DoCommand {
         report.put("worktree", String.valueOf(root));
         report.put("isolated", placement.isolated());
         report.put("isolation", placement.reason());
-        report.put("worktree_start_ref", options.baseRef());
+        report.put("worktree_start_ref", isolateFrom);
         report.put("diff_base_ref", loaded.resolved().baseRef());
         report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
         report.put("scope", scope);
@@ -302,6 +303,40 @@ public final class DoCommand {
                 .resolve(dev.warden.approval.ApprovalStore.FILE_NAME).toString());
         report.put("lands", false);
         return new Outcome(accepted, code, requested, root, taskId, report);
+    }
+
+    /**
+     * The branch a new worktree is cut from.
+     *
+     * `HEAD` is the default because it means "where I am", but it is a symbolic name, and a
+     * worktree has to be created from a concrete branch. An earlier version translated HEAD
+     * to `main` unconditionally, which silently cut from the wrong branch for anyone working
+     * on master, develop or a feature branch — the isolation looked like it worked and the
+     * agent started from a tree the operator had never seen.
+     *
+     * A detached HEAD is refused rather than guessed at: there is no branch to name, and
+     * picking one would be inventing the baseline.
+     */
+    private String branchToIsolateFrom(Path project, String baseRef)
+            throws OrcaIsolation.IsolationException {
+        if (!"HEAD".equals(baseRef)) return baseRef;
+        try {
+            ProcessRunner.Result current = processes.run(
+                    List.of("git", "rev-parse", "--abbrev-ref", "HEAD"), project,
+                    java.time.Duration.ofSeconds(30));
+            String branch = current.ok() ? current.stdout().strip() : "";
+            if (branch.isEmpty() || branch.equals("HEAD")) {
+                throw new OrcaIsolation.IsolationException("detached_head",
+                        "HEAD is detached in " + project + ", so there is no branch to cut a "
+                                + "worktree from. Check out a branch, or pass --base-ref <branch>.");
+            }
+            return branch;
+        } catch (OrcaIsolation.IsolationException already) {
+            throw already;
+        } catch (Exception notAskable) {
+            throw new OrcaIsolation.IsolationException("detached_head",
+                    "could not read the current branch of " + project + ": " + notAskable.getMessage());
+        }
     }
 
     /**

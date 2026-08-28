@@ -230,6 +230,19 @@ public final class RunReport {
                 if (!any) row.put("tokens_unknown_calls", number(row.get("tokens_unknown_calls")) + 1);
             }
         }
+        // A total nobody contributed to is not zero. `$0.0000 across one call` and "the vendor
+        // reported no cost" are different facts, and only the first one is believable on
+        // sight, so the unreported one is left absent and renders as `?`.
+        for (Map<String, Object> row : byKey.values()) {
+            long calls = number(row.get("calls"));
+            if (number(row.get("cost_unknown_calls")) == calls) row.put("cost_usd", null);
+            if (number(row.get("duration_unknown_calls")) == calls) row.put("duration_millis", null);
+            if (number(row.get("tokens_unknown_calls")) == calls) {
+                row.put("input_tokens", null);
+                row.put("output_tokens", null);
+                row.put("total_tokens", null);
+            }
+        }
         return List.copyOf(byKey.values());
     }
 

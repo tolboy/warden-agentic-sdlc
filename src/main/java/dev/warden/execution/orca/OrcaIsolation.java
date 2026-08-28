@@ -128,7 +128,7 @@ public final class OrcaIsolation {
 
     public static final class IsolationException extends IOException {
         private final String code;
-        IsolationException(String code, String message) {
+        public IsolationException(String code, String message) {
             super(message);
             this.code = code;
         }
