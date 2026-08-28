@@ -165,7 +165,11 @@ warden run create-button-testid --run-id e2e-2
 ## 4. Conductor как внешний контроллер
 
 ```text
-conductor run conductor\do.yaml --skip-gates --no-interactive   -i task=fix-the-create-button-so-it-works-again   -i project_dir=<worktree> -i run_id=lh-conductor-1 -i actor=warden-integration-test
+conductor run conductor\do.yaml --skip-gates --no-interactive
+    -i task=fix-the-create-button-so-it-works-again
+    -i project_dir=<worktree>
+    -i run_id=lh-conductor-1
+    -i actor=warden-integration-test
 ```
 
 ```text
