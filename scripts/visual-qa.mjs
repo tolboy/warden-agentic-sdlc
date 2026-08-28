@@ -478,7 +478,11 @@ async function runStep(cdp, step, outDir, label) {
   await sleep(1200);
   const after = await probe(cdp, { kind: step.kind, value: step.value });
   result.clicked_at = { x, y };
-  result.screenshot_after = await shoot(cdp, outDir, `${label}-after-click`);
+  // Per step, not per scenario. A chain of clicks used to write every one of them to the
+  // same `-after-click` file, so only the last survived — and the model with eyes was then
+  // shown images that did not contain what it was asked to judge. It said so, twice, and the
+  // run went green anyway. A screenshot that silently replaces another is worse than none.
+  result.screenshot_after = await shoot(cdp, outDir, `${label}-after-click-${step.index}`);
   result.dom_changed = after.digest !== before;
   result.ok = result.dom_changed;
   if (!result.ok) {
@@ -524,8 +528,8 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
   const steps = [];
   let page = null;
   if (viewportHonoured) {
-    for (const step of scenario.steps) {
-      const { result, info } = await runStep(cdp, step, outDir, label);
+    for (const [position, step] of scenario.steps.entries()) {
+      const { result, info } = await runStep(cdp, { ...step, index: position + 1 }, outDir, label);
       page = page || info;
       steps.push(result);
       if (!result.ok) break; // a later step's meaning depends on the earlier one holding
