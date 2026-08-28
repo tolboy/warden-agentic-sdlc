@@ -63,6 +63,7 @@ public final class Main {
                 case "report" -> report(args);
                 case "status" -> status(args);
                 case "approve" -> approve(args);
+                case "land" -> land(args);
                 default -> {
                     System.err.println("warden: unknown command '" + args[0] + "'");
                     usage();
@@ -660,6 +661,18 @@ public final class Main {
         }
     }
 
+    /**
+     * Carry an accepted candidate to a commit, a branch and a request. Merges nothing: the
+     * request is a request, and whoever merges it is a person looking at it.
+     */
+    private static int land(String[] args) throws Exception {
+        dev.warden.run.LandCommand.Outcome outcome =
+                new dev.warden.run.LandCommand(new ProcessRunner())
+                        .run(dev.warden.run.LandCommand.parse(args));
+        System.out.println(Json.write(outcome.report()));
+        return outcome.ok() ? 0 : 1;
+    }
+
     /** decision.json is authoritative; task-run.json is a convenient, explicitly derived view. */
     private static boolean updateDecisionProjection(Path root, HumanDecision decision) {
         try {
@@ -723,6 +736,9 @@ public final class Main {
                   warden status [run-id]       show pending/resolved human decisions
                   warden approve <run-id> --decision <choice>
                                                record a decision; never lands changes
+                  warden land <run-id>         plan the commit, branch and request for an
+                                               accepted run; --commit/--push/--pull-request
+                                               carry it out. Merges nothing
 
                 The command to use is `warden do`. Everything else is a piece of that loop.
                 Vendor configuration lives in ~/.warden/, project configuration in .warden/.

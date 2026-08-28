@@ -48,7 +48,8 @@ public final class ProjectInitializer {
         yaml.append("\nscopes:\n  code:\n");
         for (String scope : scopes) yaml.append("    - ").append(quote(scope)).append('\n');
         yaml.append("\ndefaults:\n  checks: fast\n  risk: medium\n")
-                .append("  max_fix_attempts: 2\n  timeout_minutes: 30\n");
+                .append("  max_fix_attempts: 2\n  timeout_minutes: 30\n")
+                .append(LAND_NOTE);
         Files.writeString(projectFile, yaml, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
 
         Path task = warden.resolve("tasks/example.yaml");
@@ -172,6 +173,29 @@ public final class ProjectInitializer {
     private static String quote(String value) {
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
+
+    /**
+     * How this project takes an accepted change. Commented out, and left for the operator to
+     * write: Warden knows git, not your forge, and a guessed `gh pr create` in a GitLab
+     * project is a landing step that fails the first time it is ever needed.
+     */
+    private static final String LAND_NOTE = """
+
+            # How an accepted candidate becomes a request. `warden land <run-id>` plans it and
+            # changes nothing; --commit, --push and --pull-request escalate a step at a time.
+            # Warden merges nothing either way: a request is a request.
+            #
+            # The command is argv, not a shell line, so a title containing a quote stays one
+            # argument. Placeholders: {{remote}} {{branch}} {{base}} {{title}} {{body_file}}.
+            #
+            # land:
+            #   remote: origin        # optional; inferred when the repo has exactly one
+            #   base: main            # optional; asked of the remote when absent
+            #   pull_request: ["gh", "pr", "create", "--base", "{{base}}", "--head",
+            #                  "{{branch}}", "--title", "{{title}}", "--body-file", "{{body_file}}"]
+            #
+            # GitLab: ["glab", "mr", "create", ...]   Gitea: ["tea", "pr", "create", ...]
+            """;
 
     private static final String GREENFIELD_NOTE = """
             # This directory had no files when warden init ran, so there is nothing here to

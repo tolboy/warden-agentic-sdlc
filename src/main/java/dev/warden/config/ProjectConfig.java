@@ -19,6 +19,7 @@ public record ProjectConfig(
         String baseRef,
         Map<String, List<String>> checks,
         Map<String, List<String>> scopes,
+        Land land,
         String defaultChecks,
         String defaultRisk,
         long defaultMaxFixAttempts,
@@ -26,8 +27,34 @@ public record ProjectConfig(
 
     public static final Set<String> RISK_LEVELS = Set.of("low", "medium", "high");
 
+    /**
+     * How this project takes a change once a human has accepted it.
+     *
+     * Every field is optional and nothing here is guessed. Warden knows git, because git is
+     * what merge-base, blast radius and the content fingerprint are built on; it does not
+     * know your forge. `gh pr create` is GitHub's, `glab mr create` is GitLab's, `tea` is
+     * Gitea's, and a repository with no forge at all is a perfectly ordinary thing. So the
+     * command that opens the request is written here, as argv rather than a shell line —
+     * the same reason profiles spell their vendor flags out, and the same reason a title
+     * containing a quote does not become somebody's debugging afternoon.
+     *
+     * Placeholders: {{remote}} {{branch}} {{base}} {{title}} {{body_file}}.
+     *
+     * @param remote      the remote to push to; inferred when the repository has exactly one
+     * @param base        the branch a request targets; asked of the remote when absent
+     * @param pullRequest argv of the command that opens the request, or empty
+     */
+    public record Land(String remote, String base, List<String> pullRequest) {
+        public Land {
+            pullRequest = List.copyOf(pullRequest);
+        }
+
+        public boolean opensRequests() { return !pullRequest.isEmpty(); }
+    }
+
     private static final Set<String> TOP_LEVEL = Set.of(
-            "version", "project", "base_ref", "checks", "scopes", "defaults");
+            "version", "project", "base_ref", "checks", "scopes", "defaults", "land");
+    private static final Set<String> LAND_KEYS = Set.of("remote", "base", "pull_request", "note");
     private static final Set<String> DEFAULTS = Set.of(
             "checks", "risk", "max_fix_attempts", "timeout_minutes");
 
@@ -78,8 +105,13 @@ public record ProjectConfig(
         long maxFixAttempts = defaults.optInt("max_fix_attempts", 2, 0, 10);
         long timeoutMinutes = defaults.optInt("timeout_minutes", 30, 1, 240);
 
+        Values landing = root.optMap("land").rejectUnknownKeys(LAND_KEYS);
+        List<String> pullRequest = landing.optStringList("pull_request", List.of());
+        Land land = new Land(landing.optString("remote", null),
+                landing.optString("base", null), pullRequest);
+
         root.throwIfAny();
-        return new ProjectConfig(project, baseRef, checks, scopes,
+        return new ProjectConfig(project, baseRef, checks, scopes, land,
                 defaultChecks, defaultRisk, maxFixAttempts, timeoutMinutes);
     }
 

@@ -55,6 +55,7 @@ public final class TaskLoopTest implements Suite {
                     evidenceBeforeDuplicate,
                     Files.readString(clean.resolve(".warden/runs/r1/evidence.jsonl")));
             reportChecks(check, clean, "r1");
+            landChecks(check, clean, "r1");
 
             // A failing gate sends the work back with the machine output attached.
             Path fixable = newProject(sandbox, "fixable");
@@ -169,6 +170,68 @@ public final class TaskLoopTest implements Suite {
         } finally {
             deleteTree(sandbox);
         }
+    }
+
+    /**
+     * Carrying an accepted candidate to a commit and a branch.
+     *
+     * Every check here is a way the step could push something nobody agreed to: work that was
+     * never accepted, a tree that moved after it was, the branch a request would target, or
+     * Warden's own evidence riding along in the commit.
+     */
+    @SuppressWarnings("unchecked")
+    private void landChecks(Check check, Path project, String runId) throws Exception {
+        dev.warden.run.LandCommand land = new dev.warden.run.LandCommand(new ProcessRunner());
+        dev.warden.run.LandCommand.Options plan = new dev.warden.run.LandCommand.Options(
+                runId, false, false, false, null, null, null, null, null);
+
+        check.eq("a pending run cannot be landed", "not_accepted",
+                land.run(plan, project).code());
+
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        dev.warden.approval.HumanDecision pending = store.read(runId);
+        store.resolve(runId, pending.updatedAt().toString(), "accept", "tester", "");
+
+        // The fixture is on `main`, which is exactly the branch a request would target.
+        check.eq("and an accepted one is still refused on the default branch",
+                "refuses_default_branch", land.run(plan, project).code());
+
+        new ProcessRunner().run(List.of("git", "checkout", "-q", "-b", "work"), project,
+                Duration.ofSeconds(60));
+
+        dev.warden.run.LandCommand.Outcome planned = land.run(plan, project);
+        check.that("on a branch of its own it plans", planned.ok());
+        check.eq("and changes nothing yet", "planned", planned.code());
+        check.eq("the commit covers the source the run changed, and only that",
+                List.of("src/result.txt"), planned.report().get("paths"));
+        check.contains("the exact commands are printed rather than described",
+                String.valueOf(planned.report().get("would_run")), "git add -- src/result.txt");
+        check.eq("and it says outright that it merges nothing",
+                Boolean.FALSE, planned.report().get("lands"));
+
+        // The acceptance is of one tree, not of a task in general.
+        String accepted = Files.readString(project.resolve("src/result.txt"));
+        Files.writeString(project.resolve("src/result.txt"), accepted + "changed after the yes\n");
+        check.eq("a tree that moved after the acceptance is refused", "candidate_changed",
+                land.run(plan, project).code());
+        Files.writeString(project.resolve("src/result.txt"), accepted);
+
+        // Pushing needs somewhere to push, and this fixture has no remote. Saying so beats
+        // inventing `origin`.
+        check.eq("a push with no remote is refused, not guessed at", "no_remote",
+                land.run(new dev.warden.run.LandCommand.Options(
+                        runId, true, true, false, null, null, null, null, null), project).code());
+
+        dev.warden.run.LandCommand.Outcome committed = land.run(
+                new dev.warden.run.LandCommand.Options(
+                        runId, true, false, false, null, null, null, null, null), project);
+        check.that("committing works on its own", committed.ok());
+        check.eq("and stops there", "committed", committed.code());
+        ProcessRunner.Result show = new ProcessRunner().run(
+                List.of("git", "show", "--name-only", "--format=", "HEAD"), project,
+                Duration.ofSeconds(60));
+        check.eq("the commit holds the source file", "src/result.txt", show.stdout().strip());
+        check.that("and none of Warden's own evidence", !show.stdout().contains(".warden"));
     }
 
     /**
