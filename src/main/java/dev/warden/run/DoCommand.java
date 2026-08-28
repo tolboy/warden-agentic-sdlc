@@ -5,12 +5,15 @@ import dev.warden.config.ProjectConfig;
 import dev.warden.config.ProjectInitializer;
 import dev.warden.config.TaskDraft;
 import dev.warden.config.UserConfig;
+import dev.warden.approval.ApprovalStore;
+import dev.warden.approval.HumanDecision;
 import dev.warden.execution.orca.OrcaIsolation;
 import dev.warden.process.ProcessRunner;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,7 +34,13 @@ import java.util.Map;
 public final class DoCommand {
 
     public record Options(Path project, String goal, String scope, String risk, String taskId,
-                          String runId, String baseRef, boolean inPlace, boolean dryRun) {}
+                          String runId, String baseRef, boolean inPlace, boolean dryRun,
+                          boolean conductor, boolean autoRejectGates) {
+        public Options(Path project, String goal, String scope, String risk, String taskId,
+                       String runId, String baseRef, boolean inPlace, boolean dryRun) {
+            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun, false, false);
+        }
+    }
 
     public record Outcome(boolean ok, String code, Path project, Path worktree, String taskId,
                           Map<String, Object> report) {}
@@ -78,7 +87,9 @@ public final class DoCommand {
         for (int index = 1; index < args.length; index++) {
             String arg = args[index];
             if (arg.startsWith("--")) {
-                if (!arg.equals("--in-place") && !arg.equals("--no-worktree") && !arg.equals("--dry-run")) {
+                if (!arg.equals("--in-place") && !arg.equals("--no-worktree")
+                        && !arg.equals("--dry-run") && !arg.equals("--conductor")
+                        && !arg.equals("--auto-reject-gates")) {
                     index++;
                 }
                 continue;
@@ -100,7 +111,8 @@ public final class DoCommand {
                 option(args, "--task-id", null), option(args, "--run-id", null),
                 option(args, "--base-ref", "HEAD"),
                 hasFlag(args, "--in-place") || hasFlag(args, "--no-worktree"),
-                hasFlag(args, "--dry-run"));
+                hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
+                hasFlag(args, "--auto-reject-gates"));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -124,7 +136,8 @@ public final class DoCommand {
         }
 
         String taskId = options.taskId() != null ? options.taskId() : TaskDraft.slug(options.goal());
-        String runId = options.runId() != null ? options.runId() : "do-" + taskId;
+        String runId = options.runId() != null ? options.runId()
+                : "do-" + taskId + "-" + Long.toUnsignedString(System.currentTimeMillis(), 36);
 
         OrcaIsolation.Placement placement;
         if (options.inPlace()) {
@@ -132,7 +145,7 @@ public final class DoCommand {
         } else {
             try {
                 placement = new OrcaIsolation(processes).isolate(requested, "w-" + taskId,
-                        "HEAD".equals(options.baseRef()) ? "main" : options.baseRef());
+                        options.baseRef());
             } catch (OrcaIsolation.IsolationException isolation) {
                 return fail(isolation.code(), requested, requested, taskId, isolation.getMessage());
             }
@@ -172,13 +185,22 @@ public final class DoCommand {
             return fail("risk_unknown", requested, root, taskId, "risk must be one of " + ProjectConfig.RISK_LEVELS);
         }
 
-        TaskDraft.Written drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk);
+        TaskDraft.Written drafted;
+        try {
+            drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk);
+        } catch (TaskDraft.TaskConflict conflict) {
+            return fail("task_conflict", requested, root, taskId, conflict.getMessage());
+        }
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
+        if (options.conductor()) {
+            return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
+                    runId, scope, risk);
+        }
         TaskLoop.Outcome loop = new TaskLoop(processes).run(loaded, user, runId, options.dryRun());
 
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("ok", loop.ok());
-        report.put("code", loop.ok() ? "ready_for_human" : loop.reason());
+        report.put("code", loop.reason());
         report.put("next_action", loop.nextAction());
         report.put("goal", options.goal());
         report.put("task_id", taskId);
@@ -188,14 +210,75 @@ public final class DoCommand {
         report.put("worktree", String.valueOf(root));
         report.put("isolated", placement.isolated());
         report.put("isolation", placement.reason());
+        report.put("worktree_start_ref", options.baseRef());
+        report.put("diff_base_ref", loaded.resolved().baseRef());
+        report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
         report.put("scope", scope);
         report.put("risk", risk);
         report.put("dry_run", options.dryRun());
         report.put("summary", String.valueOf(loop.summary()));
         report.put("steps", loop.summaryReport().get("steps"));
+        report.put("decision_path", loop.summaryReport().get("decision_path"));
+        report.put("decision_state", loop.summaryReport().get("decision_state"));
+        report.put("decision_options", loop.summaryReport().get("decision_options"));
+        report.put("approve_with", loop.summaryReport().get("approve_with"));
         report.put("lands", false);
-        return new Outcome(loop.ok(), loop.ok() ? "ready_for_human" : loop.reason(),
+        return new Outcome(loop.ok(), loop.reason(),
                 requested, root, taskId, report);
+    }
+
+    private Outcome runWithConductor(Options options, Path requested, Path root,
+                                     OrcaIsolation.Placement placement, TaskDraft.Written drafted,
+                                     ConfigLoader.Loaded loaded, String taskId, String runId,
+                                     String scope, String risk) throws Exception {
+        if (options.dryRun()) {
+            return fail("conductor_dry_run_unsupported", requested, root, taskId,
+                    "use ordinary `warden do --dry-run`; Conductor exists to present a real human gate");
+        }
+        // Agent execution has its own task budget. This outer bound is the separate human-gate
+        // TTL; Conductor checkpoints the workflow if the operator does not answer within a day.
+        ConductorBridge.Outcome conductor = new ConductorBridge().run(root, taskId, runId,
+                options.autoRejectGates(), Duration.ofHours(24));
+        Path summaryFile = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+        Map<String, Object> summary = Files.isRegularFile(summaryFile)
+                ? dev.warden.json.Json.parseObject(Files.readString(summaryFile)) : Map.of();
+        ApprovalStore decisions = new ApprovalStore(root);
+        HumanDecision decision = decisions.find(runId).orElse(null);
+        String choice = decision == null ? null : decision.decision();
+        String code = switch (choice == null ? "" : choice) {
+            case "accept" -> "human_accepted";
+            case "reject" -> "human_rejected";
+            case "abort" -> "human_aborted";
+            case "retry" -> "retry_authorized";
+            default -> conductor.timedOut() ? "human_gate_timeout" : "conductor_stopped";
+        };
+        boolean accepted = "accept".equals(choice) && conductor.ok();
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("ok", accepted);
+        report.put("code", code);
+        report.put("goal", options.goal());
+        report.put("task_id", taskId);
+        report.put("task_existed", drafted.existed());
+        report.put("run_id", runId);
+        report.put("project", String.valueOf(requested));
+        report.put("worktree", String.valueOf(root));
+        report.put("isolated", placement.isolated());
+        report.put("isolation", placement.reason());
+        report.put("worktree_start_ref", options.baseRef());
+        report.put("diff_base_ref", loaded.resolved().baseRef());
+        report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
+        report.put("scope", scope);
+        report.put("risk", risk);
+        report.put("conductor", true);
+        report.put("conductor_workflow", String.valueOf(conductor.workflow()));
+        report.put("conductor_exit_code", (long) conductor.exitCode());
+        report.put("conductor_timed_out", conductor.timedOut());
+        report.put("task_summary", summary);
+        if (decision != null) report.put("decision", decision.toMap());
+        report.put("decision_path", root.resolve(".warden/runs").resolve(runId)
+                .resolve(dev.warden.approval.ApprovalStore.FILE_NAME).toString());
+        report.put("lands", false);
+        return new Outcome(accepted, code, requested, root, taskId, report);
     }
 
     private Outcome fail(String code, Path project, Path worktree, String taskId, String message) {

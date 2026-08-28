@@ -31,6 +31,7 @@ public record Profile(
         List<String> quotaSignatures,
         String promptDelivery,
         String attachmentFlag,
+        VisionCapability vision,
         String runner,
         String verificationProbe,
         List<String> verificationChecks,
@@ -39,11 +40,13 @@ public record Profile(
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
-            "prompt_delivery", "attachments", "runner", "verification", "notes");
+            "prompt_delivery", "attachments", "capabilities", "runner", "verification", "notes");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
     private static final Set<String> QUOTA = Set.of("signatures");
     private static final Set<String> ATTACHMENTS = Set.of("flag");
+    private static final Set<String> CAPABILITIES = Set.of("vision");
+    private static final Set<String> VISION = Set.of("delivery", "verification");
     private static final Set<String> VERIFICATION = Set.of("verified_on", "status", "probe", "what_to_check", "note");
 
     public static final Set<String> ROLES = Set.of("implementer", "reviewer", "architect", "visual_qa");
@@ -66,6 +69,20 @@ public record Profile(
      * at resolve time until it exists.
      */
     public static final Set<String> RUNNERS = Set.of("direct", "orca", "local");
+    public static final Set<String> VISION_DELIVERIES = Set.of("cli_attachment", "workspace_file");
+    public static final Set<String> CAPABILITY_VERIFICATION = Set.of("required");
+
+    /** A declared and human-probed way for the model to inspect pixels, not just filenames. */
+    public record VisionCapability(String delivery, boolean verificationRequired) {}
+
+    /**
+     * A profile-level verification stamp proves vision only when the profile declared that its
+     * vision path was part of the probe. This keeps the existing verify/stamp workflow usable:
+     * an unverified profile must still parse before {@code warden profiles --verify} can run it.
+     */
+    public boolean hasVerifiedVision() {
+        return vision != null && vision.verificationRequired() && verified;
+    }
 
     public static Profile parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -111,6 +128,48 @@ public record Profile(
         String attachmentFlag = attachments.optString("flag", null);
         String runner = root.requireEnum("runner", RUNNERS, "direct");
 
+        Values capabilities = root.optMap("capabilities").rejectUnknownKeys(CAPABILITIES);
+        boolean declaresVision = capabilities.has("vision");
+        VisionCapability vision = null;
+        if (declaresVision) {
+            Values configuredVision = capabilities.optMap("vision").rejectUnknownKeys(VISION);
+            String delivery = configuredVision.requireEnum("delivery", VISION_DELIVERIES, null);
+            String verificationRequirement = configuredVision.requireEnum(
+                    "verification", CAPABILITY_VERIFICATION, null);
+            if (delivery == null) {
+                root.collector().add("capabilities.vision.delivery is required and must be one of "
+                        + VISION_DELIVERIES);
+            }
+            if (verificationRequirement == null) {
+                root.collector().add("capabilities.vision.verification is required and must be 'required'");
+            }
+            if (delivery != null && verificationRequirement != null) {
+                vision = new VisionCapability(delivery, true);
+            }
+        } else if (attachmentFlag != null && "direct".equals(runner)) {
+            // Compatibility for pre-capability profiles: an already verified direct `-i`
+            // profile is exactly the cli_attachment capability, just in the old spelling.
+            vision = new VisionCapability("cli_attachment", true);
+        }
+
+        if ("visual_qa".equals(role) && vision == null) {
+            root.collector().add("visual_qa requires capabilities.vision with delivery and verification");
+        }
+        if (attachmentFlag != null && (vision == null || !"cli_attachment".equals(vision.delivery()))) {
+            root.collector().add("attachments.flag requires capabilities.vision.delivery: cli_attachment");
+        }
+        if (vision != null && "cli_attachment".equals(vision.delivery())) {
+            if (!"direct".equals(runner)) {
+                root.collector().add("capabilities.vision.delivery cli_attachment requires runner: direct");
+            }
+            if (attachmentFlag == null) {
+                root.collector().add("capabilities.vision.delivery cli_attachment requires attachments.flag");
+            }
+        }
+        if (vision != null && "orca".equals(runner) && !"workspace_file".equals(vision.delivery())) {
+            root.collector().add("runner: orca supports vision only with delivery: workspace_file");
+        }
+
         Values verification = root.optMap("verification").rejectUnknownKeys(VERIFICATION);
         boolean verified = verification.has("verified_on");
         // Kept, not discarded: "why is this profile not eligible" is answered by the exact
@@ -122,6 +181,6 @@ public record Profile(
         root.throwIfAny();
         return new Profile(name, role, vendor, model, command, args, readOnly, wallClock,
                 promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
-                promptDelivery, attachmentFlag, runner, probe, whatToCheck, verified);
+                promptDelivery, attachmentFlag, vision, runner, probe, whatToCheck, verified);
     }
 }

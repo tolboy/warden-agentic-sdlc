@@ -26,11 +26,28 @@ public final class OrcaSettlementTest implements Suite {
         Map<String, Object> done = Json.parseObject("""
                 {"ok":true,"result":{"count":1,"messages":[
                   {"type":"worker_done","taskId":"task_1","dispatchId":"disp_1",
-                   "payload":{"summary":"ok"}}]}}
+                   "outcome":"succeeded","payload":{"summary":"ok"}}]}}
                 """);
         OrcaSettlement.Outcome completed = OrcaSettlement.fromCheck(done, "task_1", "disp_1");
         check.eq("worker_done settles the dispatch", OrcaSettlement.Kind.COMPLETED, completed.kind());
         check.eq("payload is retained", "ok", completed.payload().get("summary"));
+
+        Map<String, Object> failedDone = Json.parseObject("""
+                {"ok":true,"result":{"delivery":{"id":"delivery_1","messages":[
+                  {"id":"message_1","type":"worker_done","taskId":"task_1","dispatchId":"disp_1",
+                   "outcome":"failed","payload":{"summary":"tests failed"}}]}}}
+                """);
+        OrcaSettlement.Outcome failed = OrcaSettlement.fromCheck(failedDone, "task_1", "disp_1");
+        check.eq("failed worker_done is a terminal failure", OrcaSettlement.Kind.FAILED, failed.kind());
+        check.eq("delivery id survives for acknowledgement", "delivery_1", failed.deliveryId());
+        check.eq("message id survives for recovery", "message_1", failed.messageId());
+
+        Map<String, Object> missingOutcome = Json.parseObject("""
+                {"ok":true,"result":{"messages":[
+                  {"type":"worker_done","taskId":"task_1","dispatchId":"disp_1"}]}}
+                """);
+        check.eq("worker_done without explicit outcome fails closed", OrcaSettlement.Kind.FAILED,
+                OrcaSettlement.fromCheck(missingOutcome, "task_1", "disp_1").kind());
 
         Map<String, Object> other = Json.parseObject("""
                 {"ok":true,"result":{"messages":[
@@ -54,6 +71,21 @@ public final class OrcaSettlementTest implements Suite {
                 """);
         check.eq("dispatch-show completed is settlement",
                 OrcaSettlement.Kind.COMPLETED, OrcaSettlement.fromDispatchShow(settled).kind());
+
+        Map<String, Object> failedAndSettled = Json.parseObject("""
+                {"ok":true,"result":{"status":"failed","settled":true,"outcome":"failed",
+                "dispatchId":"disp_1"}}
+                """);
+        check.eq("failed status wins over generic settled flag", OrcaSettlement.Kind.FAILED,
+                OrcaSettlement.fromDispatchShow(failedAndSettled).kind());
+
+        Map<String, Object> question = Json.parseObject("""
+                {"ok":true,"result":{"deliveryId":"delivery_q","messages":[
+                  {"id":"message_q","type":"question","taskId":"task_1","dispatchId":"disp_1",
+                   "payload":{"question":"Which account?"}}]}}
+                """);
+        check.eq("worker question is surfaced rather than treated as completion", OrcaSettlement.Kind.QUESTION,
+                OrcaSettlement.fromCheck(question, "task_1", "disp_1").kind());
 
         Map<String, Object> inFlight = Json.parseObject("{\"ok\":true,\"result\":{\"status\":\"dispatched\"}}");
         check.eq("dispatch-show in flight is a checkpoint",

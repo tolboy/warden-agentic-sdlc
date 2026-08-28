@@ -62,7 +62,10 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("model", profile.model());
         evidence.put("read_only", profile.readOnly());
 
-        String mergeBase = git.mergeBase(request.task().baseRef());
+        // The run controller pins this before the first agent starts. Re-resolving HEAD here
+        // would let an agent hide committed changes by moving HEAD during the run.
+        String mergeBase = request.diffBaseCommit() != null
+                ? request.diffBaseCommit() : git.mergeBase(request.task().baseRef());
         String fingerprintBefore = profile.readOnly() ? git.fingerprint(mergeBase) : null;
 
         String schemaJson = "";
@@ -102,6 +105,10 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("attachments", attached);
         evidence.put("attachments_offered", request.attachments() == null ? List.of()
                 : request.attachments().stream().map(path -> path.toAbsolutePath().toString()).toList());
+        if (profile.vision() != null) {
+            evidence.put("vision_delivery", profile.vision().delivery());
+            evidence.put("vision_verified", profile.hasVerifiedVision());
+        }
         // The prompt can be enormous; record a readable command without inlining it.
         evidence.put("command", command.stream()
                 .map(part -> part.equals(argumentValues.get("prompt")) ? "<prompt>" : part).toList());
@@ -215,8 +222,28 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_artifact_schema_violation", duration, process.stdout(), null, evidence);
         }
 
+        String semanticFailure = semanticFailure(request.role(), artifact);
+        if (semanticFailure != null) {
+            evidence.put("failure", semanticFailure);
+            evidence.put("artifact_status", artifact.get("status"));
+            return new Result(false, semanticFailure, duration, process.stdout(), artifact, evidence);
+        }
+
         evidence.put("verdict", artifact.get("verdict"));
         return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+    }
+
+    /** A syntactically valid artifact may still be an honest refusal, not a completed role. */
+    public static String semanticFailure(String role, Map<String, Object> artifact) {
+        Object status = artifact == null ? null : artifact.get("status");
+        if (!(status instanceof String value)) return null;
+        String normalized = value.toLowerCase();
+        if (normalized.equals("blocked")) return "role_reported_blocked";
+        if (normalized.equals("aborted") || normalized.equals("failed")
+                || normalized.equals("cancelled") || normalized.equals("canceled")) {
+            return "role_reported_" + normalized;
+        }
+        return null;
     }
 
     /** Conformance is ours, even when the vendor claimed to enforce the schema. */

@@ -1,5 +1,8 @@
 package dev.warden;
 
+import dev.warden.approval.ApprovalException;
+import dev.warden.approval.ApprovalStore;
+import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
@@ -11,6 +14,7 @@ import dev.warden.gate.VisualQaRunner;
 import dev.warden.execution.orca.OrcaClient;
 import dev.warden.json.Json;
 import dev.warden.ledger.LedgerReader;
+import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
 import dev.warden.run.DoCommand;
@@ -18,14 +22,12 @@ import dev.warden.run.TaskLoop;
 
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Entry point. Command dispatch only — every command lives in its own class so that adding
@@ -34,9 +36,6 @@ import java.util.Map;
 public final class Main {
 
     public static final String VERSION = "0.1.0-dev";
-    private static final DateTimeFormatter RUN_ID_TIME =
-            DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
-
     public static void main(String[] args) {
         useUtf8ForOutput();
         if (args.length == 0 || args[0].equals("--help") || args[0].equals("-h")) {
@@ -60,6 +59,8 @@ public final class Main {
                 case "do" -> doIntent(args);
                 case "doctor" -> doctor();
                 case "ledger" -> ledger();
+                case "status" -> status(args);
+                case "approve" -> approve(args);
                 default -> {
                     System.err.println("warden: unknown command '" + args[0] + "'");
                     usage();
@@ -305,9 +306,23 @@ public final class Main {
         if (args.length < 2) throw new IllegalArgumentException("run requires a task id or YAML path");
         String runId = option(args, "--run-id", loadedDefaultRunId());
         boolean dryRun = hasFlag(args, "--dry-run");
-        ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
-        UserConfig user = UserConfig.load();
-        TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner()).run(loaded, user, runId, dryRun);
+        TaskLoop.Outcome outcome;
+        try {
+            ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
+            UserConfig user = UserConfig.load();
+            outcome = new TaskLoop(new ProcessRunner()).run(loaded, user, runId, dryRun);
+        } catch (EvidenceLedger.RunExistsException duplicate) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("ok", false);
+            result.put("reason", "run_id_exists");
+            result.put("next_action", "choose_new_run_id");
+            result.put("run_id", runId);
+            result.put("message", duplicate.getMessage());
+            System.out.println(Json.write(result));
+            return 1;
+        } catch (Exception preflight) {
+            return recordPreflightFailure(args[1], runId, preflight);
+        }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
         result.put("reason", outcome.reason());
@@ -315,8 +330,57 @@ public final class Main {
         result.put("run_id", runId);
         result.put("summary", String.valueOf(outcome.summary()));
         result.put("steps", outcome.summaryReport().get("steps"));
+        result.put("decision_path", outcome.summaryReport().get("decision_path"));
+        result.put("decision_state", outcome.summaryReport().get("decision_state"));
+        result.put("decision_options", outcome.summaryReport().get("decision_options"));
+        result.put("decision_updated_at", outcome.summaryReport().get("decision_updated_at"));
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
+    }
+
+    /** Turn failures before TaskLoop starts into the same durable human boundary. */
+    private static int recordPreflightFailure(String taskSelector, String runId, Exception failure)
+            throws Exception {
+        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        ledger.reserveWorkflowRun(taskSelector);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("run_id", runId);
+        summary.put("task_id", taskSelector);
+        summary.put("ok", false);
+        summary.put("reason", "run_preflight_failed");
+        summary.put("next_action", "human_escalation");
+        summary.put("error", Map.of(
+                "type", failure.getClass().getName(),
+                "message", String.valueOf(failure.getMessage())));
+        Path file = ledger.writeReport("task-run", summary);
+        ApprovalStore store = new ApprovalStore(root);
+        HumanDecision decision = store.createFailure(runId, taskSelector,
+                "run_preflight_failed", file, null);
+        summary.put("decision_path", root.relativize(store.decisionPath(runId))
+                .toString().replace('\\', '/'));
+        summary.put("decision_state", decision.state().jsonValue());
+        summary.put("decision_options", decision.options());
+        summary.put("decision_updated_at", decision.updatedAt().toString());
+        ledger.writeReport("task-run", summary);
+        ledger.append("human_decision_pending", Map.of(
+                "run_id", runId, "kind", decision.kind().jsonValue(),
+                "path", summary.get("decision_path")));
+        ledger.append("task_run", summary);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", false);
+        result.put("reason", "run_preflight_failed");
+        result.put("next_action", "human_escalation");
+        result.put("run_id", runId);
+        result.put("summary", file.toString());
+        result.put("decision_path", summary.get("decision_path"));
+        result.put("decision_state", summary.get("decision_state"));
+        result.put("decision_options", summary.get("decision_options"));
+        result.put("decision_updated_at", summary.get("decision_updated_at"));
+        result.put("message", String.valueOf(failure.getMessage()));
+        System.out.println(Json.write(result));
+        return 1;
     }
 
     /**
@@ -413,6 +477,124 @@ public final class Main {
         return 0;
     }
 
+    /** Pending and resolved human decisions are Warden state, not terminal prose. */
+    private static int status(String[] args) throws Exception {
+        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        ApprovalStore store = new ApprovalStore(root);
+        String runId = args.length > 1 && !args[1].startsWith("--") ? args[1] : null;
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("project", root.toString());
+        if (runId != null) {
+            HumanDecision decision = store.read(runId);
+            result.put("decision", decision.toMap());
+            result.put("decision_path", store.decisionPath(runId).toString());
+        } else {
+            result.put("decisions", store.list().stream().map(HumanDecision::toMap).toList());
+        }
+        System.out.println(Json.write(result));
+        return 0;
+    }
+
+    /**
+     * Record a human decision. Even an accepted decision never commits, merges, pushes or
+     * deploys; it only closes the durable gate for a separate operator-owned landing step.
+     */
+    private static int approve(String[] args) throws Exception {
+        if (args.length < 2) {
+            throw new IllegalArgumentException("approve requires a run id and --decision");
+        }
+        String runId = args[1];
+        String choice = option(args, "--decision", null);
+        if (choice == null) throw new IllegalArgumentException("approve requires --decision <choice>");
+        String actor = option(args, "--actor", System.getProperty("user.name", "human"));
+        String note = option(args, "--note", "");
+        String noteFile = option(args, "--note-file", null);
+        if (noteFile != null) note = java.nio.file.Files.readString(Path.of(noteFile));
+
+        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        ApprovalStore store = new ApprovalStore(root);
+        try {
+            HumanDecision pending = store.read(runId);
+            String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
+
+            // Acceptance is valid only for the exact candidate the human inspected. Reject,
+            // abort and retry remain available when the tree moved, because they grant no land.
+            if ("accept".equals(choice) && pending.candidateFingerprint() != null) {
+                Path summaryPath = Path.of(pending.summaryPath());
+                if (!summaryPath.isAbsolute()) summaryPath = root.resolve(summaryPath);
+                Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(summaryPath));
+                Object base = summary.get("diff_base_commit");
+                if (!(base instanceof String commit)) {
+                    throw new ApprovalException("candidate_unverifiable",
+                            "task summary has no immutable diff_base_commit");
+                }
+                String current = new dev.warden.git.GitRepository(root, new ProcessRunner()).fingerprint(commit);
+                if (!pending.candidateFingerprint().equals(current)) {
+                    throw new ApprovalException("candidate_changed",
+                            "worktree fingerprint changed after the decision was shown; run gates again");
+                }
+            }
+
+            HumanDecision resolved = store.resolve(runId, expected, choice, actor, note);
+            boolean summaryProjectionUpdated = updateDecisionProjection(root, resolved);
+            long waitMillis = Math.max(0L,
+                    Duration.between(resolved.createdAt(), resolved.updatedAt()).toMillis());
+            new dev.warden.ledger.EvidenceLedger(root, runId).append("human_decision", Map.of(
+                    "decision", choice, "actor", actor,
+                    "created_at", resolved.createdAt().toString(),
+                    "decided_at", resolved.updatedAt().toString(),
+                    "wait_millis", waitMillis,
+                    "updated_at", resolved.updatedAt().toString(), "lands", false));
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("ok", true);
+            result.put("code", "decision_recorded");
+            result.put("decision", resolved.toMap());
+            result.put("summary_projection_updated", summaryProjectionUpdated);
+            result.put("lands", false);
+            result.put("next", "accept".equals(choice)
+                    ? "inspect the exact diff and land it manually if desired"
+                    : "retry".equals(choice)
+                        ? "start a new run id after addressing the recorded blocker"
+                        : "no changes were landed");
+            System.out.println(Json.write(result));
+            return 0;
+        } catch (ApprovalException failure) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("ok", false);
+            result.put("code", failure.code());
+            result.put("message", failure.getMessage());
+            result.put("lands", false);
+            System.out.println(Json.write(result));
+            return 1;
+        }
+    }
+
+    /** decision.json is authoritative; task-run.json is a convenient, explicitly derived view. */
+    private static boolean updateDecisionProjection(Path root, HumanDecision decision) {
+        try {
+            Path summary = Path.of(decision.summaryPath());
+            if (!summary.isAbsolute()) summary = root.resolve(summary);
+            summary = summary.toAbsolutePath().normalize();
+            Path runDirectory = root.resolve(".warden/runs").resolve(decision.runId())
+                    .toAbsolutePath().normalize();
+            if (!summary.startsWith(runDirectory) || !java.nio.file.Files.isRegularFile(summary)) return false;
+            Map<String, Object> report = Json.parseObject(java.nio.file.Files.readString(summary));
+            report.put("decision_state", decision.state().jsonValue());
+            report.put("decision", decision.decision());
+            report.put("decision_actor", decision.actor());
+            report.put("decision_note", decision.note());
+            report.put("decision_updated_at", decision.updatedAt().toString());
+            String file = summary.getFileName().toString();
+            if (!file.endsWith(".json")) return false;
+            new EvidenceLedger(root, decision.runId()).writeReport(
+                    file.substring(0, file.length() - ".json".length()), report);
+            return true;
+        } catch (Exception projectionFailure) {
+            return false;
+        }
+    }
+
     private static String option(String[] args, String name, String fallback) {
         for (int index = 0; index + 1 < args.length; index++) {
             if (args[index].equals(name)) return args[index + 1];
@@ -421,7 +603,8 @@ public final class Main {
     }
 
     private static String loadedDefaultRunId() {
-        return "run-" + RUN_ID_TIME.format(Instant.now());
+        return "run-" + Long.toUnsignedString(System.currentTimeMillis(), 36)
+                + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
     private static void usage() {
@@ -441,6 +624,9 @@ public final class Main {
                                            the whole workflow; stops at the human gate
                   warden run <task>            the bounded loop; stops at the human gate
                   warden ledger                aggregate local evidence and experiment dimensions
+                  warden status [run-id]       show pending/resolved human decisions
+                  warden approve <run-id> --decision <choice>
+                                               record a decision; never lands changes
 
                 The command to use is `warden do`. Everything else is a piece of that loop.
                 Vendor configuration lives in ~/.warden/, project configuration in .warden/.

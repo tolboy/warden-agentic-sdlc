@@ -18,6 +18,12 @@ public final class TaskDraft {
 
     public record Written(Path file, String id, boolean existed) {}
 
+    /** Reusing a slug is safe only when it still denotes the same operator intent. */
+    @SuppressWarnings("serial")
+    public static final class TaskConflict extends IOException {
+        public TaskConflict(String message) { super(message); }
+    }
+
     public Written write(Path projectRoot, String id, String goal, String scope, String risk)
             throws IOException {
         if (!RepoPath.isSlug(id)) {
@@ -25,7 +31,27 @@ public final class TaskDraft {
         }
         if (goal == null || goal.isBlank()) throw new IOException("goal is required");
         Path file = projectRoot.resolve(".warden/tasks").resolve(id + ".yaml");
-        if (Files.isRegularFile(file)) return new Written(file, id, true);
+        if (Files.isRegularFile(file)) {
+            TaskSpec existing;
+            try {
+                existing = TaskSpec.parse(Files.readString(file, StandardCharsets.UTF_8), file.toString());
+            } catch (RuntimeException invalid) {
+                throw new TaskConflict("task '" + id + "' already exists but cannot be validated: "
+                        + invalid.getMessage());
+            }
+            boolean sameScope = existing.scope().entries().size() == 1
+                    && scope.equals(existing.scope().entries().get(0));
+            boolean sameRisk = risk.equals(existing.risk());
+            boolean sameGoal = goal.strip().equals(existing.goal());
+            boolean sameId = id.equals(existing.id());
+            if (!sameId || !sameGoal || !sameScope || !sameRisk) {
+                throw new TaskConflict("task '" + id + "' already exists with different intent; "
+                        + "choose a different --task-id or explicitly edit/review " + file
+                        + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
+                        + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk());
+            }
+            return new Written(file, id, true);
+        }
         Files.createDirectories(file.getParent());
         boolean visual = looksLikeUi(goal);
         String label = controlLabel(goal);

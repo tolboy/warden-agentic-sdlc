@@ -63,6 +63,9 @@ public final class DoCommandTest implements Suite {
             check.that("drafting never grants land", !loaded.resolved().authority().land());
             check.eq("dry-run does not claim a merge", Boolean.FALSE, dry.report().get("lands"));
             check.that("dry-run stays in the given checkout", Boolean.FALSE.equals(dry.report().get("isolated")));
+            check.eq("dry-run has no authorization next action", "none", dry.report().get("next_action"));
+            check.that("dry-run creates no approvable decision",
+                    !Files.exists(project.resolve(".warden/runs/do-hello/decision.json")));
 
             nonAsciiGoalChecks(check, sandbox, project, user);
             visualDraftChecks(check, sandbox);

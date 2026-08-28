@@ -1,10 +1,13 @@
 package dev.warden.run;
 
+import dev.warden.approval.ApprovalStore;
+import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.gate.GateRunner;
 import dev.warden.gate.VisualQaRunner;
+import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
@@ -76,11 +79,20 @@ public final class TaskLoop {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        // Reservation is the first mutation. A duplicate controller is refused before it can
+        // overwrite evidence, spend a token, or start a second Orca worker in the same tree.
+        ledger.reserveWorkflowRun(task.id());
+        // Both values are selected before any vendor can write. HEAD and the contract files
+        // are mutable names/bytes; resolving them inside each later role or gate lets a worker
+        // move the baseline or rewrite its own acceptance criteria.
+        GitRepository git = new GitRepository(root, processes);
+        String diffBaseCommit = git.mergeBase(task.baseRef());
+        String contractHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
         Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd());
         // One runner for the whole loop: a vendor that ran out at implement time must not be
         // dispatched again at review time. The gate makes the budget count vendor calls, not
         // role invocations, so a failover cannot spend more than the task allowed.
-        RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun);
+        RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId);
         GateRunner gates = new GateRunner(processes);
 
         boolean reviewRequired = user.policy() != null
@@ -96,6 +108,8 @@ public final class TaskLoop {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("run_id", runId);
         summary.put("task_id", task.id());
+        summary.put("diff_base_commit", diffBaseCommit);
+        summary.put("contract_sha256", contractHash);
         summary.put("risk", task.risk());
         summary.put("dry_run", dryRun);
         summary.put("max_fix_attempts", task.maxFixAttempts());
@@ -119,7 +133,8 @@ public final class TaskLoop {
                 if (!dryRun && !step.ok()) return stop(ledger, summary, reasonFor(step, "implementer_failed"), steps, attempt, budget);
             }
 
-            GateRunner.Outcome gate = runGates(gates, loaded, runId, attempt, dryRun, steps);
+            GateRunner.Outcome gate = runGates(gates, loaded, runId, attempt, dryRun, steps,
+                    contractHash, diffBaseCommit);
             while (!dryRun && !gate.ok() && attempt < task.maxFixAttempts()) {
                 attempt++;
                 contextFile = writeContext(ledger, attempt, "gates", gateContext(gate));
@@ -127,7 +142,8 @@ public final class TaskLoop {
                         stepRunId(runId, "implementer", attempt), null, contextFile, false);
                 record(steps, budget, "implementer", attempt, fix);
                 if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                gate = runGates(gates, loaded, runId, attempt, false, steps);
+                gate = runGates(gates, loaded, runId, attempt, false, steps,
+                        contractHash, diffBaseCommit);
             }
             if (!dryRun && !gate.ok()) return stop(ledger, summary, "gates_not_satisfied", steps, attempt, budget);
 
@@ -136,6 +152,9 @@ public final class TaskLoop {
                         stepRunId(runId, "reviewer", attempt), implementerVendor, null, dryRun);
                 record(steps, budget, "reviewer", attempt, review);
                 if (!dryRun) {
+                    if (!contractMatches(loaded, contractHash)) {
+                        return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
+                    }
                     if (!review.ok()) return stop(ledger, summary, reasonFor(review, "reviewer_failed"), steps, attempt, budget);
                     long blocking = blockingFindings(root, review);
                     summary.put("blocking_findings", blocking);
@@ -146,11 +165,15 @@ public final class TaskLoop {
                                 stepRunId(runId, "implementer", attempt), null, contextFile, false);
                         record(steps, budget, "implementer", attempt, fix);
                         if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                        gate = runGates(gates, loaded, runId, attempt, false, steps);
+                        gate = runGates(gates, loaded, runId, attempt, false, steps,
+                                contractHash, diffBaseCommit);
                         if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
                         review = roles.run(loaded, user, "reviewer",
                                 stepRunId(runId, "reviewer", attempt), implementerVendor, null, false);
                         record(steps, budget, "reviewer", attempt, review);
+                        if (!contractMatches(loaded, contractHash)) {
+                            return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
+                        }
                         if (!review.ok()) return stop(ledger, summary, reasonFor(review, "reviewer_failed"), steps, attempt, budget);
                         blocking = blockingFindings(root, review);
                         summary.put("blocking_findings", blocking);
@@ -176,7 +199,8 @@ public final class TaskLoop {
                             stepRunId(runId, "implementer", attempt), null, contextFile, false);
                     record(steps, budget, "implementer", attempt, fix);
                     if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                    gate = runGates(gates, loaded, runId, attempt, false, steps);
+                    gate = runGates(gates, loaded, runId, attempt, false, steps,
+                            contractHash, diffBaseCommit);
                     if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
                     visual = runVisual(loaded, runId, attempt, false, steps);
                 }
@@ -191,6 +215,9 @@ public final class TaskLoop {
                     RoleRunner.Outcome seen = runVisualRole(loaded, user, roles, runId, attempt,
                             implementerVendor, visual, dryRun, steps, budget);
                     if (!dryRun && seen != null) {
+                        if (!contractMatches(loaded, contractHash)) {
+                            return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
+                        }
                         if (!seen.ok()) return stop(ledger, summary, reasonFor(seen, "visual_qa_role_failed"), steps, attempt, budget);
                         long blocking = blockingFindings(root, seen);
                         summary.put("visual_blocking_findings", blocking);
@@ -202,7 +229,8 @@ public final class TaskLoop {
                                     stepRunId(runId, "implementer", attempt), null, contextFile, false);
                             record(steps, budget, "implementer", attempt, fix);
                             if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                            gate = runGates(gates, loaded, runId, attempt, false, steps);
+                            gate = runGates(gates, loaded, runId, attempt, false, steps,
+                                    contractHash, diffBaseCommit);
                             if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
                             visual = runVisual(loaded, runId, attempt, false, steps);
                             if (visual != null && !visual.ok()) {
@@ -210,6 +238,9 @@ public final class TaskLoop {
                             }
                             seen = runVisualRole(loaded, user, roles, runId, attempt, implementerVendor,
                                     visual, false, steps, budget);
+                            if (!contractMatches(loaded, contractHash)) {
+                                return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
+                            }
                             if (seen == null || !seen.ok()) {
                                 return stop(ledger, summary,
                                         seen == null ? "visual_qa_role_failed" : reasonFor(seen, "visual_qa_role_failed"),
@@ -227,14 +258,41 @@ public final class TaskLoop {
         } catch (Budget.ExceededException exceeded) {
             summary.put("budget_stop", exceeded.getMessage());
             return stop(ledger, summary, "budget_exhausted", steps, attempt, budget);
+        } catch (Exception unexpected) {
+            summary.put("unexpected_error", Map.of(
+                    "type", unexpected.getClass().getName(),
+                    "message", String.valueOf(unexpected.getMessage())));
+            return stop(ledger, summary, "unexpected_error", steps, attempt, budget);
+        }
+
+        if (!dryRun && !contractMatches(loaded, contractHash)) {
+            return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
         }
 
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
         summary.put("ok", true);
+        if (dryRun) {
+            // A preview has not produced a candidate a human can accept. Persisting a real
+            // pending decision here makes status noisy and, worse, makes a dry run look like
+            // an authorization boundary was actually reached.
+            summary.put("next_action", "none");
+            Path file = ledger.writeReport("task-run", summary);
+            ledger.append("task_dry_run", summary);
+            return new Outcome(true, "dry_run", "none", file, summary);
+        }
+
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
+        HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
+                "all configured machine, review and visual gates passed", file,
+                git.fingerprint(diffBaseCommit));
+        addDecision(summary, root, decision);
+        ledger.writeReport("task-run", summary);
+        ledger.append("human_decision_pending", Map.of(
+                "run_id", runId, "kind", decision.kind().jsonValue(),
+                "path", root.relativize(new ApprovalStore(root).decisionPath(runId)).toString().replace('\\', '/')));
         ledger.append("task_run", summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
     }
@@ -313,7 +371,8 @@ public final class TaskLoop {
     }
 
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
-                                        int attempt, boolean dryRun, List<Map<String, Object>> steps)
+                                        int attempt, boolean dryRun, List<Map<String, Object>> steps,
+                                        String contractHash, String diffBaseCommit)
             throws Exception {
         if (dryRun) {
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -323,7 +382,8 @@ public final class TaskLoop {
             steps.add(entry);
             return null;
         }
-        GateRunner.Outcome outcome = gates.run(loaded, stepRunId(runId, "gates", attempt));
+        GateRunner.Outcome outcome = gates.run(loaded, stepRunId(runId, "gates", attempt),
+                contractHash, diffBaseCommit);
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("step", "gates");
         entry.put("attempt", (long) attempt);
@@ -332,6 +392,14 @@ public final class TaskLoop {
         entry.put("report", String.valueOf(outcome.report()));
         steps.add(entry);
         return outcome;
+    }
+
+    private static boolean contractMatches(ConfigLoader.Loaded loaded, String expected) {
+        try {
+            return expected.equals(GitRepository.sha256(loaded.projectFile(), loaded.taskFile()));
+        } catch (Exception missingOrUnreadable) {
+            return false;
+        }
     }
 
     private VisualQaRunner.Outcome runVisual(ConfigLoader.Loaded loaded, String runId, int attempt,
@@ -427,8 +495,34 @@ public final class TaskLoop {
         summary.put("role_runs", (long) budget.runs());
         summary.put("steps", steps);
         Path file = ledger.writeReport("task-run", summary);
+        Path root = ledger.projectRoot();
+        Object base = summary.get("diff_base_commit");
+        String fingerprint = base instanceof String commit
+                ? new GitRepository(root, processes).fingerprint(commit) : null;
+        HumanDecision decision = new ApprovalStore(root).createFailure(
+                String.valueOf(summary.get("run_id")), String.valueOf(summary.get("task_id")),
+                reason, file, fingerprint);
+        addDecision(summary, root, decision);
+        ledger.writeReport("task-run", summary);
+        ledger.append("human_decision_pending", Map.of(
+                "run_id", decision.runId(), "kind", decision.kind().jsonValue(),
+                "path", root.relativize(new ApprovalStore(root).decisionPath(decision.runId()))
+                        .toString().replace('\\', '/')));
         ledger.append("task_run", summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
+    }
+
+    private static void addDecision(Map<String, Object> summary, Path root, HumanDecision decision)
+            throws Exception {
+        ApprovalStore store = new ApprovalStore(root);
+        summary.put("decision_path", root.relativize(store.decisionPath(decision.runId()))
+                .toString().replace('\\', '/'));
+        summary.put("decision_state", decision.state().jsonValue());
+        summary.put("decision_options", decision.options());
+        summary.put("decision_updated_at", decision.updatedAt().toString());
+        summary.put("approve_with", "warden approve " + decision.runId()
+                + " --decision " + decision.options().get(0)
+                + " --expected-updated-at " + decision.updatedAt());
     }
 
     private static String stepRunId(String runId, String role, int attempt) {

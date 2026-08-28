@@ -1,70 +1,136 @@
 workflow:
   name: warden-do
-  description: Isolate, lint, run the bounded role loop, stop at a fail-closed human gate. Never lands.
-  version: 0.1.0
-  entry_point: do_task
+  description: Run one prepared Warden task, surface its durable decision, and never land changes.
+  version: 0.2.0
+  entry_point: run_task
   input:
-    goal:
+    task:
       type: string
       required: true
     project_dir:
       type: string
       required: true
-    scope:
-      type: string
-      required: false
     run_id:
       type: string
-      required: false
+      required: true
+    actor:
+      type: string
+      required: true
   limits:
     max_iterations: 4
-    timeout_seconds: 7800
+    # Agent execution is bounded below; the remaining time is an explicit human-gate TTL.
+    timeout_seconds: 86400
   runtime:
     checkpoint:
       every_agent: true
 
 agents:
-  - name: do_task
+  - name: run_task
     type: script
     command: java
     args:
       - "-cp"
       - "{{ workflow.dir }}/../out/classes"
       - "dev.warden.Main"
-      - "do"
-      - "--project"
-      - "{{ workflow.input.project_dir }}"
-      - "--goal"
-      - "{{ workflow.input.goal }}"
+      - "run"
+      - "{{ workflow.input.task }}"
+      - "--run-id"
+      - "{{ workflow.input.run_id }}"
     working_dir: "{{ workflow.input.project_dir }}"
-    timeout: 7200
+    # Warden permits task timeouts up to 240 minutes. Give shutdown/evidence writes 15 more.
+    timeout: 15300
     routes:
       - to: human_approval
-        when: "{{ do_task.output.ok == true }}"
-      - to: do_failed
+        when: "{{ run_task.output.exit_code == 0 }}"
+      - to: human_intervention
 
   - name: human_approval
     type: human_gate
-    prompt: "Warden stopped before landing. Inspect {{ workflow.input.project_dir }}/.warden/runs and the worktree diff."
+    prompt: "Warden gates passed. Inspect the worktree diff, task-run.json, screenshots and {{ workflow.input.project_dir }}/.warden/runs/{{ workflow.input.run_id }}/decision.json."
     options:
       - label: Reject
         value: reject
-        route: rejected
-      - label: Approve for manual landing
-        value: approve
-        route: approved
+        route: record_reject
+      - label: Accept for manual landing
+        value: accept
+        route: record_accept
 
-  - name: approved
+  - name: human_intervention
+    type: human_gate
+    prompt: "Warden stopped on a problem. Inspect {{ workflow.input.project_dir }}/.warden/runs/{{ workflow.input.run_id }}/task-run.json and decision.json. No worker is allowed to continue implicitly."
+    options:
+      - label: Abort
+        value: abort
+        route: record_abort
+      - label: Permit a new retry run
+        value: retry
+        route: record_retry
+
+  - name: record_accept
+    type: script
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "approve", "{{ workflow.input.run_id }}", "--decision", "accept", "--expected-updated-at", "{{ run_task.output.decision_updated_at }}", "--actor", "{{ workflow.input.actor }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 60
+    routes:
+      - to: accepted
+        when: "{{ record_accept.output.exit_code == 0 }}"
+      - to: decision_record_failed
+
+  - name: record_reject
+    type: script
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "approve", "{{ workflow.input.run_id }}", "--decision", "reject", "--expected-updated-at", "{{ run_task.output.decision_updated_at }}", "--actor", "{{ workflow.input.actor }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 60
+    routes:
+      - to: rejected
+        when: "{{ record_reject.output.exit_code == 0 }}"
+      - to: decision_record_failed
+
+  - name: record_abort
+    type: script
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "approve", "{{ workflow.input.run_id }}", "--decision", "abort", "--expected-updated-at", "{{ run_task.output.decision_updated_at }}", "--actor", "{{ workflow.input.actor }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 60
+    routes:
+      - to: aborted
+        when: "{{ record_abort.output.exit_code == 0 }}"
+      - to: decision_record_failed
+
+  - name: record_retry
+    type: script
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "approve", "{{ workflow.input.run_id }}", "--decision", "retry", "--expected-updated-at", "{{ run_task.output.decision_updated_at }}", "--actor", "{{ workflow.input.actor }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 60
+    routes:
+      - to: retry_authorized
+        when: "{{ record_retry.output.exit_code == 0 }}"
+      - to: decision_record_failed
+
+  - name: accepted
     type: terminate
     status: success
-    reason: Human approval recorded. Warden still performs no merge or push.
-
-  - name: do_failed
-    type: terminate
-    status: failed
-    reason: warden do stopped before the human gate; inspect the JSON and the evidence ledger.
+    reason: Human acceptance was durably recorded. Warden still performs no commit, merge or push.
 
   - name: rejected
     type: terminate
     status: failed
-    reason: Human approval was not granted.
+    reason: Human rejected the candidate. No changes were landed.
+
+  - name: aborted
+    type: terminate
+    status: failed
+    reason: Human aborted after a failed run. No changes were landed.
+
+  - name: retry_authorized
+    type: terminate
+    status: failed
+    reason: Human authorized a NEW run id after the blocker is addressed; this workflow does not silently reuse attempts or budgets.
+
+  - name: decision_record_failed
+    type: terminate
+    status: failed
+    reason: The human choice could not be written to Warden's durable decision record; fail closed.

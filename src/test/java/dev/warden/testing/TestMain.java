@@ -25,6 +25,7 @@ public final class TestMain {
                 new dev.warden.OrcaClientTest(),
                 new dev.warden.OrcaSettlementTest(),
                 new dev.warden.LedgerTest(),
+                new dev.warden.ApprovalStoreTest(),
                 new dev.warden.InitializerTest()
         );
 

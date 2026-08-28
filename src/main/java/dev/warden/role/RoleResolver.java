@@ -55,6 +55,10 @@ public final class RoleResolver {
             Profile profile = profiles.get(name);
             if (profile == null) { rejected.put(name, "profile_not_found"); continue; }
             if (!profile.role().equals(role)) { rejected.put(name, "role_mismatch"); continue; }
+            if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
+                rejected.put(name, "vision_capability_unverified");
+                continue;
+            }
             if (!profile.verified()) { rejected.put(name, "profile_unverified"); continue; }
             if ("local".equals(profile.runner())) { rejected.put(name, "runner_unimplemented"); continue; }
             if (exhausted.contains(name)) { rejected.put(name, "quota_exhausted_this_run"); continue; }

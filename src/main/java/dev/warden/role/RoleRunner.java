@@ -78,15 +78,33 @@ public final class RoleRunner {
 
     private final ProcessRunner processes;
     private final DispatchGate gate;
+    private final String pinnedDiffBase;
+    private final String workflowRunId;
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
 
-    public RoleRunner(ProcessRunner processes) { this(processes, ALWAYS); }
+    public RoleRunner(ProcessRunner processes) { this(processes, ALWAYS, null, null); }
 
     public RoleRunner(ProcessRunner processes, DispatchGate gate) {
+        this(processes, gate, null, null);
+    }
+
+    /**
+     * @param pinnedDiffBase immutable commit selected by the outer run controller before any
+     *                       vendor is dispatched. Null is retained for the standalone
+     *                       {@code warden role} command, which resolves its own one-shot base.
+     */
+    public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase) {
+        this(processes, gate, pinnedDiffBase, null);
+    }
+
+    public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase,
+                      String workflowRunId) {
         this.processes = processes;
         this.gate = gate;
+        this.pinnedDiffBase = pinnedDiffBase;
+        this.workflowRunId = workflowRunId;
     }
 
     /** Profiles this runner has seen run out, in the order they did. */
@@ -120,7 +138,7 @@ public final class RoleRunner {
         GitRepository git = new GitRepository(root, processes);
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
         TaskSpec.ResolvedTask task = loaded.resolved();
-        String mergeBase = git.mergeBase(task.baseRef());
+        String mergeBase = pinnedDiffBase != null ? pinnedDiffBase : git.mergeBase(task.baseRef());
 
         // Rotation spreads load across profiles; it advances once per role invocation, not
         // once per failover attempt, or a single spent vendor would skew every later run.
@@ -200,6 +218,11 @@ public final class RoleRunner {
             report.put("wall_clock_minutes", profile.wallClockMinutes());
             report.put("command_preview", commandPreview(profile));
             report.put("attachment_count", (long) (attachments == null ? 0 : attachments.size()));
+            if (profile.vision() != null) {
+                report.put("vision_capability", Map.of(
+                        "verified", profile.hasVerifiedVision(),
+                        "delivery", profile.vision().delivery()));
+            }
             if (attachments != null && !attachments.isEmpty() && profile.attachmentFlag() == null) {
                 // Not fatal: the paths are in the prompt and an agentic vendor can open them.
                 // Recorded because "the reviewer looked at the screenshots" and "the reviewer
@@ -226,7 +249,8 @@ public final class RoleRunner {
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
             RoleExecutor executor = Executors.forProfile(profile, processes, git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
-                    runId, role, profile, task, root, ledger.runDirectory(), promptFile, schemaFile,
+                    runId, workflowRunId != null ? workflowRunId : runId,
+                    role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
                     values.get("context"), evidenceName, attachments == null ? List.of() : attachments));
 
             report.put("dry_run", false);

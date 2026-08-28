@@ -65,6 +65,26 @@ public final class RoleResolverTest implements Suite {
                 """, "policy.yaml");
         check.rejects("an unimplemented runner is skipped, not launched as direct CLI", "runner_unimplemented",
                 () -> resolver.resolve("reviewer", localPolicy, profiles, null, 0, profile -> true));
+
+        Policy visualPolicy = Policy.parse("""
+                version: 1
+                roles:
+                  visual_qa:
+                    profiles: [eyes]
+                    strategy: first
+                """, "policy.yaml");
+        profiles.put("eyes", visualProfile(false));
+        try {
+            resolver.resolve("visual_qa", visualPolicy, profiles, null, 0, profile -> true);
+            check.that("unverified vision is not eligible", false);
+        } catch (RoleResolver.Unresolvable failure) {
+            check.eq("unverified vision has a capability-specific reason",
+                    "vision_capability_unverified", failure.rejected().get("eyes"));
+        }
+        profiles.put("eyes", visualProfile(true));
+        check.eq("verified workspace-file vision is eligible", "eyes",
+                resolver.resolve("visual_qa", visualPolicy, profiles, null, 0, profile -> true)
+                        .selected().name());
     }
 
     private static Profile profile(String name, String vendor, String verifiedOn) {
@@ -79,5 +99,23 @@ public final class RoleResolverTest implements Suite {
                 verification:
                 %s
                 """.formatted(name, vendor, name, verification), name + ".yaml");
+    }
+
+    private static Profile visualProfile(boolean verified) {
+        return Profile.parse("""
+                version: 1
+                profile: eyes
+                role: visual_qa
+                vendor: openai
+                command: codex
+                runner: orca
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                verification:
+                %s
+                """.formatted(verified ? "  verified_on: \"2026-08-27\"" :
+                "  probe: 'describe a known image'"), "eyes.yaml");
     }
 }

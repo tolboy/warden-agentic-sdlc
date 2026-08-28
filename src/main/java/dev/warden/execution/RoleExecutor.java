@@ -14,7 +14,8 @@ public interface RoleExecutor {
      *                     for a first attempt and carries an attempt suffix afterwards, so a
      *                     failover cannot overwrite the transcript of the run it replaced.
      */
-    record Request(String runId, String role, Profile profile, TaskSpec.ResolvedTask task,
+    record Request(String runId, String workflowRunId, String role, Profile profile, TaskSpec.ResolvedTask task,
+                   String diffBaseCommit,
                    Path projectRoot, Path runDirectory, Path promptFile, Path schemaFile,
                    String context, String evidenceName, java.util.List<Path> attachments) {}
 

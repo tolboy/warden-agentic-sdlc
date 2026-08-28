@@ -110,6 +110,13 @@ public final class GitRepository {
         return HexFormat.of().formatHex(digest.digest());
     }
 
+    /** SHA-256 of file bytes only, for portable artifact integrity evidence. */
+    public static String contentSha256(Path file) throws IOException {
+        MessageDigest digest = sha256();
+        digest.update(Files.readAllBytes(file));
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
     private static MessageDigest sha256() {
         try { return MessageDigest.getInstance("SHA-256"); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
@@ -119,11 +126,12 @@ public final class GitRepository {
 
     private static void addChangedPath(Set<String> paths, String rawPath) {
         String path = normalize(rawPath);
-        // The .warden tree is Warden-owned (contract, tasks, evidence). Task blast radius
-        // is the project's source. Contract mutation is a separate hashed check; counting
-        // a freshly written project.yaml as "out of scope" made `warden do` fail closed
-        // on its own init files.
-        if (path.equals(".warden") || path.startsWith(".warden/")) return;
+        // Runtime evidence is written by Warden itself while a role is running, so including
+        // it would make every read-only fingerprint fail. Contract files are deliberately NOT
+        // excluded: the run controller snapshots them before the first agent and a mutation
+        // must remain observable. GateRunner exempts only the two exact snapshotted contract
+        // paths from source blast-radius checks; any other .warden edit is a violation.
+        if (path.equals(".warden/runs") || path.startsWith(".warden/runs/")) return;
         paths.add(path);
     }
 }

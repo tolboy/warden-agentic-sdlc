@@ -47,6 +47,13 @@ public final class TaskLoopTest implements Suite {
                     !Files.exists(clean.resolve(".git/MERGE_HEAD")));
             check.that("cost rolls up to the task, not just the role",
                     ((Number) ok.summaryReport().get("total_cost_usd")).doubleValue() > 0);
+            String evidenceBeforeDuplicate = Files.readString(
+                    clean.resolve(".warden/runs/r1/evidence.jsonl"));
+            check.rejects("a duplicate workflow id is fenced before another dispatch",
+                    "run id already reserved", () -> loop(clean, home, "r1"));
+            check.eq("duplicate workflow leaves existing evidence byte-for-byte unchanged",
+                    evidenceBeforeDuplicate,
+                    Files.readString(clean.resolve(".warden/runs/r1/evidence.jsonl")));
 
             // A failing gate sends the work back with the machine output attached.
             Path fixable = newProject(sandbox, "fixable");

@@ -54,8 +54,8 @@ public final class RuntimeTest implements Suite {
             check.that("managed run evidence does not poison later blast radius",
                     git.changedPaths().stream().noneMatch(path -> path.startsWith(".warden/runs/")));
             Files.writeString(repository.resolve(".warden/tasks/extra.yaml"), "version: 1\nid: extra\ngoal: g\nscope: code\n");
-            check.that("untracked Warden contract files are not a blast-radius violation",
-                    git.changedPaths().stream().noneMatch(path -> path.startsWith(".warden/")));
+            check.that("untracked Warden contract files remain observable",
+                    git.changedPaths().contains(".warden/tasks/extra.yaml"));
 
             ConfigLoader.Loaded visual = new ConfigLoader().load(repository, "needs-eyes");
             GateRunner.Outcome eyes = new GateRunner(runner).run(visual, "test-visual");

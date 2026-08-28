@@ -14,10 +14,16 @@ import java.util.Map;
  */
 public final class OrcaSettlement {
 
-    public enum Kind { COMPLETED, ESCALATED, FAILED, READY, CHECKPOINT, UNKNOWN }
+    public enum Kind { COMPLETED, ESCALATED, QUESTION, FAILED, READY, CHECKPOINT, UNKNOWN }
 
     public record Outcome(Kind kind, String taskId, String dispatchId, String type,
-                          Map<String, Object> payload, String reason) {}
+                          Map<String, Object> payload, String reason,
+                          String deliveryId, String messageId) {
+        public Outcome(Kind kind, String taskId, String dispatchId, String type,
+                       Map<String, Object> payload, String reason) {
+            this(kind, taskId, dispatchId, type, payload, reason, null, null);
+        }
+    }
 
     private OrcaSettlement() {}
 
@@ -63,16 +69,26 @@ public final class OrcaSettlement {
         Map<String, Object> result = resultOf(envelope);
         String status = String.valueOf(first(result, "status", "state"));
         Object nested = result.get("dispatch");
-        if (nested instanceof Map<?, ?> map && map.get("status") != null) {
-            status = String.valueOf(map.get("status"));
+        String outcome = string(first(result, "outcome", "workerOutcome", "worker_outcome"));
+        if (nested instanceof Map<?, ?> map) {
+            if (map.get("status") != null) status = String.valueOf(map.get("status"));
+            Object nestedOutcome = first(cast(map), "outcome", "workerOutcome", "worker_outcome");
+            if (nestedOutcome != null) outcome = String.valueOf(nestedOutcome);
         }
         String task = taskId(envelope);
         String dispatch = dispatchId(envelope);
-        if (Boolean.TRUE.equals(result.get("settled")) || "completed".equals(status) || "settled".equals(status)) {
-            return new Outcome(Kind.COMPLETED, task, dispatch, status, result, "dispatch_settled");
-        }
-        if ("failed".equals(status) || "blocked".equals(status) || "cancelled".equals(status)) {
+        // A failed dispatch is still settled. Failure must win over the generic settled bit.
+        if (failureOutcome(outcome) || "failed".equals(status) || "blocked".equals(status)
+                || "cancelled".equals(status) || "canceled".equals(status)
+                || "abandoned".equals(status) || "stopped".equals(status)) {
             return new Outcome(Kind.FAILED, task, dispatch, status, result, "dispatch_" + status);
+        }
+        if (successOutcome(outcome) || "completed".equals(status)) {
+            return new Outcome(Kind.COMPLETED, task, dispatch, status, result, "dispatch_succeeded");
+        }
+        if (Boolean.TRUE.equals(result.get("settled")) || "settled".equals(status)) {
+            return new Outcome(Kind.FAILED, task, dispatch, status, result,
+                    "dispatch_settled_without_success_outcome");
         }
         if ("dispatched".equals(status) || "ready".equals(status) || "pending".equals(status)) {
             return new Outcome(Kind.CHECKPOINT, task, dispatch, status, result, "dispatch_in_flight");
@@ -88,6 +104,7 @@ public final class OrcaSettlement {
         if (envelope == null) return new Outcome(Kind.UNKNOWN, expectedTaskId, expectedDispatchId, null, Map.of(),
                 "missing_envelope");
         Map<String, Object> result = resultOf(envelope);
+        String deliveryId = deliveryId(result);
         Object count = result.get("count");
         if (count instanceof Number number && number.longValue() == 0) {
             return new Outcome(Kind.CHECKPOINT, expectedTaskId, expectedDispatchId, null, result, "empty_delivery");
@@ -100,12 +117,27 @@ public final class OrcaSettlement {
             if (expectedDispatchId != null && dispatch != null && !expectedDispatchId.equals(dispatch)) continue;
             Map<String, Object> payload = payloadOf(message);
             if ("worker_done".equals(type) || "worker-done".equals(type)) {
-                return new Outcome(Kind.COMPLETED, task != null ? task : expectedTaskId,
-                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "worker_done");
+                String outcome = string(first(message, "outcome", "workerOutcome", "worker_outcome"));
+                if (outcome == null) {
+                    outcome = string(first(payload, "outcome", "workerOutcome", "worker_outcome"));
+                }
+                Kind kind = successOutcome(outcome) ? Kind.COMPLETED : Kind.FAILED;
+                String reason = successOutcome(outcome) ? "worker_done_succeeded"
+                        : failureOutcome(outcome) ? "worker_done_failed"
+                        : "worker_done_missing_or_unknown_outcome";
+                return new Outcome(kind, task != null ? task : expectedTaskId,
+                        dispatch != null ? dispatch : expectedDispatchId, type, payload, reason,
+                        deliveryId, messageId(message));
             }
             if ("escalation".equals(type)) {
                 return new Outcome(Kind.ESCALATED, task != null ? task : expectedTaskId,
-                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "escalation");
+                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "escalation",
+                        deliveryId, messageId(message));
+            }
+            if ("question".equals(type)) {
+                return new Outcome(Kind.QUESTION, task != null ? task : expectedTaskId,
+                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "question",
+                        deliveryId, messageId(message));
             }
         }
         if (Boolean.FALSE.equals(envelope.get("ok"))) {
@@ -162,6 +194,42 @@ public final class OrcaSettlement {
         Object payload = first(message, "payload", "body", "result");
         if (payload instanceof Map<?, ?> map) return new LinkedHashMap<>((Map<String, Object>) map);
         return new LinkedHashMap<>(message);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> cast(Map<?, ?> map) {
+        return (Map<String, Object>) map;
+    }
+
+    private static String deliveryId(Map<String, Object> result) {
+        Object direct = first(result, "deliveryId", "delivery_id");
+        if (direct != null) return String.valueOf(direct);
+        Object delivery = result.get("delivery");
+        if (delivery instanceof Map<?, ?> map) {
+            Object id = first(cast(map), "id", "deliveryId", "delivery_id");
+            if (id != null) return String.valueOf(id);
+        }
+        return null;
+    }
+
+    private static String messageId(Map<String, Object> message) {
+        return string(first(message, "id", "messageId", "message_id"));
+    }
+
+    private static boolean successOutcome(String outcome) {
+        if (outcome == null) return false;
+        return switch (outcome.toLowerCase()) {
+            case "succeeded", "success", "completed", "complete", "passed", "pass" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean failureOutcome(String outcome) {
+        if (outcome == null) return false;
+        return switch (outcome.toLowerCase()) {
+            case "failed", "failure", "blocked", "cancelled", "canceled", "abandoned", "stopped" -> true;
+            default -> false;
+        };
     }
 
     private static String string(Object value) {

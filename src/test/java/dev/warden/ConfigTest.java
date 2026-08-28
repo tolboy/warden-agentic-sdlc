@@ -130,6 +130,7 @@ public final class ConfigTest implements Suite {
         check.eq("args preserved", 3, reviewer.args().size());
         check.that("read_only defaults to true", reviewer.readOnly());
         check.eq("runner defaults to direct", "direct", reviewer.runner());
+        check.eq("non-visual legacy profile needs no vision capability", null, reviewer.vision());
         check.that("unverified profile is flagged", !reviewer.verified());
 
         Profile implementer = Profile.parse("""
@@ -144,6 +145,99 @@ public final class ConfigTest implements Suite {
                 """, "codex.yaml");
         check.that("write access must be explicit", !implementer.readOnly());
         check.that("verified profile is flagged", implementer.verified());
+
+        Profile visual = Profile.parse("""
+                version: 1
+                profile: codex-eyes
+                role: visual_qa
+                vendor: codex
+                command: codex
+                runner: direct
+                attachments: { flag: "-i" }
+                capabilities:
+                  vision:
+                    delivery: cli_attachment
+                    verification: required
+                verification:
+                  verified_on: 2026-08-27
+                """, "codex-eyes.yaml");
+        check.eq("direct vision delivery is explicit", "cli_attachment", visual.vision().delivery());
+        check.that("verified visual probe makes vision eligible", visual.hasVerifiedVision());
+
+        Profile legacyVisual = Profile.parse("""
+                version: 1
+                profile: legacy-eyes
+                role: visual_qa
+                vendor: codex
+                command: codex
+                attachments: { flag: "-i" }
+                verification: { verified_on: 2026-08-27 }
+                """, "legacy-eyes.yaml");
+        check.eq("legacy direct attachment maps to capability", "cli_attachment",
+                legacyVisual.vision().delivery());
+
+        Profile orcaVisual = Profile.parse("""
+                version: 1
+                profile: orca-eyes
+                role: visual_qa
+                vendor: codex
+                command: codex
+                runner: orca
+                capabilities:
+                  vision: { delivery: workspace_file, verification: required }
+                verification: { verified_on: 2026-08-27 }
+                """, "orca-eyes.yaml");
+        check.eq("orca vision uses workspace files", "workspace_file", orcaVisual.vision().delivery());
+
+        Profile unverifiedVisual = Profile.parse("""
+                version: 1
+                profile: unverified-eyes
+                role: visual_qa
+                vendor: codex
+                command: codex
+                attachments: { flag: "-i" }
+                capabilities:
+                  vision: { delivery: cli_attachment, verification: required }
+                verification:
+                  probe: 'codex exec -i known.png "describe it"'
+                """, "unverified-eyes.yaml");
+        check.that("visual profile remains parseable for the verification workflow",
+                !unverifiedVisual.hasVerifiedVision());
+
+        check.rejects("visual role without pixel delivery is refused", "visual_qa requires capabilities.vision",
+                () -> Profile.parse("version: 1\nprofile: eyes\nrole: visual_qa\nvendor: v\ncommand: c\n", "eyes.yaml"));
+        check.rejects("cli attachment requires an actual flag", "requires attachments.flag",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: eyes
+                        role: visual_qa
+                        vendor: v
+                        command: c
+                        capabilities:
+                          vision: { delivery: cli_attachment, verification: required }
+                        """, "eyes.yaml"));
+        check.rejects("orca cannot claim CLI attachment delivery", "runner: orca supports vision only",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: eyes
+                        role: visual_qa
+                        vendor: v
+                        command: c
+                        runner: orca
+                        attachments: { flag: "-i" }
+                        capabilities:
+                          vision: { delivery: cli_attachment, verification: required }
+                        """, "eyes.yaml"));
+        check.rejects("vision verification requirement is mandatory", "capabilities.vision.verification",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: eyes
+                        role: visual_qa
+                        vendor: v
+                        command: c
+                        capabilities:
+                          vision: { delivery: workspace_file }
+                        """, "eyes.yaml"));
 
         check.rejects("typo in read_only is refused, not ignored", "unsupported key 'readonly'",
                 () -> Profile.parse("version: 1\nprofile: p\nrole: reviewer\nvendor: v\ncommand: c\nreadonly: false\n", "p.yaml"));

@@ -24,20 +24,37 @@ public final class GateRunner {
     public record Outcome(boolean ok, String code, Path report, Map<String, Object> data) {}
 
     public Outcome run(ConfigLoader.Loaded loaded, String runId) throws IOException, InterruptedException {
+        return run(loaded, runId, null, null);
+    }
+
+    /**
+     * Run gates against the immutable base and contract snapshot selected before the first
+     * agent dispatch. Null values preserve the standalone {@code warden gates} behaviour.
+     */
+    public Outcome run(ConfigLoader.Loaded loaded, String runId, String expectedContractHash,
+                       String pinnedMergeBase) throws IOException, InterruptedException {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);
-        String contractHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
+        String observedHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
+        String contractHash = expectedContractHash != null ? expectedContractHash : observedHash;
         String mergeBase;
         try {
-            mergeBase = git.mergeBase(loaded.resolved().baseRef());
+            mergeBase = pinnedMergeBase != null ? pinnedMergeBase
+                    : git.mergeBase(loaded.resolved().baseRef());
         } catch (Exception failure) {
             return finish(ledger, false, "base_ref_unresolvable", base(loaded, contractHash, null,
                     List.of(), List.of(), failure.getMessage()));
         }
+        if (!contractHash.equals(observedHash)) {
+            return finish(ledger, false, "contract_mutated", base(loaded, contractHash, mergeBase,
+                    List.copyOf(git.changedPaths(mergeBase)), List.of(),
+                    "configuration changed after the run snapshot and before machine gates"));
+        }
 
         Set<String> initialPaths = git.changedPaths(mergeBase);
-        List<String> initialViolations = git.outsideScope(initialPaths, loaded.resolved().scopePaths());
+        List<String> initialViolations = git.outsideScope(sourcePaths(loaded, initialPaths),
+                loaded.resolved().scopePaths());
         if (!initialViolations.isEmpty()) {
             return finish(ledger, false, "preflight_outside_scope", base(loaded, contractHash, mergeBase,
                     List.copyOf(initialPaths), initialViolations, null));
@@ -53,7 +70,8 @@ public final class GateRunner {
                         List.copyOf(git.changedPaths(mergeBase)), List.of(), "configuration changed before command " + index));
             }
             Set<String> beforePaths = git.changedPaths(mergeBase);
-            List<String> beforeViolations = git.outsideScope(beforePaths, loaded.resolved().scopePaths());
+            List<String> beforeViolations = git.outsideScope(sourcePaths(loaded, beforePaths),
+                    loaded.resolved().scopePaths());
             if (!beforeViolations.isEmpty()) {
                 return finish(ledger, false, "blast_radius_before_command", base(loaded, contractHash,
                         mergeBase, List.copyOf(beforePaths), beforeViolations, null));
@@ -76,7 +94,8 @@ public final class GateRunner {
                 return finish(ledger, false, "contract_mutated", report);
             }
             Set<String> afterPaths = git.changedPaths(mergeBase);
-            List<String> violations = git.outsideScope(afterPaths, loaded.resolved().scopePaths());
+            List<String> violations = git.outsideScope(sourcePaths(loaded, afterPaths),
+                    loaded.resolved().scopePaths());
             if (!violations.isEmpty()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(afterPaths), violations, null);
@@ -153,5 +172,22 @@ public final class GateRunner {
         boolean windows = System.getProperty("os.name").toLowerCase().contains("win");
         return windows ? List.of("cmd.exe", "/d", "/s", "/c", command)
                 : List.of("/bin/sh", "-lc", command);
+    }
+
+    /**
+     * The project contract and selected task may have been created by {@code warden do} and
+     * are governed by the snapshot hash, not by the task's source-code scope. No other Warden
+     * path receives this exemption.
+     */
+    private static Set<String> sourcePaths(ConfigLoader.Loaded loaded, Set<String> changed) {
+        Set<String> paths = new java.util.LinkedHashSet<>(changed);
+        paths.remove(relative(loaded.root(), loaded.projectFile()));
+        paths.remove(relative(loaded.root(), loaded.taskFile()));
+        return paths;
+    }
+
+    private static String relative(Path root, Path file) {
+        return root.toAbsolutePath().normalize().relativize(file.toAbsolutePath().normalize())
+                .toString().replace('\\', '/');
     }
 }

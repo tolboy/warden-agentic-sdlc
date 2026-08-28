@@ -2,6 +2,7 @@ package dev.warden.gate;
 
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.TaskSpec;
+import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
@@ -90,7 +91,9 @@ public final class VisualQaRunner {
                     return finish(ledger, false, "visual_qa_unavailable", report,
                             "nothing is listening at " + url + " and no start command was configured");
                 }
-                server = startServer(loaded.root(), start);
+                Path previewLog = ledger.runDirectory().resolve("preview.log");
+                report.put("preview_log", previewLog.toString());
+                server = startServer(loaded.root(), start, previewLog);
                 if (!waitForHttp(url, Duration.ofSeconds(45))) {
                     return finish(ledger, false, "visual_qa_unavailable", report,
                             "started `" + start + "` but " + url + " never answered");
@@ -124,6 +127,7 @@ public final class VisualQaRunner {
                     @SuppressWarnings("unchecked")
                     Map<String, Object> body = (Map<String, Object>) map;
                     report.put("adapter", body);
+                    report.put("image_evidence", imageEvidence(body));
                     boolean ok = Boolean.TRUE.equals(body.get("ok"));
                     String code = String.valueOf(body.getOrDefault("code", ok ? "passed" : "visual_qa_failed"));
                     if (ok && !hasScreenshot(body)) {
@@ -175,6 +179,38 @@ public final class VisualQaRunner {
         return false;
     }
 
+    /** Durable image paths plus hashes; temporary browser profiles are never evidence. */
+    private static List<Map<String, Object>> imageEvidence(Map<String, Object> body) {
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        Object scenarios = body.get("scenarios");
+        if (!(scenarios instanceof List<?> rows)) return evidence;
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> scenario)) continue;
+            addImage(evidence, scenario.get("screenshot"));
+            Object steps = scenario.get("steps");
+            if (steps instanceof List<?> stepRows) {
+                for (Object step : stepRows) {
+                    if (step instanceof Map<?, ?> one) addImage(evidence, one.get("screenshot_after"));
+                }
+            }
+        }
+        return List.copyOf(evidence);
+    }
+
+    private static void addImage(List<Map<String, Object>> into, Object candidate) {
+        if (!(candidate instanceof String text)) return;
+        Path file = Path.of(text);
+        if (!Files.isRegularFile(file)) return;
+        try {
+            into.add(Map.of(
+                    "path", file.toAbsolutePath().normalize().toString(),
+                    "sha256", GitRepository.contentSha256(file),
+                    "bytes", Files.size(file)));
+        } catch (IOException ignored) {
+            // hasScreenshot still fails closed if the adapter produced no readable image.
+        }
+    }
+
     private static String defaultStart(Path root) {
         Path pkg = root.resolve("package.json");
         if (!Files.isRegularFile(pkg)) return null;
@@ -190,11 +226,13 @@ public final class VisualQaRunner {
         return null;
     }
 
-    private static Process startServer(Path root, String command) throws IOException {
+    private static Process startServer(Path root, String command, Path log) throws IOException {
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         List<String> shell = windows ? List.of("cmd.exe", "/d", "/s", "/c", command)
                 : List.of("/bin/sh", "-lc", command);
-        return new ProcessBuilder(shell).directory(root.toFile()).redirectErrorStream(true).start();
+        Files.createDirectories(log.getParent());
+        return new ProcessBuilder(shell).directory(root.toFile()).redirectErrorStream(true)
+                .redirectOutput(log.toFile()).start();
     }
 
     private static boolean waitForHttp(String url, Duration limit) throws InterruptedException {

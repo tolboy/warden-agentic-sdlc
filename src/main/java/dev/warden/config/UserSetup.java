@@ -238,6 +238,12 @@ public final class UserSetup {
             prompt_delivery: stdin
             attachments:
               flag: "-i"
+            capabilities:
+              vision:
+                delivery: cli_attachment
+                # `warden profiles --verify` stamps the profile only after a human confirms
+                # that the probe described the supplied pixels rather than merely their path.
+                verification: required
 
             limits:
               wall_clock_minutes: 15
