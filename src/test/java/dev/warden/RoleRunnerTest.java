@@ -255,6 +255,26 @@ public final class RoleRunnerTest implements Suite {
                 DirectCliExecutor.deliverabilityCheck(prefixed("vendor.cmd",
                         List.of("exec", "--prompt-file", "C:\\x\\p.md"))).get("deliverable"));
 
+        // Not a shim problem, and no shim check would ever have seen it. On Windows the JVM
+        // quotes an argument containing a space but does not escape a quote already inside
+        // it, so the receiving process re-splits from there. Measured on a real run: a
+        // visual-QA prompt with the harness report inlined reached claude.exe as
+        // `error: unknown option '->'`.
+        Map<String, Object> quoted = DirectCliExecutor.deliverabilityCheck(
+                prefixed("C:\\tools\\vendor.exe",
+                        List.of("-p", "report: {\"ok\": true, \"code\": \"passed\"}")));
+        check.eq("a prompt carrying JSON is refused before dispatch on Windows",
+                WINDOWS ? Boolean.FALSE : Boolean.TRUE, quoted.get("deliverable"));
+        if (WINDOWS) {
+            check.contains("and the offending argument is named",
+                    String.valueOf(quoted.get("undeliverable_arguments")), "double quote");
+            check.contains("with the same way out",
+                    String.valueOf(quoted.get("resolution")), "prompt_delivery: stdin");
+        }
+        check.eq("a quote-free argument still goes through", Boolean.TRUE,
+                DirectCliExecutor.deliverabilityCheck(prefixed("C:\\tools\\vendor.exe",
+                        List.of("-p", "no quotes here at all"))).get("deliverable"));
+
         // And the channel that survives a shim actually carries the prompt.
         Files.deleteIfExists(project.resolve("src/result.txt"));
         writeStdinProfile(home);

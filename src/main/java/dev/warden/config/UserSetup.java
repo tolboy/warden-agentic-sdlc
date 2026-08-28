@@ -214,9 +214,13 @@ public final class UserSetup {
             runner: direct
             read_only: true
 
+            # The prompt goes on stdin, not in argv. On Windows the JVM does not escape a
+            # double quote inside an argument, and this prompt embeds the artifact schema:
+            # a live run reached claude.exe as `error: unknown option` after being torn
+            # apart at the first quote in the JSON.
+            prompt_delivery: stdin
             args:
               - "-p"
-              - "{{prompt}}"
               - "--output-format"
               - "json"
               - "--max-turns"
@@ -464,6 +468,18 @@ public final class UserSetup {
 
             Acceptance commands the machine gate runs
             {{acceptance_commands}}
+
+            Browser scenarios the harness asserts, after you and before a human
+            {{visual_scenarios}}
+
+            Those two lists are the whole of the machine acceptance, and the second one is not
+            a plan — a headless browser runs it at the named viewports, clicks what it says to
+            click, and fails the run when an assertion does not hold. So "no command verifies
+            this change" is a finding only when **neither** list covers it. A live review once
+            filed a P1 saying nothing asserted an attribute that the browser scenario on the
+            next line asserted by name; the implementer was then sent to add a test for
+            something already tested. Check both lists before writing that finding, and if the
+            gap is real, say which list you would put the check in.
 
             ## Hard constraints
 

@@ -291,6 +291,14 @@ public final class DirectCliExecutor implements RoleExecutor {
      * with its output flags stripped off. Paying for that answer and then judging it is worse
      * than not running: use `prompt_delivery: stdin`, or a vendor flag that takes a file path.
      *
+     * The second rule is not about shims at all. On Windows the JVM builds one command-line
+     * string and wraps an argument in quotes when it contains a space — but it does not escape
+     * a double quote already inside the value. The receiving process re-splits on whitespace
+     * from there, so an argument carrying JSON arrives as a dozen arguments. Measured: a
+     * visual-QA prompt with the harness report inlined reached `claude.exe` as
+     * `error: unknown option '->'`, having been torn apart at the first quote in the report.
+     * That is not a shim problem and no shim check would ever have seen it.
+     *
      * What this does not cover: cmd.exe also expands `%NAME%` inside an argument when that
      * variable exists in the environment. Warden does not scan for that, and the check says so
      * in every report rather than leaving the gap to be discovered.
@@ -298,23 +306,29 @@ public final class DirectCliExecutor implements RoleExecutor {
     public static Map<String, Object> deliverabilityCheck(List<String> command) {
         String executable = command.get(0).toLowerCase();
         boolean shim = executable.endsWith(".cmd") || executable.endsWith(".bat");
-        List<String> multiline = new ArrayList<>();
-        if (shim) {
-            for (int index = 1; index < command.size(); index++) {
-                String argument = command.get(index);
-                if (argument.contains("\n") || argument.contains("\r")) {
-                    multiline.add("argv[" + index + "] (" + argument.length() + " chars)");
-                }
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        List<String> undeliverable = new ArrayList<>();
+        for (int index = 1; index < command.size(); index++) {
+            String argument = command.get(index);
+            if (shim && (argument.contains("\n") || argument.contains("\r"))) {
+                undeliverable.add("argv[" + index + "] is multi-line ("
+                        + argument.length() + " chars) and goes through cmd.exe");
+            } else if (windows && argument.indexOf('"') >= 0) {
+                undeliverable.add("argv[" + index + "] contains a double quote ("
+                        + argument.length() + " chars)");
             }
         }
         Map<String, Object> check = new LinkedHashMap<>();
         check.put("executable_is_batch_shim", shim);
-        check.put("covers", "multi-line arguments passed through cmd.exe, which truncates them "
-                + "at the first newline and drops every argument after it");
+        check.put("covers", windows
+                ? "multi-line arguments through cmd.exe, and double quotes inside any Windows "
+                  + "argument, which the JVM does not escape"
+                : "multi-line arguments passed through cmd.exe, which truncates them at the "
+                  + "first newline and drops every argument after it");
         check.put("does_not_cover", "cmd.exe expansion of %NAME% inside an argument");
-        check.put("deliverable", multiline.isEmpty());
-        if (!multiline.isEmpty()) {
-            check.put("undeliverable_arguments", multiline);
+        check.put("deliverable", undeliverable.isEmpty());
+        if (!undeliverable.isEmpty()) {
+            check.put("undeliverable_arguments", undeliverable);
             check.put("resolution", "set prompt_delivery: stdin on this profile, or pass "
                     + "{{prompt_file}} to a vendor flag that reads the prompt from a path");
         }
