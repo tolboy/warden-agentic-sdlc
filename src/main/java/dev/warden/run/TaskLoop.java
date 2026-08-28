@@ -171,9 +171,12 @@ public final class TaskLoop {
         summary.put("reason", "ready_for_human");
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
+        // Named, not asserted. The chain is declared now, so "all machine, review and visual
+        // gates passed" was a sentence that could describe a run in which review never ran.
+        // What the human is being asked to accept is what actually executed.
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
-                "all configured machine, review and visual gates passed", file,
-                git.fingerprint(diffBaseCommit));
+                "every stage that ran passed: " + String.join(", ", executedStages(steps)),
+                file, git.fingerprint(diffBaseCommit));
         addDecision(summary, root, decision);
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
@@ -648,6 +651,16 @@ public final class TaskLoop {
                         .toString().replace('\\', '/')));
         ledger.append("task_run", summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
+    }
+
+    /** The stage labels that ran, in order, each named once however often it repeated. */
+    private static List<String> executedStages(List<Map<String, Object>> steps) {
+        List<String> labels = new ArrayList<>();
+        for (Map<String, Object> step : steps) {
+            String label = String.valueOf(step.get("step"));
+            if (!labels.contains(label)) labels.add(label);
+        }
+        return labels.isEmpty() ? List.of("no stage") : labels;
     }
 
     private static void addDecision(Map<String, Object> summary, Path root, HumanDecision decision)

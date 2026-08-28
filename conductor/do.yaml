@@ -44,6 +44,9 @@ agents:
         when: "{{ run_task.output.exit_code == 0 }}"
       - to: human_intervention
 
+  # Option order is load-bearing. `conductor run --skip-gates` auto-selects the FIRST
+  # option, so the refusing choice is first in both gates below: automation can decline
+  # on a human's behalf, never accept on one. Reordering these would let a flag land work.
   - name: human_approval
     type: human_gate
     prompt: "Warden gates passed. Inspect the worktree diff, task-run.json, screenshots and {{ workflow.input.project_dir }}/.warden/runs/{{ workflow.input.run_id }}/decision.json."

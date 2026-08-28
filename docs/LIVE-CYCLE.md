@@ -162,7 +162,46 @@ warden run create-button-testid --run-id e2e-2
 
 ---
 
-## 4. Проект с нуля
+## 4. Conductor как внешний контроллер
+
+```text
+conductor run conductor\do.yaml --skip-gates --no-interactive   -i task=fix-the-create-button-so-it-works-again   -i project_dir=<worktree> -i run_id=lh-conductor-1 -i actor=warden-integration-test
+```
+
+```text
+┌─ Agent: run_task [iter 1]
+└─ ✓ run_task  (21.64s)
+   → next: human_approval
+
+┌─ Agent: human_approval [iter 1]
+Auto-selecting: Reject (--skip-gates)
+
+┌─ Agent: record_reject [iter 1]
+  Script: … dev.warden.Main approve lh-conductor-1 --decision reject
+          --expected-updated-at 2026-08-28T12:10:59.410123200Z --actor warden-integration-test
+└─ ✓ record_reject  (0.19s)
+
+Workflow terminated at 'rejected': Human rejected the candidate. No changes were landed.
+```
+
+Conductor 0.1.33. Проверено:
+
+* маршрут по `run_task.output.exit_code` сработал;
+* токен оптимистичной блокировки `decision_updated_at` прошёл из вывода Warden в аргументы
+  `warden approve` через шаблон Conductor — единственное место, где эти две программы обязаны
+  договориться;
+* решение записано durable: `state: resolved`, `decision: reject`, `actor` — тот, что передан;
+* повторное решение по тому же прогону отклонено (`duplicate_decision`);
+* `--skip-gates` выбирает **первый** вариант, и в обоих гейтах первым стоит отказ (`Reject`,
+  `Abort`). Автоматика может отказать за человека, принять — нет. Порядок вариантов в
+  `do.yaml` держит этот инвариант, и об этом там написано.
+
+Прогон намеренно машинный: цепочка из одной стадии `machine_gates`, ни одного вызова вендора.
+Проверялся мост, а не мнение модели.
+
+---
+
+## 5. Проект с нуля
 
 ```text
 warden do --project <пустой каталог> --in-place --init-repo --dry-run \
@@ -182,4 +221,5 @@ warden do --project <пустой каталог> --in-place --init-repo --dry-r
   прогонялась; профиль `codex-visual-qa` не верифицирован.
 * Orca-адаптер (`runner: orca`) как исполнитель роли живьём не подтверждён. Orca в этих
   прогонах создавала worktree — это `OrcaIsolation`, другой путь кода.
-* Conductor как внешний контроллер (`warden do --conductor`) в этих прогонах не участвовал.
+* `warden do --conductor` (Conductor, запущенный самим Warden через `ConductorBridge`) не
+  прогонялся: проверялся тот же workflow, запущенный напрямую из CLI Conductor.
