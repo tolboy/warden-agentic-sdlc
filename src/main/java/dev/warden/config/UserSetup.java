@@ -141,6 +141,10 @@ public final class UserSetup {
                   when: [review_required]
                   on_fail: stop
                   on_findings: fix
+                  # A fix round for the browser or the visual role edits code after the
+                  # reviewer passed. Without this, the candidate a human accepts contains a
+                  # diff no independent vendor ever read.
+                  recheck_after_fix: true
 
                 - stage: browser
                   run: visual_harness

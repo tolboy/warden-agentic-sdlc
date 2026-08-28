@@ -157,6 +157,38 @@ function parseScenario(raw) {
   return { raw, width, height, mobile, consoleOnly: false, steps, noConsoleErrors };
 }
 
+/** The URL the top of a stack came from, or "" when the browser did not say. */
+function originOf(stackTrace) {
+  const frame = stackTrace?.callFrames?.[0];
+  return frame?.url || "";
+}
+
+/**
+ * Whether an error belongs to something other than the page under test.
+ *
+ * A browser ships components that talk to each other over the extension message bus, and
+ * when the other end is not listening they log to the page's console like anything else.
+ * Measured: a run of a passing feature failed `no-console-errors` on
+ * "Could not establish connection. Receiving end does not exist." and spent two fix rounds
+ * on it — an error no change to the application could ever remove. The launch flags below
+ * are the real fix; this is what keeps one that slipped through from being reported as the
+ * application's. Nothing is dropped silently: what was ignored, and where it came from,
+ * goes into the report.
+ */
+const FOREIGN_ORIGINS = ["chrome-extension://", "moz-extension://", "edge://", "chrome://",
+  "devtools://"];
+const FOREIGN_TEXT = [
+  "could not establish connection. receiving end does not exist",
+  "the message port closed before a response was received",
+  "extension context invalidated",
+];
+function isForeign(origin, text) {
+  const where = String(origin || "").toLowerCase();
+  if (FOREIGN_ORIGINS.some((prefix) => where.startsWith(prefix))) return true;
+  const body = String(text || "").toLowerCase();
+  return FOREIGN_TEXT.some((phrase) => body.includes(phrase));
+}
+
 function findBrowser() {
   const candidates = [
     process.env.WARDEN_BROWSER,
@@ -220,6 +252,8 @@ class Cdp {
     this.events = [];
     this.consoleErrors = [];
     this.pageErrors = [];
+    /** Errors that were not the page's, kept rather than dropped silently. */
+    this.foreignErrors = [];
     ws.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data));
       if (message.id && this.pending.has(message.id)) {
@@ -241,12 +275,23 @@ class Cdp {
         .map((a) => a.value ?? a.description ?? a.unserializableValue ?? "")
         .join(" ")
         .trim();
-      if (text) this.consoleErrors.push(text.slice(0, 400));
+      if (text) {
+        const where = originOf(message.params.stackTrace);
+        if (isForeign(where, text)) this.foreignErrors.push({ text: text.slice(0, 400), from: where });
+        else this.consoleErrors.push(text.slice(0, 400));
+      }
     }
     if (message.method === "Runtime.exceptionThrown") {
       const details = message.params?.exceptionDetails;
       const text = details?.exception?.description || details?.text || "";
-      if (text) this.pageErrors.push(String(text).slice(0, 400));
+      if (text) {
+        const where = details?.url || originOf(details?.stackTrace);
+        if (isForeign(where, text)) {
+          this.foreignErrors.push({ text: String(text).slice(0, 400), from: where });
+        } else {
+          this.pageErrors.push(String(text).slice(0, 400));
+        }
+      }
     }
   }
 
@@ -455,6 +500,7 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
   });
   cdp.events = [];
   cdp.consoleErrors = [];
+  cdp.foreignErrors = [];
   cdp.pageErrors = [];
   await cdp.send("Page.navigate", { url: targetUrl });
   try {
@@ -517,6 +563,7 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
     screenshot,
     steps,
     console_errors: consoleErrors,
+    ignored_console_errors: cdp.foreignErrors,
     console_checked: requireQuietConsole,
     page: page ? { title: page.title, innerWidth: page.innerWidth, innerHeight: page.innerHeight, orientation: page.orientation } : null,
     why,
@@ -544,6 +591,14 @@ async function main() {
       "--disable-gpu",
       "--no-first-run",
       "--no-default-browser-check",
+      // A browser's own bundled components log to the page's console when their message
+      // bus has no listener, and `no-console-errors` then fails a page that did nothing
+      // wrong. Turning them off is the fix; isForeign() is the net under it.
+      "--disable-extensions",
+      "--disable-component-extensions-with-background-pages",
+      "--disable-background-networking",
+      "--disable-sync",
+      "--disable-default-apps",
       `--remote-debugging-port=${debugPort}`,
       `--user-data-dir=${profileDir}`,
       "about:blank",

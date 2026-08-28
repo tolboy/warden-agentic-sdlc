@@ -167,8 +167,14 @@ public record Workflow(List<Stage> stages) {
                         "stop", null, false, "implementer", null),
                 new Stage("gates", Kind.MACHINE_GATES, null, List.of(),
                         "fix", null, true, "implementer", null),
+                // recheck_after_fix, unlike the other role stages. A fix round for the
+                // browser or the visual role edits code after the reviewer has passed, and
+                // without this the candidate a human is asked to accept contains a diff no
+                // independent vendor ever read. Measured: an implementer rewrote the app
+                // shell in a browser fix round, and the review that had already passed was
+                // reported as if it covered it.
                 new Stage("review", Kind.ROLE, "reviewer", List.of("review_required"),
-                        "stop", "fix", false, "implementer", null),
+                        "stop", "fix", true, "implementer", null),
                 new Stage("browser", Kind.VISUAL_HARNESS, null, List.of("visual_qa_required"),
                         "fix", null, true, "implementer", null),
                 new Stage("look", Kind.ROLE, "visual_qa", List.of("visual_qa_required"),

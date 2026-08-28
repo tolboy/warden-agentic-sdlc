@@ -39,8 +39,11 @@ public final class WorkflowTest implements Suite {
         check.eq("gates recheck after any later fix round", true,
                 builtIn.stream().filter(stage -> stage.name().equals("gates")).findFirst()
                         .orElseThrow().recheckAfterFix());
-        check.eq("only gates and the browser precede a fix recheck of the last stage",
-                List.of("gates", "browser"),
+        // The reviewer is in this list on purpose. A fix round for the browser or the
+        // visual role edits code after the review passed, and without re-running it the
+        // candidate a human accepts holds a diff no independent vendor ever read.
+        check.eq("every judging stage before the last one is re-run after a fix",
+                List.of("gates", "review", "browser"),
                 Workflow.builtIn().recheckBefore(4).stream().map(Workflow.Stage::name).toList());
 
         // Failure names are what an operator greps for. They follow the stage's job, not the

@@ -184,6 +184,11 @@ public final class TaskLoop {
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
+        // Which judging stages did not see the tree as it finally stands. A workflow may
+        // legitimately choose not to pay for a second review, but "every stage passed" must
+        // not be allowed to mean "every stage passed something, at some point".
+        List<String> stale = staleJudgements(steps);
+        if (!stale.isEmpty()) summary.put("stale_judgements", stale);
         summary.put("ok", true);
         if (dryRun) {
             // A preview has not produced a candidate a human can accept. Persisting a real
@@ -202,9 +207,13 @@ public final class TaskLoop {
         // Named, not asserted. The chain is declared now, so "all machine, review and visual
         // gates passed" was a sentence that could describe a run in which review never ran.
         // What the human is being asked to accept is what actually executed.
+        String verdict = "every stage that ran passed: " + String.join(", ", executedStages(steps));
+        if (!stale.isEmpty()) {
+            verdict += ". WARNING: " + String.join(", ", stale) + " last judged an earlier tree; "
+                    + "code changed after that and was not judged again";
+        }
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
-                "every stage that ran passed: " + String.join(", ", executedStages(steps)),
-                file, git.sourceFingerprint(diffBaseCommit));
+                verdict, file, git.sourceFingerprint(diffBaseCommit));
         addDecision(summary, root, decision);
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
@@ -716,6 +725,32 @@ public final class TaskLoop {
                         .toString().replace('\\', '/')));
         ledger.append("task_run", summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
+    }
+
+    /**
+     * Judging stages whose last run predates the last change to the code.
+     *
+     * A role that reads a diff and passes it has judged one tree, not the task. If an
+     * implementer runs afterwards — a browser fix round, a visual finding — the candidate a
+     * human is then asked to accept contains a diff that role never saw. Declaring
+     * `recheck_after_fix: true` closes it; this reports the gap for a workflow that chooses
+     * not to, so the human is told rather than left to notice.
+     */
+    private static List<String> staleJudgements(List<Map<String, Object>> steps) {
+        long lastWrite = -1;
+        Map<String, Long> lastJudged = new LinkedHashMap<>();
+        for (int index = 0; index < steps.size(); index++) {
+            String label = String.valueOf(steps.get(index).get("step"));
+            if ("implementer".equals(label)) lastWrite = index;
+            else if (!"gates".equals(label) && steps.get(index).get("profile") != null) {
+                lastJudged.put(label, (long) index);
+            }
+        }
+        List<String> stale = new ArrayList<>();
+        for (Map.Entry<String, Long> entry : lastJudged.entrySet()) {
+            if (entry.getValue() < lastWrite) stale.add(entry.getKey());
+        }
+        return stale;
     }
 
     /** The stage labels that ran, in order, each named once however often it repeated. */
