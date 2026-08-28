@@ -5,6 +5,7 @@ import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
+import dev.warden.config.Workflow;
 import dev.warden.gate.GateRunner;
 import dev.warden.gate.VisualQaRunner;
 import dev.warden.git.GitRepository;
@@ -22,10 +23,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The bounded loop:
+ * The bounded loop. By default:
  *
  *   implement → machine gates → [fix ≤ N] → independent review → [fix ≤ N]
  *             → browser harness → [fix ≤ N] → visual QA role → [fix ≤ N] → stop for a human
+ *
+ * That chain is the built-in {@link Workflow}, not a hard-coded one: the order of stages and
+ * the conditions under which each runs are declared beside the roles they dispatch, in
+ * `~/.warden/policy.yaml`. This class executes whatever chain it is handed and owns the parts
+ * that must not be configurable — the fix bound, the budget, and what a failure is called.
  *
  * Three properties are deliberate.
  *
@@ -95,11 +101,10 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId);
         GateRunner gates = new GateRunner(processes);
 
-        boolean reviewRequired = user.policy() != null
-                && user.policy().reviewRequired(task.risk())
+        Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
+        boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
+        boolean reviewRequired = reviewByRisk
                 && user.policy().roles().containsKey("reviewer");
-        boolean implementConfigured = user.policy() != null
-                && user.policy().roles().containsKey("implementer");
         // Opt-in, and only meaningful for a task that asked for visual QA at all.
         boolean visualRoleConfigured = user.policy() != null
                 && user.policy().roles().containsKey("visual_qa");
@@ -118,152 +123,27 @@ public final class TaskLoop {
         summary.put("review_required", reviewRequired);
         summary.put("visual_qa_required", task.visualQa().required());
         summary.put("visual_qa_role", visualRoleConfigured);
+        summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
+        summary.put("workflow", workflow.toList());
         summary.put("steps", steps);
 
-        int attempt = 0;
-        String implementerVendor = null;
-        Path contextFile = null;
-
+        Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
+                contractHash, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk);
         try {
-            if (implementConfigured) {
-                RoleRunner.Outcome step = roles.run(loaded, user, "implementer",
-                        stepRunId(runId, "implementer", attempt), null, contextFile, dryRun);
-                record(steps, budget, "implementer", attempt, step);
-                implementerVendor = step.vendor();
-                if (!dryRun && !step.ok()) return stop(ledger, summary, reasonFor(step, "implementer_failed"), steps, attempt, budget);
-            }
-
-            GateRunner.Outcome gate = runGates(gates, loaded, runId, attempt, dryRun, steps,
-                    contractHash, diffBaseCommit);
-            while (!dryRun && !gate.ok() && attempt < task.maxFixAttempts()) {
-                attempt++;
-                contextFile = writeContext(ledger, attempt, "gates", gateContext(gate));
-                RoleRunner.Outcome fix = roles.run(loaded, user, "implementer",
-                        stepRunId(runId, "implementer", attempt), null, contextFile, false);
-                record(steps, budget, "implementer", attempt, fix);
-                if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                gate = runGates(gates, loaded, runId, attempt, false, steps,
-                        contractHash, diffBaseCommit);
-            }
-            if (!dryRun && !gate.ok()) return stop(ledger, summary, "gates_not_satisfied", steps, attempt, budget);
-
-            if (reviewRequired) {
-                RoleRunner.Outcome review = roles.run(loaded, user, "reviewer",
-                        stepRunId(runId, "reviewer", attempt), implementerVendor, null, dryRun);
-                record(steps, budget, "reviewer", attempt, review);
-                if (!dryRun) {
-                    if (!contractMatches(loaded, contractHash)) {
-                        return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
-                    }
-                    if (!review.ok()) return stop(ledger, summary, reasonFor(review, "reviewer_failed"), steps, attempt, budget);
-                    long blocking = blockingFindings(root, review);
-                    summary.put("blocking_findings", blocking);
-                    while (blocking > 0 && attempt < task.maxFixAttempts()) {
-                        attempt++;
-                        contextFile = writeContext(ledger, attempt, "review", reviewContext(root, review));
-                        RoleRunner.Outcome fix = roles.run(loaded, user, "implementer",
-                                stepRunId(runId, "implementer", attempt), null, contextFile, false);
-                        record(steps, budget, "implementer", attempt, fix);
-                        if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                        gate = runGates(gates, loaded, runId, attempt, false, steps,
-                                contractHash, diffBaseCommit);
-                        if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
-                        review = roles.run(loaded, user, "reviewer",
-                                stepRunId(runId, "reviewer", attempt), implementerVendor, null, false);
-                        record(steps, budget, "reviewer", attempt, review);
-                        if (!contractMatches(loaded, contractHash)) {
-                            return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
-                        }
-                        if (!review.ok()) return stop(ledger, summary, reasonFor(review, "reviewer_failed"), steps, attempt, budget);
-                        blocking = blockingFindings(root, review);
-                        summary.put("blocking_findings", blocking);
-                    }
-                    if (blocking > 0) return stop(ledger, summary, "blocking_findings_remain", steps, attempt, budget);
-                }
-            }
-
-            if (task.visualQa().required()) {
-                VisualQaRunner.Outcome visual = runVisual(loaded, runId, attempt, dryRun, steps);
-
-                // A failing screenshot is a failing check, and every other failing check in
-                // this loop gets handed back with its evidence. Leaving visual QA terminal
-                // made the one role with eyes the only one whose finding nobody had to act on.
-                // `visual_qa_unavailable` is excluded on purpose: no implementer can fix a
-                // missing browser, and asking one to try burns a role run on the operator's
-                // configuration.
-                while (!dryRun && visual != null && "visual_qa_failed".equals(visual.code())
-                        && attempt < task.maxFixAttempts()) {
-                    attempt++;
-                    contextFile = writeContext(ledger, attempt, "visual", visualContext(visual));
-                    RoleRunner.Outcome fix = roles.run(loaded, user, "implementer",
-                            stepRunId(runId, "implementer", attempt), null, contextFile, false);
-                    record(steps, budget, "implementer", attempt, fix);
-                    if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                    gate = runGates(gates, loaded, runId, attempt, false, steps,
-                            contractHash, diffBaseCommit);
-                    if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
-                    visual = runVisual(loaded, runId, attempt, false, steps);
-                }
-                if (!dryRun && visual != null && !visual.ok()) {
-                    return stop(ledger, summary, visual.code(), steps, attempt, budget);
-                }
-
-                // Only now, on a page the machine has already accepted, is it worth paying a
-                // model to look at it. It answers what the harness cannot measure: whether the
-                // result reads correctly to a person.
-                if (visualRoleConfigured) {
-                    RoleRunner.Outcome seen = runVisualRole(loaded, user, roles, runId, attempt,
-                            implementerVendor, visual, dryRun, steps, budget);
-                    if (!dryRun && seen != null) {
-                        if (!contractMatches(loaded, contractHash)) {
-                            return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
-                        }
-                        if (!seen.ok()) return stop(ledger, summary, reasonFor(seen, "visual_qa_role_failed"), steps, attempt, budget);
-                        long blocking = blockingFindings(root, seen);
-                        summary.put("visual_blocking_findings", blocking);
-                        while (blocking > 0 && attempt < task.maxFixAttempts()) {
-                            attempt++;
-                            contextFile = writeContext(ledger, attempt, "visual-review",
-                                    reviewContext(root, seen));
-                            RoleRunner.Outcome fix = roles.run(loaded, user, "implementer",
-                                    stepRunId(runId, "implementer", attempt), null, contextFile, false);
-                            record(steps, budget, "implementer", attempt, fix);
-                            if (!fix.ok()) return stop(ledger, summary, reasonFor(fix, "fix_attempt_failed"), steps, attempt, budget);
-                            gate = runGates(gates, loaded, runId, attempt, false, steps,
-                                    contractHash, diffBaseCommit);
-                            if (!gate.ok()) return stop(ledger, summary, "gates_not_satisfied_after_fix", steps, attempt, budget);
-                            visual = runVisual(loaded, runId, attempt, false, steps);
-                            if (visual != null && !visual.ok()) {
-                                return stop(ledger, summary, visual.code(), steps, attempt, budget);
-                            }
-                            seen = runVisualRole(loaded, user, roles, runId, attempt, implementerVendor,
-                                    visual, false, steps, budget);
-                            if (!contractMatches(loaded, contractHash)) {
-                                return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
-                            }
-                            if (seen == null || !seen.ok()) {
-                                return stop(ledger, summary,
-                                        seen == null ? "visual_qa_role_failed" : reasonFor(seen, "visual_qa_role_failed"),
-                                        steps, attempt, budget);
-                            }
-                            blocking = blockingFindings(root, seen);
-                            summary.put("visual_blocking_findings", blocking);
-                        }
-                        if (blocking > 0) {
-                            return stop(ledger, summary, "visual_findings_remain", steps, attempt, budget);
-                        }
-                    }
-                }
-            }
+            engine.run();
+        } catch (StopException stopped) {
+            return stop(ledger, summary, stopped.reason(), steps, engine.attempt(), budget);
         } catch (Budget.ExceededException exceeded) {
             summary.put("budget_stop", exceeded.getMessage());
-            return stop(ledger, summary, "budget_exhausted", steps, attempt, budget);
+            return stop(ledger, summary, "budget_exhausted", steps, engine.attempt(), budget);
         } catch (Exception unexpected) {
             summary.put("unexpected_error", Map.of(
                     "type", unexpected.getClass().getName(),
                     "message", String.valueOf(unexpected.getMessage())));
-            return stop(ledger, summary, "unexpected_error", steps, attempt, budget);
+            return stop(ledger, summary, "unexpected_error", steps, engine.attempt(), budget);
         }
+        int attempt = engine.attempt();
+        summary.putIfAbsent("skipped_stages", engine.skipped());
 
         if (!dryRun && !contractMatches(loaded, contractHash)) {
             return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
@@ -295,6 +175,257 @@ public final class TaskLoop {
                 "path", root.relativize(new ApprovalStore(root).decisionPath(runId)).toString().replace('\\', '/')));
         ledger.append("task_run", summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
+    }
+
+    /**
+     * Raised by a stage that has run out of options. It carries the reason an operator greps
+     * for, and the only thing the caller does with it is stop at the human boundary —
+     * threading a "should I stop now" flag through every nested loop is how one of the
+     * branches quietly forgets to check it.
+     */
+    @SuppressWarnings("serial")
+    private static final class StopException extends RuntimeException {
+        private final String reason;
+
+        StopException(String reason) {
+            super(reason);
+            this.reason = reason;
+        }
+
+        String reason() { return reason; }
+    }
+
+    /**
+     * Walks the declared chain. Every routing decision here is a counter, an exit code or a
+     * declared condition; nothing asks a model what to do next, and nothing lands anything.
+     */
+    private final class Engine {
+        private final ConfigLoader.Loaded loaded;
+        private final UserConfig user;
+        private final RoleRunner roles;
+        private final GateRunner gates;
+        private final EvidenceLedger ledger;
+        private final String runId;
+        private final boolean dryRun;
+        private final String contractHash;
+        private final String diffBaseCommit;
+        private final List<Map<String, Object>> steps;
+        private final Map<String, Object> summary;
+        private final Budget budget;
+        private final TaskSpec.ResolvedTask task;
+        private final Workflow workflow;
+        private final boolean reviewByRisk;
+
+        /** The vendor that filled each role, so a later role can be required to differ. */
+        private final Map<String, String> vendors = new LinkedHashMap<>();
+        /** The pixels each harness stage produced, for the role stage that looks at them. */
+        private final Map<String, VisualQaRunner.Outcome> harness = new LinkedHashMap<>();
+        private final List<Map<String, Object>> skipped = new ArrayList<>();
+        private int attempt;
+
+        Engine(ConfigLoader.Loaded loaded, UserConfig user, RoleRunner roles, GateRunner gates,
+               EvidenceLedger ledger, String runId, boolean dryRun, String contractHash,
+               String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
+               Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk) {
+            this.loaded = loaded;
+            this.user = user;
+            this.roles = roles;
+            this.gates = gates;
+            this.ledger = ledger;
+            this.runId = runId;
+            this.dryRun = dryRun;
+            this.contractHash = contractHash;
+            this.diffBaseCommit = diffBaseCommit;
+            this.steps = steps;
+            this.summary = summary;
+            this.budget = budget;
+            this.task = task;
+            this.workflow = workflow;
+            this.reviewByRisk = reviewByRisk;
+        }
+
+        int attempt() { return attempt; }
+
+        List<Map<String, Object>> skipped() { return List.copyOf(skipped); }
+
+        void run() throws Exception {
+            List<Workflow.Stage> stages = workflow.stages();
+            for (int index = 0; index < stages.size(); index++) {
+                Workflow.Stage stage = stages.get(index);
+                String reason = skipReason(stage);
+                if (reason != null) {
+                    skipped.add(Map.of("stage", stage.name(), "reason", reason));
+                    // Written as we go: a run that stops early still owes an answer to
+                    // "why did the reviewer never run", and that is the run that needs it.
+                    summary.put("skipped_stages", List.copyOf(skipped));
+                    continue;
+                }
+                runStage(stage, index);
+            }
+        }
+
+        private void runStage(Workflow.Stage stage, int index) throws Exception {
+            Object outcome = execute(stage);
+            if (dryRun) return;
+
+            while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(outcome)
+                    && attempt < task.maxFixAttempts()) {
+                fixRound(stage, index, failureContext(stage, outcome));
+                outcome = execute(stage);
+            }
+            if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
+            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) return;
+
+            // A role that succeeded can still object. Findings are the reason to run a second
+            // vendor at all, so they route like any other failing check instead of being
+            // printed for somebody to notice.
+            RoleRunner.Outcome reviewed = (RoleRunner.Outcome) outcome;
+            long blocking = recordFindings(stage, reviewed);
+            while (blocking > 0 && "fix".equals(stage.onFindings()) && attempt < task.maxFixAttempts()) {
+                fixRound(stage, index, reviewContext(loaded.root(), reviewed));
+                outcome = execute(stage);
+                if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
+                reviewed = (RoleRunner.Outcome) outcome;
+                blocking = recordFindings(stage, reviewed);
+            }
+            if (blocking > 0) throw new StopException(stage.findingsReason());
+        }
+
+        /**
+         * One fix round: hand the exact failure back, then re-establish every earlier stage
+         * that asked to be rechecked. Without the recheck a fix could satisfy the stage that
+         * complained by breaking one that had already passed.
+         */
+        private void fixRound(Workflow.Stage stage, int index, String context) throws Exception {
+            attempt++;
+            Path file = writeContext(ledger, attempt, stage.contextKind(), context);
+            String role = stage.fixWith();
+            RoleRunner.Outcome fix = roles.run(loaded, user, role,
+                    stepRunId(runId, role, attempt), null, file, false);
+            record(steps, budget, role, attempt, fix);
+            vendors.putIfAbsent(role, fix.vendor());
+            if (!fix.ok()) throw new StopException(reasonFor(fix, "fix_attempt_failed"));
+            requireUnchangedContract();
+            for (Workflow.Stage earlier : workflow.recheckBefore(index)) {
+                if (skipReason(earlier) != null) continue;
+                Object rechecked = execute(earlier);
+                if (!failed(rechecked)) continue;
+                throw new StopException(earlier.kind() == Workflow.Kind.MACHINE_GATES
+                        ? "gates_not_satisfied_after_fix" : terminalReason(earlier, rechecked));
+            }
+        }
+
+        private Object execute(Workflow.Stage stage) throws Exception {
+            switch (stage.kind()) {
+                case MACHINE_GATES -> {
+                    return runGates(gates, loaded, runId, attempt, dryRun, steps,
+                            contractHash, diffBaseCommit);
+                }
+                case VISUAL_HARNESS -> {
+                    VisualQaRunner.Outcome outcome = runVisual(loaded, runId, attempt, dryRun, steps);
+                    harness.put(stage.name(), outcome);
+                    return outcome;
+                }
+                default -> {
+                    return runRole(stage);
+                }
+            }
+        }
+
+        private RoleRunner.Outcome runRole(Workflow.Stage stage) throws Exception {
+            String role = stage.role();
+            // Independence is only meaningful against whoever wrote the code.
+            String avoid = "implementer".equals(role) ? null : vendors.get("implementer");
+            RoleRunner.Outcome outcome;
+            if ("visual_qa".equals(role)) {
+                outcome = runVisualRole(loaded, user, roles, runId, attempt, avoid,
+                        harness.get(stage.sees()), dryRun, steps, budget);
+            } else {
+                outcome = roles.run(loaded, user, role, stepRunId(runId, role, attempt),
+                        avoid, null, dryRun);
+                record(steps, budget, role, attempt, outcome);
+            }
+            if (dryRun || outcome == null) return outcome;
+            vendors.putIfAbsent(role, outcome.vendor());
+            // A read-only role that edited the contract has already invalidated the very
+            // thing it is about to be believed for.
+            requireUnchangedContract();
+            return outcome;
+        }
+
+        private void requireUnchangedContract() {
+            if (!contractMatches(loaded, contractHash)) throw new StopException("contract_mutated");
+        }
+
+        /** Why this stage is not running at all, or null when it is. */
+        private String skipReason(Workflow.Stage stage) {
+            if (stage.kind() == Workflow.Kind.ROLE) {
+                boolean configured = user.policy() != null
+                        && user.policy().roles().containsKey(stage.role());
+                if (!configured) return "role_not_configured";
+            }
+            for (String condition : stage.when()) {
+                if (!holds(condition)) return "condition_not_met:" + condition;
+            }
+            return null;
+        }
+
+        private boolean holds(String condition) {
+            return switch (condition) {
+                case "review_required" -> reviewByRisk;
+                case "visual_qa_required" -> task.visualQa().required();
+                case "risk_low" -> "low".equals(task.risk());
+                case "risk_medium" -> "medium".equals(task.risk());
+                case "risk_high" -> "high".equals(task.risk());
+                default -> true;
+            };
+        }
+
+        private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
+            long blocking = blockingFindings(loaded.root(), outcome);
+            summary.put(findingsKey(stage), blocking);
+            return blocking;
+        }
+
+        private String findingsKey(Workflow.Stage stage) {
+            return switch (stage.role()) {
+                case "reviewer" -> "blocking_findings";
+                case "visual_qa" -> "visual_blocking_findings";
+                default -> stage.role() + "_blocking_findings";
+            };
+        }
+
+        private boolean failed(Object outcome) {
+            if (outcome instanceof GateRunner.Outcome gate) return !gate.ok();
+            if (outcome instanceof VisualQaRunner.Outcome visual) return !visual.ok();
+            if (outcome instanceof RoleRunner.Outcome role) return !role.ok();
+            return false;
+        }
+
+        /**
+         * `visual_qa_unavailable` and `visual_qa_port_occupied` are excluded on purpose: no
+         * implementer can install a browser or evict another project's dev server, and asking
+         * one to try spends a role run on the operator's configuration.
+         */
+        private boolean fixable(Object outcome) {
+            if (outcome instanceof VisualQaRunner.Outcome visual) {
+                return "visual_qa_failed".equals(visual.code());
+            }
+            return true;
+        }
+
+        private String terminalReason(Workflow.Stage stage, Object outcome) {
+            if (outcome instanceof VisualQaRunner.Outcome visual) return visual.code();
+            if (outcome instanceof RoleRunner.Outcome role) return reasonFor(role, stage.failureReason());
+            return stage.failureReason();
+        }
+
+        private String failureContext(Workflow.Stage stage, Object outcome) throws Exception {
+            if (outcome instanceof GateRunner.Outcome gate) return gateContext(gate);
+            if (outcome instanceof VisualQaRunner.Outcome visual) return visualContext(visual);
+            if (outcome instanceof RoleRunner.Outcome role) return reviewContext(loaded.root(), role);
+            return "# " + stage.name() + " failed\n";
+        }
     }
 
     private static final class Budget {

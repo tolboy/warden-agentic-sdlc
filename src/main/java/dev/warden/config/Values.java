@@ -190,6 +190,33 @@ public final class Values {
         return new Values((Map<String, Object>) raw, source, at(key), collector);
     }
 
+    /**
+     * A sequence of mappings, used by the workflow's ordered stages. Order is the point, so
+     * this is a list rather than the name → value mappings the rest of the config uses.
+     */
+    @SuppressWarnings("unchecked")
+    public List<Values> mapList(String key) {
+        Object raw = map.get(key);
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> list)) {
+            collector.add(at(key) + " must be a list of mappings, got "
+                    + dev.warden.json.Json.typeName(raw));
+            return List.of();
+        }
+        List<Values> result = new ArrayList<>();
+        for (int index = 0; index < list.size(); index++) {
+            Object item = list.get(index);
+            if (item instanceof Map) {
+                result.add(new Values((Map<String, Object>) item, source,
+                        at(key) + "[" + index + "]", collector));
+            } else {
+                collector.add(at(key) + "[" + index + "] must be a mapping, got "
+                        + dev.warden.json.Json.typeName(item));
+            }
+        }
+        return result;
+    }
+
     /** A mapping of name → list of strings, used by `checks` and `scopes`. */
     public Map<String, List<String>> namedStringLists(String key) {
         Values nested = optMap(key);

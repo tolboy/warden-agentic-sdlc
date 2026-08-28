@@ -125,6 +125,44 @@ Warden — как: гейты, роли, петля, улики.
 команды проверки. Не копируйте `.warden/` самого Warden: это его собственный контракт, не
 шаблон.
 
+## Цепочка вызовов моделей
+
+Порядок стадий — не код, а объявление. Он лежит в том же файле, что и роли с вендорами,
+поэтому «кто запускает», «в каком порядке» и «при каком условии» читаются в одном месте:
+
+```yaml
+# ~/.warden/policy.yaml
+roles:
+  implementer: { profiles: [codex-implement], strategy: first }
+  reviewer:    { profiles: [grok-review, claude-review], strategy: rotate,
+                 require_independent_vendor: true }
+
+workflow:
+  stages:
+    - { stage: implement, run: role, role: implementer, on_fail: stop }
+    - { stage: gates,     run: machine_gates, on_fail: fix, recheck_after_fix: true }
+    - { stage: review,    run: role, role: reviewer, when: [review_required],
+        on_fail: stop, on_findings: fix }
+    - { stage: browser,   run: visual_harness, when: [visual_qa_required],
+        on_fail: fix, recheck_after_fix: true }
+    - { stage: look,      run: role, role: visual_qa, when: [visual_qa_required],
+        sees: browser, on_fail: stop, on_findings: fix }
+```
+
+`run:` — `role`, `machine_gates` или `visual_harness`. `when:` — **закрытый** список условий
+(`review_required`, `visual_qa_required`, `risk_low|medium|high`); неизвестное условие это
+ошибка конфигурации, а не молчаливое «ложь», потому что ложь здесь — разрешающий ответ.
+`on_fail: fix` возвращает точный текст провала реализатору, не больше `max_fix_attempts` раз,
+и заново прогоняет все более ранние стадии с `recheck_after_fix` — иначе починка одной
+проверки может сломать уже пройденную. `sees:` привязывает роль с глазами к конкретной
+стадии браузера: смотреть на пиксели, которых никто не снял, нельзя.
+
+Что **не** настраивается: как называется провал (`gates_not_satisfied` не переименуется
+вместе со стадией), граница бюджета и то, что финал — человек. Блок необязателен: без него
+работает ровно та цепочка, что написана выше. Эффективную цепочку показывает
+`warden doctor` в поле `workflow`, а фактически пройденную — `task-run.json` в полях
+`workflow` и `skipped_stages`.
+
 ## Настройка вендоров
 
 Профиль не выпускается резолвером, пока в нём нет `verification.verified_on` — даты, которая

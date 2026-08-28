@@ -19,6 +19,7 @@ public final class TestMain {
                 new dev.warden.RoleResolverTest(),
                 new dev.warden.QuotaSignalTest(),
                 new dev.warden.RoleRunnerTest(),
+                new dev.warden.WorkflowTest(),
                 new dev.warden.TaskLoopTest(),
                 new dev.warden.DoCommandTest(),
                 new dev.warden.VisualQaTest(),

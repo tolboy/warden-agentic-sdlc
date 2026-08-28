@@ -447,6 +447,13 @@ public final class Main {
         userSummary.put("problems", user.problems());
         userSummary.put("dangling_policy_references", user.danglingProfileReferences());
         result.put("user_config", userSummary);
+        // The chain that will actually run, so an operator can read it back before paying
+        // for a run rather than discovering the order from a summary afterwards.
+        Map<String, Object> chain = new LinkedHashMap<>();
+        chain.put("declared", user.policy() != null && user.policy().workflowDeclared());
+        chain.put("stages", (user.policy() != null ? user.policy().workflow()
+                : dev.warden.config.Workflow.builtIn()).toList());
+        result.put("workflow", chain);
         result.put("role_execution_ready", roleExecutionReady);
         if (!roleExecutionReady) {
             result.put("role_execution_blocked_by", !user.policyPresent()

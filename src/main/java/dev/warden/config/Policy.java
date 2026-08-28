@@ -14,15 +14,19 @@ import java.util.Set;
  * implementer shares its blind spots, which is the only defensible reason to run more than
  * one vendor at all. When it cannot be satisfied the resolver fails rather than quietly
  * handing the code back to its own author for review.
+ *
+ * The optional `workflow:` block declares the order those roles run in and the conditions
+ * under which each runs at all — see {@link Workflow}. Omitting it keeps the built-in chain.
  */
-public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk) {
+public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                     Workflow workflow, boolean workflowDeclared) {
 
     public record RoleSpec(String role, List<String> profiles, String strategy,
                            boolean requireIndependentVendor) {}
 
     public static final Set<String> STRATEGIES = Set.of("rotate", "first");
 
-    private static final Set<String> TOP_LEVEL = Set.of("version", "roles", "review");
+    private static final Set<String> TOP_LEVEL = Set.of("version", "roles", "review", "workflow");
     private static final Set<String> ROLE_KEYS = Set.of("profiles", "strategy", "require_independent_vendor");
     private static final Set<String> REVIEW_KEYS = Set.of("required_for_risk", "note");
 
@@ -57,8 +61,14 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
             }
         }
 
+        // A policy that says nothing about order gets the documented loop. Declaring the
+        // block replaces the chain wholesale rather than patching it: a workflow assembled
+        // from a default plus overrides is one nobody can read off the file in front of them.
+        boolean workflowDeclared = root.has("workflow");
+        Workflow workflow = workflowDeclared ? Workflow.parse(root, "workflow") : Workflow.builtIn();
+
         root.throwIfAny();
-        return new Policy(roles, Set.copyOf(requiredForRisk));
+        return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared);
     }
 
     public boolean reviewRequired(String risk) {

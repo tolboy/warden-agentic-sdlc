@@ -51,6 +51,9 @@ public final class UserSetup {
         created.add(label);
     }
 
+    /** The shipped policy, exposed so the suite can prove Warden's own parser accepts it. */
+    public static String policyTemplate() { return POLICY; }
+
     private static final String POLICY = """
             version: 1
 
@@ -82,6 +85,56 @@ public final class UserSetup {
             review:
               # A low-risk task still passes every machine gate; it just does not pay a reviewer.
               required_for_risk: [medium, high]
+
+            # The order those roles run in, and what has to be true for each to run at all.
+            # This block is optional; deleting it restores exactly the chain written below.
+            # Reorder, drop or repeat stages here — nothing else has to change.
+            #
+            #   run:               role | machine_gates | visual_harness
+            #   when:              every listed condition must hold, or the stage is skipped.
+            #                      always · review_required · visual_qa_required ·
+            #                      risk_low · risk_medium · risk_high
+            #   on_fail:           stop | fix   (fix = hand the failure back, bounded by the
+            #                      task's max_fix_attempts, then run this stage again)
+            #   on_findings:       stop | fix   (a role that passed but filed P1 findings)
+            #   recheck_after_fix: re-run this stage after any later stage's fix round, so a
+            #                      fix cannot satisfy one check by breaking an earlier one
+            #   sees:              the visual_harness stage whose screenshots a role receives
+            #
+            # A role stage is skipped when `roles:` above does not name that role, so the
+            # visual_qa stage below costs nothing until you turn the role on.
+            workflow:
+              stages:
+                - stage: implement
+                  run: role
+                  role: implementer
+                  on_fail: stop
+
+                - stage: gates
+                  run: machine_gates
+                  on_fail: fix
+                  recheck_after_fix: true
+
+                - stage: review
+                  run: role
+                  role: reviewer
+                  when: [review_required]
+                  on_fail: stop
+                  on_findings: fix
+
+                - stage: browser
+                  run: visual_harness
+                  when: [visual_qa_required]
+                  on_fail: fix
+                  recheck_after_fix: true
+
+                - stage: look
+                  run: role
+                  role: visual_qa
+                  when: [visual_qa_required]
+                  sees: browser
+                  on_fail: stop
+                  on_findings: fix
             """;
 
     private static final String GROK_REVIEW = """

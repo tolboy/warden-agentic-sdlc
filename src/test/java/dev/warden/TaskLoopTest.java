@@ -139,6 +139,7 @@ public final class TaskLoopTest implements Suite {
             check.contains("the vendor's own message reaches the summary",
                     Json.write(steps(ranOut)), "try again at 9:21 PM");
 
+            declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
 
             // Whatever happens, the loop only ever hands off to a human.
@@ -151,6 +152,74 @@ public final class TaskLoopTest implements Suite {
         } finally {
             deleteTree(sandbox);
         }
+    }
+
+    /**
+     * The chain is declared, so changing the declaration has to change the run. A workflow
+     * that parses but is not the one executed would be the worst of both worlds: an operator
+     * reading a file that describes a loop nobody runs.
+     */
+    @SuppressWarnings("unchecked")
+    private void declaredWorkflowChecks(Check check, Path sandbox, Path home) throws Exception {
+        // Same medium-risk task, same profiles, same policy roles — only the chain differs.
+        Path dropped = newProject(sandbox, "workflow-no-review");
+        writeProfiles(home, sandbox, "workflow-no-review", 1, 99);
+        workflowPolicy(home, """
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                """);
+        TaskLoop.Outcome unreviewed = loop(dropped, home, "w1");
+        check.that("a chain without a review stage finishes without one", unreviewed.ok());
+        check.that("and no reviewer was dispatched despite a reviewer role being configured",
+                steps(unreviewed).stream().noneMatch(step -> "reviewer".equals(step.get("step"))));
+        check.eq("the summary records the chain that actually ran",
+                List.of("implement", "gates"),
+                ((List<Map<String, Object>>) unreviewed.summaryReport().get("workflow")).stream()
+                        .map(stage -> stage.get("stage")).toList());
+        check.eq("and marks the policy as declaring it", Boolean.TRUE,
+                unreviewed.summaryReport().get("workflow_declared"));
+
+        // The same reviewer, gated on risk instead of the review block. A skipped stage says
+        // which condition skipped it: "the reviewer did not run" is not an answer by itself.
+        Path gated = newProject(sandbox, "workflow-risk-gated", "medium");
+        writeProfiles(home, sandbox, "workflow-risk-gated", 1, 99);
+        workflowPolicy(home, """
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, when: [risk_high], on_fail: stop, on_findings: fix }
+                """);
+        TaskLoop.Outcome skipped = loop(gated, home, "w2");
+        check.that("a condition that does not hold skips its stage", skipped.ok());
+        check.eq("and the summary names the condition, not just the stage",
+                List.of(Map.of("stage", "review", "reason", "condition_not_met:risk_high")),
+                skipped.summaryReport().get("skipped_stages"));
+
+        // Order is executed, not merely stored.
+        Path twice = newProject(sandbox, "workflow-reordered");
+        writeProfiles(home, sandbox, "workflow-reordered", 1, 1);
+        workflowPolicy(home, """
+                    - { stage: review-first, run: role, role: reviewer, on_fail: stop }
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                """);
+        TaskLoop.Outcome reordered = loop(twice, home, "w3");
+        check.that("a reordered chain runs", reordered.ok());
+        check.eq("in the order it was declared",
+                List.of("reviewer", "implementer", "gates"),
+                steps(reordered).stream().map(step -> step.get("step")).toList());
+    }
+
+    /** A policy whose roles are the usual stand-ins but whose chain is written out. */
+    private void workflowPolicy(Path home, String stages) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                %s""".formatted(stages));
     }
 
     /**
