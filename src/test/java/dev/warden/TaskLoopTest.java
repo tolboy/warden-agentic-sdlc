@@ -54,6 +54,7 @@ public final class TaskLoopTest implements Suite {
             check.eq("duplicate workflow leaves existing evidence byte-for-byte unchanged",
                     evidenceBeforeDuplicate,
                     Files.readString(clean.resolve(".warden/runs/r1/evidence.jsonl")));
+            reportChecks(check, clean, "r1");
 
             // A failing gate sends the work back with the machine output attached.
             Path fixable = newProject(sandbox, "fixable");
@@ -152,6 +153,52 @@ public final class TaskLoopTest implements Suite {
         } finally {
             deleteTree(sandbox);
         }
+    }
+
+    /**
+     * The joined report, checked against a run that actually happened rather than against a
+     * directory hand-built to match. Every stage writes its own file and never edits another;
+     * this asserts that the join over those files answers "which model did what, and what did
+     * it cost" — the question the evidence directory does not answer on its own.
+     */
+    @SuppressWarnings("unchecked")
+    private void reportChecks(Check check, Path project, String runId) throws Exception {
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(project, runId);
+        check.eq("the report is about the run it was asked for", runId, report.get("run_id"));
+        check.eq("and carries the goal from the task contract, not from a model",
+                "Create src/result.txt", report.get("goal"));
+
+        List<Map<String, Object>> stages = (List<Map<String, Object>>) report.get("stages");
+        check.eq("every step of the loop appears", List.of("implementer", "gates", "reviewer"),
+                stages.stream().map(stage -> stage.get("step")).toList());
+        Map<String, Object> implement = stages.get(0);
+        check.eq("a role stage is joined to the vendor that filled it",
+                "implvendor", implement.get("vendor"));
+        check.eq("and to the profile it came from", "loop-impl", implement.get("profile"));
+        check.that("and to what it cost", implement.get("cost_usd") instanceof Number);
+        check.that("and how long it took", implement.get("duration_millis") instanceof Number);
+
+        List<Map<String, Object>> vendors = (List<Map<String, Object>>) report.get("vendors");
+        check.eq("vendors roll up one row per vendor and model", 2, vendors.size());
+        check.that("with the calls counted",
+                vendors.stream().allMatch(row -> ((Number) row.get("calls")).longValue() == 1));
+
+        // The number a vendor never reported must not become a zero. A run summarised as
+        // "$0.00 across four calls" is one an operator will believe.
+        check.that("a token count no stand-in reported is counted as unknown, not as zero",
+                vendors.stream().anyMatch(row -> ((Number) row.get("tokens_unknown_calls")).longValue() > 0));
+
+        check.eq("the machine gate stage is identified as one", "machine_gates",
+                stages.get(1).get("kind"));
+        check.that("the changed file the implementer wrote is in the report",
+                ((List<Object>) report.get("changed_files")).contains("src/result.txt"));
+        Map<String, Object> decision = (Map<String, Object>) report.get("decision");
+        check.eq("and the pending human decision is part of the result", "pending",
+                decision.get("state"));
+
+        String rendered = dev.warden.ledger.RunReport.render(report);
+        check.contains("the terminal rendering names the vendor", rendered, "implvendor");
+        check.contains("and says what still has to happen", rendered, "human_gate");
     }
 
     /**

@@ -125,6 +125,43 @@ Warden — как: гейты, роли, петля, улики.
 команды проверки. Не копируйте `.warden/` самого Warden: это его собственный контракт, не
 шаблон.
 
+## Результат прогона
+
+Каждая стадия пишет свой отчёт и никогда не правит чужой — так ничего из уже случившегося
+нельзя тихо переписать задним числом. Это правильно для улик и бесполезно для вопроса «как
+прошёл прогон». Соединение делает отдельная команда:
+
+```text
+warden report <run-id> --text
+```
+
+```text
+run      do-fix-the-create-button-mc9k1
+task     fix-the-create-button  risk=medium
+outcome  ok  ready_for_human  next=human_gate
+human    pending  options=[accept, reject]
+
+stage           attempt  ok  vendor/model                    cost      tokens        ms
+implementer           0  ok  codex/gpt-5.6-terra             0.4120    18400/2100   96140
+gates                 0  ok  -                               ?         ?/?              ?
+reviewer              0  ok  grok/grok-4.6                   0.1880    31200/900    41020
+visual_qa             0  ok  -                               ?         ?/?              ?
+
+vendor/model                     calls  fail  cost      in/out tokens        ms
+codex/gpt-5.6-terra                  1     0  0.4120    18400/2100         96140
+grok/grok-4.6                        1     0  0.1880    31200/900          41020
+
+browser  passed  3 screenshot(s)
+  ok    1280x720: testid=create-button click -> css=.editor visible
+```
+
+`?` означает «вендор этого не сообщил», а не ноль: прогон, у которого «$0.00 за четыре
+вызова», в отчёте выглядел бы точно так же, как прогон, где никто не прислал стоимость — и
+ему бы поверили. То же самое поле есть в JSON как `*_unknown_calls`.
+
+Тот же отчёт пишется автоматически в `.warden/runs/<run-id>/report.json` после `do` и `run`;
+`warden ledger` агрегирует уже все прогоны проекта.
+
 ## Цепочка вызовов моделей
 
 Порядок стадий — не код, а объявление. Он лежит в том же файле, что и роли с вендорами,

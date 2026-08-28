@@ -14,6 +14,7 @@ import dev.warden.gate.VisualQaRunner;
 import dev.warden.execution.orca.OrcaClient;
 import dev.warden.json.Json;
 import dev.warden.ledger.LedgerReader;
+import dev.warden.ledger.RunReport;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
@@ -59,6 +60,7 @@ public final class Main {
                 case "do" -> doIntent(args);
                 case "doctor" -> doctor();
                 case "ledger" -> ledger();
+                case "report" -> report(args);
                 case "status" -> status(args);
                 case "approve" -> approve(args);
                 default -> {
@@ -334,8 +336,38 @@ public final class Main {
         result.put("decision_state", outcome.summaryReport().get("decision_state"));
         result.put("decision_options", outcome.summaryReport().get("decision_options"));
         result.put("decision_updated_at", outcome.summaryReport().get("decision_updated_at"));
+        result.put("report_path", writeRunReport(Path.of("."), runId));
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
+    }
+
+    /**
+     * The joined view, written next to the evidence it joins. It is derived, so it is
+     * regenerated rather than appended to: `warden report` recomputes it from the same files
+     * at any time, and a stale copy can never outlive what it summarises.
+     */
+    private static String writeRunReport(Path from, String runId) {
+        try {
+            Path root = new ConfigLoader().findProjectRoot(from);
+            Map<String, Object> report = new RunReport().of(root, runId);
+            Path file = new EvidenceLedger(root, runId).writeReport("report", report);
+            return file.toString();
+        } catch (Exception noSummary) {
+            // A run that never wrote a summary has nothing to join. The stage evidence is
+            // still on disk, and saying so beats failing the command that produced it.
+            return null;
+        }
+    }
+
+    /** Everything one run did: stages, vendors, cost, tokens, pixels, decision. */
+    private static int report(String[] args) throws Exception {
+        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        String runId = args.length > 1 && !args[1].startsWith("--") ? args[1] : null;
+        if (runId == null) throw new IllegalArgumentException("report requires a run id");
+        Map<String, Object> report = new RunReport().of(root, runId);
+        if (hasFlag(args, "--text")) System.out.print(RunReport.render(report));
+        else System.out.println(Json.write(report));
+        return 0;
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */
@@ -391,7 +423,12 @@ public final class Main {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner()).run(options, user);
-        System.out.println(Json.write(outcome.report()));
+        Map<String, Object> report = new LinkedHashMap<>(outcome.report());
+        Object runId = report.get("run_id");
+        if (runId instanceof String id && outcome.worktree() != null) {
+            report.put("report_path", writeRunReport(outcome.worktree(), id));
+        }
+        System.out.println(Json.write(report));
         return outcome.ok() ? 0 : 1;
     }
 
@@ -631,6 +668,9 @@ public final class Main {
                                            the whole workflow; stops at the human gate
                   warden run <task>            the bounded loop; stops at the human gate
                   warden ledger                aggregate local evidence and experiment dimensions
+                  warden report <run-id> [--text]
+                                               one run joined: stages, vendors, cost, tokens,
+                                               screenshots, changed files, human decision
                   warden status [run-id]       show pending/resolved human decisions
                   warden approve <run-id> --decision <choice>
                                                record a decision; never lands changes
