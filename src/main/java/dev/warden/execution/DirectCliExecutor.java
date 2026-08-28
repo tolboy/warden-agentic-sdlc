@@ -195,6 +195,20 @@ public final class DirectCliExecutor implements RoleExecutor {
         if (artifact == null || isEventEnvelope(artifact)) {
             Result quota = quotaFailure(request, process, duration, evidence);
             if (quota != null) return quota;
+            // A vendor that ran out of turns did not fail at the work; it was interrupted
+            // mid-thought by a ceiling the operator set. `role_command_failed` sends someone
+            // to read a transcript looking for a defect that is not in it — the same reason
+            // a spent subscription is classified apart from an ordinary failure.
+            if (turnsExhausted(process.stdout(), process.stderr())) {
+                evidence.put("failure", "role_turns_exhausted");
+                evidence.put("stderr_tail", tail(process.stderr(), 500));
+                evidence.put("resolution", "the vendor stopped at its turn ceiling before "
+                        + "emitting an artifact. Raise --max-turns (or the vendor's equivalent) "
+                        + "on profile '" + profile.name() + "', or narrow the task: this diff "
+                        + "needed more steps to read than the profile allows.");
+                return new Result(false, "role_turns_exhausted", duration, process.stdout(),
+                        null, evidence);
+            }
             evidence.put("failure", "role_artifact_unparseable");
             evidence.put("stdout_tail", tail(process.stdout(), 2000));
             return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
@@ -231,6 +245,24 @@ public final class DirectCliExecutor implements RoleExecutor {
 
         evidence.put("verdict", artifact.get("verdict"));
         return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+    }
+
+    /**
+     * Whether the vendor stopped because it hit its own turn ceiling.
+     *
+     * Matched on the vendor's words, like the quota signatures, and for the same reason: no
+     * vendor exposes this as a distinct exit code, and inferring it from "exit 1 with no
+     * artifact" would swallow real crashes too. Kept narrow on purpose — a phrase this
+     * specific is not going to appear in an ordinary failure.
+     */
+    public static boolean turnsExhausted(String stdout, String stderr) {
+        String haystack = ((stderr == null ? "" : stderr) + "\n"
+                + (stdout == null ? "" : stdout.length() > 4000
+                        ? stdout.substring(stdout.length() - 4000) : stdout))
+                .toLowerCase();
+        return haystack.contains("max turns reached")
+                || haystack.contains("maximum number of turns")
+                || haystack.contains("max_turns exceeded");
     }
 
     /** A syntactically valid artifact may still be an honest refusal, not a completed role. */

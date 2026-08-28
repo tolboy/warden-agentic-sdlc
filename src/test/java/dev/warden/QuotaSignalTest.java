@@ -1,6 +1,7 @@
 package dev.warden;
 
 import dev.warden.execution.QuotaSignal;
+import dev.warden.execution.DirectCliExecutor;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
@@ -80,5 +81,26 @@ public final class QuotaSignalTest implements Suite {
                         .matched());
         check.that("a bare mention of the word quota decides nothing, even on stderr",
                 !QuotaSignal.detect(List.of(), "", "recomputing the disk quota table").matched());
+        turnCeilingChecks(check);
+    }
+
+    /**
+     * A vendor stopped by its own turn ceiling is not a vendor that failed at the work.
+     * Measured: a review of a 126-line diff used all 16 turns reading it and exited 1 with
+     * no artifact, and the run called that `role_command_failed` — sending an operator to
+     * read a transcript in which nothing had gone wrong.
+     */
+    private void turnCeilingChecks(Check check) {
+        check.that("the vendor's own words are what identify it",
+                DirectCliExecutor.turnsExhausted("", "Error: max turns reached"));
+        check.that("wherever they appear",
+                DirectCliExecutor.turnsExhausted("... Error: max turns reached\n", ""));
+        check.that("and in the other spellings vendors use",
+                DirectCliExecutor.turnsExhausted("", "reached the maximum number of turns"));
+        // Narrow on purpose. Inferring this from "exit 1 with no artifact" would swallow
+        // every real crash into a code that tells the operator to raise a limit.
+        check.that("an ordinary failure is not mistaken for one",
+                !DirectCliExecutor.turnsExhausted("Traceback: connection reset", "exit status 1"));
+        check.that("nor is silence", !DirectCliExecutor.turnsExhausted("", ""));
     }
 }
