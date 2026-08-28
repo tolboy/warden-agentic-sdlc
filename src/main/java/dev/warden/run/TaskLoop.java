@@ -161,12 +161,14 @@ public final class TaskLoop {
             // A preview has not produced a candidate a human can accept. Persisting a real
             // pending decision here makes status noisy and, worse, makes a dry run look like
             // an authorization boundary was actually reached.
+            summary.put("reason", "dry_run");
             summary.put("next_action", "none");
             Path file = ledger.writeReport("task-run", summary);
             ledger.append("task_dry_run", summary);
             return new Outcome(true, "dry_run", "none", file, summary);
         }
 
+        summary.put("reason", "ready_for_human");
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),

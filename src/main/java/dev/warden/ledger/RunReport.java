@@ -1,5 +1,6 @@
 package dev.warden.ledger;
 
+import dev.warden.config.WardenTree;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
@@ -66,7 +67,16 @@ public final class RunReport {
         report.put("stages", stages);
         report.put("vendors", vendors(stages));
         report.put("visual", visual(stages));
-        report.put("changed_files", changedFiles(projectRoot, summary.get("diff_base_commit")));
+        // Warden's own contract files are listed apart. They are a real difference in the
+        // worktree and stay visible, but reporting "4 files changed" for a one-file fix sends
+        // somebody looking for three changes no agent made.
+        List<String> changed = changedFiles(projectRoot, summary.get("diff_base_commit"));
+        report.put("changed_files", List.copyOf(WardenTree.sourcePaths(
+                new java.util.LinkedHashSet<>(changed))));
+        report.put("contract_files", changed.stream()
+                .filter(path -> path.equals(WardenTree.DIRECTORY)
+                        || path.startsWith(WardenTree.DIRECTORY + "/"))
+                .toList());
         report.put("decision", readOptionalJson(directory.resolve("decision.json")));
         report.put("totals", totals(summary, stages));
         return report;
@@ -188,7 +198,7 @@ public final class RunReport {
             for (Map<String, Object> call : callsOf(stage)) {
                 String vendor = text(call.getOrDefault("vendor", "<unknown>"));
                 String model = text(call.getOrDefault("model", "<unknown>"));
-                Map<String, Object> row = byKey.computeIfAbsent(vendor + " " + model, ignored -> {
+                Map<String, Object> row = byKey.computeIfAbsent(vendor + "\u0000" + model, ignored -> {
                     Map<String, Object> fresh = new LinkedHashMap<>();
                     fresh.put("vendor", vendor);
                     fresh.put("model", model);
@@ -226,13 +236,24 @@ public final class RunReport {
     /**
      * A role that failed over dispatched more than one vendor. Charging only the survivor
      * would under-report exactly the run most worth costing.
+     *
+     * Each attempt records its own vendor and cost, but model and token usage are written
+     * once, on the role report, by the attempt that actually settled. Those are folded back
+     * into the matching attempt: leaving them out made a rollup that said `grok/&lt;unknown&gt;`
+     * and `0/0 tokens` next to a stage row that had both.
      */
     private static List<Map<String, Object>> callsOf(Map<String, Object> stage) {
         Object attempts = stage.get("vendor_attempts");
         if (attempts instanceof List<?> rows && !rows.isEmpty()) {
             List<Map<String, Object>> calls = new ArrayList<>();
             for (Object item : rows) {
-                if (item instanceof Map<?, ?> map) calls.add(cast(map));
+                if (!(item instanceof Map<?, ?> map)) continue;
+                Map<String, Object> call = new LinkedHashMap<>(cast(map));
+                if (call.get("profile") != null && call.get("profile").equals(stage.get("profile"))) {
+                    call.putIfAbsent("model", stage.get("model"));
+                    call.putIfAbsent("tokens", stage.get("tokens"));
+                }
+                calls.add(call);
             }
             if (!calls.isEmpty()) return calls;
         }
@@ -242,7 +263,10 @@ public final class RunReport {
     private static Map<String, Object> visual(List<Map<String, Object>> stages) {
         Map<String, Object> visual = new LinkedHashMap<>();
         List<Map<String, Object>> scenarios = new ArrayList<>();
-        List<Object> screenshots = new ArrayList<>();
+        // Several scenarios share one viewport screenshot, so the harness legitimately names
+        // the same file more than once. Listing it three times reads as three pieces of
+        // evidence; it is one.
+        Map<String, Object> screenshotsByPath = new LinkedHashMap<>();
         boolean ran = false;
         Boolean last = null;
         for (Map<String, Object> stage : stages) {
@@ -252,8 +276,15 @@ public final class RunReport {
             if (stage.get("scenarios") instanceof List<?> rows) {
                 for (Object item : rows) if (item instanceof Map<?, ?> map) scenarios.add(cast(map));
             }
-            if (stage.get("screenshots") instanceof List<?> rows) screenshots.addAll(rows);
+            if (stage.get("screenshots") instanceof List<?> rows) {
+                for (Object item : rows) {
+                    if (item instanceof Map<?, ?> map) {
+                        screenshotsByPath.putIfAbsent(text(map.get("path")), cast(map));
+                    }
+                }
+            }
         }
+        List<Object> screenshots = new ArrayList<>(screenshotsByPath.values());
         visual.put("ran", ran);
         visual.put("passed", last);
         visual.put("scenarios", scenarios);
@@ -376,12 +407,17 @@ public final class RunReport {
         }
 
         List<Object> changed = list(report.get("changed_files"));
-        out.append('\n').append("changed  ").append(changed.size()).append(" file(s)");
+        out.append('\n').append("changed  ").append(changed.size()).append(" source file(s)");
         if (report.get("diff_base_commit") != null) {
             out.append(" since ").append(clip(text(report.get("diff_base_commit")), 12));
         }
         out.append('\n');
         for (Object path : changed) out.append("  ").append(path).append('\n');
+        List<Object> contract = list(report.get("contract_files"));
+        if (!contract.isEmpty()) {
+            out.append("         plus ").append(contract.size())
+                    .append(" Warden contract file(s), unchanged since the run snapshot\n");
+        }
 
         if (report.get("totals") instanceof Map<?, ?> raw) {
             Map<String, Object> totals = cast(raw);
