@@ -218,12 +218,135 @@ warden do --project <пустой каталог> --in-place --init-repo --dry-r
 
 ---
 
-## Чего этот файл **не** утверждает
+## 6. Три вендора в одном прогоне, и что при этом сломалось
 
-* Реализатор на живом вендоре внутри полного цикла не прогнан до зелёного — упёрся в квоту.
-* Роль `visual_qa` (модель, которой скриншоты приходят вложениями) на живом вендоре не
-  прогонялась; профиль `codex-visual-qa` не верифицирован.
+Второй заход, когда квоты открылись у всех троих. Состав ролей: реализатор — Codex
+(`gpt-5.6-terra`), ревьюер — Grok 4.6, глаза — Claude Opus через `capabilities.vision`
+с доставкой `workspace_file`: у Claude нет флага для картинок, зато есть инструмент
+чтения, который показывает изображение, а не имя файла.
+
+Верификация профиля `claude-visual-qa` — не «вышел с нулём», а сверка по пикселям:
+
+```text
+probe: открой этот скриншот и назови две кнопки в пилюле сверху и число иконок справа
+ответ: VIEW, CREATE
+       8
+```
+
+Метки прочитаны верно, и ни в одном имени файла по этому пути нет слова VIEW. Счёт
+иконок при повторном прогоне дал 7 вместо 8 — это записано в `verification.note`
+профиля, чтобы дата верификации не читалась как обещание точности, которого проба не
+дала. Этот глаз — для «читаемо, налезло, развалилось», а не для пересчёта мелочи.
+
+### Что нашёл живой прогон
+
+Пять дефектов, каждый — в коде, а не в рассуждении о коде.
+
+**Промпт с JSON не доходил до вендора.** Промпт визуального QA включает отчёт
+харнесса; отчёт — JSON; JSON — кавычки. На Windows JVM оборачивает аргумент в кавычки,
+если в нём есть пробел, но не экранирует кавычку внутри значения — принимающий процесс
+разрезает аргумент с этого места. До `claude.exe` дошло `error: unknown option '->'` за
+620 мс. Старая проверка искала только переводы строк через batch-shim, а `claude` —
+настоящий `.exe`. Теперь отказ до отправки, оба Claude-профиля на `prompt_delivery: stdin`.
+Обе половины правила нужны: `-c model_reasoning_effort="high"` кавычку содержит, пробела
+нет, JVM его не оборачивает, и он ходит исправно — первая версия правила его отклонила.
+
+**Ревьюер не знал о браузерном слое.** Grok выписал P1 «ни одна команда не проверяет
+этот атрибут» — а сценарий строкой ниже проверял его по имени. Реализатора отправили
+писать тест для уже проверенного. Промпт ревьюера не упоминал браузерные сценарии
+вообще; теперь они стоят рядом с командами приёмки.
+
+**Гейт брал деньги за проблему оператора.** `package-lock.json` тронул setup самой Orca,
+до появления агента. Проверка области срабатывала *после* реализатора и возвращалась ему
+же фикс-раундом — а он физически не может это починить: путь вне его области изменений.
+Теперь проверка идёт до первой отправки, а `preflight_outside_scope`,
+`base_ref_unresolvable` и `contract_mutated` терминальны по той же причине, по какой ею
+уже был `visual_qa_unavailable`.
+
+**Отпечаток кандидата включал улики Warden.** Прогон, зелёный на каждой стадии, отказал
+в приёмке с `candidate_changed` — из-за собственного лог-файла, лежавшего в `.warden/`.
+Правило верное, набор файлов неверный: человек принимает изменение исходников. Два
+вопроса разведены — «трогала ли что-нибудь read-only роль» по-прежнему включает
+`.warden`, «тот ли это кандидат» больше нет. Целостность контракта не слабеет: любое
+изменение в `.warden` во время прогона и так даёт `contract_mutated` по снимку.
+
+**Потолок ходов — не провал работы.** Ревью диффа на 126 строк израсходовало все 16
+разрешённых ходов на чтение и вышло с кодом 1 без артефакта; прогон записал
+`role_command_failed`. Ничего не сломалось: вендора прервал предел, который выставил
+оператор, и он к тому моменту уже нашёл два настоящих дефекта. Отдельный код
+`role_turns_exhausted` с указанием, что поднять. Failover не делается — другой вендор
+упрётся в тот же потолок на том же диффе.
+
+### Отказ, который система обязана была не проглотить
+
+Реализация маяка прошла обе команды приёмки, и Codex вернул `status: blocked`:
+
+> The scoped lighthouse implementation is present and both acceptance commands pass.
+> Production persistence remains blocked: Supabase frame validation does not allow the
+> new lighthouse kind, and the required migration is outside the permitted src/scripts
+> paths.
+
+То же самое до него нашёл Grok. Агент отказался и молча выпустить то, что сломается при
+публикации, и выйти за выданную ему область. Синтаксически корректный артефакт со
+статусом `blocked` — это не успех, и `semanticFailure` его таким не считает.
+
+Ответ оператора — не уговорить агента, а расширить область до `supabase/migrations`,
+где лежит прямой прецедент: `20260712060000_boat_element.sql` добавлял ровно так же вид
+`boat`.
+
+### Полный цикл, три вендора, зелёный
+
+```text
+run      lighthouse-5
+task     lighthouse-element  risk=medium
+outcome  ok  ready_for_human  next=human_gate
+human    pending  options=[accept, reject]
+
+stage           attempt  ok  vendor/model                    cost      tokens        ms
+implementer           0  ok  codex/gpt-5.6-terra             ?         549584/3549    143451
+gates                 0  ok  -                               ?         ?/?                 ?
+reviewer              0  ok  grok/grok-4.6                   0.2584    148206/34219  1019773
+visual_qa             0  ok  -                               ?         ?/?                 ?
+visual_qa             0  ok  claude/opus                     1.0181    10/6578        113959
+
+browser  passed  2 screenshot(s)
+  ok    1280x720: text=Create click -> testid=tool-lighthouse visible
+  ok    ... -> css=.palette button.active[data-testid=tool-lighthouse] visible
+  ok    ... -> css=canvas click@0.5,0.12 -> text=water visible
+  ok    ... -> css=canvas click@0.5,0.82
+  ok    1280x720: no-console-errors
+
+changed  8 source file(s) since 5c42b7bcbdb…
+totals   3 vendor call(s), 0 fix round(s), $1.2765 of $14.0000 budget
+```
+
+Ревьюер, дословно:
+
+> The lighthouse is a permanent Create-palette kind (`data-testid=tool-lighthouse`), allowed
+> only in the central share of a deep water band, drawn with a sand-and-stone islet under the
+> tower, and admitted by a new `frame_elements_valid` migration that copies the current
+> allowlist and adds lighthouse. Existing kinds' placement and draw helpers are unchanged.
+
+Роль с глазами, дословно:
+
+> the canvas shows a lighthouse standing in the middle of the lake on a small sandy islet of
+> its own, with a lit lamp and glow — mid-water, well clear of both shores, exactly what the
+> task asks for.
+
+Две находки P3, обе косметические и обе — не про эту задачу: строка состояния пишет
+«1 DETAILS» рядом с «1 DETAIL», и подпись LIGHTHOUSE заполняет свою плитку почти вплотную,
+тогда как у соседей есть поля.
+
+`css=canvas click@0.5,0.82` — тот самый клик в точку внутри элемента. Без него canvas во всё
+окно достижим только по центру, и поставить что-либо в воду сценарием нельзя.
+
+---
+
+## 7. Чего этот файл всё ещё не утверждает
+
 * Orca-адаптер (`runner: orca`) как исполнитель роли живьём не подтверждён. Orca в этих
   прогонах создавала worktree — это `OrcaIsolation`, другой путь кода.
-* `warden do --conductor` (Conductor, запущенный самим Warden через `ConductorBridge`) не
-  прогонялся: проверялся тот же workflow, запущенный напрямую из CLI Conductor.
+* `warden do --conductor` (Conductor, запущенный самим Warden) не прогонялся: проверялся тот
+  же workflow, запущенный напрямую из CLI Conductor.
+* Подтверждение failover по решению человека (`--continue`) покрыто тестами, но на живой
+  исчерпанной квоте не прогонялось: во второй заход квоты были у всех троих.
