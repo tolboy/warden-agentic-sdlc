@@ -66,6 +66,7 @@ public final class RunReport {
         List<Map<String, Object>> stages = stages(runs, runId, summary);
         report.put("stages", stages);
         report.put("vendors", vendors(stages));
+        report.put("failovers", failovers(stages));
         report.put("visual", visual(stages));
         // Warden's own contract files are listed apart. They are a real difference in the
         // worktree and stay visible, but reporting "4 files changed" for a one-file fix sends
@@ -273,6 +274,33 @@ public final class RunReport {
         return List.of(stage);
     }
 
+    /**
+     * Every point in the run where the vendor doing the work changed. It is recorded per
+     * stage, where it happened; it is reported here, because "who wrote this" is a question
+     * about the run and not about a directory.
+     */
+    private static List<Map<String, Object>> failovers(List<Map<String, Object>> stages) {
+        List<Map<String, Object>> switches = new ArrayList<>();
+        for (Map<String, Object> stage : stages) {
+            List<Map<String, Object>> calls = callsOf(stage);
+            if (calls.size() < 2) continue;
+            for (int index = 1; index < calls.size(); index++) {
+                Map<String, Object> before = calls.get(index - 1);
+                Map<String, Object> after = calls.get(index);
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("step", stage.get("step"));
+                one.put("attempt", stage.get("attempt"));
+                one.put("from_profile", before.get("profile"));
+                one.put("from_vendor", before.get("vendor"));
+                one.put("from_code", before.get("code"));
+                one.put("to_profile", after.get("profile"));
+                one.put("to_vendor", after.get("vendor"));
+                switches.add(one);
+            }
+        }
+        return List.copyOf(switches);
+    }
+
     private static Map<String, Object> visual(List<Map<String, Object>> stages) {
         Map<String, Object> visual = new LinkedHashMap<>();
         List<Map<String, Object>> scenarios = new ArrayList<>();
@@ -396,6 +424,19 @@ public final class RunReport {
                     out.append("    not reported by this vendor: cost on ").append(unknownCost)
                             .append(" call(s), tokens on ").append(unknownTokens).append(" call(s)\n");
                 }
+            }
+        }
+
+        List<Object> switches = list(report.get("failovers"));
+        if (!switches.isEmpty()) {
+            out.append('\n').append("failover\n");
+            for (Object item : switches) {
+                if (!(item instanceof Map<?, ?> row)) continue;
+                out.append("  ").append(row.get("step")).append(": ")
+                        .append(row.get("from_profile")).append(" (").append(row.get("from_vendor"))
+                        .append(") ").append(row.get("from_code")).append(" -> ")
+                        .append(row.get("to_profile")).append(" (").append(row.get("to_vendor"))
+                        .append(")\n");
             }
         }
 

@@ -52,7 +52,16 @@ public record HumanDecision(
 
     public enum Kind {
         SUCCESS("success", List.of("accept", "reject")),
-        FAILURE("failure", List.of("retry", "abort"));
+        FAILURE("failure", List.of("retry", "abort")),
+        /**
+         * A vendor ran out mid-run and another could take over. Distinct from FAILURE
+         * because the choice is not "try again or give up" — the work so far is fine, and
+         * what is being asked is whether somebody else may finish it.
+         *
+         * `abort` is first so that automation which auto-selects the first option declines
+         * the substitution rather than granting one.
+         */
+        FAILOVER("failover", List.of("abort", "switch"));
 
         private final String jsonValue;
         private final List<String> options;

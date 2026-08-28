@@ -83,6 +83,16 @@ public final class TaskLoop {
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
+        return run(loaded, user, runId, dryRun, Map.of());
+    }
+
+    /**
+     * @param authorizedFailover role to profile substitutions a human already agreed to on an
+     *                           earlier run. Empty for an ordinary run, which is why the
+     *                           default policy stops and asks instead of switching.
+     */
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
+                       Map<String, String> authorizedFailover) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
@@ -102,7 +112,8 @@ public final class TaskLoop {
         // One runner for the whole loop: a vendor that ran out at implement time must not be
         // dispatched again at review time. The gate makes the budget count vendor calls, not
         // role invocations, so a failover cannot spend more than the task allowed.
-        RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId);
+        RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId,
+                authorizedFailover);
         GateRunner gates = new GateRunner(processes);
 
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
@@ -128,6 +139,8 @@ public final class TaskLoop {
         summary.put("visual_qa_required", task.visualQa().required());
         summary.put("visual_qa_role", visualRoleConfigured);
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
+        summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
+        if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
         summary.put("steps", steps);
 
@@ -490,6 +503,9 @@ public final class TaskLoop {
             } else {
                 budget.account(step.details().get("cost_usd"));
             }
+            if (step.details().get("failover_pending") != null) {
+                entry.put("failover_pending", step.details().get("failover_pending"));
+            }
             entry.put("cost_usd", step.details().get("cost_usd"));
             entry.put("attempts_cost_usd", step.details().get("attempts_cost_usd"));
             entry.put("failed_over_from", step.details().get("failed_over_from"));
@@ -508,7 +524,11 @@ public final class TaskLoop {
      * both still stop for a human, because Warden does not decide to wait out a quota window.
      */
     private static String reasonFor(RoleRunner.Outcome step, String genericReason) {
-        return "role_quota_exhausted".equals(step.code()) ? "quota_exhausted" : genericReason;
+        if ("role_quota_exhausted".equals(step.code())) return "quota_exhausted";
+        if ("role_failover_requires_confirmation".equals(step.code())) {
+            return "failover_requires_confirmation";
+        }
+        return genericReason;
     }
 
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
@@ -640,9 +660,20 @@ public final class TaskLoop {
         Object base = summary.get("diff_base_commit");
         String fingerprint = base instanceof String commit
                 ? new GitRepository(root, processes).fingerprint(commit) : null;
-        HumanDecision decision = new ApprovalStore(root).createFailure(
-                String.valueOf(summary.get("run_id")), String.valueOf(summary.get("task_id")),
-                reason, file, fingerprint);
+        // A spent subscription with a named successor is a different question from a failure:
+        // nothing is wrong with the work, and what is being asked is who may finish it.
+        Map<String, Object> pending = pendingFailover(steps);
+        ApprovalStore store = new ApprovalStore(root);
+        String runIdentity = String.valueOf(summary.get("run_id"));
+        String taskIdentity = String.valueOf(summary.get("task_id"));
+        HumanDecision decision;
+        if (pending != null) {
+            summary.put("failover_pending", pending);
+            decision = store.createFailover(runIdentity, taskIdentity,
+                    failoverQuestion(pending), file, fingerprint);
+        } else {
+            decision = store.createFailure(runIdentity, taskIdentity, reason, file, fingerprint);
+        }
         addDecision(summary, root, decision);
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
@@ -663,12 +694,32 @@ public final class TaskLoop {
         return labels.isEmpty() ? List.of("no stage") : labels;
     }
 
+    /** The failover awaiting a human, if the run stopped for one. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> pendingFailover(List<Map<String, Object>> steps) {
+        for (int index = steps.size() - 1; index >= 0; index--) {
+            Object pending = steps.get(index).get("failover_pending");
+            if (pending instanceof Map<?, ?> map) return (Map<String, Object>) map;
+        }
+        return null;
+    }
+
+    /** What the human is actually being asked, in one line, with both vendors named. */
+    private static String failoverQuestion(Map<String, Object> pending) {
+        return "role " + pending.get("role") + ": " + pending.get("from_profile")
+                + " (" + pending.get("from_vendor") + ") reported a spent subscription. "
+                + "Switch to " + pending.get("to_profile") + " (" + pending.get("to_vendor")
+                + ")? " + pending.get("independence_after_switch");
+    }
+
     private static void addDecision(Map<String, Object> summary, Path root, HumanDecision decision)
             throws Exception {
         ApprovalStore store = new ApprovalStore(root);
         summary.put("decision_path", root.relativize(store.decisionPath(decision.runId()))
                 .toString().replace('\\', '/'));
         summary.put("decision_state", decision.state().jsonValue());
+        summary.put("decision_kind", decision.kind().jsonValue());
+        summary.put("decision_reason", decision.reason());
         summary.put("decision_options", decision.options());
         summary.put("decision_updated_at", decision.updatedAt().toString());
         summary.put("approve_with", "warden approve " + decision.runId()

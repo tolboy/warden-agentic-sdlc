@@ -503,13 +503,25 @@ public final class RoleRunnerTest implements Suite {
     }
 
     private void writePolicy(Path home, String reviewers, String implementers) throws IOException {
+        policy(home, reviewers, implementers, "auto");
+    }
+
+    /**
+     * @param failover the policy's answer to a spent subscription. These scenarios were
+     *                 written when routing around one was the only behaviour, so they say
+     *                 `auto` outright; the shipped default is `confirm`, and has its own
+     *                 checks below.
+     */
+    private void policy(Path home, String reviewers, String implementers, String failover)
+            throws IOException {
         Files.writeString(home.resolve("policy.yaml"), """
                 version: 1
                 roles:
                   reviewer: { profiles: [%s], strategy: first, require_independent_vendor: true }
                   implementer: { profiles: [%s], strategy: first, require_independent_vendor: false }
                 review: { required_for_risk: [medium, high] }
-                """.formatted(reviewers, implementers));
+                failover: { on_quota_exhausted: %s }
+                """.formatted(reviewers, implementers, failover));
     }
 
     private RoleRunner.Outcome runRole(Path project, Path home, String role, String runId,

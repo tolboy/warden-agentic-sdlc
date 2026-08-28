@@ -86,6 +86,26 @@ public final class UserSetup {
               # A low-risk task still passes every machine gate; it just does not pay a reviewer.
               required_for_risk: [medium, high]
 
+            # What happens when the vendor filling a role reports a spent subscription and
+            # another profile could take over.
+            #
+            #   confirm  stop, name the successor, and wait for a person. The default.
+            #   auto     switch straight away; the swap is still written to the ledger as a
+            #            role_failover event naming both vendors and who authorised it.
+            #   stop     never switch, even when a candidate exists.
+            #
+            # `confirm` is the default because a failover changes who wrote the work, and on a
+            # small roster it can cost the run its independent reviewer: two vendors minus one
+            # spent subscription leaves one, and a model reviewing its own output is the thing
+            # running two vendors was for. That is a judgement about the value of the result,
+            # so it is the operator's.
+            #
+            # Record the choice with `warden approve <run-id> --decision switch`, then re-run
+            # with `warden run <task> --run-id <new> --continue <run-id>`. The authorisation is
+            # that recorded decision: it names one role and one profile, and nothing else.
+            failover:
+              on_quota_exhausted: confirm
+
             # The order those roles run in, and what has to be true for each to run at all.
             # This block is optional; deleting it restores exactly the chain written below.
             # Reorder, drop or repeat stages here — nothing else has to change.
@@ -329,7 +349,9 @@ public final class UserSetup {
             Scenarios the machine harness was asked to check
             {{visual_scenarios}}
 
-            Screenshots attached to this message
+            How the images reach you
+            : {{vision_note}}
+
             {{screenshots}}
 
             ## What has already been settled without you

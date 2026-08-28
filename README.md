@@ -31,8 +31,7 @@ Orca должна быть запущена: команда создаст workt
 **Новый проект с нуля.** Каталог без `.git` — это не ошибка, если так и задумано:
 
 ```text
-warden.cmd do --project C:\path	o
-ew-project --init-repo --in-place "Landing page with a Create button"
+warden.cmd do --project C:\path\to\new-project --init-repo --in-place "Landing page with a Create button"
 ```
 
 `--init-repo` делает `git init` и коммитит то, что уже лежит в каталоге, как базовую линию —
@@ -217,6 +216,45 @@ workflow:
 работает ровно та цепочка, что написана выше. Эффективную цепочку показывает
 `warden doctor` в поле `workflow`, а фактически пройденную — `task-run.json` в полях
 `workflow` и `skipped_stages`.
+
+## Что делать, когда у вендора кончилась подписка
+
+Исчерпанная квота — единственный провал, который не про работу. Warden отделяет её от
+обычной ошибки и умеет передать роль другому вендору, но **по умолчанию спрашивает**:
+
+```yaml
+# ~/.warden/policy.yaml
+failover:
+  on_quota_exhausted: confirm   # confirm (по умолчанию) | auto | stop
+```
+
+Почему не `auto`: смена вендора меняет автора работы, а на маленьком составе она может стоить
+прогону независимого ревьюера — два вендора минус одна исчерпанная подписка это один вендор, а
+модель, проверяющая саму себя, и есть то, ради чего запускали двух. Это суждение о ценности
+результата, и оно операторское.
+
+При `confirm` прогон останавливается, называет обоих вендоров и пишет durable-решение
+отдельного вида (`kind: failover`, варианты `[abort, switch]` — отказ первым, чтобы
+автоматика отклоняла, а не разрешала):
+
+```text
+role implementer: codex-implement (codex) reported a spent subscription.
+Switch to claude-implement (claude)? the candidate is a different vendor from
+the implementer (codex), so independence is preserved
+```
+
+Разрешение — это записанное решение, а не флаг:
+
+```text
+warden approve <run-id> --decision switch
+warden run <task> --run-id <new> --continue <run-id>
+```
+
+`--continue` читает решение того прогона и разрешает **ровно одну** подстановку: названную
+роль на названный профиль. Флаг разрешал бы кому угодно, а сохранённое «у codex кончилось»
+протухло бы в момент, когда окно квоты откроется. При `auto` подстановка происходит сразу, но
+событие `role_failover` с обоими вендорами и полем `authorized_by` всё равно попадает в улики
+и в `warden report`.
 
 ## Настройка вендоров
 

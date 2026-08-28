@@ -42,6 +42,10 @@ agents:
     routes:
       - to: human_approval
         when: "{{ run_task.output.exit_code == 0 }}"
+      # A spent subscription with a named successor is not the same question as a failure.
+      # Nothing is wrong with the work; what is being asked is who may finish it.
+      - to: human_failover
+        when: "{{ run_task.output.reason == 'failover_requires_confirmation' }}"
       - to: human_intervention
 
   # Option order is load-bearing. `conductor run --skip-gates` auto-selects the FIRST
@@ -57,6 +61,28 @@ agents:
       - label: Accept for manual landing
         value: accept
         route: record_accept
+
+  - name: human_failover
+    type: human_gate
+    prompt: "{{ run_task.output.decision_reason }}\n\nSwitching changes who wrote the work, and on a small roster it can leave one vendor reviewing its own output. Inspect {{ workflow.input.project_dir }}/.warden/runs/{{ workflow.input.run_id }}/decision.json."
+    options:
+      - label: Abort
+        value: abort
+        route: record_abort
+      - label: Switch to the named vendor
+        value: switch
+        route: record_switch
+
+  - name: record_switch
+    type: script
+    command: java
+    args: ["-cp", "{{ workflow.dir }}/../out/classes", "dev.warden.Main", "approve", "{{ workflow.input.run_id }}", "--decision", "switch", "--expected-updated-at", "{{ run_task.output.decision_updated_at }}", "--actor", "{{ workflow.input.actor }}"]
+    working_dir: "{{ workflow.input.project_dir }}"
+    timeout: 60
+    routes:
+      - to: switch_authorized
+        when: "{{ record_switch.output.exit_code == 0 }}"
+      - to: decision_record_failed
 
   - name: human_intervention
     type: human_gate
@@ -132,6 +158,11 @@ agents:
     type: terminate
     status: failed
     reason: Human authorized a NEW run id after the blocker is addressed; this workflow does not silently reuse attempts or budgets.
+
+  - name: switch_authorized
+    type: terminate
+    status: failed
+    reason: "Human authorized a vendor substitution. It applies to a NEW run id: re-run with `warden run <task> --run-id <new> --continue {{ workflow.input.run_id }}`. This workflow does not reuse the attempt or the budget of the run that stopped."
 
   - name: decision_record_failed
     type: terminate

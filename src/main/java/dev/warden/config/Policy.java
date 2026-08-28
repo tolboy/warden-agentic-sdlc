@@ -17,16 +17,33 @@ import java.util.Set;
  *
  * The optional `workflow:` block declares the order those roles run in and the conditions
  * under which each runs at all — see {@link Workflow}. Omitting it keeps the built-in chain.
+ *
+ * `failover.on_quota_exhausted` decides whether a spent subscription may be routed around
+ * without asking. It defaults to `confirm`, not `auto`: swapping vendors mid-run changes who
+ * wrote the code and can leave one vendor reviewing its own work.
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
-                     Workflow workflow, boolean workflowDeclared) {
+                     Workflow workflow, boolean workflowDeclared, String failoverMode) {
 
     public record RoleSpec(String role, List<String> profiles, String strategy,
                            boolean requireIndependentVendor) {}
 
     public static final Set<String> STRATEGIES = Set.of("rotate", "first");
 
-    private static final Set<String> TOP_LEVEL = Set.of("version", "roles", "review", "workflow");
+    private static final Set<String> TOP_LEVEL =
+            Set.of("version", "roles", "review", "workflow", "failover");
+    private static final Set<String> FAILOVER_KEYS = Set.of("on_quota_exhausted", "note");
+
+    /**
+     * What happens when the vendor filling a role reports a spent subscription and another
+     * eligible profile exists.
+     *
+     * `confirm` is the default because a failover is a change of who is doing the work, and
+     * on a two-vendor roster it can quietly cost the run its independent reviewer: the last
+     * vendor standing would be reviewing its own output. That is a judgement about the value
+     * of the result, which is the operator's to make.
+     */
+    public static final Set<String> FAILOVER_MODES = Set.of("confirm", "auto", "stop");
     private static final Set<String> ROLE_KEYS = Set.of("profiles", "strategy", "require_independent_vendor");
     private static final Set<String> REVIEW_KEYS = Set.of("required_for_risk", "note");
 
@@ -64,11 +81,15 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         // A policy that says nothing about order gets the documented loop. Declaring the
         // block replaces the chain wholesale rather than patching it: a workflow assembled
         // from a default plus overrides is one nobody can read off the file in front of them.
+        Values failover = root.optMap("failover").rejectUnknownKeys(FAILOVER_KEYS);
+        String failoverMode = failover.requireEnum("on_quota_exhausted", FAILOVER_MODES, "confirm");
+
         boolean workflowDeclared = root.has("workflow");
         Workflow workflow = workflowDeclared ? Workflow.parse(root, "workflow") : Workflow.builtIn();
 
         root.throwIfAny();
-        return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared);
+        return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
+                failoverMode);
     }
 
     public boolean reviewRequired(String risk) {

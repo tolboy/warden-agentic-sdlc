@@ -140,6 +140,7 @@ public final class TaskLoopTest implements Suite {
             check.contains("the vendor's own message reaches the summary",
                     Json.write(steps(ranOut)), "try again at 9:21 PM");
 
+            failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
 
@@ -199,6 +200,84 @@ public final class TaskLoopTest implements Suite {
         String rendered = dev.warden.ledger.RunReport.render(report);
         check.contains("the terminal rendering names the vendor", rendered, "implvendor");
         check.contains("and says what still has to happen", rendered, "human_gate");
+    }
+
+    /**
+     * Routing around a spent subscription changes who wrote the code, and on a small roster
+     * it can cost the run its independent reviewer. The default is therefore to stop and ask,
+     * and the authorisation to proceed is a recorded human decision — not a flag, which
+     * anyone could pass, and not persisted "codex is out", which goes stale the moment the
+     * quota window rolls over.
+     */
+    @SuppressWarnings("unchecked")
+    private void failoverConfirmationChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path asked = newProject(sandbox, "failover-confirm");
+        writeProfiles(home, sandbox, "failover-confirm", 1, 1);
+        writeQuotaProfile(home, sandbox, "failover-confirm");
+        policy(home, "loop-review", "loop-spent, loop-impl", "confirm");
+
+        TaskLoop.Outcome stopped = loop(asked, home, "f1");
+        check.that("the shipped default does not switch vendors unattended", !stopped.ok());
+        check.eq("it stops and says what it is waiting for",
+                "failover_requires_confirmation", stopped.reason());
+
+        Map<String, Object> pending =
+                (Map<String, Object>) stopped.summaryReport().get("failover_pending");
+        check.eq("the spent profile is named", "loop-spent", pending.get("from_profile"));
+        check.eq("and so is the one that would take over", "loop-impl", pending.get("to_profile"));
+        check.eq("the cause is not confused with an ordinary failure",
+                "role_quota_exhausted", pending.get("cause"));
+
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(asked);
+        dev.warden.approval.HumanDecision decision = store.read("f1");
+        check.eq("the human is asked a different question from retry-or-give-up",
+                "failover", decision.kind().jsonValue());
+        check.eq("and abort is offered first, so automation declines rather than grants",
+                List.of("abort", "switch"), decision.options());
+        check.contains("the question names both vendors", decision.reason(), "spentvendor");
+        check.contains("and says what the switch costs in independence",
+                decision.reason(), "independence");
+
+        // Nothing changes until a person answers, and answering is the whole authorisation.
+        store.resolve("f1", decision.updatedAt().toString(), "switch", "tester", "");
+        TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(asked, "hello"), UserConfig.load(home), "f2", false,
+                Map.of("implementer", "loop-impl"));
+        check.that("with the switch recorded, the run completes on the other vendor", resumed.ok());
+        String evidence = Files.readString(
+                asked.resolve(".warden/runs/f2--implementer-0/evidence.jsonl"));
+        check.contains("and the substitution is an event, not a footnote",
+                evidence, "\"type\":\"role_failover\"");
+        check.contains("attributed to the human who allowed it",
+                evidence, "human_switch_decision");
+
+        // `auto` is the opt-out, and it still leaves the same event behind.
+        Path unattended = newProject(sandbox, "failover-auto");
+        writeProfiles(home, sandbox, "failover-auto", 1, 1);
+        writeQuotaProfile(home, sandbox, "failover-auto");
+        policy(home, "loop-review", "loop-spent, loop-impl", "auto");
+        TaskLoop.Outcome automatic = loop(unattended, home, "f3");
+        check.that("failover.on_quota_exhausted: auto switches without asking", automatic.ok());
+        check.contains("and records who authorised it",
+                Files.readString(unattended.resolve(".warden/runs/f3--implementer-0/evidence.jsonl")),
+                "policy_auto");
+
+        // A switch is also a workflow-level fact: whoever reads the run report should not
+        // have to know which stage directory to open to find out the author changed.
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(unattended, "f3");
+        List<Map<String, Object>> switches = (List<Map<String, Object>>) report.get("failovers");
+        check.eq("the run report names the substitution", 1, switches.size());
+        check.eq("from the profile that ran out", "loop-spent", switches.get(0).get("from_profile"));
+        check.eq("to the one that finished", "loop-impl", switches.get(0).get("to_profile"));
+
+        // `stop` refuses the switch even though a candidate exists.
+        Path refused = newProject(sandbox, "failover-stop");
+        writeProfiles(home, sandbox, "failover-stop", 1, 1);
+        writeQuotaProfile(home, sandbox, "failover-stop");
+        policy(home, "loop-review", "loop-spent, loop-impl", "stop");
+        TaskLoop.Outcome declined = loop(refused, home, "f4");
+        check.eq("failover.on_quota_exhausted: stop never switches",
+                "quota_exhausted", declined.reason());
     }
 
     /**
@@ -565,13 +644,19 @@ public final class TaskLoopTest implements Suite {
     }
 
     private void policy(Path home, String reviewers, String implementers) throws IOException {
+        policy(home, reviewers, implementers, "auto");
+    }
+
+    private void policy(Path home, String reviewers, String implementers, String failover)
+            throws IOException {
         Files.writeString(home.resolve("policy.yaml"), """
                 version: 1
                 roles:
                   implementer: { profiles: [%s], strategy: first, require_independent_vendor: false }
                   reviewer: { profiles: [%s], strategy: first, require_independent_vendor: true }
                 review: { required_for_risk: [medium, high] }
-                """.formatted(implementers, reviewers));
+                failover: { on_quota_exhausted: %s }
+                """.formatted(implementers, reviewers, failover));
     }
 
     private void writeProfile(Path home, String name, String role, String vendor, boolean readOnly,

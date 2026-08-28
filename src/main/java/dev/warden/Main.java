@@ -308,11 +308,13 @@ public final class Main {
         if (args.length < 2) throw new IllegalArgumentException("run requires a task id or YAML path");
         String runId = option(args, "--run-id", loadedDefaultRunId());
         boolean dryRun = hasFlag(args, "--dry-run");
+        String continueFrom = option(args, "--continue", null);
         TaskLoop.Outcome outcome;
         try {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
             UserConfig user = UserConfig.load();
-            outcome = new TaskLoop(new ProcessRunner()).run(loaded, user, runId, dryRun);
+            Map<String, String> authorized = authorizedFailover(loaded.root(), continueFrom);
+            outcome = new TaskLoop(new ProcessRunner()).run(loaded, user, runId, dryRun, authorized);
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
@@ -334,8 +336,11 @@ public final class Main {
         result.put("steps", outcome.summaryReport().get("steps"));
         result.put("decision_path", outcome.summaryReport().get("decision_path"));
         result.put("decision_state", outcome.summaryReport().get("decision_state"));
+        result.put("decision_kind", outcome.summaryReport().get("decision_kind"));
+        result.put("decision_reason", outcome.summaryReport().get("decision_reason"));
         result.put("decision_options", outcome.summaryReport().get("decision_options"));
         result.put("decision_updated_at", outcome.summaryReport().get("decision_updated_at"));
+        result.put("failover_pending", outcome.summaryReport().get("failover_pending"));
         result.put("report_path", writeRunReport(Path.of("."), runId));
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
@@ -368,6 +373,46 @@ public final class Main {
         if (hasFlag(args, "--text")) System.out.print(RunReport.render(report));
         else System.out.println(Json.write(report));
         return 0;
+    }
+
+    /**
+     * The substitutions a human authorised on an earlier run, read back from that run's own
+     * decision record.
+     *
+     * The authorisation is the resolved decision, not a flag: a flag would let anyone grant
+     * the switch, and a persisted "codex is out" would go stale the moment the quota window
+     * rolled over. Naming a prior run ties the permission to one recorded human choice, for
+     * one role, to one named profile.
+     */
+    private static Map<String, String> authorizedFailover(Path root, String priorRunId)
+            throws Exception {
+        if (priorRunId == null) return Map.of();
+        HumanDecision decision = new ApprovalStore(root).read(priorRunId);
+        if (decision.kind() != HumanDecision.Kind.FAILOVER) {
+            throw new IllegalArgumentException("--continue " + priorRunId + " names a "
+                    + decision.kind().jsonValue() + " decision; only a failover decision "
+                    + "authorises a vendor substitution");
+        }
+        if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
+            throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
+                    + "resolved as 'switch' (state=" + decision.state().jsonValue()
+                    + ", decision=" + decision.decision() + "); record the choice first with "
+                    + "`warden approve " + priorRunId + " --decision switch`");
+        }
+        Path summary = root.resolve(decision.summaryPath());
+        Object pending = Json.parseObject(java.nio.file.Files.readString(summary))
+                .get("failover_pending");
+        if (!(pending instanceof Map<?, ?> map)) {
+            throw new IllegalArgumentException("--continue " + priorRunId + ": that run's summary "
+                    + "names no pending failover, so there is nothing to authorise");
+        }
+        Object role = map.get("role");
+        Object profile = map.get("to_profile");
+        if (role == null || profile == null) {
+            throw new IllegalArgumentException("--continue " + priorRunId
+                    + ": the recorded failover names no role and profile");
+        }
+        return Map.of(String.valueOf(role), String.valueOf(profile));
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */
@@ -668,6 +713,8 @@ public final class Main {
                                            the whole workflow; stops at the human gate
                                            --init-repo for a directory that is not a repo yet
                   warden run <task>            the bounded loop; stops at the human gate
+                                               --continue <run-id> carries a recorded `switch`
+                                               decision into this run
                   warden ledger                aggregate local evidence and experiment dimensions
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,

@@ -65,6 +65,20 @@ public final class ApprovalStore {
                 summaryPath, candidateFingerprint);
     }
 
+    /**
+     * A spent subscription with somewhere to go. The candidate is named in {@code reason} so
+     * the person deciding is not asked to approve an unnamed substitution.
+     */
+    public HumanDecision createFailover(
+            String runId,
+            String taskId,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint) throws IOException {
+        return createPending(runId, taskId, HumanDecision.Kind.FAILOVER, reason,
+                summaryPath, candidateFingerprint);
+    }
+
     public synchronized HumanDecision createPending(
             String runId,
             String taskId,

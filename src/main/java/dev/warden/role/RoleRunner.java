@@ -80,6 +80,7 @@ public final class RoleRunner {
     private final DispatchGate gate;
     private final String pinnedDiffBase;
     private final String workflowRunId;
+    private final Map<String, String> authorizedFailover;
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
@@ -101,10 +102,21 @@ public final class RoleRunner {
 
     public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase,
                       String workflowRunId) {
+        this(processes, gate, pinnedDiffBase, workflowRunId, Map.of());
+    }
+
+    /**
+     * @param authorizedFailover role to profile substitutions a human has already agreed to,
+     *                           carried from a resolved `switch` decision on an earlier run.
+     *                           Each entry authorises exactly that swap and nothing else.
+     */
+    public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase,
+                      String workflowRunId, Map<String, String> authorizedFailover) {
         this.processes = processes;
         this.gate = gate;
         this.pinnedDiffBase = pinnedDiffBase;
         this.workflowRunId = workflowRunId;
+        this.authorizedFailover = Map.copyOf(authorizedFailover);
     }
 
     /** Profiles this runner has seen run out, in the order they did. */
@@ -223,13 +235,19 @@ public final class RoleRunner {
                         "verified", profile.hasVerifiedVision(),
                         "delivery", profile.vision().delivery()));
             }
-            if (attachments != null && !attachments.isEmpty() && profile.attachmentFlag() == null) {
+            boolean opensFilesItself = profile.vision() != null
+                    && "workspace_file".equals(profile.vision().delivery());
+            if (attachments != null && !attachments.isEmpty()
+                    && profile.attachmentFlag() == null && !opensFilesItself) {
                 // Not fatal: the paths are in the prompt and an agentic vendor can open them.
                 // Recorded because "the reviewer looked at the screenshots" and "the reviewer
-                // was told where the screenshots are" are different claims.
+                // was told where the screenshots are" are different claims. A profile that
+                // declares `vision.delivery: workspace_file` has made the second claim on
+                // purpose, so warning about it would be noise, not a finding.
                 report.put("attachments_not_passed_to_vendor",
-                        "profile '" + profile.name() + "' declares no attachments.flag, so the "
-                                + "images reach it only as paths inside the prompt");
+                        "profile '" + profile.name() + "' declares no attachments.flag and no "
+                                + "workspace_file vision, so the images reach it only as paths "
+                                + "inside the prompt");
             }
             report.put("vendor_attempt", (long) attempt);
 
@@ -271,15 +289,47 @@ public final class RoleRunner {
                 ledger.append("role_quota_exhausted", Map.of(
                         "role", role, "profile", profile.name(), "vendor", profile.vendor(),
                         "quota", result.evidence().getOrDefault("quota", Map.of())));
-                if (canFailOver(role, user, implementerVendor, rotation)) {
-                    continue;
+                Profile candidate = failoverCandidate(role, user, implementerVendor, rotation);
+                if (candidate != null) {
+                    String mode = user.policy().failoverMode();
+                    boolean preAuthorized = candidate.name().equals(authorizedFailover.get(role));
+                    if ("auto".equals(mode) || preAuthorized) {
+                        // Switching vendors mid-role changes who wrote the work, so it is an
+                        // event in its own right rather than a line in a report nobody reads.
+                        ledger.append("role_failover", failoverEvent(role, profile, candidate,
+                                result, preAuthorized ? "human_switch_decision" : "policy_auto"));
+                        continue;
+                    }
+                    if ("confirm".equals(mode)) {
+                        Map<String, Object> pending = failoverEvent(role, profile, candidate,
+                                result, "pending_human_confirmation");
+                        pending.put("independence_after_switch",
+                                independenceNote(candidate, implementerVendor));
+                        report.put("failover_pending", pending);
+                        report.put("vendor_attempts", attempts);
+                        report.put("attempts_cost_usd", spent);
+                        report.put("resolution", "policy failover.on_quota_exhausted is 'confirm'. "
+                                + "Record the choice with `warden approve <run-id> --decision switch`, "
+                                + "then re-run with `--continue <run-id>`; or set "
+                                + "failover.on_quota_exhausted: auto to let Warden switch unattended.");
+                        Path pendingPath = ledger.writeReport("role-" + role, report);
+                        ledger.append("role_run", report);
+                        return new Outcome(false, "role_failover_requires_confirmation", role,
+                                profile.name(), profile.vendor(), resolution.rejected(),
+                                pendingPath, report);
+                    }
+                    // mode 'stop': a candidate exists and is deliberately not used.
+                    report.put("failover_declined_by_policy", candidate.name());
                 }
-                // Last vendor standing. The report has to carry the operator's next move,
-                // because this is where the run ends and nothing downstream will add it.
+                // Last vendor standing, or a policy that forbids the switch. The report has to
+                // carry the operator's next move: this is where the run ends and nothing
+                // downstream will add it.
                 report.put("exhausted_profiles", List.copyOf(exhausted));
-                report.put("resolution", "every profile able to fill this role reported a spent "
-                        + "subscription; add a profile from another vendor, or wait for the quota "
-                        + "window named in the vendor message and re-run");
+                report.put("resolution", candidate != null
+                        ? "another profile could fill this role, but failover.on_quota_exhausted is 'stop'"
+                        : "every profile able to fill this role reported a spent subscription; "
+                          + "add a profile from another vendor, or wait for the quota window "
+                          + "named in the vendor message and re-run");
             }
 
             if (result.ok() && result.artifact() != null) {
@@ -308,18 +358,51 @@ public final class RoleRunner {
     }
 
     /**
-     * Whether another profile could fill this role once the exhausted ones are removed. Asked
-     * before continuing so that the last vendor's failure is reported as its own outcome
-     * rather than as an unresolvable role.
+     * Which profile could fill this role once the exhausted ones are removed, or null when
+     * none can. Asked before continuing so that the last vendor's failure is reported as its
+     * own outcome rather than as an unresolvable role, and so that an operator being asked to
+     * confirm a switch is told who would take over.
      */
-    private boolean canFailOver(String role, UserConfig user, String implementerVendor, long rotation) {
+    private Profile failoverCandidate(String role, UserConfig user, String implementerVendor,
+                                      long rotation) {
         try {
-            new RoleResolver().resolve(role, user.policy(), user.profiles(), implementerVendor,
-                    rotation, this::available, exhausted);
-            return true;
+            return new RoleResolver().resolve(role, user.policy(), user.profiles(),
+                    implementerVendor, rotation, this::available, exhausted).selected();
         } catch (RuntimeException none) {
-            return false;
+            return null;
         }
+    }
+
+    private static Map<String, Object> failoverEvent(String role, Profile from, Profile to,
+                                                     RoleExecutor.Result result, String authorizedBy) {
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("role", role);
+        event.put("from_profile", from.name());
+        event.put("from_vendor", from.vendor());
+        event.put("to_profile", to.name());
+        event.put("to_vendor", to.vendor());
+        event.put("cause", "role_quota_exhausted");
+        event.put("authorized_by", authorizedBy);
+        event.put("quota", result.evidence().getOrDefault("quota", Map.of()));
+        return event;
+    }
+
+    /**
+     * Two vendors and one spent subscription leaves one vendor. The resolver already refuses
+     * a reviewer sharing the implementer's vendor, so a switch cannot silently produce
+     * self-review — but the operator confirming it should be told the roster is about to get
+     * thin, before the next role fails to resolve.
+     */
+    private static String independenceNote(Profile candidate, String implementerVendor) {
+        if (implementerVendor == null) {
+            return "no implementer has run yet in this workflow, so independence is unaffected";
+        }
+        if (candidate.vendor().equals(implementerVendor)) {
+            return "the candidate shares the implementer's vendor (" + implementerVendor
+                    + "); a role that requires an independent vendor will refuse it";
+        }
+        return "the candidate is a different vendor from the implementer (" + implementerVendor
+                + "), so independence is preserved";
     }
 
     /**
@@ -414,6 +497,7 @@ public final class RoleRunner {
         values.put("context", context);
         values.put("context_path", contextFile == null ? "" : contextFile.toString());
         values.put("screenshots", attachmentList(attachments));
+        values.put("vision_note", visionNote(profile, attachments));
         return values;
     }
 
@@ -441,6 +525,32 @@ public final class RoleRunner {
 
                 """);
         return builder.toString();
+    }
+
+    /**
+     * How the pixels actually reach this vendor, in the words the prompt needs.
+     *
+     * The two deliveries ask for different behaviour from the model, and getting it wrong is
+     * silent: a `workspace_file` profile told the images are "attached" will answer about
+     * filenames, and sound just as confident doing it.
+     */
+    private static String visionNote(Profile profile, List<Path> attachments) {
+        boolean any = attachments != null && !attachments.isEmpty();
+        if (!any) return "No screenshot reached this run. Say so and return status: \"aborted\".";
+        String delivery = profile.vision() == null ? null : profile.vision().delivery();
+        if ("cli_attachment".equals(delivery)) {
+            return "The images below are attached to this message as image data. Look at them.";
+        }
+        if ("workspace_file".equals(delivery)) {
+            return "The images below are absolute paths in this workspace, not attachments. "
+                    + "**Open every one with your own image-reading tool before you answer.** "
+                    + "If your tools cannot open an image, say so in `summary` and return "
+                    + "status: \"aborted\" — a verdict on files you did not open is worth "
+                    + "less than an honest refusal, and Warden checks for exactly that.";
+        }
+        return "The images below are paths. This profile declares no vision capability, so "
+                + "whether you can see them at all is unproven; if you cannot, say so and "
+                + "return status: \"aborted\".";
     }
 
     private static String attachmentList(List<Path> attachments) {
