@@ -42,7 +42,10 @@ public record ProjectConfig(
             root.collector().add("base_ref is not a safe git revision name: " + baseRef);
         }
 
-        Map<String, List<String>> checks = root.namedStringLists("checks");
+        // An explicitly empty set is legal and means "this project has no command to run
+        // yet" — a from-scratch project whose definition of done is its browser scenarios.
+        // A missing `checks:` block is still refused: that is an omission, not a statement.
+        Map<String, List<String>> checks = root.namedStringLists("checks", true);
         if (checks.isEmpty()) {
             root.collector().add("checks must declare at least one named command set — "
                     + "a project with no executable definition of 'done' cannot be gated");
@@ -50,7 +53,20 @@ public record ProjectConfig(
 
         Map<String, List<String>> scopes = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> entry : root.namedStringLists("scopes").entrySet()) {
-            scopes.put(entry.getKey(), normalizePaths(root, "scopes." + entry.getKey(), entry.getValue()));
+            List<String> declared = entry.getValue();
+            if (declared.contains(RepoPath.WHOLE_REPOSITORY)) {
+                // All or a boundary, never both: `[src, <repository>]` reads like a narrowing
+                // and means the opposite, so it is refused rather than interpreted.
+                if (declared.size() != 1) {
+                    root.collector().add("scopes." + entry.getKey() + ": "
+                            + RepoPath.WHOLE_REPOSITORY + " cannot be combined with a path; it "
+                            + "already means every path in the repository");
+                    continue;
+                }
+                scopes.put(entry.getKey(), List.of(RepoPath.WHOLE_REPOSITORY));
+                continue;
+            }
+            scopes.put(entry.getKey(), normalizePaths(root, "scopes." + entry.getKey(), declared));
         }
 
         Values defaults = root.optMap("defaults").rejectUnknownKeys(DEFAULTS);

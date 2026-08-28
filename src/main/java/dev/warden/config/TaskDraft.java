@@ -26,6 +26,18 @@ public final class TaskDraft {
 
     public Written write(Path projectRoot, String id, String goal, String scope, String risk)
             throws IOException {
+        return write(projectRoot, id, goal, scope, risk, false);
+    }
+
+    /**
+     * @param requireVisual the project resolves to no acceptance command, so the browser
+     *                      scenarios are the only executable definition of done available.
+     *                      Drafting a non-visual task there produces a contract the linter
+     *                      immediately refuses, which reads as a Warden defect rather than as
+     *                      the missing check command it actually is.
+     */
+    public Written write(Path projectRoot, String id, String goal, String scope, String risk,
+                         boolean requireVisual) throws IOException {
         if (!RepoPath.isSlug(id)) {
             throw new IOException("task id must be a lowercase slug of at most 80 characters, got '" + id + "'");
         }
@@ -53,7 +65,7 @@ public final class TaskDraft {
             return new Written(file, id, true);
         }
         Files.createDirectories(file.getParent());
-        boolean visual = looksLikeUi(goal);
+        boolean visual = requireVisual || looksLikeUi(goal);
         String label = controlLabel(goal);
         String yaml;
         if (visual) {

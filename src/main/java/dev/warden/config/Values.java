@@ -219,10 +219,20 @@ public final class Values {
 
     /** A mapping of name → list of strings, used by `checks` and `scopes`. */
     public Map<String, List<String>> namedStringLists(String key) {
+        return namedStringLists(key, false);
+    }
+
+    /**
+     * @param allowEmpty an explicitly written `[]` is a statement, not a typo. It is accepted
+     *                   only where the caller has something else that defines "done"; a
+     *                   missing key still fails, because that one is an omission.
+     */
+    public Map<String, List<String>> namedStringLists(String key, boolean allowEmpty) {
         Values nested = optMap(key);
         Map<String, List<String>> result = new LinkedHashMap<>();
         for (String name : nested.keys()) {
-            result.put(name, nested.requireStringList(name));
+            result.put(name, allowEmpty ? nested.optStringList(name, List.of())
+                    : nested.requireStringList(name));
         }
         return result;
     }

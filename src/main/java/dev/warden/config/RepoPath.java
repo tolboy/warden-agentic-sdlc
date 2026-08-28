@@ -11,6 +11,15 @@ package dev.warden.config;
  */
 public final class RepoPath {
 
+    /**
+     * The one spelling of "every path in this repository". It is a reserved token, not a
+     * path, precisely so it cannot be arrived at by accident: `.` and `*` are refused, and a
+     * blast radius that silently means everything is the failure mode this whole class exists
+     * to prevent. It is written by `warden init` only for a project that has no files yet,
+     * where there is no existing code for a boundary to protect.
+     */
+    public static final String WHOLE_REPOSITORY = "<repository>";
+
     private RepoPath() {}
 
     /** Returns the normalised path, or null when it is not a safe repository-relative path. */

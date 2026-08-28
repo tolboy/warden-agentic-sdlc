@@ -48,6 +48,57 @@ public final class ConfigTest implements Suite {
                 () -> ProjectConfig.parse(PROJECT.replace("checks: full", "checks: nonexistent"), "project.yaml"));
         check.rejects("unsafe scope path refused", "not a safe repository-relative path",
                 () -> ProjectConfig.parse(PROJECT.replace("\"scripts\"", "\"../../etc\""), "project.yaml"));
+
+        // "Everything" has exactly one spelling, and it is a token nobody types by accident.
+        // `.` and `*` stay refused, so a blast radius cannot become unbounded through a typo.
+        ProjectConfig whole = ProjectConfig.parse(
+                PROJECT.replace("harness: [\"scripts\"]", "harness: [\"<repository>\"]"), "project.yaml");
+        check.eq("the whole-repository token survives normalisation as itself",
+                List.of("<repository>"), whole.scopes().get("harness"));
+        check.rejects("and cannot be mixed with a path that would read as a narrowing",
+                "already means every path",
+                () -> ProjectConfig.parse(
+                        PROJECT.replace("harness: [\"scripts\"]", "harness: [\"scripts\", \"<repository>\"]"),
+                        "project.yaml"));
+        check.rejects("a bare dot is still not a scope", "not a safe repository-relative path",
+                () -> ProjectConfig.parse(PROJECT.replace("\"scripts\"", "\".\""), "project.yaml"));
+
+        // An explicitly empty command set is a statement — "this project has no command yet".
+        // A missing checks block is an omission, and stays refused.
+        ProjectConfig noCommands = ProjectConfig.parse("""
+                version: 1
+                project: fresh
+                checks:
+                  fast: []
+                scopes:
+                  code: ["<repository>"]
+                """, "project.yaml");
+        check.eq("an explicitly empty check set is legal", List.of(), noCommands.checks().get("fast"));
+
+        String freshTask = """
+                version: 1
+                id: first
+                goal: Build the first page
+                risk: medium
+                scope: code
+                checks: fast
+                """;
+        check.rejects("a task that defines done nowhere is still refused",
+                "no executable definition of 'done'",
+                () -> TaskSpec.parse(freshTask + """
+                        visual_qa:
+                          required: false
+                          scenarios: []
+                        """, "task.yaml").resolve(noCommands, "task.yaml"));
+        TaskSpec.ResolvedTask byPixels = TaskSpec.parse(freshTask + """
+                visual_qa:
+                  required: true
+                  scenarios: ["1280x720: no-console-errors"]
+                """, "task.yaml").resolve(noCommands, "task.yaml");
+        check.eq("but browser scenarios are an executable definition of done on their own",
+                List.of("1280x720: no-console-errors"), byPixels.visualQa().scenarios());
+        check.eq("and the task carries no command it would have had to invent",
+                List.of(), byPixels.acceptanceCommands());
         check.rejects("unsafe base_ref refused", "not a safe git revision name",
                 () -> ProjectConfig.parse(PROJECT.replace("origin/main", "origin/../main"), "project.yaml"));
         check.rejects("wrong version refused", "version must be 1",

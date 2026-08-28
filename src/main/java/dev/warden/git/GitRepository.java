@@ -80,6 +80,9 @@ public final class GitRepository {
     }
 
     public List<String> outsideScope(Set<String> paths, List<String> scopes) {
+        // A repository with no baseline has no existing code for a boundary to protect. The
+        // token is the only way to say so, and it has to be written down to be true.
+        if (scopes.contains(dev.warden.config.RepoPath.WHOLE_REPOSITORY)) return List.of();
         List<String> violations = new ArrayList<>();
         for (String path : paths) {
             boolean within = scopes.stream().anyMatch(scope -> path.equals(scope) || path.startsWith(scope + "/"));

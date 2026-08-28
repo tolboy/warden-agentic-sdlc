@@ -34,6 +34,46 @@ public final class InitializerTest implements Suite {
             }
         }
 
+        // A project that does not exist yet. There is nothing to infer a check from, and no
+        // existing code for a blast radius to protect — but the contract still has to be one
+        // the linter accepts, or the first thing an operator meets is a refusal from init.
+        Path empty = Files.createTempDirectory("warden-init-empty-");
+        try {
+            ProjectInitializer.Result greenfield = new ProjectInitializer().initialize(empty, "HEAD");
+            check.eq("an empty directory is detected as a project with no build yet",
+                    "none", greenfield.detectedBuild());
+            ConfigLoader.Loaded loaded = new ConfigLoader().load(empty, "example");
+            check.eq("no command is invented for it", java.util.List.of(),
+                    loaded.project().checks().get("fast"));
+            check.eq("and the whole repository is the declared blast radius",
+                    java.util.List.of("<repository>"), loaded.resolved().scopePaths());
+            check.that("which the task inherits as its scope",
+                    loaded.resolved().scopePaths().contains("<repository>"));
+            check.that("the browser scenarios are what define done instead",
+                    loaded.resolved().visualQa().required()
+                            && !loaded.resolved().visualQa().scenarios().isEmpty());
+            check.contains("and the contract says so in the file itself",
+                    Files.readString(greenfield.projectFile()), "no existing");
+        } finally {
+            try (var paths = Files.walk(empty)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+            }
+        }
+
+        // Unrecognised is not the same as absent: a project with files but no build marker
+        // still gets a refusal, because guessing its check would gate the wrong thing.
+        Path unknown = Files.createTempDirectory("warden-init-unknown-");
+        try {
+            Files.writeString(unknown.resolve("main.zig"), "pub fn main() void {}\n");
+            check.rejects("an unrecognised build system is still refused, not guessed at",
+                    "no supported build marker",
+                    () -> new ProjectInitializer().initialize(unknown, "HEAD"));
+        } finally {
+            try (var paths = Files.walk(unknown)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+            }
+        }
+
         Path makeOnly = Files.createTempDirectory("warden-init-make-");
         try {
             Files.writeString(makeOnly.resolve("Makefile"), "test:\n\t@echo ok\n");

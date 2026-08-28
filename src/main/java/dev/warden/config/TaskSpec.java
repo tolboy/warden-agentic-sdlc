@@ -145,9 +145,16 @@ public record TaskSpec(
         }
         commands.addAll(acceptance);
 
-        if (commands.isEmpty()) {
-            collector.add("this task resolves to no acceptance command; "
-                    + "a task with no executable definition of 'done' is not runnable");
+        // Browser scenarios are an executable definition of done, and a stricter one than
+        // most test commands for work a person looks at. Accepting them here is what lets a
+        // project with no build system yet — a directory that was empty this morning — be
+        // gated at all. What is still refused is a task that defines done nowhere.
+        boolean visualDefinesDone = visualQa != null && visualQa.required()
+                && !visualQa.scenarios().isEmpty();
+        if (commands.isEmpty() && !visualDefinesDone) {
+            collector.add("this task resolves to no acceptance command and no visual scenario; "
+                    + "a task with no executable definition of 'done' is not runnable. Add a "
+                    + "command under checks in project.yaml, or visual_qa scenarios here");
         }
         if (commands.size() > 20) {
             collector.add("a task may declare at most 20 acceptance commands, got " + commands.size());

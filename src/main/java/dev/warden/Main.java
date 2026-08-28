@@ -666,6 +666,7 @@ public final class Main {
                   warden role <role> <task>    run one role; add --dry-run to spend nothing
                   warden do \"<goal>\" [--project DIR] [--scope NAME] [--goal-file FILE]
                                            the whole workflow; stops at the human gate
+                                           --init-repo for a directory that is not a repo yet
                   warden run <task>            the bounded loop; stops at the human gate
                   warden ledger                aggregate local evidence and experiment dimensions
                   warden report <run-id> [--text]

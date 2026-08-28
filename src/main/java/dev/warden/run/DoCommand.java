@@ -35,10 +35,18 @@ public final class DoCommand {
 
     public record Options(Path project, String goal, String scope, String risk, String taskId,
                           String runId, String baseRef, boolean inPlace, boolean dryRun,
-                          boolean conductor, boolean autoRejectGates) {
+                          boolean conductor, boolean autoRejectGates, boolean initRepo) {
         public Options(Path project, String goal, String scope, String risk, String taskId,
                        String runId, String baseRef, boolean inPlace, boolean dryRun) {
-            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun, false, false);
+            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
+                    false, false, false);
+        }
+
+        public Options(Path project, String goal, String scope, String risk, String taskId,
+                       String runId, String baseRef, boolean inPlace, boolean dryRun,
+                       boolean conductor, boolean autoRejectGates) {
+            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
+                    conductor, autoRejectGates, false);
         }
     }
 
@@ -89,7 +97,7 @@ public final class DoCommand {
             if (arg.startsWith("--")) {
                 if (!arg.equals("--in-place") && !arg.equals("--no-worktree")
                         && !arg.equals("--dry-run") && !arg.equals("--conductor")
-                        && !arg.equals("--auto-reject-gates")) {
+                        && !arg.equals("--auto-reject-gates") && !arg.equals("--init-repo")) {
                     index++;
                 }
                 continue;
@@ -112,7 +120,7 @@ public final class DoCommand {
                 option(args, "--base-ref", "HEAD"),
                 hasFlag(args, "--in-place") || hasFlag(args, "--no-worktree"),
                 hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
-                hasFlag(args, "--auto-reject-gates"));
+                hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -131,8 +139,19 @@ public final class DoCommand {
             return fail("project_not_found", requested, requested, null, "not a directory: " + requested);
         }
         if (!Files.exists(requested.resolve(".git"))) {
-            return fail("not_a_git_repository", requested, requested, null,
-                    "warden do requires a Git repository so isolation and blast-radius have a merge-base");
+            if (!options.initRepo()) {
+                return fail("not_a_git_repository", requested, requested, null,
+                        "warden do requires a Git repository so isolation and blast-radius have a "
+                                + "merge-base. For a new project, pass --init-repo: warden will run "
+                                + "git init and commit whatever is already here as the baseline");
+            }
+            try {
+                initializeRepository(requested);
+            } catch (Exception cannotInitialize) {
+                return fail("git_init_failed", requested, requested, null,
+                        "could not create a repository in " + requested + ": "
+                                + cannotInitialize.getMessage());
+            }
         }
 
         String taskId = options.taskId() != null ? options.taskId() : TaskDraft.slug(options.goal());
@@ -185,9 +204,13 @@ public final class DoCommand {
             return fail("risk_unknown", requested, root, taskId, "risk must be one of " + ProjectConfig.RISK_LEVELS);
         }
 
+        // A project with no check command has only its browser scenarios to define done.
+        List<String> defaultCommands = project.defaultChecks() == null ? List.of()
+                : project.checks().getOrDefault(project.defaultChecks(), List.of());
         TaskDraft.Written drafted;
         try {
-            drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk);
+            drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk,
+                    defaultCommands.isEmpty());
         } catch (TaskDraft.TaskConflict conflict) {
             return fail("task_conflict", requested, root, taskId, conflict.getMessage());
         }
@@ -279,6 +302,32 @@ public final class DoCommand {
                 .resolve(dev.warden.approval.ApprovalStore.FILE_NAME).toString());
         report.put("lands", false);
         return new Outcome(accepted, code, requested, root, taskId, report);
+    }
+
+    /**
+     * A repository for a project that did not have one. Whatever is already in the directory
+     * becomes the first commit, on purpose: without a baseline every pre-existing file would
+     * read as something an agent produced, and the blast-radius check would be measuring the
+     * operator's own work. `--init-repo` is opt-in for the same reason — creating a commit in
+     * somebody's directory is not something to do because a path happened to lack `.git`.
+     */
+    private void initializeRepository(Path project) throws Exception {
+        java.time.Duration limit = java.time.Duration.ofSeconds(60);
+        for (List<String> command : List.of(
+                List.of("git", "init", "-q", "-b", "main", "."),
+                List.of("git", "add", "-A"))) {
+            ProcessRunner.Result result = processes.run(command, project, limit);
+            if (!result.ok()) throw new java.io.IOException(String.join(" ", command)
+                    + " failed: " + result.stderr().strip());
+        }
+        // --allow-empty so a genuinely empty directory still gets the root commit that every
+        // later merge-base, fingerprint and diff is taken against.
+        ProcessRunner.Result committed = processes.run(List.of("git", "commit", "-q",
+                "--allow-empty", "-m", "warden: baseline before automated work"), project, limit);
+        if (!committed.ok()) {
+            throw new java.io.IOException("git commit failed: " + committed.stderr().strip()
+                    + " (set user.name and user.email, or run git init yourself)");
+        }
     }
 
     private Outcome fail(String code, Path project, Path worktree, String taskId, String message) {

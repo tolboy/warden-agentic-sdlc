@@ -28,6 +28,11 @@ public final class ProjectInitializer {
         }
         if (scopes.isEmpty()) {
             if (Files.isRegularFile(root.resolve("Makefile"))) scopes.add("Makefile");
+            // A project from scratch has no directory to protect: whatever the agent creates
+            // is new, and a blast radius of `src` would refuse the package.json it has to
+            // write. This is the one case where the whole repository is the honest boundary,
+            // and it is written into the contract rather than assumed.
+            else if (detection.greenfield()) scopes.add(RepoPath.WHOLE_REPOSITORY);
             else scopes.add("src");
         }
 
@@ -36,7 +41,9 @@ public final class ProjectInitializer {
         String project = root.getFileName() == null ? "project" : root.getFileName().toString();
         StringBuilder yaml = new StringBuilder();
         yaml.append("version: 1\nproject: ").append(quote(project)).append("\nbase_ref: ")
-                .append(quote(baseRef)).append("\n\nchecks:\n  fast:\n");
+                .append(quote(baseRef)).append("\n\n");
+        if (detection.greenfield()) yaml.append(GREENFIELD_NOTE);
+        yaml.append("checks:\n  fast:").append(detection.checks().isEmpty() ? " []" : "").append('\n');
         for (String command : detection.checks()) yaml.append("    - ").append(quote(command)).append('\n');
         yaml.append("\nscopes:\n  code:\n");
         for (String scope : scopes) yaml.append("    - ").append(quote(scope)).append('\n');
@@ -45,6 +52,42 @@ public final class ProjectInitializer {
         Files.writeString(projectFile, yaml, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
 
         Path task = warden.resolve("tasks/example.yaml");
+        // With no check command there has to be something else that says "done", or the
+        // linter would reject the very file init just wrote. Two assertions that hold for any
+        // page, and each one leaves a screenshot the visual_qa role can be shown.
+        if (detection.greenfield()) {
+            Files.writeString(task, """
+                version: 1
+                id: example
+                goal: Replace this with one mechanically verifiable outcome
+                non_goals:
+                  - "Name at least one thing this task must not change"
+                risk: medium
+                scope: code
+                checks: fast
+                authority:
+                  workspace_write: true
+                  network: false
+                  land: false
+                # This project has no check command yet, so these scenarios are its definition
+                # of done. Point url at the dev server once there is one, and replace the two
+                # generic assertions with what this task actually promises.
+                visual_qa:
+                  required: true
+                  url: "http://127.0.0.1:4173/"
+                  scenarios:
+                    - "1280x720: no-console-errors"
+                    - "700x400: no-console-errors"
+                budgets:
+                  max_role_runs: 6
+                  max_cost_usd: 20.0
+                max_fix_attempts: 2
+                timeout_minutes: 30
+                """, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
+            writeRunsIgnore(warden);
+            new ConfigLoader().load(root, "example");
+            return new Result(projectFile, task, detection.name(), detection.checks());
+        }
         Files.writeString(task, """
                 version: 1
                 id: example
@@ -67,6 +110,13 @@ public final class ProjectInitializer {
                 max_fix_attempts: 2
                 timeout_minutes: 30
                 """, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
+        writeRunsIgnore(warden);
+        // Never claim successful initialization for a contract Warden itself cannot load.
+        new ConfigLoader().load(root, "example");
+        return new Result(projectFile, task, detection.name(), detection.checks());
+    }
+
+    private static void writeRunsIgnore(Path warden) throws IOException {
         Files.writeString(warden.resolve("runs/.gitignore"), """
                 *
                 !*/
@@ -75,9 +125,6 @@ public final class ProjectInitializer {
                 !.gitignore
                 """,
                 StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
-        // Never claim successful initialization for a contract Warden itself cannot load.
-        new ConfigLoader().load(root, "example");
-        return new Result(projectFile, task, detection.name(), detection.checks());
     }
 
     @SuppressWarnings("unchecked")
@@ -106,12 +153,40 @@ public final class ProjectInitializer {
         }
         if (Files.isRegularFile(root.resolve("Cargo.toml"))) return new Detection("cargo", List.of("cargo test"));
         if (Files.isRegularFile(root.resolve("Makefile"))) return new Detection("make", List.of("make test"));
+        // No build marker AND no files: a project that does not exist yet, which is a
+        // different thing from one whose build system is unrecognised. Guessing a check for
+        // the second produces a gate that fails for reasons unrelated to the task, so it is
+        // still refused. The first gets a contract whose definition of done is written by the
+        // operator, or by the browser scenarios `warden do` drafts.
+        if (isEmptyProject(root)) return new Detection("none", List.of(), true);
         throw new IOException("no supported build marker found; create .warden/project.yaml manually");
+    }
+
+    /** Nothing but hidden metadata: no source, no manifest, nothing to infer a check from. */
+    private static boolean isEmptyProject(Path root) throws IOException {
+        try (var entries = Files.list(root)) {
+            return entries.noneMatch(path -> !path.getFileName().toString().startsWith("."));
+        }
     }
 
     private static String quote(String value) {
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
-    private record Detection(String name, List<String> checks) {}
+    private static final String GREENFIELD_NOTE = """
+            # This directory had no files when warden init ran, so there is nothing here to
+            # infer a check from. Two consequences, both deliberate and both editable:
+            #
+            #   checks.fast is empty. Until you write the real command, the browser scenarios
+            #   in the task contract are this project's only executable definition of "done",
+            #   and a task that declares neither is refused rather than passed.
+            #
+            #   the scope is the whole repository. A project with no baseline has no existing
+            #   code for a blast radius to protect. Narrow it to real directories as soon as
+            #   this project has a shape.
+            """;
+
+    private record Detection(String name, List<String> checks, boolean greenfield) {
+        Detection(String name, List<String> checks) { this(name, checks, false); }
+    }
 }
