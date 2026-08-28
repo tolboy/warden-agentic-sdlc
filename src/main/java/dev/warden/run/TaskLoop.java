@@ -5,6 +5,7 @@ import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
+import dev.warden.config.WardenTree;
 import dev.warden.config.Workflow;
 import dev.warden.gate.GateRunner;
 import dev.warden.gate.VisualQaRunner;
@@ -93,7 +94,10 @@ public final class TaskLoop {
         // move the baseline or rewrite its own acceptance criteria.
         GitRepository git = new GitRepository(root, processes);
         String diffBaseCommit = git.mergeBase(task.baseRef());
-        String contractHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
+        // The whole `.warden` tree, not two files: a second task contract, a rewritten policy
+        // or a deleted scenario file are all terms the run would then be judged by.
+        Map<String, String> configSnapshot = WardenTree.snapshot(root);
+        String contractHash = WardenTree.digest(configSnapshot);
         Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd());
         // One runner for the whole loop: a vendor that ran out at implement time must not be
         // dispatched again at review time. The gate makes the budget count vendor calls, not
@@ -128,7 +132,7 @@ public final class TaskLoop {
         summary.put("steps", steps);
 
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
-                contractHash, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk);
+                configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk);
         try {
             engine.run();
         } catch (StopException stopped) {
@@ -145,7 +149,7 @@ public final class TaskLoop {
         int attempt = engine.attempt();
         summary.putIfAbsent("skipped_stages", engine.skipped());
 
-        if (!dryRun && !contractMatches(loaded, contractHash)) {
+        if (!dryRun && !contractMatches(loaded, configSnapshot)) {
             return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
         }
 
@@ -207,7 +211,7 @@ public final class TaskLoop {
         private final EvidenceLedger ledger;
         private final String runId;
         private final boolean dryRun;
-        private final String contractHash;
+        private final Map<String, String> contractSnapshot;
         private final String diffBaseCommit;
         private final List<Map<String, Object>> steps;
         private final Map<String, Object> summary;
@@ -224,7 +228,8 @@ public final class TaskLoop {
         private int attempt;
 
         Engine(ConfigLoader.Loaded loaded, UserConfig user, RoleRunner roles, GateRunner gates,
-               EvidenceLedger ledger, String runId, boolean dryRun, String contractHash,
+               EvidenceLedger ledger, String runId, boolean dryRun,
+               Map<String, String> contractSnapshot,
                String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
                Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk) {
             this.loaded = loaded;
@@ -234,7 +239,7 @@ public final class TaskLoop {
             this.ledger = ledger;
             this.runId = runId;
             this.dryRun = dryRun;
-            this.contractHash = contractHash;
+            this.contractSnapshot = contractSnapshot;
             this.diffBaseCommit = diffBaseCommit;
             this.steps = steps;
             this.summary = summary;
@@ -319,7 +324,7 @@ public final class TaskLoop {
             switch (stage.kind()) {
                 case MACHINE_GATES -> {
                     return runGates(gates, loaded, runId, attempt, dryRun, steps,
-                            contractHash, diffBaseCommit);
+                            contractSnapshot, diffBaseCommit);
                 }
                 case VISUAL_HARNESS -> {
                     VisualQaRunner.Outcome outcome = runVisual(loaded, runId, attempt, dryRun, steps);
@@ -354,7 +359,7 @@ public final class TaskLoop {
         }
 
         private void requireUnchangedContract() {
-            if (!contractMatches(loaded, contractHash)) throw new StopException("contract_mutated");
+            if (!contractMatches(loaded, contractSnapshot)) throw new StopException("contract_mutated");
         }
 
         /** Why this stage is not running at all, or null when it is. */
@@ -503,7 +508,7 @@ public final class TaskLoop {
 
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
                                         int attempt, boolean dryRun, List<Map<String, Object>> steps,
-                                        String contractHash, String diffBaseCommit)
+                                        Map<String, String> pinnedConfig, String diffBaseCommit)
             throws Exception {
         if (dryRun) {
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -514,7 +519,7 @@ public final class TaskLoop {
             return null;
         }
         GateRunner.Outcome outcome = gates.run(loaded, stepRunId(runId, "gates", attempt),
-                contractHash, diffBaseCommit);
+                pinnedConfig, diffBaseCommit);
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("step", "gates");
         entry.put("attempt", (long) attempt);
@@ -525,9 +530,9 @@ public final class TaskLoop {
         return outcome;
     }
 
-    private static boolean contractMatches(ConfigLoader.Loaded loaded, String expected) {
+    private static boolean contractMatches(ConfigLoader.Loaded loaded, Map<String, String> pinned) {
         try {
-            return expected.equals(GitRepository.sha256(loaded.projectFile(), loaded.taskFile()));
+            return WardenTree.changedSince(loaded.root(), pinned).isEmpty();
         } catch (Exception missingOrUnreadable) {
             return false;
         }

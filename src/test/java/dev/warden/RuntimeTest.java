@@ -57,6 +57,34 @@ public final class RuntimeTest implements Suite {
             check.that("untracked Warden contract files remain observable",
                     git.changedPaths().contains(".warden/tasks/extra.yaml"));
 
+            // A project whose `.warden` is not committed — which is every project the day
+            // `warden do` created it — must not fail its own next task because a sibling task
+            // contract exists on disk and is outside the task's source scope.
+            java.util.Map<String, String> pinned =
+                    dev.warden.config.WardenTree.snapshot(repository);
+            GateRunner.Outcome withSibling = new GateRunner(runner)
+                    .run(loaded, "test-sibling-contract", pinned, null);
+            check.that("an unchanged sibling contract is not a blast-radius violation",
+                    withSibling.ok());
+
+            // Changed, though, and it is the terms of the run moving under it.
+            Files.writeString(repository.resolve(".warden/tasks/extra.yaml"),
+                    "version: 1\nid: extra\ngoal: something else\nscope: code\n");
+            GateRunner.Outcome mutated = new GateRunner(runner)
+                    .run(loaded, "test-config-mutated", pinned, null);
+            check.eq("editing any Warden config mid-run fails closed",
+                    "contract_mutated", mutated.code());
+            check.contains("and the report names the exact file and what happened to it",
+                    String.valueOf(mutated.data().get("configuration_changed")),
+                    ".warden/tasks/extra.yaml (modified)");
+
+            Files.delete(repository.resolve(".warden/tasks/extra.yaml"));
+            GateRunner.Outcome removed = new GateRunner(runner)
+                    .run(loaded, "test-config-removed", pinned, null);
+            check.eq("so does deleting one", "contract_mutated", removed.code());
+            check.contains("and that is reported as a removal, not a modification",
+                    String.valueOf(removed.data().get("configuration_changed")), "(removed)");
+
             ConfigLoader.Loaded visual = new ConfigLoader().load(repository, "needs-eyes");
             GateRunner.Outcome eyes = new GateRunner(runner).run(visual, "test-visual");
             check.that("machine gates no longer stand in for visual QA",

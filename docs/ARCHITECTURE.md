@@ -12,6 +12,7 @@ The source of truth is Warden, not a target-project branch.
 | Direct CLI adapter | Warden SPI | Implemented. Live: Grok review, Claude Sonnet review, Codex mini implement (`prompt_delivery: stdin`, `--approve-for-me`). JSONL `agent_message` recovery for Codex. Windows batch-shim refusal unchanged |
 | Orca adapter | Warden SPI + Orca | Implemented: attaches to the current Orca worktree, starts one supervised worker, completes only on `worker_done` / dispatch settlement. Does not create worktrees. Live lifecycle not yet claimed as proven |
 | Local runner | Warden SPI | Named (`runner: local`); resolver refuses `runner_unimplemented` rather than pretending it is Direct CLI |
+| Configuration integrity | Warden | Implemented: the whole `.warden` tree except `runs/` is snapshotted before the first dispatch and compared after every role and around every gate command. Any modification, addition or deletion is `contract_mutated` naming the path. Because that holds, `.warden` sits outside the task's source blast radius without opening a hole |
 | Workspace/tool policy | Git + TaskSpec authority | Scope and local write/network/land declarations implemented; tool allowlists pending |
 | Evidence ledger | Warden | Implemented: machine reports, append-only JSONL, `warden ledger` aggregation, and per-attempt vendor cost, turns, tokens and model as reported |
 | Conductor | Outer controller | Machine-only workflow implemented; it does not duplicate Warden's role loop |

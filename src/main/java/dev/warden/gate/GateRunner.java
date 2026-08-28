@@ -1,6 +1,7 @@
 package dev.warden.gate;
 
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.WardenTree;
 import dev.warden.git.GitRepository;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
@@ -28,16 +29,18 @@ public final class GateRunner {
     }
 
     /**
-     * Run gates against the immutable base and contract snapshot selected before the first
-     * agent dispatch. Null values preserve the standalone {@code warden gates} behaviour.
+     * Run gates against the immutable base and `.warden` snapshot selected before the first
+     * agent dispatch. Null values preserve the standalone {@code warden gates} behaviour,
+     * which takes its own snapshot on entry and so only sees a command mutating the config.
      */
-    public Outcome run(ConfigLoader.Loaded loaded, String runId, String expectedContractHash,
+    public Outcome run(ConfigLoader.Loaded loaded, String runId, Map<String, String> pinnedConfig,
                        String pinnedMergeBase) throws IOException, InterruptedException {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);
-        String observedHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
-        String contractHash = expectedContractHash != null ? expectedContractHash : observedHash;
+        Map<String, String> config = pinnedConfig != null ? pinnedConfig
+                : WardenTree.snapshot(loaded.root());
+        String contractHash = WardenTree.digest(config);
         String mergeBase;
         try {
             mergeBase = pinnedMergeBase != null ? pinnedMergeBase
@@ -46,14 +49,17 @@ public final class GateRunner {
             return finish(ledger, false, "base_ref_unresolvable", base(loaded, contractHash, null,
                     List.of(), List.of(), failure.getMessage()));
         }
-        if (!contractHash.equals(observedHash)) {
-            return finish(ledger, false, "contract_mutated", base(loaded, contractHash, mergeBase,
+        List<String> mutated = WardenTree.changedSince(loaded.root(), config);
+        if (!mutated.isEmpty()) {
+            Map<String, Object> report = base(loaded, contractHash, mergeBase,
                     List.copyOf(git.changedPaths(mergeBase)), List.of(),
-                    "configuration changed after the run snapshot and before machine gates"));
+                    "configuration changed after the run snapshot and before machine gates");
+            report.put("configuration_changed", mutated);
+            return finish(ledger, false, "contract_mutated", report);
         }
 
         Set<String> initialPaths = git.changedPaths(mergeBase);
-        List<String> initialViolations = git.outsideScope(sourcePaths(loaded, initialPaths),
+        List<String> initialViolations = git.outsideScope(WardenTree.sourcePaths(initialPaths),
                 loaded.resolved().scopePaths());
         if (!initialViolations.isEmpty()) {
             return finish(ledger, false, "preflight_outside_scope", base(loaded, contractHash, mergeBase,
@@ -64,13 +70,16 @@ public final class GateRunner {
         long totalMillis = 0;
         for (int index = 0; index < loaded.resolved().acceptanceCommands().size(); index++) {
             String command = loaded.resolved().acceptanceCommands().get(index);
-            String beforeHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
-            if (!contractHash.equals(beforeHash)) {
-                return finish(ledger, false, "contract_mutated", base(loaded, contractHash, mergeBase,
-                        List.copyOf(git.changedPaths(mergeBase)), List.of(), "configuration changed before command " + index));
+            List<String> beforeMutations = WardenTree.changedSince(loaded.root(), config);
+            if (!beforeMutations.isEmpty()) {
+                Map<String, Object> report = base(loaded, contractHash, mergeBase,
+                        List.copyOf(git.changedPaths(mergeBase)), List.of(),
+                        "configuration changed before command " + index);
+                report.put("configuration_changed", beforeMutations);
+                return finish(ledger, false, "contract_mutated", report);
             }
             Set<String> beforePaths = git.changedPaths(mergeBase);
-            List<String> beforeViolations = git.outsideScope(sourcePaths(loaded, beforePaths),
+            List<String> beforeViolations = git.outsideScope(WardenTree.sourcePaths(beforePaths),
                     loaded.resolved().scopePaths());
             if (!beforeViolations.isEmpty()) {
                 return finish(ledger, false, "blast_radius_before_command", base(loaded, contractHash,
@@ -86,15 +95,17 @@ public final class GateRunner {
             totalMillis += result.durationMillis();
             commands.add(commandEvidence(index, command, result));
 
-            String afterHash = GitRepository.sha256(loaded.projectFile(), loaded.taskFile());
-            if (!contractHash.equals(afterHash)) {
+            List<String> afterMutations = WardenTree.changedSince(loaded.root(), config);
+            if (!afterMutations.isEmpty()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
-                        List.copyOf(git.changedPaths(mergeBase)), List.of(), "configuration changed by command " + index);
+                        List.copyOf(git.changedPaths(mergeBase)), List.of(),
+                        "configuration changed by command " + index);
+                report.put("configuration_changed", afterMutations);
                 report.put("commands", commands);
                 return finish(ledger, false, "contract_mutated", report);
             }
             Set<String> afterPaths = git.changedPaths(mergeBase);
-            List<String> violations = git.outsideScope(sourcePaths(loaded, afterPaths),
+            List<String> violations = git.outsideScope(WardenTree.sourcePaths(afterPaths),
                     loaded.resolved().scopePaths());
             if (!violations.isEmpty()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
@@ -174,20 +185,4 @@ public final class GateRunner {
                 : List.of("/bin/sh", "-lc", command);
     }
 
-    /**
-     * The project contract and selected task may have been created by {@code warden do} and
-     * are governed by the snapshot hash, not by the task's source-code scope. No other Warden
-     * path receives this exemption.
-     */
-    private static Set<String> sourcePaths(ConfigLoader.Loaded loaded, Set<String> changed) {
-        Set<String> paths = new java.util.LinkedHashSet<>(changed);
-        paths.remove(relative(loaded.root(), loaded.projectFile()));
-        paths.remove(relative(loaded.root(), loaded.taskFile()));
-        return paths;
-    }
-
-    private static String relative(Path root, Path file) {
-        return root.toAbsolutePath().normalize().relativize(file.toAbsolutePath().normalize())
-                .toString().replace('\\', '/');
-    }
 }
