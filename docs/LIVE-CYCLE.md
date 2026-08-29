@@ -342,6 +342,62 @@ totals   3 vendor call(s), 0 fix round(s), $1.2765 of $14.0000 budget
 
 ---
 
+## 8. Полный цикл до человеческого гейта, и починка, которую заказали глаза
+
+2026-08-29. Задача не про вёрстку и не про кнопку: у главы `stone-upon-stone` в
+`src/lib/story.ts` не было смысла — путник нёс камень к куче камней, клал его и
+останавливался. Цель дала направление (очаг на камнях вместо ещё одного камня) и оставила
+дизайн реализатору, а обязательным сделала то, что можно проверить: id шаблона, вид
+жеста-потребности, `data-testid` на кнопках стенда и «читается с одного взгляда на 1280x720».
+
+Контракт задачи опирается на шаг `wait`, без которого этот проект нельзя проверить вообще:
+панель стенда появляется в DOM секунд через шесть после загрузки, а расплата главы —
+секунд через двадцать восемь после постановки.
+
+```yaml
+- "1280x720: wait 7 -> testid=lab-chapter-stone-upon-stone click -> wait 20
+   -> css=canvas visible -> wait 14 -> css=canvas visible -> no-console-errors"
+```
+
+```text
+stage           attempt  ok  vendor/model                    cost      tokens        ms
+implementer           0  ok  codex/gpt-5.6-terra             ?         1103531/4842   166805
+gates                 0  ok  -                               ?         ?/?                 ?
+reviewer              0  ok  grok/grok-4.6                   0.3397    543998/23179   712582
+visual_qa             0  ok  -                               ?         ?/?                 ?
+visual_qa             0  ok  claude/opus                     1.8399    34/15152       243463
+implementer           1  ok  codex/gpt-5.6-terra             ?         851760/5597    164552
+gates                 1  ok  -                               ?         ?/?                 ?
+reviewer              1  ok  grok/grok-4.6                   0.3099    187337/45156   990086
+visual_qa             1  ok  -                               ?         ?/?                 ?
+visual_qa             1  ok  claude/opus                     1.4202    26/9485        156206
+
+totals   6 vendor call(s), 1 fix round(s), $3.9098 of $40.0000 budget
+outcome  ok  ready_for_human  next=human_gate
+```
+
+Раунд починки заказала **не машина**. Гейты были зелёные, ревью Grok — `pass`, харнесс —
+`passed`. P1 выставила роль с глазами, дословно:
+
+> the whole tableau is standing on water … at wait-5 the fire's base sits at ~y 578, above
+> the lake's near edge at y 590, i.e. mid-basin. A hearth burning on a lake reads as a
+> rendering fault, not as a reason, and it directly contradicts the chapter's own name,
+> 'the mark on the open ground'.
+
+Реализатор починил постановку стенда, ревьюер перечитал дерево (`recheck_after_fix`), на
+втором заходе роль дала `pass`: путник подходит к двум камням на равнине, через четырнадцать
+секунд там горит очаг с дымом. `stale_judgements` в `task-run.json` пусто — ни одна стадия не
+судила о дереве, которого больше нет.
+
+Что этот прогон стоил инструменту: четыре дефекта Warden, найденные по дороге и починенные в
+самом Warden, — слепота харнесса к интерфейсу со своими часами, `text=chapter visible` в
+черновике контракта из слова перед «button», реализатор, которому никогда не показывали
+браузерные сценарии, и проба готовности, которая говорила Vite по HTTP/2 и не слышала ответа.
+Последняя стоила отдельного прогона: `visual_qa_unavailable` — это остановка без раунда
+починки, и она выбросила зелёные реализатора и ревью.
+
+---
+
 ## 7. Чего этот файл всё ещё не утверждает
 
 * Orca-адаптер (`runner: orca`) как исполнитель роли живьём не подтверждён. Orca в этих
