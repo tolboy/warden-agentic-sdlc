@@ -242,6 +242,13 @@ public final class DoCommand {
         report.put("dry_run", options.dryRun());
         report.put("summary", String.valueOf(loop.summary()));
         report.put("steps", loop.summaryReport().get("steps"));
+        // Only when there is something to say. A dry run does not stop for these, so if the
+        // preview does not name them the operator reads "ok" and then watches the real run
+        // refuse to dispatch.
+        for (String carried : List.of("preexisting_violations", "resolution", "would_stop")) {
+            Object value = loop.summaryReport().get(carried);
+            if (value != null) report.put(carried, value);
+        }
         report.put("decision_path", loop.summaryReport().get("decision_path"));
         report.put("decision_state", loop.summaryReport().get("decision_state"));
         report.put("decision_options", loop.summaryReport().get("decision_options"));

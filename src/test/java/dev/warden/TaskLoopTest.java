@@ -156,6 +156,17 @@ public final class TaskLoopTest implements Suite {
                     List.of("README.md"), refusedEarly.summaryReport().get("preexisting_violations"));
             check.that("no role step was recorded at all", steps(refusedEarly).isEmpty());
 
+            // The same tree, previewed. A dry run has no candidate to protect, so it does not
+            // stop — but it is the operator's "will this work", and staying silent here meant
+            // the preview resolved the whole chain and the real run then refused to dispatch.
+            TaskLoop.Outcome previewed = new TaskLoop(new ProcessRunner())
+                    .run(new ConfigLoader().load(dirty, "hello"), UserConfig.load(home), "p2", true);
+            check.eq("a dry run still finishes", "dry_run", previewed.reason());
+            check.eq("but names the path that will stop the real one",
+                    List.of("README.md"), previewed.summaryReport().get("preexisting_violations"));
+            check.eq("and says what it would have stopped for", "preflight_outside_scope",
+                    previewed.summaryReport().get("would_stop"));
+
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);

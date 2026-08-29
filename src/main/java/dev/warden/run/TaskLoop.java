@@ -151,12 +151,19 @@ public final class TaskLoop {
         // that at the gates stage means having paid a vendor to find out.
         List<String> alreadyOutside = git.outsideScope(
                 WardenTree.sourcePaths(git.changedPaths(diffBaseCommit)), task.scopePaths());
-        if (!dryRun && !alreadyOutside.isEmpty()) {
+        if (!alreadyOutside.isEmpty()) {
             summary.put("preexisting_violations", alreadyOutside);
             summary.put("resolution", "these paths were already changed before this run started "
                     + "and are outside the task's scope " + task.scopePaths() + ". Revert them, "
                     + "commit them, or widen the scope — an implementer cannot touch them.");
-            return stop(ledger, summary, "preflight_outside_scope", steps, 0, budget);
+            if (!dryRun) return stop(ledger, summary, "preflight_outside_scope", steps, 0, budget);
+            // A dry run has no candidate to protect, so this does not stop it — but it is
+            // exactly what the preview is for. Measured: a fresh Orca worktree of an npm
+            // project arrives with `npm install` having rewritten the lockfile, --dry-run
+            // reported the whole chain resolving, and the real run refused before dispatching
+            // anything. A preview that stays silent about the one thing that will stop the
+            // run is worse than no preview.
+            summary.put("would_stop", "preflight_outside_scope");
         }
 
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
