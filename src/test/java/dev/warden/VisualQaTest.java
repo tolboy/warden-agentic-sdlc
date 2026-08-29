@@ -47,6 +47,7 @@ public final class VisualQaTest implements Suite {
             check.that("and does not pass", !missing.ok());
 
             waitBudgetChecks(check);
+            upgradeHostileServerChecks(check);
             occupiedPortChecks(check, project);
         } finally {
             deleteTree(sandbox);
@@ -62,6 +63,56 @@ public final class VisualQaTest implements Suite {
      * confident set of assertions about the wrong application. It failed that time, which was
      * luck. Warden now refuses to guess whose server it found.
      */
+    /**
+     * A server that behaves the way a Node dev server with a WebSocket on the same port
+     * behaves: an ordinary HTTP/1.1 request is answered, and one carrying `Connection:
+     * Upgrade` is swallowed, because the WebSocket layer claimed it and then found it was
+     * not a WebSocket.
+     *
+     * Java's HttpClient defaults to HTTP/2, and over cleartext that means it sends exactly
+     * that upgrade. Measured against Vite 8: three timeouts out of three, while the same
+     * request pinned to HTTP/1.1 came back 200 in 7-23 ms. A live run lost its whole visual
+     * stage to it — `visual_qa_unavailable`, which stops with no fix round — over a server
+     * whose own log said "ready in 1784 ms".
+     */
+    private void upgradeHostileServerChecks(Check check) throws Exception {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0, 4,
+                java.net.InetAddress.getLoopbackAddress())) {
+            Thread server = new Thread(() -> {
+                while (!socket.isClosed()) {
+                    try (java.net.Socket client = socket.accept()) {
+                        var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                                client.getInputStream(), java.nio.charset.StandardCharsets.US_ASCII));
+                        boolean upgrade = false;
+                        for (String line = reader.readLine();
+                             line != null && !line.isEmpty(); line = reader.readLine()) {
+                            if (line.toLowerCase(java.util.Locale.ROOT).startsWith("connection:")
+                                    && line.toLowerCase(java.util.Locale.ROOT).contains("upgrade")) {
+                                upgrade = true;
+                            }
+                        }
+                        if (upgrade) {
+                            // Claimed by the WebSocket layer and never answered.
+                            Thread.sleep(8_000);
+                            continue;
+                        }
+                        client.getOutputStream().write(
+                                ("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                                        .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        client.getOutputStream().flush();
+                    } catch (Exception stop) {
+                        return;
+                    }
+                }
+            });
+            server.setDaemon(true);
+            server.start();
+            String url = "http://127.0.0.1:" + socket.getLocalPort() + "/";
+            check.that("a server that swallows an h2c upgrade still answers the probe",
+                    VisualQaRunner.httpOk(url));
+        }
+    }
+
     /**
      * A `wait` in a scenario is time the operator asked the page for. Charging it against
      * the fixed two-minute adapter ceiling turns a legal contract into

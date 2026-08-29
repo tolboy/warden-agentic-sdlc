@@ -95,8 +95,12 @@ public final class VisualQaRunner {
                 report.put("preview_log", previewLog.toString());
                 server = startServer(loaded.root(), start, previewLog);
                 if (!waitForHttp(url, Duration.ofSeconds(45))) {
+                    // The server's own log is the first thing anybody would want to read here,
+                    // and until it was quoted the message sounded like the command had failed
+                    // when the log said "ready in 1784 ms".
                     return finish(ledger, false, "visual_qa_unavailable", report,
-                            "started `" + start + "` but " + url + " never answered");
+                            "started `" + start + "` but " + url + " never answered. Its output "
+                                    + "ended with: " + logTail(previewLog));
                 }
             } else {
                 // No start in the contract: pointing at a running app is the operator's choice.
@@ -254,6 +258,20 @@ public final class VisualQaRunner {
         return null;
     }
 
+    /** The last few lines a started server printed, for a message about it not answering. */
+    private static String logTail(Path log) {
+        try {
+            if (!Files.isRegularFile(log)) return "(no output)";
+            List<String> lines = Files.readAllLines(log).stream()
+                    .map(String::strip).filter(line -> !line.isEmpty()).toList();
+            if (lines.isEmpty()) return "(no output)";
+            List<String> tail = lines.subList(Math.max(0, lines.size() - 4), lines.size());
+            return String.join(" / ", tail);
+        } catch (IOException unreadable) {
+            return "(log unreadable: " + unreadable.getMessage() + ")";
+        }
+    }
+
     private static Process startServer(Path root, String command, Path log) throws IOException {
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         List<String> shell = windows ? List.of("cmd.exe", "/d", "/s", "/c", command)
@@ -272,11 +290,33 @@ public final class VisualQaRunner {
         return httpOk(url);
     }
 
-    private static boolean httpOk(String url) {
+    /**
+     * Is anything serving this URL?
+     *
+     * Pinned to HTTP/1.1, and that is the whole point of this method existing rather than
+     * being one line inline. Java's HttpClient defaults to HTTP/2, and over cleartext that
+     * means every request carries the h2c upgrade headers. A Node dev server with a
+     * WebSocket server attached to the same port takes `Connection: Upgrade` for its own,
+     * decides it is not a WebSocket, and leaves the socket hanging — so the request times
+     * out against a server that is answering everyone else in seven milliseconds.
+     *
+     * Measured on Vite 8: the default client timed out three times out of three; the same
+     * request pinned to HTTP/1.1 returned 200 in 7-23 ms. Both of this method's callers
+     * failed the wrong way round because of it. The readiness wait reported
+     * `visual_qa_unavailable` — "started `npm run dev` but the URL never answered" — for a
+     * server whose own log said it was ready, and that code stops the run with no fix round.
+     * Worse, the occupancy check concluded the port was free while a stranger was serving
+     * it, which is exactly the case `visual_qa_port_occupied` exists to catch.
+     *
+     * A liveness probe has no use for HTTP/2 in any case.
+     */
+    public static boolean httpOk(String url) {
         try {
-            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+            HttpClient client = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(Duration.ofSeconds(2)).build();
             HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET()
-                    .timeout(Duration.ofSeconds(2)).build();
+                    .timeout(Duration.ofSeconds(5)).build();
             HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
             return response.statusCode() < 500;
         } catch (Exception ignored) {
