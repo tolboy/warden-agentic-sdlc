@@ -311,10 +311,15 @@ public final class VisualQaRunner {
      * A liveness probe has no use for HTTP/2 in any case.
      */
     public static boolean httpOk(String url) {
-        try {
-            HttpClient client = HttpClient.newBuilder()
-                    .version(HttpClient.Version.HTTP_1_1)
-                    .connectTimeout(Duration.ofSeconds(2)).build();
+        // Closed after every probe, and not only out of tidiness. An HttpClient keeps a
+        // keep-alive pool and a selector thread; `waitForHttp` calls this every 300 ms for
+        // up to 45 s, so leaking one per call leaks a hundred and fifty of them per stage.
+        // Worse, a pooled connection outlives the socket it was made to: a probe can be
+        // handed a dead connection to a port that has since been rebound and answer "no"
+        // about a server that is answering. Caught by one test poisoning the next.
+        try (HttpClient client = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(2)).build()) {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET()
                     .timeout(Duration.ofSeconds(5)).build();
             HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
