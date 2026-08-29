@@ -203,7 +203,10 @@ public final class RoleRunner {
             if (!Files.isRegularFile(templateFile)) {
                 throw new IllegalStateException("prompt template not found: " + templateFile);
             }
-            String prompt = PromptRenderer.render(Files.readString(templateFile), values, templateFile.toString());
+            String template = Files.readString(templateFile);
+            String prompt = PromptRenderer.render(template, values, templateFile.toString());
+            boolean backfilled = backfillNeeded(role, task, template);
+            if (backfilled) prompt = prompt + browserScenarioSection(values.get("visual_scenarios"));
 
             Path promptDirectory = ledger.runDirectory().resolve("prompts");
             Files.createDirectories(promptDirectory);
@@ -223,6 +226,7 @@ public final class RoleRunner {
             report.put("strategy", spec.strategy());
             report.put("independence_required", spec.requireIndependentVendor());
             report.put("avoided_vendor", implementerVendor);
+            if (backfilled) report.put("prompt_backfilled", List.of("visual_scenarios"));
             report.put("rejected_profiles", resolution.rejected());
             report.put("prompt_path", root.relativize(promptFile).toString().replace('\\', '/'));
             report.put("prompt_sha256", GitRepository.sha256(promptFile));
@@ -451,6 +455,40 @@ public final class RoleRunner {
         if (quota != null) entry.put("quota", quota);
         if (inheritsUnfinishedWork) entry.put("inherited_unfinished_work", true);
         return entry;
+    }
+
+    /**
+     * Whether this prompt has to be told about the browser scenarios after the fact.
+     *
+     * The scenarios are half the definition of done — for a project with no check command
+     * they are all of it — and both the reviewer and the visual_qa prompts have always been
+     * given them. The implementer, the one role that can actually satisfy them, was not:
+     * measured on a live run, where the contract asked for a `data-testid` the harness needs
+     * and the implementer's prompt never mentioned it. It would have been found by the
+     * browser stage and sent back as a fix round, paying a vendor to learn something the
+     * contract already said.
+     *
+     * The shipped template now names {{visual_scenarios}}. This covers the templates already
+     * sitting in an operator's ~/.warden — `warden setup` never overwrites them, and no
+     * operator ever meant to hide the definition of done from the role expected to meet it.
+     */
+    private static boolean backfillNeeded(String role, TaskSpec.ResolvedTask task, String template) {
+        return "implementer".equals(role)
+                && task.visualQa().required()
+                && !task.visualQa().scenarios().isEmpty()
+                && !PromptRenderer.uses(template, "visual_scenarios");
+    }
+
+    private static String browserScenarioSection(String scenarios) {
+        return """
+
+                ## Browser scenarios that must also pass
+
+                A headless browser runs these against the app after the acceptance commands.
+                They are part of the definition of done, not a suggestion: a matcher that finds
+                nothing fails the run and comes back to you as a fix round.
+
+                """ + scenarios + "\n";
     }
 
     private Map<String, String> promptValues(ConfigLoader.Loaded loaded, TaskSpec.ResolvedTask task,

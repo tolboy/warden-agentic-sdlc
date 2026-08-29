@@ -542,6 +542,11 @@ public final class UserSetup {
             The work is done when all of these pass
             {{acceptance_commands}}
 
+            And when a headless browser can still assert every one of these. They are part of
+            the definition of done, and for a project with no check command they are all of it
+            — a matcher that finds nothing sends the work back to you as a fix round.
+            {{visual_scenarios}}
+
             Authority granted by the task
             : {{authority}}
 
