@@ -46,6 +46,7 @@ public final class VisualQaTest implements Suite {
             check.eq("missing adapter fails closed", "visual_qa_unavailable", missing.code());
             check.that("and does not pass", !missing.ok());
 
+            waitBudgetChecks(check);
             occupiedPortChecks(check, project);
         } finally {
             deleteTree(sandbox);
@@ -61,6 +62,25 @@ public final class VisualQaTest implements Suite {
      * confident set of assertions about the wrong application. It failed that time, which was
      * luck. Warden now refuses to guess whose server it found.
      */
+    /**
+     * A `wait` in a scenario is time the operator asked the page for. Charging it against
+     * the fixed two-minute adapter ceiling turns a legal contract into
+     * `visual_qa_unavailable` — a stop with no fix round, blaming the browser for a
+     * contract that was doing exactly what it said.
+     */
+    private void waitBudgetChecks(Check check) {
+        check.eq("no wait declared leaves the plain ceiling", 120L,
+                VisualQaRunner.adapterBudget(java.util.List.of(
+                        "1280x720: text=Create visible")).toSeconds());
+        check.eq("declared waits are added on top", 120L + 30 + 45,
+                VisualQaRunner.adapterBudget(java.util.List.of(
+                        "1280x720: testid=stage click -> wait 30 -> css=.fire visible",
+                        "700x400: testid=stage click -> wait 45s -> css=.fire visible")).toSeconds());
+        check.eq("and are bounded, so a contract cannot ask for forever", 120L + 15 * 60,
+                VisualQaRunner.adapterBudget(java.util.Collections.nCopies(400,
+                        "1280x720: testid=stage click -> wait 100 -> css=.fire visible")).toSeconds());
+    }
+
     private void occupiedPortChecks(Check check, Path project) throws Exception {
         try (java.net.ServerSocket squatter = new java.net.ServerSocket(0, 1,
                 java.net.InetAddress.getByName("127.0.0.1"))) {

@@ -10,7 +10,7 @@
  *     --scenario "1280x720: css=.settings-panel visible" \
  *     --scenario "1280x720: testid=save click -> css=.saved visible" \
  *     --scenario "1280x720: css=canvas click@0.5,0.86 -> text=Placed visible" \
- *     --scenario "1280x720: no-console-errors"
+ *     --scenario "1280x720: testid=stage click -> wait 30 -> css=.fire visible" \n *     --scenario "1280x720: no-console-errors"
  *
  * Scenario grammar
  *   WxH: <matcher> <assertion> [-> <matcher> <assertion>]
@@ -23,6 +23,11 @@
  *              click@0.5,0.86 presses that fraction across and down the element's
  *              own box instead of its centre. For a full-window canvas the centre
  *              is the only point a plain `click` can ever reach.
+ *   wait N     a step of its own: hold for N seconds, then photograph the page.
+ *              Everything else here judges a page 1.2 s after a click, which is
+ *              blind to any UI that runs on its own clock — an animation, a
+ *              staged scene, a countdown. A wait cannot fail and cannot be a
+ *              scenario's only step: it produces evidence, it does not assert.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -95,6 +100,14 @@ const ASSERTIONS = new Set(["visible", "hidden", "click"]);
 const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
 
 /**
+ * `wait 30` / `wait 30s`: hold, then photograph. Bounded because a gate that can
+ * sleep forever is a hang with a friendly name; 120 s is longer than any UI ought
+ * to make a person wait for the thing it is about.
+ */
+const WAIT_STEP = /^wait\s*=?\s*(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?$|^wait\s*=?\s*(\d+(?:\.\d+)?)$/i;
+const WAIT_MAX_SECONDS = 120;
+
+/**
  * Splits "css=.panel > .row visible" into a matcher and an assertion. The
  * assertion is the LAST word, because a CSS selector may contain spaces and
  * a label almost always does.
@@ -102,6 +115,14 @@ const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
 function parseStep(raw, fallbackAssertion = "visible") {
   const text = String(raw).trim();
   if (!text) return null;
+  const held = text.match(WAIT_STEP);
+  if (held) {
+    const seconds = Number(held[1] ?? held[2]);
+    if (!(seconds > 0 && seconds <= WAIT_MAX_SECONDS)) {
+      throw new Error(`scenario "${text}": wait takes 0 to ${WAIT_MAX_SECONDS} seconds, got ${seconds}`);
+    }
+    return { kind: "wait", value: String(seconds), assertion: "wait", seconds, at: null, raw: text };
+  }
   const words = text.split(/\s+/);
   let assertion = fallbackAssertion;
   let at = null;
@@ -439,7 +460,36 @@ async function shoot(cdp, outDir, name) {
   return file;
 }
 
+/**
+ * Hold, then photograph.
+ *
+ * A wait never fails: there is nothing here for a page to get wrong. What it
+ * produces is a screenshot taken at a moment the scenario names, so a step
+ * after it can assert on a state the page reached by itself, and the role with
+ * eyes is shown the frame the chapter is actually about rather than the one
+ * 1.2 s after a click.
+ */
+async function runWait(cdp, step, outDir, label) {
+  const before = await probe(cdp, { kind: "css", value: "html" });
+  await sleep(Math.round(step.seconds * 1000));
+  const info = await probe(cdp, { kind: "css", value: "html" });
+  return {
+    result: {
+      matcher: `wait ${step.seconds}s`,
+      assertion: "wait",
+      waited_seconds: step.seconds,
+      // Information, not a verdict: a page that is meant to be still after the
+      // wait is not a failure, and a wait that asserted would be a hidden check.
+      dom_changed: info.digest !== before.digest,
+      screenshot_after: await shoot(cdp, outDir, `${label}-after-wait-${step.index}`),
+      ok: true,
+    },
+    info,
+  };
+}
+
 async function runStep(cdp, step, outDir, label) {
+  if (step.kind === "wait") return await runWait(cdp, step, outDir, label);
   const info = await probe(cdp, { kind: step.kind, value: step.value });
   const found = info.found;
   const visible = isVisible(found);
@@ -575,12 +625,28 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
 }
 
 async function main() {
-  const parsed = scenarios.map(parseScenario);
+  let parsed;
+  try {
+    parsed = scenarios.map(parseScenario);
+  } catch (badGrammar) {
+    // A scenario the grammar refuses used to throw out of main() before the report
+    // existed, and Warden then reported "adapter wrote no visual-qa.json (is node and
+    // Edge/Chrome installed?)" — sending an operator to check their browser over a typo.
+    fail("visual_qa_unavailable", String(badGrammar?.message || badGrammar));
+  }
   const empty = parsed.find((s) => !s.consoleOnly && s.steps.length === 0);
   if (empty) {
     fail("visual_qa_unavailable",
       `scenario "${empty.raw}" states no assertion. Use "WxH: text=Label visible", `
       + `"WxH: css=SELECTOR visible", "WxH: testid=ID click" or "WxH: no-console-errors".`);
+  }
+  const onlyWaiting = parsed.find((s) => !s.consoleOnly && s.steps.length > 0
+    && s.steps.every((step) => step.kind === "wait"));
+  if (onlyWaiting) {
+    fail("visual_qa_unavailable",
+      `scenario "${onlyWaiting.raw}" only waits. A wait produces a screenshot; it does not `
+      + `assert anything, so a scenario made of waits passes without testing the page. `
+      + `Say what should be true once the wait is over: "... -> css=SELECTOR visible".`);
   }
 
   const debugPort = await freePort();

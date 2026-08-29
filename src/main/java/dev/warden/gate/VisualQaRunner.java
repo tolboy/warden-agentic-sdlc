@@ -115,7 +115,9 @@ public final class VisualQaRunner {
                 command.add("--scenario");
                 command.add(scenario);
             }
-            ProcessRunner.Result result = processes.run(command, loaded.root(), Duration.ofMinutes(2), 256 * 1024);
+            Duration budget = adapterBudget(visual.scenarios());
+            report.put("adapter_timeout_seconds", budget.toSeconds());
+            ProcessRunner.Result result = processes.run(command, loaded.root(), budget, 256 * 1024);
             report.put("exit_code", (long) result.exitCode());
             report.put("timed_out", result.timedOut());
             report.put("stdout", result.stdout());
@@ -166,6 +168,32 @@ public final class VisualQaRunner {
         ledger.append("visual_qa", Map.of("ok", ok, "code", code, "report", path.toString()));
         return new Outcome(ok, code, path, report);
     }
+
+    /**
+     * How long the browser adapter may take.
+     *
+     * Two minutes covers a browser start, a handful of navigations and their assertions.
+     * A scenario may also declare `wait <n>` steps, and those seconds are the operator
+     * asking the page for time it needs — charging them against a fixed ceiling turns a
+     * legal contract into `visual_qa_unavailable`, which stops the run with no fix round
+     * and points the blame at the browser. So declared waits are added on top, with an
+     * upper bound of their own: a contract cannot talk the harness into running forever.
+     */
+    public static Duration adapterBudget(List<String> scenarios) {
+        double declared = 0;
+        for (String scenario : scenarios) {
+            if (scenario == null) continue;
+            var held = WAIT_STEP.matcher(scenario);
+            while (held.find()) declared += Double.parseDouble(held.group(1));
+        }
+        long waited = Math.min(Math.round(Math.ceil(declared)), MAX_DECLARED_WAIT_SECONDS);
+        return Duration.ofMinutes(2).plusSeconds(waited);
+    }
+
+    /** Deliberately loose: over-counting a `wait` inside a label only buys time. */
+    private static final java.util.regex.Pattern WAIT_STEP =
+            java.util.regex.Pattern.compile("(?i)\\bwait\\s*=?\\s*(\\d+(?:\\.\\d+)?)\\s*s?\\b");
+    private static final long MAX_DECLARED_WAIT_SECONDS = 15 * 60;
 
     private static boolean hasScreenshot(Map<String, Object> body) {
         Object scenarios = body.get("scenarios");
