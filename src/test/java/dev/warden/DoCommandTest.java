@@ -132,6 +132,17 @@ public final class DoCommandTest implements Suite {
         check.contains("and falls back to what holds for any page", unnamed, "no-console-errors");
         check.contains("while telling the operator what to replace it with", unnamed, "css=.settings-panel");
 
+        // Measured on a live draft: a goal asking for "a data-testid on every lab chapter
+        // button" produced `text=chapter visible` — an assertion about a word the page
+        // happens to contain, which passes without testing anything the task is about.
+        new TaskDraft().write(drafts, "incidental",
+                "Give every lab chapter button a stable data-testid", "code", "low");
+        String incidental = Files.readString(drafts.resolve(".warden/tasks/incidental.yaml"));
+        check.that("a lowercase word before \"button\" is not a control name",
+                !incidental.contains("text=chapter"));
+        check.contains("so the draft falls back to what holds for any page",
+                incidental, "no-console-errors");
+
         new TaskDraft().write(drafts, "russian", "почини вёрстку экрана настроек", "code", "low");
         String russian = Files.readString(drafts.resolve(".warden/tasks/russian.yaml"));
         check.contains("a Russian UI goal gets visual QA too", russian, "required: true");

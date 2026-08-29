@@ -106,6 +106,8 @@ const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
  */
 const WAIT_STEP = /^wait\s*=?\s*(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?$|^wait\s*=?\s*(\d+(?:\.\d+)?)$/i;
 const WAIT_MAX_SECONDS = 120;
+const NO_CONSOLE_ERRORS = /^no[-_ ]?console[-_ ]?errors$/i;
+const NO_CONSOLE_ERRORS_ANYWHERE = /\bno[-_ ]?console[-_ ]?errors\b/i;
 
 /**
  * Splits "css=.panel > .row visible" into a matcher and an assertion. The
@@ -115,6 +117,13 @@ const WAIT_MAX_SECONDS = 120;
 function parseStep(raw, fallbackAssertion = "visible") {
   const text = String(raw).trim();
   if (!text) return null;
+  // `-> no-console-errors` is not a step, it is the scenario asking for a quiet
+  // console; parseScenario reads it off the whole line. Without this it parsed as a
+  // text matcher and the scenario failed looking for a page that says
+  // "no-console-errors" — so the console could be watched on an idle page, or a chain
+  // of clicks could be run, never both. That is backwards: a console is most worth
+  // watching while something is actually happening.
+  if (NO_CONSOLE_ERRORS.test(text)) return null;
   const held = text.match(WAIT_STEP);
   if (held) {
     const seconds = Number(held[1] ?? held[2]);
@@ -161,7 +170,7 @@ function parseScenario(raw) {
   const mobile = Boolean(sized && sized[3]);
   let rest = (sized ? sized[4] : String(raw)).trim();
 
-  if (/^no[-_ ]?console[-_ ]?errors$/i.test(rest)) {
+  if (NO_CONSOLE_ERRORS.test(rest)) {
     return { raw, width, height, mobile, consoleOnly: true, steps: [] };
   }
 
@@ -174,7 +183,7 @@ function parseScenario(raw) {
     const step = parseStep(extra);
     if (step) steps.push(step);
   }
-  const noConsoleErrors = /\bno[-_ ]?console[-_ ]?errors\b/i.test(rest);
+  const noConsoleErrors = NO_CONSOLE_ERRORS_ANYWHERE.test(rest);
   return { raw, width, height, mobile, consoleOnly: false, steps, noConsoleErrors };
 }
 

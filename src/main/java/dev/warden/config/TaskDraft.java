@@ -169,9 +169,13 @@ public final class TaskDraft {
      */
     static String controlLabel(String goal) {
         if (goal == null || goal.isBlank()) return null;
-        // "Add a Settings button" / "кнопку Settings"
+        // "Add a Settings button" / "кнопку Settings". The capital is the whole test: a
+        // live draft read "give every lab chapter button a data-testid" and wrote
+        // `text=chapter visible` into the contract — an assertion about a word the page
+        // happens to contain, which would have gone green without testing anything. A
+        // control is named the way it is written on the control.
         java.util.regex.Matcher english = java.util.regex.Pattern
-                .compile("(?i)\\b([A-Za-z][A-Za-z0-9_-]*)\\s+button\\b").matcher(goal);
+                .compile("\\b([A-Z][A-Za-z0-9_-]*)\\s+[Bb]utton\\b").matcher(goal);
         if (english.find()) return english.group(1);
         // A quoted name is the operator saying it outright, in any language.
         java.util.regex.Matcher quoted = java.util.regex.Pattern
