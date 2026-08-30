@@ -108,12 +108,29 @@ public final class TaskLoop {
      * @param fromRunId    the run whose decision this is, named in the evidence
      * @param rejectionNote what the person said when they rejected that candidate, or null
      */
-    public record Continuation(String fromRunId, String rejectionNote) {
-        public static final Continuation NONE = new Continuation(null, null);
+    public record Continuation(String fromRunId, String rejectionNote, boolean reuseJudgements) {
+        public static final Continuation NONE = new Continuation(null, null, false);
+
+        public Continuation(String fromRunId, String rejectionNote) {
+            this(fromRunId, rejectionNote, false);
+        }
+
         public boolean carriesRejection() {
             return rejectionNote != null && !rejectionNote.isBlank();
         }
     }
+
+    /**
+     * Failures that were never about the work.
+     *
+     * These are the codes {@code docs/ARCHITECTURE.md} already routes away from the fix loop:
+     * no implementer can install a browser or evict another project's dev server. A run that
+     * stopped for one of them threw away an implementer and an independent review that had
+     * both passed, and the only way forward was to pay for both again — measured at $0.34 and
+     * twenty minutes for a defect that was in Warden itself.
+     */
+    private static final java.util.Set<String> NOT_ABOUT_THE_WORK = java.util.Set.of(
+            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope");
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
@@ -209,6 +226,10 @@ public final class TaskLoop {
             summary.put("continued_from", carried.fromRunId());
             summary.put("carries_human_rejection", true);
         }
+        Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
+                ? reusableJudgements(root, carried.fromRunId(), contractHash,
+                        git.sourceFingerprint(diffBaseCommit), summary)
+                : Map.of();
         header(task, runId, workflow, dryRun);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
@@ -217,7 +238,7 @@ public final class TaskLoop {
         }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
-                progress, carried);
+                progress, carried, reusable);
         try {
             engine.run();
         } catch (StopException stopped) {
@@ -274,6 +295,15 @@ public final class TaskLoop {
         // gates passed" was a sentence that could describe a run in which review never ran.
         // What the human is being asked to accept is what actually executed.
         String verdict = "every stage that ran passed: " + String.join(", ", executedStages(steps));
+        // The person accepting this is entitled to know which of those verdicts were reached
+        // in this run and which were carried over. They are about the same bytes — that is
+        // what let them be carried — but "passed" and "passed, earlier, elsewhere" are
+        // different sentences and the gate should not blur them.
+        if (summary.get("reused_judgements") instanceof Map<?, ?> reused) {
+            verdict += ". " + reused.get("roles") + " were not re-run: they passed this exact "
+                    + "tree on run " + reused.get("from") + " and neither the source nor the "
+                    + "contract has changed since";
+        }
         if (!stale.isEmpty()) {
             verdict += ". WARNING: " + String.join(", ", stale) + " last judged an earlier tree; "
                     + "code changed after that and was not judged again";
@@ -343,6 +373,7 @@ public final class TaskLoop {
         private final boolean reviewByRisk;
         private final Progress progress;
         private final Continuation carried;
+        private final Map<String, Map<String, Object>> reusable;
         private boolean rejectionDelivered;
 
         /** The vendor that filled each role, so a later role can be required to differ. */
@@ -357,7 +388,8 @@ public final class TaskLoop {
                Map<String, String> contractSnapshot,
                String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
                Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk,
-               Progress progress, Continuation carried) {
+               Progress progress, Continuation carried,
+               Map<String, Map<String, Object>> reusable) {
             this.loaded = loaded;
             this.user = user;
             this.roles = roles;
@@ -375,6 +407,7 @@ public final class TaskLoop {
             this.reviewByRisk = reviewByRisk;
             this.progress = progress;
             this.carried = carried;
+            this.reusable = new LinkedHashMap<>(reusable);
         }
 
         int attempt() { return attempt; }
@@ -402,6 +435,9 @@ public final class TaskLoop {
         private void runStage(Workflow.Stage stage, int index) throws Exception {
             Object outcome = execute(stage);
             if (dryRun) return;
+            // A role whose verdict was carried over from an earlier run on this exact tree
+            // dispatched nobody, so there is no outcome to route and nothing new to object.
+            if (outcome == null) return;
 
             while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(outcome)
                     && attempt < task.maxFixAttempts()) {
@@ -484,8 +520,17 @@ public final class TaskLoop {
                 if (details.get("tokens") instanceof Map<?, ?> tokens) {
                     line.append("   tokens ").append(tokens.get("input")).append("/").append(tokens.get("output"));
                 }
-                line.append("   cost ").append(Progress.money(details.get("attempts_cost_usd") != null
-                        ? details.get("attempts_cost_usd") : details.get("cost_usd")));
+                // `cost_usd` first, and `?` when it is absent. `attempts_cost_usd` is a sum,
+                // and a sum of nothing is 0.0 — printing that would tell the operator a call
+                // was free when what happened is that nobody priced it, which is the exact
+                // confusion the report's `?` exists to prevent. The sum is only better when
+                // it is actually carrying something: a role that failed over paid twice.
+                Object cost = details.get("cost_usd");
+                if (cost == null && details.get("attempts_cost_usd") instanceof Number summed
+                        && summed.doubleValue() > 0) {
+                    cost = summed;
+                }
+                line.append("   cost ").append(Progress.money(cost));
                 if (details.get("verdict") != null) line.append("   verdict ").append(details.get("verdict"));
                 if (!role.ok()) line.append("   ").append(role.code());
             } else if (outcome instanceof GateRunner.Outcome gate) {
@@ -556,6 +601,20 @@ public final class TaskLoop {
 
         private RoleRunner.Outcome runRole(Workflow.Stage stage) throws Exception {
             String role = stage.role();
+            Map<String, Object> standing = attempt == 0 ? reusable.remove(role) : null;
+            if (standing != null) {
+                // Not a shortcut and not a cache: the fingerprint check that let this entry
+                // through says these are the same bytes the earlier vendor read. A fix round
+                // makes it stale immediately, which is why this only applies at attempt 0.
+                Map<String, Object> entry = new LinkedHashMap<>(standing);
+                entry.put("reused_from", carried.fromRunId());
+                entry.put("attempt", (long) attempt);
+                steps.add(entry);
+                vendors.putIfAbsent(role, String.valueOf(standing.get("vendor")));
+                progress.line("      reused from " + carried.fromRunId() + ": "
+                        + standing.get("profile") + " already passed this exact tree");
+                return null;
+            }
             // Independence is only meaningful against whoever wrote the code.
             String avoid = "implementer".equals(role) ? null : vendors.get("implementer");
             RoleRunner.Outcome outcome;
@@ -704,6 +763,84 @@ public final class TaskLoop {
             if (cost instanceof Number number) spent += number.doubleValue();
             else unpriced++;
         }
+    }
+
+    /**
+     * Role verdicts from an earlier run that are still true of this tree.
+     *
+     * A verdict is about a tree, not about a run. If the source fingerprint and the whole
+     * `.warden` contract are byte-for-byte what they were when that role passed, then paying
+     * a second vendor to reach the same conclusion about the same bytes buys nothing.
+     *
+     * Every condition here is a way to say no, and any doubt at all returns an empty map and
+     * runs the full chain:
+     *
+     *  - the earlier run must have stopped for something that was never about the work;
+     *  - the contract must be identical, or the role was judged against different terms;
+     *  - the source must be identical, or it judged a different candidate;
+     *  - the role's own last attempt must have passed and filed no blocking findings, because
+     *    a pass with a P1 is not a pass, it is a fix round that had not happened yet.
+     */
+    private Map<String, Map<String, Object>> reusableJudgements(
+            Path root, String priorRunId, String contractHash, String fingerprint,
+            Map<String, Object> summary) throws Exception {
+        Path priorSummary = root.resolve(".warden/runs").resolve(priorRunId).resolve("task-run.json");
+        if (!Files.isRegularFile(priorSummary)) return declineReuse(summary, "no summary for " + priorRunId);
+        Map<String, Object> prior = Json.parseObject(Files.readString(priorSummary));
+        String priorReason = String.valueOf(prior.get("reason"));
+        if (!NOT_ABOUT_THE_WORK.contains(priorReason)) {
+            return declineReuse(summary, priorRunId + " stopped with `" + priorReason
+                    + "`, which is a verdict on the work; only a failure that was never about "
+                    + "the work leaves an earlier judgement standing");
+        }
+        if (!contractHash.equals(prior.get("contract_sha256"))) {
+            return declineReuse(summary, "the contract changed since " + priorRunId
+                    + ", so its roles were judged against different terms");
+        }
+        String priorFingerprint;
+        try {
+            priorFingerprint = new ApprovalStore(root).read(priorRunId).candidateFingerprint();
+        } catch (Exception noDecision) {
+            // The fingerprint is the whole basis for believing an earlier verdict. Without a
+            // decision file there is nothing to check it against, and an unverifiable claim
+            // that the tree has not moved is worth less than re-running the roles.
+            return declineReuse(summary, "no recorded decision for " + priorRunId
+                    + ", so there is no fingerprint to prove the tree has not moved");
+        }
+        if (priorFingerprint == null || !priorFingerprint.equals(fingerprint)) {
+            return declineReuse(summary, "the worktree changed since " + priorRunId
+                    + ", so its roles judged a different candidate");
+        }
+        Map<String, Map<String, Object>> reusable = new LinkedHashMap<>();
+        Object steps = prior.get("steps");
+        if (steps instanceof List<?> rows) {
+            for (Object item : rows) {
+                if (!(item instanceof Map<?, ?> row)) continue;
+                String label = String.valueOf(row.get("step"));
+                if (row.get("profile") == null) continue;
+                if (!Boolean.TRUE.equals(row.get("ok"))) { reusable.remove(label); continue; }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> entry = (Map<String, Object>) row;
+                reusable.put(label, entry);
+            }
+        }
+        for (String role : List.copyOf(reusable.keySet())) {
+            Object blocking = prior.get("reviewer".equals(role) ? "blocking_findings"
+                    : "visual_qa".equals(role) ? "visual_blocking_findings"
+                    : role + "_blocking_findings");
+            if (blocking instanceof Number number && number.longValue() > 0) reusable.remove(role);
+        }
+        if (!reusable.isEmpty()) {
+            summary.put("reused_judgements", Map.of("from", priorRunId,
+                    "roles", List.copyOf(reusable.keySet())));
+        }
+        return reusable;
+    }
+
+    private Map<String, Map<String, Object>> declineReuse(Map<String, Object> summary, String why) {
+        summary.put("reuse_declined", why);
+        progress.line("note  not reusing any earlier verdict: " + why);
+        return Map.of();
     }
 
     private static String pad(String text, int width) {

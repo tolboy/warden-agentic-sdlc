@@ -168,6 +168,7 @@ public final class TaskLoopTest implements Suite {
                     previewed.summaryReport().get("would_stop"));
 
             narrationChecks(check, sandbox, home);
+            reusedJudgementChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
@@ -663,6 +664,56 @@ public final class TaskLoopTest implements Suite {
                 0L, outcome.summaryReport().get("unpriced_calls"));
         check.eq("so the $ ceiling is known to have measured this run",
                 Boolean.TRUE, outcome.summaryReport().get("cost_ceiling_binding"));
+    }
+
+    /**
+     * A verdict is about a tree, not about a run.
+     *
+     * A run that stopped because no browser was available threw away an implementer and an
+     * independent review that had both passed on a tree nobody has touched since, and the
+     * only way forward was to pay for both again. Measured once at $0.34 and twenty minutes,
+     * for a defect that turned out to be in Warden.
+     */
+    private void reusedJudgementChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "reusable", "medium", 20, true);
+        writeProfiles(home, sandbox, "reusable", 1, 1);
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        // The browser is simply not there: a failure that is not about the work.
+        TaskLoop unavailable = new TaskLoop(new ProcessRunner(), (l, r) ->
+                new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
+                        Map.of("message", "no Chrome/Edge executable found")));
+        TaskLoop.Outcome stopped = unavailable.run(loaded, UserConfig.load(home), "ru1", false);
+        check.eq("the run stops on the environment, not the work",
+                "visual_qa_unavailable", stopped.reason());
+
+        dev.warden.approval.ApprovalStore decisions = new dev.warden.approval.ApprovalStore(project);
+        decisions.resolve("ru1", decisions.read("ru1").updatedAt().toString(), "retry", "operator",
+                "installed a browser");
+
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner(),
+                (l, r) -> stubVisual(true))
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "ru2",
+                        false, Map.of(), new TaskLoop.Continuation("ru1", null, true));
+        check.that("the second run reaches the human gate", resumed.ok());
+        check.that("and says which verdicts it kept",
+                String.join("\n", printed).contains("reused from ru1"));
+        check.eq("recording where they came from", Map.of("from", "ru1",
+                        "roles", List.of("implementer", "reviewer")),
+                resumed.summaryReport().get("reused_judgements"));
+        check.that("and charging nothing for them", (Long) resumed.summaryReport().get("role_runs") == 0L);
+
+        // Now the same thing after the tree moved: nothing may be carried over.
+        Files.writeString(project.resolve("src/moved.txt"), "changed after the verdicts\n");
+        TaskLoop.Outcome moved = new TaskLoop(new ProcessRunner(),
+                (l, r) -> stubVisual(true))
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "ru3",
+                        false, Map.of(), new TaskLoop.Continuation("ru1", null, true));
+        check.that("a tree that changed keeps nothing",
+                moved.summaryReport().get("reused_judgements") == null);
+        check.contains("and says why", String.valueOf(moved.summaryReport().get("reuse_declined")),
+                "judged a different candidate");
     }
 
     /**

@@ -405,11 +405,18 @@ public final class Main {
             return new Carried(Map.of(),
                     new TaskLoop.Continuation(priorRunId, decision.note()));
         }
+        // A failure a person answered with `retry` is a request to run the same task again.
+        // When that failure was never about the work, the roles that already passed judged
+        // the very tree that is still sitting there, and TaskLoop re-checks that before it
+        // believes any of it.
+        if (decision.kind() == HumanDecision.Kind.FAILURE && "retry".equals(decision.decision())) {
+            return new Carried(Map.of(),
+                    new TaskLoop.Continuation(priorRunId, null, true));
+        }
         if (decision.kind() != HumanDecision.Kind.FAILOVER) {
             throw new IllegalArgumentException("--continue " + priorRunId + " names a "
-                    + decision.kind().jsonValue() + " decision that is not a rejection; only a "
-                    + "failover decision authorises a vendor substitution, and only a rejection "
-                    + "carries a reason forward");
+                    + decision.kind().jsonValue() + " decision that is neither a rejection nor a "
+                    + "retry; only a failover decision authorises a vendor substitution");
         }
         if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
             throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
@@ -756,10 +763,16 @@ public final class Main {
                   warden do \"<goal>\" [--project DIR] [--scope NAME] [--goal-file FILE]
                                            the whole workflow; stops at the human gate
                                            --init-repo for a directory that is not a repo yet
+                                           --draft-only stops after writing the contract, so
+                                           its browser scenarios can be written before any
+                                           vendor is paid to satisfy them
                   warden run <task>            the bounded loop; stops at the human gate
                                                --continue <run-id> carries a recorded decision
                                                from that run into this one: an authorised
-                                               `switch`, or a rejection's reason
+                                               `switch`, a rejection's reason, or a `retry`
+                                               of a failure that was never about the work,
+                                               which keeps the verdicts already reached on
+                                               this exact tree
                   warden ledger                aggregate local evidence and experiment dimensions
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,

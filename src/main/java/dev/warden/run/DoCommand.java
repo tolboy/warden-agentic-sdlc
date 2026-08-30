@@ -35,7 +35,15 @@ public final class DoCommand {
 
     public record Options(Path project, String goal, String scope, String risk, String taskId,
                           String runId, String baseRef, boolean inPlace, boolean dryRun,
-                          boolean conductor, boolean autoRejectGates, boolean initRepo) {
+                          boolean conductor, boolean autoRejectGates, boolean initRepo,
+                          boolean draftOnly) {
+        public Options(Path project, String goal, String scope, String risk, String taskId,
+                       String runId, String baseRef, boolean inPlace, boolean dryRun,
+                       boolean conductor, boolean autoRejectGates, boolean initRepo) {
+            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
+                    conductor, autoRejectGates, initRepo, false);
+        }
+
         public Options(Path project, String goal, String scope, String risk, String taskId,
                        String runId, String baseRef, boolean inPlace, boolean dryRun) {
             this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
@@ -103,7 +111,8 @@ public final class DoCommand {
             if (arg.startsWith("--")) {
                 if (!arg.equals("--in-place") && !arg.equals("--no-worktree")
                         && !arg.equals("--dry-run") && !arg.equals("--conductor")
-                        && !arg.equals("--auto-reject-gates") && !arg.equals("--init-repo")) {
+                        && !arg.equals("--auto-reject-gates") && !arg.equals("--init-repo")
+                        && !arg.equals("--draft-only") && !arg.equals("--quiet")) {
                     index++;
                 }
                 continue;
@@ -126,7 +135,8 @@ public final class DoCommand {
                 option(args, "--base-ref", "HEAD"),
                 hasFlag(args, "--in-place") || hasFlag(args, "--no-worktree"),
                 hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
-                hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"));
+                hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"),
+                hasFlag(args, "--draft-only"));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -222,6 +232,36 @@ public final class DoCommand {
             return fail("task_conflict", requested, root, taskId, conflict.getMessage());
         }
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
+        if (options.draftOnly()) {
+            // The contract is where a run's whole meaning lives, and the drafter writes it
+            // from one sentence. Every real task so far needed its browser scenarios written
+            // by hand before it was worth paying anybody to satisfy them — and there was no
+            // way to stop here and do that: `do` went straight on to dispatch, and the only
+            // way to get the draft without spending was --dry-run, which resolves the whole
+            // chain and reads like a rehearsal rather than a checkpoint.
+            Map<String, Object> report = new LinkedHashMap<>();
+            report.put("ok", true);
+            report.put("code", "drafted");
+            report.put("next_action", "review_the_contract");
+            report.put("goal", options.goal());
+            report.put("task_id", taskId);
+            report.put("task_existed", drafted.existed());
+            report.put("task_file", drafted.file().toString());
+            report.put("project", String.valueOf(requested));
+            report.put("worktree", String.valueOf(root));
+            report.put("isolated", placement.isolated());
+            report.put("scope", scope);
+            report.put("risk", risk);
+            report.put("lands", false);
+            progress.blank();
+            progress.line("draft " + drafted.file());
+            progress.line("      read it, write the browser scenarios this task actually "
+                    + "promises, then:");
+            progress.line("      cd " + root);
+            progress.line("      warden run " + taskId + " --run-id <id>");
+            progress.blank();
+            return new Outcome(true, "drafted", requested, root, taskId, report);
+        }
         if (options.conductor()) {
             return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
