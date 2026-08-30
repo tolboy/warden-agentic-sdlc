@@ -317,15 +317,26 @@ public final class VisualQaRunner {
         // Worse, a pooled connection outlives the socket it was made to: a probe can be
         // handed a dead connection to a port that has since been rebound and answer "no"
         // about a server that is answering. Caught by one test poisoning the next.
-        try (HttpClient client = HttpClient.newBuilder()
+        HttpClient client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(Duration.ofSeconds(2)).build()) {
+                .connectTimeout(Duration.ofSeconds(2)).build();
+        try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET()
                     .timeout(Duration.ofSeconds(5)).build();
             HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
             return response.statusCode() < 500;
         } catch (Exception ignored) {
             return false;
+        } finally {
+            // Not try-with-resources, and not `close()`. The answer to "is anything serving
+            // this URL" is decided by the response; letting the shutdown of the client throw
+            // into the same catch turns a server that answered into one that did not, and
+            // `close()` waits on a keep-alive connection the other side may never close.
+            try {
+                client.shutdownNow();
+            } catch (Exception alreadyGone) {
+                // Nothing here can change what the probe already saw.
+            }
         }
     }
 
