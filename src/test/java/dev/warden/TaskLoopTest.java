@@ -167,6 +167,8 @@ public final class TaskLoopTest implements Suite {
             check.eq("and says what it would have stopped for", "preflight_outside_scope",
                     previewed.summaryReport().get("would_stop"));
 
+            narrationChecks(check, sandbox, home);
+            carriedRejectionChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
@@ -631,6 +633,66 @@ public final class TaskLoopTest implements Suite {
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> steps(TaskLoop.Outcome outcome) {
         return (List<Map<String, Object>>) outcome.summaryReport().get("steps");
+    }
+
+    /**
+     * The run narrates itself while it works.
+     *
+     * Not evidence — every line restates the ledger — but a twenty-minute loop that printed
+     * nothing until it was over meant the only way to see where it had got to was to stat
+     * files in four run directories.
+     */
+    private void narrationChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "narrated");
+        writeProfiles(home, sandbox, "narrated", 1, 1);
+        List<String> printed = new java.util.ArrayList<>();
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner()).withProgress(printed::add)
+                .run(loaded, UserConfig.load(home), "n1", false);
+        String all = String.join("\n", printed);
+        check.that("the run says what it is about to do", all.contains("plan  implement"));
+        check.that("and names each stage as it reaches it", all.contains("] implement")
+                && all.contains("] gates"));
+        check.that("and says how each one went", all.contains("      ok"));
+        check.that("and ends by naming the command that shows the whole run",
+                all.contains("warden report n1 --text"));
+        check.that("and the command the person is now expected to run",
+                all.contains("warden approve n1 --decision"));
+        check.that("a run that narrates still returns the same outcome", outcome.ok());
+        check.eq("and counts the vendor calls that reported no price at all",
+                0L, outcome.summaryReport().get("unpriced_calls"));
+        check.eq("so the $ ceiling is known to have measured this run",
+                Boolean.TRUE, outcome.summaryReport().get("cost_ceiling_binding"));
+    }
+
+    /**
+     * A human rejection is the only feedback in this loop that costs a person's attention.
+     * It used to be written to `decision.json` and read by nobody.
+     */
+    private void carriedRejectionChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "rejected-once");
+        writeProfiles(home, sandbox, "rejected-once", 1, 1);
+        TaskLoop.Outcome first = loop(project, home, "rj1");
+        check.that("the first run reaches the human gate", first.ok());
+        dev.warden.approval.ApprovalStore decisions = new dev.warden.approval.ApprovalStore(project);
+        decisions.resolve("rj1", decisions.read("rj1").updatedAt().toString(), "reject", "operator",
+                "the fire is drawn twice the height of the person standing next to it");
+
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        TaskLoop.Outcome second = new TaskLoop(new ProcessRunner())
+                .run(loaded, UserConfig.load(home), "rj2", false, Map.of(),
+                        new TaskLoop.Continuation("rj1", "the fire is drawn twice the height "
+                                + "of the person standing next to it"));
+        check.that("the next run still reaches the human gate", second.ok());
+        check.eq("and records where it came from", "rj1",
+                second.summaryReport().get("continued_from"));
+        Path context = project.resolve(".warden/runs/rj2/context/fix-0-rejection.md");
+        check.that("the reason is written where the implementer is pointed at it",
+                Files.isRegularFile(context));
+        String carried = Files.readString(context);
+        check.contains("with the person's own words", carried, "twice the height");
+        check.contains("and says plainly that a person, not a check, objected",
+                carried, "A person rejected the previous candidate");
     }
 
     private TaskLoop.Outcome loop(Path project, Path home, String runId) throws Exception {

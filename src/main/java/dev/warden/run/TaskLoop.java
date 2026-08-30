@@ -71,14 +71,48 @@ public final class TaskLoop {
 
     private final ProcessRunner processes;
     private final VisualCheck visualCheck;
+    private final Progress progress;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (loaded, runId) -> new VisualQaRunner(processes).run(loaded, runId));
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck) {
+        this(processes, visualCheck, Progress.SILENT);
+    }
+
+    /**
+     * The same loop, narrating itself. Not an overloaded constructor on purpose: `Progress`
+     * and `VisualCheck` are both single-method interfaces, so `new TaskLoop(runner, x::y)`
+     * would be ambiguous at every call site and a lambda could silently pick the wrong one.
+     */
+    public TaskLoop withProgress(Progress narration) {
+        return new TaskLoop(processes, visualCheck, narration);
+    }
+
+    public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
         this.processes = processes;
         this.visualCheck = visualCheck;
+        this.progress = progress;
+    }
+
+    /**
+     * What a previous run's recorded decision carries into this one.
+     *
+     * A rejection used to be a full stop. The reason a person typed went into `decision.json`
+     * and was read by nobody: the next run started from an empty context and the implementer
+     * was left to rediscover, or not, what a human had already said was wrong with its work.
+     * That is the one piece of feedback in the whole loop that cost a person's attention
+     * rather than a vendor call, and it was the only one thrown away.
+     *
+     * @param fromRunId    the run whose decision this is, named in the evidence
+     * @param rejectionNote what the person said when they rejected that candidate, or null
+     */
+    public record Continuation(String fromRunId, String rejectionNote) {
+        public static final Continuation NONE = new Continuation(null, null);
+        public boolean carriesRejection() {
+            return rejectionNote != null && !rejectionNote.isBlank();
+        }
     }
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
@@ -93,6 +127,11 @@ public final class TaskLoop {
      */
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                        Map<String, String> authorizedFailover) throws Exception {
+        return run(loaded, user, runId, dryRun, authorizedFailover, Continuation.NONE);
+    }
+
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
+                       Map<String, String> authorizedFailover, Continuation carried) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
@@ -113,7 +152,7 @@ public final class TaskLoop {
         // dispatched again at review time. The gate makes the budget count vendor calls, not
         // role invocations, so a failover cannot spend more than the task allowed.
         RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId,
-                authorizedFailover);
+                authorizedFailover, progress);
         GateRunner gates = new GateRunner(processes);
 
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
@@ -166,8 +205,19 @@ public final class TaskLoop {
             summary.put("would_stop", "preflight_outside_scope");
         }
 
+        if (carried.carriesRejection()) {
+            summary.put("continued_from", carried.fromRunId());
+            summary.put("carries_human_rejection", true);
+        }
+        header(task, runId, workflow, dryRun);
+        if (carried.carriesRejection()) {
+            progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
+                    + "; the implementer is given its reason verbatim");
+            progress.blank();
+        }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
-                configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk);
+                configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
+                progress, carried);
         try {
             engine.run();
         } catch (StopException stopped) {
@@ -191,6 +241,8 @@ public final class TaskLoop {
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
+        summary.put("unpriced_calls", (long) budget.unpriced());
+        summary.put("cost_ceiling_binding", budget.unpriced() == 0);
         // Which judging stages did not see the tree as it finally stands. A workflow may
         // legitimately choose not to pay for a second review, but "every stage passed" must
         // not be allowed to mean "every stage passed something, at some point".
@@ -205,6 +257,13 @@ public final class TaskLoop {
             summary.put("next_action", "none");
             Path file = ledger.writeReport("task-run", summary);
             ledger.append("task_dry_run", summary);
+            progress.blank();
+            progress.line("done  dry_run   nothing was dispatched and nothing was spent");
+            if (summary.get("would_stop") != null) {
+                progress.line("      a real run would stop here: " + summary.get("would_stop"));
+                progress.line("      " + summary.get("resolution"));
+            }
+            progress.blank();
             return new Outcome(true, "dry_run", "none", file, summary);
         }
 
@@ -227,6 +286,7 @@ public final class TaskLoop {
                 "run_id", runId, "kind", decision.kind().jsonValue(),
                 "path", root.relativize(new ApprovalStore(root).decisionPath(runId)).toString().replace('\\', '/')));
         ledger.append("task_run", summary);
+        footer(runId, "ready_for_human", "human_gate", budget, summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
     }
 
@@ -281,6 +341,9 @@ public final class TaskLoop {
         private final TaskSpec.ResolvedTask task;
         private final Workflow workflow;
         private final boolean reviewByRisk;
+        private final Progress progress;
+        private final Continuation carried;
+        private boolean rejectionDelivered;
 
         /** The vendor that filled each role, so a later role can be required to differ. */
         private final Map<String, String> vendors = new LinkedHashMap<>();
@@ -293,7 +356,8 @@ public final class TaskLoop {
                EvidenceLedger ledger, String runId, boolean dryRun,
                Map<String, String> contractSnapshot,
                String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
-               Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk) {
+               Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk,
+               Progress progress, Continuation carried) {
             this.loaded = loaded;
             this.user = user;
             this.roles = roles;
@@ -309,6 +373,8 @@ public final class TaskLoop {
             this.task = task;
             this.workflow = workflow;
             this.reviewByRisk = reviewByRisk;
+            this.progress = progress;
+            this.carried = carried;
         }
 
         int attempt() { return attempt; }
@@ -321,6 +387,8 @@ public final class TaskLoop {
                 Workflow.Stage stage = stages.get(index);
                 String reason = skipReason(stage);
                 if (reason != null) {
+                    progress.line("[" + (index + 1) + "/" + stages.size() + "] "
+                            + pad(stage.name(), 10) + "skipped: " + reason);
                     skipped.add(Map.of("stage", stage.name(), "reason", reason));
                     // Written as we go: a run that stops early still owes an answer to
                     // "why did the reviewer never run", and that is the run that needs it.
@@ -365,6 +433,8 @@ public final class TaskLoop {
          */
         private void fixRound(Workflow.Stage stage, int index, String context) throws Exception {
             attempt++;
+            progress.line("      -> fix round " + attempt + " of " + task.maxFixAttempts()
+                    + ": " + stage.name() + " sends the work back to " + stage.fixWith());
             Path file = writeContext(ledger, attempt, stage.contextKind(), context);
             String role = stage.fixWith();
             RoleRunner.Outcome fix = roles.run(loaded, user, role,
@@ -383,6 +453,60 @@ public final class TaskLoop {
         }
 
         private Object execute(Workflow.Stage stage) throws Exception {
+            announce(stage);
+            long started = System.nanoTime();
+            Object outcome = dispatch(stage);
+            narrate(outcome, (System.nanoTime() - started) / 1_000_000L);
+            return outcome;
+        }
+
+        /** `[3/5] review   role=reviewer` — where the loop is, in the plan it printed. */
+        private void announce(Workflow.Stage stage) {
+            int position = 1 + workflow.stages().indexOf(stage);
+            String what = switch (stage.kind()) {
+                case MACHINE_GATES -> "machine gates: " + String.join(", ", task.acceptanceCommands());
+                case VISUAL_HARNESS -> "browser harness: " + task.visualQa().scenarios().size()
+                        + " scenario(s) at " + task.visualQa().url();
+                default -> "role " + stage.role();
+            };
+            progress.line("[" + position + "/" + workflow.stages().size() + "] "
+                    + pad(stage.name(), 10)
+                    + (attempt > 0 ? "(after fix " + attempt + ")  " : "") + what);
+        }
+
+        /** How it went, in the same two-line shape for every kind of stage. */
+        private void narrate(Object outcome, long millis) {
+            if (outcome == null) return;
+            StringBuilder line = new StringBuilder("      ");
+            if (outcome instanceof RoleRunner.Outcome role) {
+                line.append(role.ok() ? "ok" : "FAILED ").append("  ").append(Progress.elapsed(millis));
+                Map<String, Object> details = role.details() == null ? Map.of() : role.details();
+                if (details.get("tokens") instanceof Map<?, ?> tokens) {
+                    line.append("   tokens ").append(tokens.get("input")).append("/").append(tokens.get("output"));
+                }
+                line.append("   cost ").append(Progress.money(details.get("attempts_cost_usd") != null
+                        ? details.get("attempts_cost_usd") : details.get("cost_usd")));
+                if (details.get("verdict") != null) line.append("   verdict ").append(details.get("verdict"));
+                if (!role.ok()) line.append("   ").append(role.code());
+            } else if (outcome instanceof GateRunner.Outcome gate) {
+                line.append(gate.ok() ? "ok" : "FAILED ").append("  ").append(Progress.elapsed(millis));
+                if (!gate.ok()) line.append("   ").append(gate.code());
+            } else if (outcome instanceof VisualQaRunner.Outcome visual) {
+                line.append(visual.ok() ? "ok" : "FAILED ").append("  ").append(Progress.elapsed(millis));
+                Object images = visual.data() == null ? null : visual.data().get("image_evidence");
+                if (images instanceof List<?> shots) line.append("   ").append(shots.size()).append(" screenshot(s)");
+                if (!visual.ok()) {
+                    line.append("   ").append(visual.code());
+                    Object message = visual.data() == null ? null : visual.data().get("message");
+                    if (message != null) line.append("\n      ").append(message);
+                }
+            } else {
+                return;
+            }
+            progress.line(line.toString());
+        }
+
+        private Object dispatch(Workflow.Stage stage) throws Exception {
             switch (stage.kind()) {
                 case MACHINE_GATES -> {
                     return runGates(gates, loaded, runId, attempt, dryRun, steps,
@@ -399,6 +523,37 @@ public final class TaskLoop {
             }
         }
 
+        /**
+         * A human rejection, handed to the implementer as the context of its first attempt.
+         *
+         * Delivered once, to the implementer, and only at the start: after that the ordinary
+         * fix-round context is what a stage failure has to say, and stacking a stale rejection
+         * on top of a specific machine failure would bury the specific one.
+         */
+        private Path rejectionContextFor(String role) throws Exception {
+            if (rejectionDelivered || !"implementer".equals(role) || !carried.carriesRejection()) {
+                return null;
+            }
+            rejectionDelivered = true;
+            String text = """
+                    # A person rejected the previous candidate
+
+                    Run `%s` reached the human gate and was **rejected**. This is not a failed
+                    check and not a reviewer's finding: it is the reason a person gave for not
+                    accepting the work, and it is the only feedback in this loop that cost
+                    somebody's attention rather than a vendor call.
+
+                    > %s
+
+                    The worktree still holds that candidate. Read what is there before writing
+                    anything, address this specific objection, and do not restart the task from
+                    scratch. If you believe the objection is wrong, say so in your summary with
+                    evidence rather than leaving it unaddressed.
+                    """.formatted(carried.fromRunId(),
+                            carried.rejectionNote().replace("\n", "\n> "));
+            return writeContext(ledger, 0, "rejection", text);
+        }
+
         private RoleRunner.Outcome runRole(Workflow.Stage stage) throws Exception {
             String role = stage.role();
             // Independence is only meaningful against whoever wrote the code.
@@ -409,7 +564,7 @@ public final class TaskLoop {
                         harness.get(stage.sees()), dryRun, steps, budget);
             } else {
                 outcome = roles.run(loaded, user, role, stepRunId(runId, role, attempt),
-                        avoid, null, dryRun);
+                        avoid, rejectionContextFor(role), dryRun);
                 record(steps, budget, role, attempt, outcome);
             }
             if (dryRun || outcome == null) return outcome;
@@ -451,6 +606,12 @@ public final class TaskLoop {
         private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
             long blocking = blockingFindings(loaded.root(), outcome);
             summary.put(findingsKey(stage), blocking);
+            if (blocking > 0) {
+                // A role that passed its own run and still objects is the whole reason a
+                // second vendor is paid, so it says so out loud rather than only in a file.
+                progress.line("      " + blocking + " blocking finding(s) from " + stage.role()
+                        + " — see warden report for what it saw");
+            }
             return blocking;
         }
 
@@ -510,6 +671,17 @@ public final class TaskLoop {
         private final double maxCost;
         private int runs;
         private double spent;
+        /**
+         * Vendor calls that came back with no price at all.
+         *
+         * Every vendor here is driven through its own CLI on the operator's own
+         * subscription, and what a call costs is whatever that CLI chose to report: Grok and
+         * Claude print a figure, Codex prints none. So `max_cost_usd` is a ceiling on the
+         * part of the run that priced itself, and a run where nothing did could spend its
+         * whole allowance of calls under a $40 limit and charge $0.00 against it. Counting
+         * the silent calls is the difference between a budget and the appearance of one.
+         */
+        private int unpriced;
 
         Budget(long maxRuns, double maxCost) { this.maxRuns = maxRuns; this.maxCost = maxCost; }
 
@@ -526,9 +698,57 @@ public final class TaskLoop {
             runs++;
         }
 
+        int unpriced() { return unpriced; }
+
         void account(Object cost) {
             if (cost instanceof Number number) spent += number.doubleValue();
+            else unpriced++;
         }
+    }
+
+    private static String pad(String text, int width) {
+        return text.length() >= width ? text + " " : text + " ".repeat(width - text.length());
+    }
+
+    /** What is about to happen, before the first vendor is paid to do any of it. */
+    private void header(TaskSpec.ResolvedTask task, String runId, Workflow workflow, boolean dryRun) {
+        progress.blank();
+        progress.line("run   " + runId + (dryRun ? "   (dry run: nothing is dispatched)" : ""));
+        progress.line("task  " + task.id() + "   risk=" + task.risk()
+                + "   scope=" + String.join(", ", task.scopePaths()));
+        List<String> names = new ArrayList<>();
+        for (Workflow.Stage stage : workflow.stages()) names.add(stage.name());
+        progress.line("plan  " + String.join(" -> ", names));
+        progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
+                + Progress.money(task.budget().maxCostUsd()) + " ceiling, fix rounds <= "
+                + task.maxFixAttempts());
+        progress.blank();
+    }
+
+    /** Where the run ended and what the person watching is now expected to do about it. */
+    private void footer(String runId, String reason, String nextAction, Budget budget,
+                        Map<String, Object> summary) {
+        progress.blank();
+        progress.line("done  " + reason + "   " + budget.runs() + " vendor call(s), "
+                + Progress.money(budget.spent()) + " charged");
+        Object unpriced = summary.get("unpriced_calls");
+        if (unpriced instanceof Number number && number.longValue() > 0) {
+            progress.line("      " + number + " of those reported no price at all, so the "
+                    + "$ ceiling did not measure them");
+        }
+        if ("human_gate".equals(nextAction)) {
+            progress.line("      the candidate is ready and nothing has been landed");
+        } else if ("human_escalation".equals(nextAction)) {
+            progress.line("      stopped for a person; nothing has been landed");
+        }
+        progress.line("      warden report " + runId + " --text");
+        Object options = summary.get("decision_options");
+        if (options instanceof List<?> list && !list.isEmpty()) {
+            progress.line("      warden approve " + runId + " --decision <"
+                    + list.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining("|"))
+                    + ">");
+        }
+        progress.blank();
     }
 
     private void record(List<Map<String, Object>> steps, Budget budget, String role, int attempt,
@@ -704,6 +924,8 @@ public final class TaskLoop {
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
+        summary.put("unpriced_calls", (long) budget.unpriced());
+        summary.put("cost_ceiling_binding", budget.unpriced() == 0);
         summary.put("steps", steps);
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
@@ -731,6 +953,7 @@ public final class TaskLoop {
                 "path", root.relativize(new ApprovalStore(root).decisionPath(decision.runId()))
                         .toString().replace('\\', '/')));
         ledger.append("task_run", summary);
+        footer(runIdentity, reason, "human_escalation", budget, summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
     }
 

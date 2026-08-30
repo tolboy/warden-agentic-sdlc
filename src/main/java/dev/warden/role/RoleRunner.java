@@ -81,6 +81,7 @@ public final class RoleRunner {
     private final String pinnedDiffBase;
     private final String workflowRunId;
     private final Map<String, String> authorizedFailover;
+    private final dev.warden.run.Progress progress;
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
@@ -112,11 +113,19 @@ public final class RoleRunner {
      */
     public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase,
                       String workflowRunId, Map<String, String> authorizedFailover) {
+        this(processes, gate, pinnedDiffBase, workflowRunId, authorizedFailover,
+                dev.warden.run.Progress.SILENT);
+    }
+
+    public RoleRunner(ProcessRunner processes, DispatchGate gate, String pinnedDiffBase,
+                      String workflowRunId, Map<String, String> authorizedFailover,
+                      dev.warden.run.Progress progress) {
         this.processes = processes;
         this.gate = gate;
         this.pinnedDiffBase = pinnedDiffBase;
         this.workflowRunId = workflowRunId;
         this.authorizedFailover = Map.copyOf(authorizedFailover);
+        this.progress = progress;
     }
 
     /** Profiles this runner has seen run out, in the order they did. */
@@ -267,6 +276,14 @@ public final class RoleRunner {
 
             // Budget is checked here — after the routing decision, before anything is spent.
             gate.requireDispatch();
+
+            // Said before the call, not after it: this is the line an operator reads while a
+            // vendor is busy for ten minutes, and "which model is working right now" is the
+            // question the silence was hiding.
+            progress.line("      " + profile.name() + "  " + profile.vendor()
+                    + (profile.model() == null ? "" : "/" + profile.model())
+                    + (attempt > 1 ? "  (vendor attempt " + attempt + ")" : "")
+                    + "  dispatching, up to " + profile.wallClockMinutes() + " min");
 
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
             RoleExecutor executor = Executors.forProfile(profile, processes, git);

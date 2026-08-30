@@ -314,8 +314,9 @@ public final class Main {
         try {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
             UserConfig user = UserConfig.load();
-            Map<String, String> authorized = authorizedFailover(loaded.root(), continueFrom);
-            outcome = new TaskLoop(new ProcessRunner()).run(loaded, user, runId, dryRun, authorized);
+            Carried carried = continuation(loaded.root(), continueFrom);
+            outcome = new TaskLoop(new ProcessRunner()).withProgress(narration(args))
+                    .run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
@@ -385,14 +386,30 @@ public final class Main {
      * rolled over. Naming a prior run ties the permission to one recorded human choice, for
      * one role, to one named profile.
      */
-    private static Map<String, String> authorizedFailover(Path root, String priorRunId)
-            throws Exception {
-        if (priorRunId == null) return Map.of();
+    /** Both things a recorded decision can carry forward: an authorised swap, or a rejection. */
+    private record Carried(Map<String, String> failover, TaskLoop.Continuation continuation) {}
+
+    private static Carried continuation(Path root, String priorRunId) throws Exception {
+        if (priorRunId == null) return new Carried(Map.of(), TaskLoop.Continuation.NONE);
         HumanDecision decision = new ApprovalStore(root).read(priorRunId);
+        // A rejection is feedback, not an authorisation: it grants nothing, it only tells the
+        // next implementer what a person already objected to. Refusing to carry it meant the
+        // one piece of human judgement in the loop was the one piece nobody downstream saw.
+        if (decision.kind() == HumanDecision.Kind.SUCCESS && "reject".equals(decision.decision())) {
+            if (decision.note() == null || decision.note().isBlank()) {
+                throw new IllegalArgumentException("--continue " + priorRunId + " was rejected "
+                        + "without a note, so there is nothing to carry. Record why with "
+                        + "`warden approve " + priorRunId + " --decision reject --note \"...\"`, "
+                        + "or run without --continue");
+            }
+            return new Carried(Map.of(),
+                    new TaskLoop.Continuation(priorRunId, decision.note()));
+        }
         if (decision.kind() != HumanDecision.Kind.FAILOVER) {
             throw new IllegalArgumentException("--continue " + priorRunId + " names a "
-                    + decision.kind().jsonValue() + " decision; only a failover decision "
-                    + "authorises a vendor substitution");
+                    + decision.kind().jsonValue() + " decision that is not a rejection; only a "
+                    + "failover decision authorises a vendor substitution, and only a rejection "
+                    + "carries a reason forward");
         }
         if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
             throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
@@ -413,7 +430,8 @@ public final class Main {
             throw new IllegalArgumentException("--continue " + priorRunId
                     + ": the recorded failover names no role and profile");
         }
-        return Map.of(String.valueOf(role), String.valueOf(profile));
+        return new Carried(Map.of(String.valueOf(role), String.valueOf(profile)),
+                TaskLoop.Continuation.NONE);
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */
@@ -468,7 +486,7 @@ public final class Main {
     private static int doIntent(String[] args) throws Exception {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
-        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner()).run(options, user);
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args)).run(options, user);
         Map<String, Object> report = new LinkedHashMap<>(outcome.report());
         Object runId = report.get("run_id");
         if (runId instanceof String id && outcome.worktree() != null) {
@@ -476,6 +494,18 @@ public final class Main {
         }
         System.out.println(Json.write(report));
         return outcome.ok() ? 0 : 1;
+    }
+
+    /**
+     * The live account of a long run, on stderr.
+     *
+     * stdout is one JSON object and stays that way — Conductor and every script read it —
+     * so the narration goes to the other stream, where redirecting one does not disturb the
+     * other. `--quiet` turns it off for anyone who wants neither.
+     */
+    private static dev.warden.run.Progress narration(String[] args) {
+        return hasFlag(args, "--quiet") ? dev.warden.run.Progress.SILENT
+                : dev.warden.run.Progress.toStderr();
     }
 
     private static boolean hasFlag(String[] args, String name) {
@@ -727,8 +757,9 @@ public final class Main {
                                            the whole workflow; stops at the human gate
                                            --init-repo for a directory that is not a repo yet
                   warden run <task>            the bounded loop; stops at the human gate
-                                               --continue <run-id> carries a recorded `switch`
-                                               decision into this run
+                                               --continue <run-id> carries a recorded decision
+                                               from that run into this one: an authorised
+                                               `switch`, or a rejection's reason
                   warden ledger                aggregate local evidence and experiment dimensions
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,
@@ -739,6 +770,10 @@ public final class Main {
                   warden land <run-id>         plan the commit, branch and request for an
                                                accepted run; --commit/--push/--pull-request
                                                carry it out. Merges nothing
+
+                `do` and `run` narrate the stages on stderr while they work — which role is
+                dispatched, to which vendor, what it cost and where it went next. stdout stays
+                one JSON object. `--quiet` turns the narration off.
 
                 The command to use is `warden do`. Everything else is a piece of that loop.
                 Vendor configuration lives in ~/.warden/, project configuration in .warden/.

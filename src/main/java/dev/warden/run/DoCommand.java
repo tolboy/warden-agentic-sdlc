@@ -54,8 +54,14 @@ public final class DoCommand {
                           Map<String, Object> report) {}
 
     private final ProcessRunner processes;
+    private final Progress progress;
 
-    public DoCommand(ProcessRunner processes) { this.processes = processes; }
+    public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
+
+    public DoCommand(ProcessRunner processes, Progress progress) {
+        this.processes = processes;
+        this.progress = progress;
+    }
 
     /**
      * The JVM decodes the native command line with {@code sun.jnu.encoding}, which on a
@@ -220,7 +226,8 @@ public final class DoCommand {
             return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }
-        TaskLoop.Outcome loop = new TaskLoop(processes).run(loaded, user, runId, options.dryRun());
+        TaskLoop.Outcome loop = new TaskLoop(processes).withProgress(progress)
+                .run(loaded, user, runId, options.dryRun());
 
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("ok", loop.ok());
