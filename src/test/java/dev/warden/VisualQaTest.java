@@ -140,7 +140,22 @@ public final class VisualQaTest implements Suite {
                 while (!Thread.currentThread().isInterrupted()) {
                     try (java.net.Socket client = squatter.accept();
                          var out = client.getOutputStream()) {
-                        out.write(("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+                        // Read the request before answering it, the way a real server does.
+                        // Writing a response and closing at once leaves the client request
+                        // bytes unread in the receive buffer, and Windows answers a close
+                        // with unread data by sending RST. That reset can reach the client
+                        // before it has finished reading the response, and the probe then
+                        // reports "nothing is serving this port" about a server that had
+                        // already replied 200. About one run in three failed that way; the
+                        // defect was in this double, not in the probe it was testing.
+                        var request = new java.io.BufferedReader(new java.io.InputStreamReader(
+                                client.getInputStream(),
+                                java.nio.charset.StandardCharsets.US_ASCII));
+                        for (String line = request.readLine();
+                             line != null && !line.isEmpty(); line = request.readLine()) {
+                            // the request head, drained
+                        }
+                        out.write(("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
                                 .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
                         out.flush();
                     } catch (Exception done) {
@@ -163,6 +178,8 @@ public final class VisualQaTest implements Suite {
                 ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "occupied");
                 VisualQaRunner.Outcome occupied = new VisualQaRunner(new ProcessRunner())
                         .run(loaded, "vq-occupied");
+                check.eq("the probe sees the stranger", Boolean.TRUE,
+                        occupied.data().get("already_answering"));
                 check.eq("a stranger on the port is a refusal, not a silent substitution",
                         "visual_qa_port_occupied", occupied.code());
                 check.that("and the run does not pass", !occupied.ok());
