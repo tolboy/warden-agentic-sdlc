@@ -383,6 +383,11 @@ public final class UserSetup {
             - a layout that has collapsed, overflowed, or lost its alignment at this viewport;
             - a state that is plainly wrong for the stated goal — an empty list where there
               should be content, a spinner that never resolved, a placeholder left in.
+            - two things drawn at sizes that cannot both be true: an object several times
+              the height of the person beside it, an icon larger than the button holding it,
+              a thumbnail that dwarfs its own caption. A machine can measure one element; only
+              you are looking at two of them at once, and a picture is wrong long before any
+              matcher notices.
 
             You are not reviewing the code. You are answering one question: **does the result
             look right at these viewports.**
