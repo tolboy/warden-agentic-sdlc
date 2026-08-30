@@ -58,6 +58,10 @@ warden.cmd do --goal-file goal.txt --project C:\path\to\repo --scope ui
 
 Поштучно и без токенов: `init`, `validate`, `gates`, `visual-qa`, `role --dry-run`.
 
+Пока цепочка идёт, `do` и `run` пишут в stderr, на какой она стадии, какой профиль и вендор
+сейчас работает, что это стоило и куда ушло дальше — см.
+[Что видно, пока прогон идёт](#что-видно-пока-прогон-идёт). stdout остаётся одним JSON.
+
 ## Тестировщик, у которого есть глаза
 
 Визуальная проверка — два слоя, и они отвечают на разные вопросы.
@@ -146,9 +150,77 @@ visual_qa:
 человеком. Что из этой схемы уже прогонялось вживую, а что нет — в разделе
 [Состояние](#состояние); статус по блокам — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+**Отказ человека — это тоже вход, а не точка.** Причина, которую вы напишете при `reject`,
+единственная обратная связь во всей петле, стоившая чьего-то внимания, а не вызова вендора.
+`--continue` передаёт её следующему прогону — дословно, реализатору, как причину человека, а
+не как непройденную проверку:
+
+```text
+warden approve <run-id> --decision reject --note "костёр вдвое выше человека рядом"
+warden run <task> --run-id <new> --continue <run-id>
+```
+
+Разрешения это не даёт: подстановку вендора по-прежнему авторизует только решение
+`switch`. Оно передаёт ровно текст, и передаёт его один раз — дальше контекстом становится
+конкретный провал стадии, и заваливать его несвежим отказом было бы хуже.
+
 Подключить новый проект = запустить `init`, проверить созданный контракт и описать его
 команды проверки. Не копируйте `.warden/` самого Warden: это его собственный контракт, не
 шаблон.
+
+## Что видно, пока прогон идёт
+
+Петля работает десятки минут. Раньше она за всё это время не печатала ни символа, а в
+конце выдавала один JSON, и «где мы сейчас» приходилось выяснять по датам файлов в четырёх
+каталогах прогона. Теперь `do` и `run` рассказывают о себе **в stderr**:
+
+```text
+run   chapter-hearth-4
+task  chapter-with-a-reason   risk=medium   scope=src, scripts
+plan  implement -> gates -> review -> browser -> look
+bound 12 vendor call(s), $40.0000 ceiling, fix rounds <= 3
+
+note  starting from the rejection recorded on chapter-hearth-3; the implementer is
+      given its reason verbatim
+
+[1/5] implement codex-implement  codex/gpt-5.6-terra  dispatching, up to 60 min
+      ok  2m45s   tokens 851760/5597   cost ?
+[2/5] gates     machine gates: npm run check, npm run build
+      ok  18.5s
+[3/5] review    grok-review  grok/grok-4.6  dispatching, up to 45 min
+      ok  16m30s  tokens 187337/45156   cost $0.3099   verdict pass
+[4/5] browser   browser harness: 3 scenario(s) at http://127.0.0.1:4173/?lab
+      ok  2m14s   7 screenshot(s)
+[5/5] look      claude-visual-qa  claude/opus  dispatching, up to 25 min
+      ok  2m36s   cost $1.4202   verdict fail
+      1 blocking finding(s) from visual_qa — see warden report for what it saw
+      -> fix round 1 of 3: look sends the work back to implementer
+
+done  ready_for_human   6 vendor call(s), $3.9098 charged
+      2 of those reported no price at all, so the $ ceiling did not measure them
+      the candidate is ready and nothing has been landed
+      warden report chapter-hearth-4 --text
+      warden approve chapter-hearth-4 --decision <accept|reject>
+```
+
+**stdout при этом не меняется** — там по-прежнему ровно один JSON-объект, который читают
+Conductor и любые скрипты, поэтому перенаправление одного потока не мешает другому.
+`--quiet` выключает рассказ. Ничего из напечатанного не является уликой: каждая строка
+повторяет то, что уже лежит в леджере, — потому её и можно выключить, ничего не потеряв.
+
+## Сколько это стоило, и почему иногда неизвестно
+
+Каждый вендор здесь запускается своим CLI по подписке оператора. Цена вызова — это то,
+что этот CLI сам решил сообщить: Grok и Claude печатают цифру, Codex не печатает ничего.
+Warden не досчитывает и не оценивает — он записывает то, что пришло, и считает, сколько
+вызовов не сообщили ничего.
+
+Отсюда и честная граница `budgets.max_cost_usd`: это потолок для **той части прогона,
+которая сама себя оценила**. Прогон, где ни один вендор цену не назвал, может израсходовать
+все свои вызовы под лимитом в $40 и списать против него $0.00. Поэтому в `task-run.json`
+рядом с `total_cost_usd` лежат `unpriced_calls` и `cost_ceiling_binding`, и рассказ в
+терминале говорит это вслух. Настоящая граница, которая держит всегда, — `max_role_runs`:
+она считает вызовы, а не деньги, и проверяется до отправки.
 
 ## Результат прогона
 
@@ -260,7 +332,8 @@ warden run <task> --run-id <new> --continue <run-id>
 
 `--continue` читает решение того прогона и разрешает **ровно одну** подстановку: названную
 роль на названный профиль. Флаг разрешал бы кому угодно, а сохранённое «у codex кончилось»
-протухло бы в момент, когда окно квоты откроется. При `auto` подстановка происходит сразу, но
+протухло бы в момент, когда окно квоты откроется. Тот же флаг принимает и **отклонённый**
+прогон — но там он ничего не разрешает, а только переносит причину отказа реализатору. При `auto` подстановка происходит сразу, но
 событие `role_failover` с обоими вендорами и полем `authorized_by` всё равно попадает в улики
 и в `warden report`.
 
