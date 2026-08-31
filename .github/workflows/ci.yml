@@ -94,9 +94,13 @@ jobs:
       # every one of them matched something real before this repository was opened.
       # `git grep` is deliberate — it looks at tracked files only, so a maintainer's local
       # run directories under .warden/runs/ cannot make this job fail or pass by accident.
+      # The segment after the home directory must *start* with a letter or a digit. A dot is
+      # legal inside a Windows user name but never begins an elision, so `C:\Users\...\npm`
+      # in a comment illustrating what `where.exe` prints is not a personal path — and the
+      # first run of this job failed on exactly that.
       - name: No absolute personal paths
         run: |
-          if git grep -nE '(C:\\+Users\\+[A-Za-z0-9._-]+|/home/[a-z][a-z0-9._-]*|/Users/[a-z][a-z0-9._-]*)' \
+          if git grep -nE '(C:\\+Users\\+[A-Za-z0-9][A-Za-z0-9._-]*|/home/[a-z][a-z0-9._-]*|/Users/[a-z][a-z0-9._-]*)' \
                -- '*.md' '*.java' '*.yaml' '*.yml' '*.mjs' '*.sh' '*.cmd' '*.json' '*.jsonl' ; then
             echo "::error::an absolute personal path is committed; use <warden> / <project> placeholders"
             exit 1
