@@ -1,48 +1,55 @@
-# Живой цикл: что реально прогонялось, на чём и чем закончилось
+# The live cycle: what was actually run, on what, and how it ended
 
-Стенограмма, а не заявление о намерениях. Проект — `Living Horizon` (SvelteKit),
-worktree создавала Orca 1.4.190, вендоры настоящие, Windows 11, Java 25, `--release 21`.
+A transcript, not a statement of intent. The target is a private SvelteKit application,
+referred to here as *the target project*; the worktrees were created by Orca 1.4.190; the
+vendors are real and were billed to the operator's own subscriptions. Windows 11, Java 25,
+`--release 21`.
 
-Дата прогонов: 2026-08-28.
+Run dates: 2026-08-28 and 2026-08-29.
+
+The project's own file and identifier names have been generalised where they would expose a
+private codebase. Every number, verdict and quoted vendor sentence is as recorded.
 
 ---
 
-## 1. Вход оператора: `warden do` создаёт изоляцию сам
+## 1. The operator's entry point: `warden do` creates the isolation itself
 
 ```text
-warden do --project C:\Users\anato\Living-horizon --scope code --dry-run \
+warden do --project <project> --scope code --dry-run \
           --task-id warden-e2e-probe "Probe run: confirm the Create button stays visible"
 ```
 
 ```json
 {"ok":true,"code":"dry_run",
- "worktree":"C:\\Users\\anato\\orca\\workspaces\\Living-horizon\\w-warden-e2e-probe",
+ "worktree":"<orca-workspaces>/w-warden-e2e-probe",
  "isolated":true,"isolation":"created","worktree_start_ref":"main",
  "steps":[{"step":"implementer",...},{"step":"gates",...},
           {"step":"reviewer",...},{"step":"visual_qa",...}]}
 ```
 
-Проверено этим прогоном:
+Proved by this run:
 
-* Orca создала worktree по запросу Warden; Warden не выполнял ни `git branch`, ни
+* Orca created the worktree at Warden's request; Warden ran neither `git branch` nor
   `git worktree add`;
-* `worktree_start_ref: main` — `HEAD` разрешается в **фактическую текущую ветку**, а не
-  подставляется константой. На `master`, `develop` или feature-ветке worktree возьмётся
-  оттуда же; при detached HEAD команда отказывает (`detached_head`), а не угадывает;
-* в новом worktree создан контракт проекта, составлен черновик задачи, и вся цепочка
-  стадий разрешилась — до единого вызова вендора.
+* `worktree_start_ref: main` — `HEAD` resolves to the **actual current branch** rather than
+  being substituted with a constant. On `master`, `develop` or a feature branch the worktree
+  is cut from there; on a detached HEAD the command refuses (`detached_head`) instead of
+  guessing;
+* a project contract was created in the new worktree, a task draft was written, and the whole
+  chain of stages resolved — all before a single vendor call.
 
 ---
 
-## 2. Полный цикл на существующей задаче: кнопка Create
+## 2. A full cycle on an existing task: the Create button
 
-Задача была поставлена раньше и сделана: в `src/routes/layout.css` девять строк,
-возвращающих `.mode-switch` на ширинах 640–759.98px в ландшафтной ориентации. Телефон,
-повёрнутый набок, достаточно широк для студии, но мобильная шапка прятала единственный
-элемент, через который в неё можно войти. Явного подтверждения, что задача закрыта, не было.
+The task had been set earlier and done: nine lines in a route stylesheet that bring the
+mode switch back at widths 640–759.98px in landscape orientation. A phone turned sideways is
+wide enough for the studio, but the mobile header hid the only control that opens it. There
+was no explicit confirmation that the task was closed.
 
-Прогон выполнялся цепочкой **без стадии `implement`** — работа уже в worktree, реализовывать
-нечего. Именно для этого цепочка объявляется, а не зашита:
+The run used a chain **without an `implement` stage** — the work was already in the worktree
+and there was nothing to implement. This is exactly why the chain is declared rather than
+compiled in:
 
 ```yaml
 workflow:
@@ -89,43 +96,43 @@ changed  1 source file(s) since 5c42b7bcbdb…
 totals   1 vendor call(s), 0 fix round(s), $0.0835 of $6.0000 budget
 ```
 
-Что здесь доказано, по слоям:
+What that proves, layer by layer:
 
-| Слой | Чем именно |
+| Layer | By what exactly |
 |---|---|
-| Машинные гейты | `npm run check` и `npm run build` прошли в worktree; ни одного пути вне `src`/`scripts` |
-| Целостность конфигурации | весь `.warden` снят слепком до первой стадии и сверен после каждой; отличий нет |
-| Независимый ревьюер | Grok 4.6, `verdict: pass`, 0 находок, 104 042 / 13 006 токенов, $0.0835, 337 с |
-| Браузер | шесть сценариев на трёх виюпортах, включая **клик** и переход в `main.editing` |
-| Человеческий гейт | `decision.json` в состоянии `pending`, варианты `accept`/`reject` |
+| Machine gates | `npm run check` and `npm run build` passed in the worktree; no path outside `src`/`scripts` |
+| Configuration integrity | the whole `.warden` tree was snapshotted before the first stage and compared after each one; no difference |
+| Independent reviewer | Grok 4.6, `verdict: pass`, 0 findings, 104,042 / 13,006 tokens, $0.0835, 337 s |
+| Browser | six scenarios across three viewports, including a **click** and the transition into the editing mode |
+| Human gate | `decision.json` in state `pending`, options `accept` / `reject` |
 
-Ревьюер о сути изменения, дословно:
+The reviewer on the substance of the change, verbatim:
 
 > The Create/View switch was already in the DOM for landscape viewports at 640–759.98px
 > (MOBILE_VIEW_ONLY_QUERY admits the studio there) but `@media (max-width: 759.98px)` set
 > `.mode-switch` to `display:none`. The added later rule restores `display:flex` for that band
 > in landscape only. Production CSS keeps hide-then-restore order.
 
-Сценарий `400x800: text=Create hidden` стоит в контракте намеренно: без него самый дешёвый
-способ пройти проверку выше — показать переключатель везде, а это ломает продукт на
-портретном телефоне. Проверка запрещает не только провал, но и подделку.
+The scenario `400x800: text=Create hidden` is in the contract on purpose: without it, the
+cheapest way to satisfy the checks above is to show the switch everywhere, which breaks the
+product on a portrait phone. The check forbids not only failure but also the forgery.
 
-Скриншот `700x400-after-click.png` показывает открытую студию с палитрой инструментов —
-кнопка не просто видна, она работает.
+The screenshot `700x400-after-click.png` shows the studio open with its tool palette — the
+button is not merely visible, it works.
 
-**Решение не записано.** Приёмка — единственный шаг, который считает вывод агента
-доверенным, и он остаётся за человеком:
+**No decision was recorded.** Acceptance is the only step that treats an agent's output as
+trusted, and it stays with a person:
 
 ```text
 warden approve lh-verify-1 --decision accept --expected-updated-at 2026-08-28T11:53:39.586362700Z
 ```
 
-Accept отклоняется, если отпечаток worktree изменился с момента показа. Reject, abort и retry
-остаются доступны всегда — они ничего не разрешают.
+`accept` is refused if the worktree fingerprint moved since it was shown. `reject`, `abort`
+and `retry` are always available — they permit nothing.
 
 ---
 
-## 3. Полный цикл с реализатором: остановлен исчерпанной подпиской
+## 3. A full cycle with an implementer: stopped by a spent subscription
 
 ```text
 warden run create-button-testid --run-id e2e-1
@@ -139,30 +146,33 @@ stage           attempt  ok  vendor/model                    cost      tokens   
 implementer           0  NO  codex/gpt-5.6-terra             ?         ?/?             16519
 ```
 
-Сообщение вендора сохранено дословно: «You've hit your usage limit… or try again at
-10:55 AM». Warden не разбирает из него время: в формулировке нет ни даты, ни часового пояса.
+The vendor's message is kept verbatim: "You've hit your usage limit… or try again at
+10:55 AM". Warden does not parse a time out of it: the wording carries neither a date nor a
+time zone.
 
-Это не дефект прогона, а тот самый путь, ради которого квота отделена от обычной ошибки:
+This is not a defect in the run; it is the exact path for which quota is separated from an
+ordinary error:
 
-* `role_quota_exhausted`, а не `implementer_failed` — оператора не отправляют читать
-  транскрипт, в котором нет дефекта;
-* профиль исключён из этого процесса, повторно не вызывается;
-* failover не сработал только потому, что в политике на роль `implementer` назначен ровно
-  один профиль;
-* `?` вместо `0.0000` в стоимости и токенах: вендор их не сообщил, и отчёт этого не скрывает.
+* `role_quota_exhausted`, not `implementer_failed` — the operator is not sent to read a
+  transcript that contains no defect;
+* the profile is excluded for the rest of the process and is not called again;
+* failover did not fire only because the policy assigns exactly one profile to the
+  `implementer` role;
+* `?` rather than `0.0000` for cost and tokens: the vendor did not report them, and the report
+  does not hide that.
 
-Задача и worktree остались готовыми к повтору, когда окно квоты откроется:
+The task and the worktree stayed ready for a retry once the quota window reopened:
 
 ```text
-cd C:\Users\anato\orca\workspaces\Living-horizon\w-warden-e2e-probe
+cd <orca-workspaces>/w-warden-e2e-probe
 warden run create-button-testid --run-id e2e-2
 ```
 
-Убрать за собой, если повтор не нужен: `orca worktree remove --worktree name:w-warden-e2e-probe`.
+To clean up instead: `orca worktree remove --worktree name:w-warden-e2e-probe`.
 
 ---
 
-## 4. Conductor как внешний контроллер
+## 4. Conductor as the outer controller
 
 ```text
 conductor run conductor\do.yaml --skip-gates --no-interactive
@@ -188,113 +198,116 @@ Auto-selecting: Reject (--skip-gates)
 Workflow terminated at 'rejected': Human rejected the candidate. No changes were landed.
 ```
 
-Conductor 0.1.33. Проверено:
+Conductor 0.1.33. Verified:
 
-* маршрут по `run_task.output.exit_code` сработал;
-* токен оптимистичной блокировки `decision_updated_at` прошёл из вывода Warden в аргументы
-  `warden approve` через шаблон Conductor — единственное место, где эти две программы обязаны
-  договориться;
-* решение записано durable: `state: resolved`, `decision: reject`, `actor` — тот, что передан;
-* повторное решение по тому же прогону отклонено (`duplicate_decision`);
-* `--skip-gates` выбирает **первый** вариант, и в обоих гейтах первым стоит отказ (`Reject`,
-  `Abort`). Автоматика может отказать за человека, принять — нет. Порядок вариантов в
-  `do.yaml` держит этот инвариант, и об этом там написано.
+* routing on `run_task.output.exit_code` worked;
+* the optimistic-lock token `decision_updated_at` travelled from Warden's output into the
+  arguments of `warden approve` through a Conductor template — the one place where these two
+  programs are obliged to agree;
+* the decision was recorded durably: `state: resolved`, `decision: reject`, `actor` as passed;
+* a second decision on the same run was refused (`duplicate_decision`);
+* `--skip-gates` selects the **first** option, and in both gates the refusal is first
+  (`Reject`, `Abort`). Automation may refuse on a human's behalf; it may not accept. The order
+  of options in `do.yaml` holds that invariant, and says so in the file.
 
-Прогон намеренно машинный: цепочка из одной стадии `machine_gates`, ни одного вызова вендора.
-Проверялся мост, а не мнение модели.
+The run is deliberately machine-only: a chain of a single `machine_gates` stage, not one vendor
+call. What was being tested was the bridge, not a model's opinion.
 
 ---
 
-## 5. Проект с нуля
+## 5. A project from nothing
 
 ```text
-warden do --project <пустой каталог> --in-place --init-repo --dry-run \
+warden do --project <empty directory> --in-place --init-repo --dry-run \
           "Build a landing page with a Create button"
 ```
 
-`git init` + базовый коммит, контракт с пустым `checks.fast: []` и областью `<repository>`,
-черновик задачи с браузерными сценариями как определением «сделано», вся цепочка разрешилась.
-Подробности — в README, раздел «Первый запуск».
+`git init` plus a baseline commit, a contract with an empty `checks.fast: []` and a
+`<repository>` scope, a task draft whose browser scenarios are the definition of done, and the
+whole chain resolved. Details are in the README, under *The first real run*.
 
 ---
 
-## 6. Три вендора в одном прогоне, и что при этом сломалось
+## 6. Three vendors in one run, and what broke while doing it
 
-Второй заход, когда квоты открылись у всех троих. Состав ролей: реализатор — Codex
-(`gpt-5.6-terra`), ревьюер — Grok 4.6, глаза — Claude Opus через `capabilities.vision`
-с доставкой `workspace_file`: у Claude нет флага для картинок, зато есть инструмент
-чтения, который показывает изображение, а не имя файла.
+A second attempt, once all three quotas were open. The roster: implementer — Codex
+(`gpt-5.6-terra`); reviewer — Grok 4.6; eyes — Claude Opus through `capabilities.vision` with
+`workspace_file` delivery, because Claude has no flag for images but does have a read tool that
+shows it the picture rather than the filename.
 
-Верификация профиля `claude-visual-qa` — не «вышел с нулём», а сверка по пикселям:
+Verifying the `claude-visual-qa` profile was not "it exited zero" but a check against pixels:
 
 ```text
-probe: открой этот скриншот и назови две кнопки в пилюле сверху и число иконок справа
-ответ: VIEW, CREATE
+probe: open this screenshot, name the two buttons in the pill at the top, and count the
+       icons on the right
+reply: VIEW, CREATE
        8
 ```
 
-Метки прочитаны верно, и ни в одном имени файла по этому пути нет слова VIEW. Счёт
-иконок при повторном прогоне дал 7 вместо 8 — это записано в `verification.note`
-профиля, чтобы дата верификации не читалась как обещание точности, которого проба не
-дала. Этот глаз — для «читаемо, налезло, развалилось», а не для пересчёта мелочи.
+The labels were read correctly, and no filename along that path contains the word VIEW.
+Counting the icons on a repeat gave 7 instead of 8 — which is recorded in the profile's
+`verification.note`, so the verification date is not read as a promise of precision the probe
+did not deliver. This eye is for "readable / overlapping / collapsed", not for counting small
+things.
 
-### Что нашёл живой прогон
+### What the live run found
 
-Пять дефектов, каждый — в коде, а не в рассуждении о коде.
+Five defects, every one of them in code rather than in reasoning about code.
 
-**Промпт с JSON не доходил до вендора.** Промпт визуального QA включает отчёт
-харнесса; отчёт — JSON; JSON — кавычки. На Windows JVM оборачивает аргумент в кавычки,
-если в нём есть пробел, но не экранирует кавычку внутри значения — принимающий процесс
-разрезает аргумент с этого места. До `claude.exe` дошло `error: unknown option '->'` за
-620 мс. Старая проверка искала только переводы строк через batch-shim, а `claude` —
-настоящий `.exe`. Теперь отказ до отправки, оба Claude-профиля на `prompt_delivery: stdin`.
-Обе половины правила нужны: `-c model_reasoning_effort="high"` кавычку содержит, пробела
-нет, JVM его не оборачивает, и он ходит исправно — первая версия правила его отклонила.
+**A prompt carrying JSON never reached the vendor.** The visual-QA prompt includes the
+harness report; the report is JSON; JSON has quotes. On Windows the JVM wraps an argument in
+quotes if it contains a space, but does not escape a quote inside the value — the receiving
+process cuts the argument at that point. What reached `claude.exe` was
+`error: unknown option '->'` after 620 ms. The old check looked only for newlines through a
+batch shim, and `claude` is a real `.exe`. Now the refusal happens before dispatch, and both
+Claude profiles use `prompt_delivery: stdin`. Both halves of the rule are needed:
+`-c model_reasoning_effort="high"` contains a quote but no space, the JVM does not wrap it, and
+it travels fine — the first version of the rule rejected it.
 
-**Ревьюер не знал о браузерном слое.** Grok выписал P1 «ни одна команда не проверяет
-этот атрибут» — а сценарий строкой ниже проверял его по имени. Реализатора отправили
-писать тест для уже проверенного. Промпт ревьюера не упоминал браузерные сценарии
-вообще; теперь они стоят рядом с командами приёмки.
+**The reviewer did not know about the browser layer.** Grok filed a P1 saying "no command
+verifies this attribute" — while the scenario one line below verified it by name. The
+implementer was sent to write a test for something already checked. The reviewer's prompt did
+not mention browser scenarios at all; now they sit next to the acceptance commands.
 
-**Гейт брал деньги за проблему оператора.** `package-lock.json` тронул setup самой Orca,
-до появления агента. Проверка области срабатывала *после* реализатора и возвращалась ему
-же фикс-раундом — а он физически не может это починить: путь вне его области изменений.
-Теперь проверка идёт до первой отправки, а `preflight_outside_scope`,
-`base_ref_unresolvable` и `contract_mutated` терминальны по той же причине, по какой ею
-уже был `visual_qa_unavailable`.
+**The gate charged money for the operator's problem.** A lockfile had been touched by Orca's
+own setup, before any agent existed. The scope check fired *after* the implementer and came
+back to it as a fix round — which it physically cannot fix, the path being outside its blast
+radius. The check now runs before the first dispatch, and `preflight_outside_scope`,
+`base_ref_unresolvable` and `contract_mutated` are terminal for the same reason
+`visual_qa_unavailable` already was.
 
-**Отпечаток кандидата включал улики Warden.** Прогон, зелёный на каждой стадии, отказал
-в приёмке с `candidate_changed` — из-за собственного лог-файла, лежавшего в `.warden/`.
-Правило верное, набор файлов неверный: человек принимает изменение исходников. Два
-вопроса разведены — «трогала ли что-нибудь read-only роль» по-прежнему включает
-`.warden`, «тот ли это кандидат» больше нет. Целостность контракта не слабеет: любое
-изменение в `.warden` во время прогона и так даёт `contract_mutated` по снимку.
+**The candidate's fingerprint included Warden's own evidence.** A run that was green at every
+stage refused acceptance with `candidate_changed` — because of its own log file sitting inside
+`.warden/`. The rule was right and the file set was wrong: a human accepts a change to sources.
+Two questions were separated — "did a read-only role touch anything" still includes `.warden`,
+"is this the same candidate" no longer does. Contract integrity is not weakened: any change
+inside `.warden` during a run already yields `contract_mutated` against the snapshot.
 
-**Потолок ходов — не провал работы.** Ревью диффа на 126 строк израсходовало все 16
-разрешённых ходов на чтение и вышло с кодом 1 без артефакта; прогон записал
-`role_command_failed`. Ничего не сломалось: вендора прервал предел, который выставил
-оператор, и он к тому моменту уже нашёл два настоящих дефекта. Отдельный код
-`role_turns_exhausted` с указанием, что поднять. Failover не делается — другой вендор
-упрётся в тот же потолок на том же диффе.
+**A turn ceiling is not a failure at the work.** Reviewing a 126-line diff consumed all 16
+permitted turns on reading and exited 1 with no artifact; the run recorded
+`role_command_failed`. Nothing was broken: the vendor was interrupted by a limit the operator
+set, and it had already found two genuine defects by then. There is now a distinct
+`role_turns_exhausted` code that names what to raise. No failover is attempted — another vendor
+would meet the same ceiling on the same diff.
 
-### Отказ, который система обязана была не проглотить
+### The refusal the system had to not swallow
 
-Реализация маяка прошла обе команды приёмки, и Codex вернул `status: blocked`:
+An implementation passed both acceptance commands and Codex returned `status: blocked`:
 
-> The scoped lighthouse implementation is present and both acceptance commands pass.
-> Production persistence remains blocked: Supabase frame validation does not allow the
-> new lighthouse kind, and the required migration is outside the permitted src/scripts
-> paths.
+> The scoped implementation is present and both acceptance commands pass. Production
+> persistence remains blocked: server-side frame validation does not allow the new element
+> kind, and the required migration is outside the permitted src/scripts paths.
 
-То же самое до него нашёл Grok. Агент отказался и молча выпустить то, что сломается при
-публикации, и выйти за выданную ему область. Синтаксически корректный артефакт со
-статусом `blocked` — это не успех, и `semanticFailure` его таким не считает.
+Grok had found the same thing before it. The agent refused both to quietly ship something that
+would break on publish and to step outside the blast radius it was given. A syntactically valid
+artifact with status `blocked` is not a success, and `semanticFailure` does not treat it as
+one.
 
-Ответ оператора — не уговорить агента, а расширить область до `supabase/migrations`,
-где лежит прямой прецедент: `20260712060000_boat_element.sql` добавлял ровно так же вид
-`boat`.
+The operator's answer was not to talk the agent round but to widen the scope to the migrations
+directory, where a direct precedent already existed: an earlier migration had added another
+element kind in exactly the same way.
 
-### Полный цикл, три вендора, зелёный
+### The full cycle, three vendors, green
 
 ```text
 run      lighthouse-5
@@ -320,39 +333,41 @@ changed  8 source file(s) since 5c42b7bcbdb…
 totals   3 vendor call(s), 0 fix round(s), $1.2765 of $14.0000 budget
 ```
 
-Ревьюер, дословно:
+The reviewer, verbatim:
 
 > The lighthouse is a permanent Create-palette kind (`data-testid=tool-lighthouse`), allowed
 > only in the central share of a deep water band, drawn with a sand-and-stone islet under the
 > tower, and admitted by a new `frame_elements_valid` migration that copies the current
 > allowlist and adds lighthouse. Existing kinds' placement and draw helpers are unchanged.
 
-Роль с глазами, дословно:
+The role with eyes, verbatim:
 
 > the canvas shows a lighthouse standing in the middle of the lake on a small sandy islet of
 > its own, with a lit lamp and glow — mid-water, well clear of both shores, exactly what the
 > task asks for.
 
-Две находки P3, обе косметические и обе — не про эту задачу: строка состояния пишет
-«1 DETAILS» рядом с «1 DETAIL», и подпись LIGHTHOUSE заполняет свою плитку почти вплотную,
-тогда как у соседей есть поля.
+Two P3 findings, both cosmetic and both unrelated to this task: a status line writing
+"1 DETAILS" next to "1 DETAIL", and one caption filling its tile almost edge to edge where its
+neighbours have margins.
 
-`css=canvas click@0.5,0.82` — тот самый клик в точку внутри элемента. Без него canvas во всё
-окно достижим только по центру, и поставить что-либо в воду сценарием нельзя.
+`css=canvas click@0.5,0.82` is the click at a point inside the element. Without it, a
+full-window canvas is reachable only at its centre, and no scenario can place anything in the
+water.
 
 ---
 
-## 8. Полный цикл до человеческого гейта, и починка, которую заказали глаза
+## 7. The full cycle to the human gate, and a fix ordered by the eyes
 
-2026-08-29. Задача не про вёрстку и не про кнопку: у главы `stone-upon-stone` в
-`src/lib/story.ts` не было смысла — путник нёс камень к куче камней, клал его и
-останавливался. Цель дала направление (очаг на камнях вместо ещё одного камня) и оставила
-дизайн реализатору, а обязательным сделала то, что можно проверить: id шаблона, вид
-жеста-потребности, `data-testid` на кнопках стенда и «читается с одного взгляда на 1280x720».
+2026-08-29. This task was about neither layout nor a button: one chapter of the target
+project's story had no meaning — a walker carried a stone to a pile of stones, put it down and
+stopped. The goal gave a direction (a hearth on the stones rather than one more stone) and left
+the design to the implementer, while making mandatory only what can be checked: the template
+id, the kind of gesture, `data-testid` on the workbench buttons, and "legible at a glance at
+1280x720".
 
-Контракт задачи опирается на шаг `wait`, без которого этот проект нельзя проверить вообще:
-панель стенда появляется в DOM секунд через шесть после загрузки, а расплата главы —
-секунд через двадцать восемь после постановки.
+The task contract leans on the `wait` step, without which this project cannot be checked at
+all: the workbench panel enters the DOM about six seconds after load, and the chapter's payoff
+lands about twenty-eight seconds after it is staged.
 
 ```yaml
 - "1280x720: wait 7 -> testid=lab-chapter-stone-upon-stone click -> wait 20
@@ -376,33 +391,34 @@ totals   6 vendor call(s), 1 fix round(s), $3.9098 of $40.0000 budget
 outcome  ok  ready_for_human  next=human_gate
 ```
 
-Раунд починки заказала **не машина**. Гейты были зелёные, ревью Grok — `pass`, харнесс —
-`passed`. P1 выставила роль с глазами, дословно:
+The fix round was ordered by **no machine**. The gates were green, Grok's review was `pass`,
+the harness was `passed`. The P1 came from the role with eyes, verbatim:
 
 > the whole tableau is standing on water … at wait-5 the fire's base sits at ~y 578, above
 > the lake's near edge at y 590, i.e. mid-basin. A hearth burning on a lake reads as a
 > rendering fault, not as a reason, and it directly contradicts the chapter's own name,
 > 'the mark on the open ground'.
 
-Реализатор починил постановку стенда, ревьюер перечитал дерево (`recheck_after_fix`), на
-втором заходе роль дала `pass`: путник подходит к двум камням на равнине, через четырнадцать
-секунд там горит очаг с дымом. `stale_judgements` в `task-run.json` пусто — ни одна стадия не
-судила о дереве, которого больше нет.
+The implementer fixed the staging, the reviewer re-read the tree (`recheck_after_fix`), and on
+the second look the role returned `pass`: the walker approaches two stones on open ground, and
+fourteen seconds later a hearth burns there with smoke. `stale_judgements` in `task-run.json`
+is empty — no stage judged a tree that no longer exists.
 
-Что этот прогон стоил инструменту: четыре дефекта Warden, найденные по дороге и починенные в
-самом Warden, — слепота харнесса к интерфейсу со своими часами, `text=chapter visible` в
-черновике контракта из слова перед «button», реализатор, которому никогда не показывали
-браузерные сценарии, и проба готовности, которая говорила Vite по HTTP/2 и не слышала ответа.
-Последняя стоила отдельного прогона: `visual_qa_unavailable` — это остановка без раунда
-починки, и она выбросила зелёные реализатора и ревью.
+What this run cost the tool: four Warden defects, found along the way and fixed in Warden
+itself — the harness's blindness to an interface running on its own clock; a
+`text=chapter visible` in a draft contract produced from a word that merely sat before
+"button"; an implementer that was never shown the browser scenarios; and a readiness probe
+that spoke HTTP/2 to a dev server and heard nothing back. The last one cost a whole run:
+`visual_qa_unavailable` is a stop with no fix round, and it threw away a green implementer and
+a green review.
 
 ---
 
-## 7. Чего этот файл всё ещё не утверждает
+## 8. What this file still does not claim
 
-* Orca-адаптер (`runner: orca`) как исполнитель роли живьём не подтверждён. Orca в этих
-  прогонах создавала worktree — это `OrcaIsolation`, другой путь кода.
-* `warden do --conductor` (Conductor, запущенный самим Warden) не прогонялся: проверялся тот
-  же workflow, запущенный напрямую из CLI Conductor.
-* Подтверждение failover по решению человека (`--continue`) покрыто тестами, но на живой
-  исчерпанной квоте не прогонялось: во второй заход квоты были у всех троих.
+* The Orca adapter (`runner: orca`) as a **role runner** is not confirmed live. Orca created
+  worktrees in these runs — that is `OrcaIsolation`, a different code path.
+* `warden do --conductor` (Conductor launched by Warden itself) has not been run: what was
+  tested is the same workflow launched directly from Conductor's own CLI.
+* Failover confirmed by a human decision (`--continue`) is covered by tests but has not been
+  run against a genuinely exhausted quota: on the second attempt all three quotas were open.

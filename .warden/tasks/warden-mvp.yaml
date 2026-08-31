@@ -3,7 +3,7 @@ id: warden-mvp
 goal: Implement and verify the standalone reusable Warden JVM MVP
 non_goals:
   - "No automatic merge, push, branch creation or pull request"
-  - "No project-specific Living Horizon behavior"
+  - "No behaviour specific to any single target project"
   - "No unverified vendor permission flags"
 risk: high
 scope: platform

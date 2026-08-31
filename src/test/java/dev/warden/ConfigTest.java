@@ -17,7 +17,7 @@ public final class ConfigTest implements Suite {
 
     private static final String PROJECT = """
             version: 1
-            project: living-horizon
+            project: example-app
             base_ref: origin/main
             checks:
               fast: ["npm run check"]
@@ -34,7 +34,7 @@ public final class ConfigTest implements Suite {
 
     @Override public void run(Check check) {
         ProjectConfig project = ProjectConfig.parse(PROJECT, "project.yaml");
-        check.eq("project name", "living-horizon", project.project());
+        check.eq("project name", "example-app", project.project());
         check.eq("named check set", List.of("npm run check", "npm run build"), project.checks().get("full"));
         check.eq("named scope", List.of("src/routes", "src/lib/components"), project.scopes().get("ui"));
         check.eq("default risk", "medium", project.defaultRisk());

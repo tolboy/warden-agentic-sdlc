@@ -1,26 +1,32 @@
 # Reproducible cross-project smoke
 
-This proves the currently implemented boundary without pretending that `warden run` already
-exists:
+The narrow, repeatable proof that the machine boundary holds across a project Warden has never
+seen:
 
 ```text
 Orca tracked implementer -> target worktree -> Warden validate/gates -> evidence ledger
                          -> Conductor machine nodes -> fail-closed human gate
 ```
 
-The smoke uses a throwaway Git repository, not Warden and not Living Horizon.
+The smoke uses a throwaway Git repository — not Warden itself, and not a project you care about.
+
+This document is the **cross-project boundary** smoke and predates the full loop. For the loop
+end to end with live vendors, read [`LIVE-CYCLE.md`](LIVE-CYCLE.md); for a version that needs
+no vendor, no key and no network at all, run [`examples/demo/run.sh`](../examples/demo/README.md).
+The dated sections below are kept as they were written, because a transcript that gets edited
+after the fact stops being evidence.
 
 ## 1. Prerequisites
 
 Build Warden once:
 
 ```text
-cd C:\Users\anato\IdeaProjects\warden
+cd <warden>
 build.cmd
 test.cmd
 ```
 
-On this Windows host, Orca and Codex run under different local identities. Add only the
+If Orca and your vendor CLI run under different local identities on Windows, add only the
 specific repository you intend Orca to use:
 
 ```text
@@ -80,9 +86,9 @@ Commit the contract and checker while deliberately leaving `result.txt` absent.
 Run from the target repository:
 
 ```text
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd validate create-result
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd gates create-result --run-id smoke-red
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd ledger
+<warden>\bin\warden.cmd validate create-result
+<warden>\bin\warden.cmd gates create-result --run-id smoke-red
+<warden>\bin\warden.cmd ledger
 ```
 
 Expected: validation succeeds, gates return `command_failed`, and ledger contains one failed
@@ -110,8 +116,8 @@ Completion is accepted only when `dispatch-show` is settled and the coordinator 
 Run from the Orca task worktree:
 
 ```text
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd gates create-result --run-id smoke-green
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd ledger
+<warden>\bin\warden.cmd gates create-result --run-id smoke-green
+<warden>\bin\warden.cmd ledger
 git status --short
 ```
 
@@ -126,7 +132,7 @@ run with the target worktree as `project_dir`:
 
 ```text
 $env:PYTHONUTF8='1'
-conductor run C:\Users\anato\IdeaProjects\warden\conductor\gates.yaml `
+conductor run <warden>\conductor\gates.yaml `
   --skip-gates --no-interactive `
   --input task=create-result `
   --input run_id=conductor-smoke `
@@ -191,17 +197,24 @@ lowered only in that test home: Claude `--model sonnet` (resolved `claude-sonnet
   Nothing was merged. Codex `--json` is JSONL; the role artifact is recovered from
   `item.completed` / `agent_message`, not from the trailing `turn.completed` usage event.
 
-JS scripts under the Living Horizon Orca worktree remain reference-only. Warden is the source
-of truth and does not create worktrees.
+Warden is the source of truth for its own behaviour, and it does not create worktrees itself.
 
-## What this does not prove yet
 
-Warden now launches roles and owns the bounded fix/review loop. A cheap-model `warden run`
-on a throwaway repo has reached `human_gate` with a writing Codex implementer and passing
-gates; an independent Claude review was run separately on another fixture. Visual QA
-pixel-diff, a live `runner: orca` worker_done cycle, tamper-evident external ledger storage
-and automatic LAND remain disabled.
+## What these smokes do and do not prove
 
-What the smokes prove is narrower and more useful than "it works": the pieces compose, and
-their failure boundaries are observable from the outside. Every failure above was found by
+What they prove is narrower and more useful than "it works": the pieces compose, and their
+failure boundaries are observable from the outside. Every failure recorded above was found by
 reading a report, not by inferring it from behaviour.
+
+What they do **not** cover has since been run elsewhere. The combined loop — a writing
+implementer, machine gates, an independent reviewer on a second vendor, the browser harness
+and the `visual_qa` role, with a fix round ordered by the role with eyes — was run to a green
+human gate on a real project; that transcript is [`LIVE-CYCLE.md`](LIVE-CYCLE.md), not this
+file.
+
+Still not proven anywhere, and refused rather than faked:
+
+- visual QA pixel-diff and baseline comparison (not implemented);
+- a live `runner: orca` `worker_done` cycle as a role runner;
+- tamper-evident external ledger storage;
+- automatic landing — which is not a gap but a decision. Warden never merges.

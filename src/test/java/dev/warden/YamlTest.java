@@ -14,11 +14,11 @@ public final class YamlTest implements Suite {
     @Override public void run(Check check) {
         Map<String, Object> simple = Yaml.parseMapping("""
                 version: 1
-                project: living-horizon
+                project: example-app
                 base_ref: origin/main
                 """);
         check.eq("integer scalar", Long.valueOf(1), simple.get("version"));
-        check.eq("plain scalar", "living-horizon", simple.get("project"));
+        check.eq("plain scalar", "example-app", simple.get("project"));
         check.eq("scalar with a slash is not split", "origin/main", simple.get("base_ref"));
 
         Map<String, Object> nested = Yaml.parseMapping("""

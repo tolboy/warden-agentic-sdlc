@@ -1,49 +1,105 @@
-# Warden setup and reuse log
+# Setup
 
-This is the repeatable procedure. Warden is installed once; each target project only gets
-its own `.warden/project.yaml` and task files.
+Warden is installed once. Each project you point it at gets only its own
+`.warden/project.yaml` and task files — never a vendor name, never a model, never a key.
 
-## 1. Build Warden offline
+Throughout this document, `<warden>` is wherever you cloned this repository and `<project>`
+is the repository you want Warden to work on.
 
-Windows:
+## Requirements
+
+| | |
+|---|---|
+| JDK | 21 or newer. Bytecode targets 21 deliberately; a newer JDK is fine |
+| Git | Any recent version |
+| Node | Only for the browser harness (`scripts/visual-qa.mjs`). Standard library only |
+| Browser | Only for the browser harness: Chrome or Edge, already installed |
+| Vendor CLIs | Whatever you intend to use — `codex`, `claude`, `grok`, … Installed and signed in by you |
+
+Nothing is downloaded at build time. If the build needs the network, that is a bug.
+
+## 1. Build Warden, offline
+
+```bash
+cd <warden>
+./build.sh
+./test.sh
+./bin/warden --version
+```
 
 ```text
-cd C:\Users\anato\IdeaProjects\warden
+cd <warden>
 build.cmd
 test.cmd
 bin\warden.cmd --version
 ```
 
-The installed JDK may be 25; `javac --release 21` deliberately emits Java 21 bytecode.
-Kotlin is not required for the MVP and no dependency is downloaded.
+Your installed JDK may be newer than 21; `javac --release 21` deliberately emits Java 21
+bytecode so one build runs everywhere. Override the floor with `WARDEN_JAVA_RELEASE` if you
+have a reason.
 
-## 2. Add Warden to Orca
+Before going further, run the offline demo. It takes seconds, costs nothing, and proves the
+machine half of the loop works on your machine:
 
-Warden has been registered as the separate Orca repo `warden`, id
-`427085c8-85dc-4d6e-8825-d6dfcc4a4e61`. A fresh repository needs one human-reviewed
-baseline commit before Git/Orca can create child worktrees. Baseline `fc54be7` now exists.
-Do not point Warden development back at the Living Horizon branch.
-
-On this Windows host the checkout is written by `CodexSandboxOffline` while Orca runs as
-the interactive user. Git therefore needs one narrow trust entry before Orca can create a
-worktree:
-
-```text
-git config --global --add safe.directory C:/Users/anato/IdeaProjects/warden
+```bash
+./examples/demo/run.sh
 ```
 
-Do not use a wildcard safe-directory entry.
-
-## 3. Connect any project
-
-From the root of the target Git repository, generate a starter contract:
+## 2. Create your operator configuration
 
 ```text
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd init --base-ref HEAD
+<warden>/bin/warden setup
 ```
 
-Use `HEAD` only for a local repository with no long-lived remote ref. Otherwise replace it
-with the reviewed base ref such as `origin/main`. The command creates:
+This creates `~/.warden/` and never overwrites a file that already exists:
+
+```text
+~/.warden/
+├ policy.yaml            which profiles may fill which role; rotation; failover; workflow
+├ profiles/*.yaml        one vendor filling one role: command, args, quota signatures, model
+├ prompts/*.md           the role prompt templates
+└ schemas/*.json         the JSON schema each role's artifact must satisfy
+```
+
+Set `WARDEN_CONFIG_HOME` to put this somewhere other than `~/.warden`. Note that this is
+**not** `WARDEN_HOME`, which the launcher scripts use for the installation directory — the two
+were once the same name, and the collision silently pointed `warden setup` at the repository.
+
+The shipped profiles are examples, and none of them is usable yet. That is the next step.
+
+## 3. Verify each profile before you let it run
+
+A profile is not released by the resolver until it carries `verification.verified_on` — a date
+that means a human ran its probe and read the output. It is the only field in the whole
+configuration that records a judgement rather than a fact, and it stands in front of a role
+with write access to a repository.
+
+```text
+warden profiles                                       what loads, what is eligible, and why not
+warden profiles --verify grok-review                  run this profile's probe, keep the transcript
+warden profiles --verify grok-review --confirm        stamp the date
+```
+
+`--verify` prints `what_to_check`: the specific things you must see with your own eyes. It
+does **not** stamp the date on a zero exit code — `verified_on` would then mean "the binary
+started", which is exactly the guess the field exists to prevent. `--confirm` only works if
+the probe passed in the same invocation.
+
+**Do the implementer last, and do it carefully.** It is the only role with
+`read_only: false` — the only one that writes to your worktree, and the one whose profile
+carries whatever auto-approval flag its vendor needs. Run its probe standalone, then
+`warden role implementer <task> --dry-run`, and only then let the loop drive it.
+
+## 4. Connect a project
+
+From the root of the target repository:
+
+```text
+<warden>/bin/warden init --base-ref origin/main
+```
+
+Use `--base-ref HEAD` only for a local repository with no long-lived remote ref; otherwise
+name the reviewed base such as `origin/main`. The command creates:
 
 ```text
 <project>/.warden/project.yaml
@@ -51,66 +107,86 @@ with the reviewed base ref such as `origin/main`. The command creates:
 <project>/.warden/runs/.gitignore
 ```
 
-Review every generated command and replace the placeholder goal. Do not copy Warden's own
-`.warden/`; it describes Warden itself. Vendor/model/account configuration does not belong
-in the target repository.
+`init` recognises npm, a Gradle wrapper, Maven, Cargo and Make, and writes a conservative
+starter contract. **Its inferred check commands are a review starting point, not policy** —
+read every one and replace the placeholder goal. A directory with files but no recognised
+build system is refused rather than given a guessed command: a guessed gate fails for reasons
+that have nothing to do with the task.
 
-Run the cheap checks before spending an agent call:
+Do not copy Warden's own `.warden/` into a project. That directory describes Warden itself.
+
+Then run the cheap checks, before spending anything on an agent:
 
 ```text
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd validate <task-id>
-C:\Users\anato\IdeaProjects\warden\bin\warden.cmd gates <task-id> --run-id <run-id>
+<warden>/bin/warden validate <task-id>
+<warden>/bin/warden gates <task-id> --run-id <run-id>
 ```
 
-These commands must run with the target project as the current directory.
+Both must run with the target project as the current directory.
 
-## 4. Conductor boundary
+## 5. Isolation
 
-`conductor/gates.yaml` is the currently executable outer workflow. Its required
-`project_dir` input points at the target repository; the compiled Warden classpath is resolved
-relative to the workflow file. Conductor owns the
-outer timeout and the native fail-closed human gate. Warden owns contract linting, machine
-gates and the bounded role loop — Conductor deliberately does not duplicate the role DAG.
-Conductor's own workflow still exercises only the machine nodes; the visual leg is not
-enabled, and the repository must not claim otherwise.
+`warden do` creates an Orca worktree from the branch you are actually
+on, so the loop never writes to your working checkout. Orca must be running.
 
-On Windows Conductor v0.1.33 may require `PYTHONUTF8=1` before validation or execution.
+For a throwaway repository, or when you do not use Orca, `--in-place` skips isolation and lets
+the implementer edit the tree you are standing in. That is the whole difference; decide
+accordingly.
 
-## 4a. Non-ASCII goals on Windows
+A fresh repository needs one human-reviewed baseline commit before Git or Orca can create
+child worktrees.
 
-Measured on this host: `sun.jnu.encoding` is `Cp1252`, so the JVM replaces every Cyrillic
-character in a command-line argument with `?` before `main` runs. `-Dsun.jnu.encoding=UTF-8`,
-`JDK_JAVA_OPTIONS` and `chcp 65001` were all tried and none of them change it.
-
-Two working options:
+**On Windows, if Orca and your vendor CLI run under different local identities**, Git will
+refuse to operate on the checkout until you add one narrow trust entry:
 
 ```text
-warden do --goal-file goal.txt --project C:/path/to/repo --scope ui
+git config --global --add safe.directory C:/absolute/path/to/project
+```
+
+Add the specific repository. Never use `safe.directory=*`.
+
+## 6. Non-ASCII goals on Windows
+
+The JVM decodes command-line arguments using `sun.jnu.encoding`. Where the ANSI code page is
+not UTF-8 — the ordinary Windows default — every Cyrillic character in an argument becomes `?`
+before `main` runs. `-Dsun.jnu.encoding=UTF-8`, `JDK_JAVA_OPTIONS` and `chcp 65001` do not
+change it.
+
+Two things that work:
+
+```text
+warden do --goal-file goal.txt --project <project> --scope ui
 ```
 
 or enable Windows Settings → Time & language → Language & region → Administrative language
-settings → "Use Unicode UTF-8 for worldwide language support", which makes the ANSI codepage
+settings → "Use Unicode UTF-8 for worldwide language support", which makes the ANSI code page
 65001 and fixes it for every program.
 
-`warden doctor` reports this under `argument_encoding`, and `warden do` refuses a goal that
-arrived as question marks rather than writing it into a contract.
+`warden doctor` reports this under `argument_encoding`, and `warden do` refuses a mangled goal
+rather than writing question marks into a contract.
 
-## 5. Current live verification
+## 7. Conductor, if you use it
 
-- Java runtime: Temurin 25.0.2; bytecode target: 21.
-- Conductor: 0.1.33.
-- Orca: 1.4.188, runtime ready.
-- Unit/conformance tests: see the latest `test.cmd` output.
-- Old JS implementation: reference only at
-  `C:\Users\anato\orca\workspaces\Living-horizon\agentic-sdlc-mvp\scripts\agentic-sdlc`.
+Conductor is optional. `conductor/gates.yaml` is the
+executable outer workflow: its required `project_dir` input points at the target repository,
+and the compiled Warden classpath is resolved relative to the workflow file.
 
-## 6. Safe next steps
+The division is deliberate. Conductor owns the outer timeout and the native fail-closed human
+gate; Warden owns contract linting, machine gates and the bounded role loop. Conductor does
+not duplicate the role DAG — two competing resume/retry state machines would be worse than
+either.
 
-1. Keep both smokes in `docs/SMOKE.md` reproducible.
-2. Verify a writing implementer profile by running its probe standalone, then `--dry-run`,
-   then let `warden run` drive it. This is the last step before the loop is live end to end,
-   and it is the riskiest one: it is the only role with `read_only: false`.
-3. Live-test `runner: orca` from inside an Orca worktree. The adapter is written; completion
-   is fail-closed until `worker_done` is proven. Do not point Warden development back at the
-   Living Horizon JS branch — that tree is reference-only.
-4. Only then enable visual QA pixel-diff; until then `visual_qa.required` fails closed.
+Conductor's own workflow currently exercises only the machine nodes. The visual leg is not
+enabled there, and this repository does not claim otherwise.
+
+On Windows, Conductor may require `PYTHONUTF8=1` before validation or execution.
+
+## 8. Checking your setup
+
+```text
+warden doctor
+```
+
+reports the Java runtime, which profiles load and which are eligible, the effective workflow
+chain, Orca readiness, and `argument_encoding`. It is the first thing to paste into a bug
+report.

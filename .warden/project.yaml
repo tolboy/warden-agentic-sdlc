@@ -2,19 +2,32 @@ version: 1
 project: warden
 base_ref: HEAD
 
+# Warden's own contract. This is not a template — a project connects itself with
+# `warden init`. The check command is spelled for the maintainer's Windows host; CI runs
+# both build.sh/test.sh and build.cmd/test.cmd across Linux and Windows.
 checks:
   fast: [".\\test.cmd"]
 
 scopes:
   platform:
     - ".warden"
+    - ".github"
     - "bin"
     - "conductor"
     - "docs"
+    - "examples"
+    - "scripts"
     - "spec"
     - "src"
+    - ".gitattributes"
     - ".gitignore"
+    - "CHANGELOG.md"
+    - "CONTRIBUTING.md"
+    - "LICENSE"
+    - "NOTICE"
     - "README.md"
+    - "README.ru.md"
+    - "SECURITY.md"
     - "build.cmd"
     - "build.sh"
     - "test.cmd"

@@ -1,87 +1,107 @@
-# warden
+# Warden
 
-Запускает AI-агентов по ролям внутри чужого репозитория, проверяет результат машинно и
-останавливается перед человеком. **Ничего не мёржит.**
+**Runs AI agents by role inside someone else's repository, checks the result mechanically,
+and stops in front of a human. It never merges anything.**
 
-Java, **ноль зависимостей**, сборка одним `javac`. Инструмент, который запускает агентов с
-правом записи в репозиторий, не должен тащить за собой supply-chain из сотни артефактов —
-и должен собираться без сети.
+Java, **zero dependencies**, built by a single `javac` invocation. A tool that hands a
+language model write access to your repository should not drag a hundred-artifact supply
+chain in behind it — and it should build with no network.
 
-```
-./build.sh          # или build.cmd на Windows
-./test.sh           # или test.cmd
+[![CI](https://github.com/tolboy/warden-agentic-sdlc/actions/workflows/ci.yml/badge.svg)](https://github.com/tolboy/warden-agentic-sdlc/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+*[Русская версия](README.ru.md)*
+
+```bash
+./build.sh          # or build.cmd on Windows
+./test.sh           # or test.cmd
 ./bin/warden --help
 ```
 
-Собирается с `--release 21` (это пол, а не потолок: байткод запускается на любой более новой
-JVM). Переопределяется переменной `WARDEN_JAVA_RELEASE`.
+Compiled with `--release 21` — a floor, not a ceiling: the bytecode runs on any newer JVM.
+Override with `WARDEN_JAVA_RELEASE`.
 
-## Первый запуск
+## Try it in ten seconds, spending nothing
 
-Соберите Warden один раз. Дальше одна команда — цель и проект:
-
-```text
-C:\path\to\warden\bin\warden.cmd do --project C:\path\to\repo --scope code "Add a Settings button"
+```bash
+./examples/demo/run.sh
 ```
 
-Orca должна быть запущена: команда создаст worktree и не будет писать в `main`.
-Для одноразового репозитория без Orca: `--in-place`.
-Ничего не мёржится — стоп на human gate.
+No vendor, no API key, no network. It builds a throwaway repository, runs the machine half of
+the loop twice — once against a tree that fails the contract and once against a tree that
+passes — and prints the evidence both runs left behind. See
+[`examples/demo/`](examples/demo/README.md), including a committed
+[sample evidence ledger](examples/demo/sample-evidence) if you would rather read than run.
 
-**Перед тем как платить.** `warden do --draft-only` останавливается сразу после того, как
-создан worktree и написан черновик контракта, и печатает путь к нему. Браузерные сценарии
-Warden не выдумывает: у задачи, чья цель не называет ни одного контрола, черновик оставит
-только «страница рендерится и не сыпет ошибок в консоль» плюс комментарий о том, что сюда
-надо вписать. Почти каждой настоящей задаче их пишут руками, и это единственное место, где
-стоит остановиться: дальше начинают тратиться вызовы вендоров.
+## The first real run
 
-```text
-warden.cmd do --project C:\path\to\repo --draft-only "Add a Settings button"
-```
-```text
-warden.cmd run <task-id> --run-id <id>
-```
-
-**Новый проект с нуля.** Каталог без `.git` — это не ошибка, если так и задумано:
+Build Warden once. After that it is one command — a goal and a project:
 
 ```text
-warden.cmd do --project C:\path\to\new-project --init-repo --in-place "Landing page with a Create button"
+/path/to/warden/bin/warden do --project /path/to/repo --scope code "Add a Settings button"
 ```
 
-`--init-repo` делает `git init` и коммитит то, что уже лежит в каталоге, как базовую линию —
-опция явная, потому что создавать коммит в чужом каталоге только из-за отсутствия `.git`
-нельзя. Пустой каталог получает контракт, где сказано прямо: команд проверки ещё нет
-(`checks.fast: []`), а областью изменений объявлен весь репозиторий (`<repository>`) —
-защищать в проекте, которого утром не существовало, пока нечего. Определением «сделано»
-тогда служат браузерные сценарии задачи; задача, у которой нет ни того, ни другого,
-отклоняется, а не пропускается.
+Orca must be running: the command creates a worktree and will not write to `main`.
+For a throwaway repository without Orca: `--in-place`.
+Nothing is merged — it stops at the human gate.
 
-Каталог **с файлами, но без известной системы сборки** по-прежнему получает отказ: угаданная
-команда проверки — это гейт, который падает по причинам, не связанным с задачей.
-
-**Цель не на латинице — только через файл.** JVM декодирует аргументы командной строки через
-`sun.jnu.encoding`; там, где это не UTF-8 (обычная Windows), кириллица становится `?` ещё до
-входа в `main`, и ни один флаг JVM этого не меняет. Warden такую цель отклоняет, а не
-записывает в контракт:
+**Before you pay.** `warden do --draft-only` stops as soon as the worktree exists and a draft
+contract has been written, and prints the path to it. Warden does not invent browser
+scenarios: for a task whose goal names no control at all, the draft leaves only "the page
+renders and logs no console errors" plus a comment saying what belongs there. Almost every
+real task has its scenarios written by hand, and this is the one place worth stopping —
+after it, vendor calls start costing money.
 
 ```text
-warden.cmd do --goal-file goal.txt --project C:\path\to\repo --scope ui
+warden do --project /path/to/repo --draft-only "Add a Settings button"
+```
+```text
+warden run <task-id> --run-id <id>
 ```
 
-`warden doctor` показывает это состояние в `argument_encoding`.
+**A new project from nothing.** A directory with no `.git` is not an error if that is what you
+meant:
 
-Поштучно и без токенов: `init`, `validate`, `gates`, `visual-qa`, `role --dry-run`.
+```text
+warden do --project /path/to/new-project --init-repo --in-place "Landing page with a Create button"
+```
 
-Пока цепочка идёт, `do` и `run` пишут в stderr, на какой она стадии, какой профиль и вендор
-сейчас работает, что это стоило и куда ушло дальше — см.
-[Что видно, пока прогон идёт](#что-видно-пока-прогон-идёт). stdout остаётся одним JSON.
+`--init-repo` runs `git init` and commits whatever is already in the directory as a baseline.
+The option is explicit because creating a commit in someone's directory merely because it has
+no `.git` is not something a tool should decide. An empty directory gets a contract that says
+so outright: there are no check commands yet (`checks.fast: []`), and the blast radius is the
+whole repository (`<repository>`) — there is nothing to protect in a project that did not
+exist this morning. The task's browser scenarios then serve as the definition of done; a task
+with neither is rejected rather than waved through.
 
-## Тестировщик, у которого есть глаза
+A directory **with files but no recognised build system** is still refused: a guessed check
+command is a gate that fails for reasons unrelated to the task.
 
-Визуальная проверка — два слоя, и они отвечают на разные вопросы.
+**A non-Latin goal only works through a file.** The JVM decodes command-line arguments using
+`sun.jnu.encoding`; where that is not UTF-8 (ordinary Windows), Cyrillic becomes `?` before
+`main` is even entered, and no JVM flag changes it. Warden refuses such a goal rather than
+writing it into a contract:
 
-**Харнесс** — настоящий headless-браузер по CDP, ноль npm-зависимостей. Сценарии живут в
-контракте задачи и проверяются механически:
+```text
+warden do --goal-file goal.txt --project /path/to/repo --scope ui
+```
+
+`warden doctor` reports this state under `argument_encoding`.
+
+Piecewise and without spending a token: `init`, `validate`, `gates`, `visual-qa`,
+`role --dry-run`.
+
+While the chain runs, `do` and `run` write to stderr which stage it is on, which profile and
+vendor is working, what it cost and where it went next — see
+[What you see while a run is going](#what-you-see-while-a-run-is-going). stdout stays a single
+JSON object.
+
+## A tester with eyes
+
+Visual checking is two layers, and they answer different questions.
+
+**The harness** is a real headless browser over CDP, with zero npm dependencies. Scenarios
+live in the task contract and are checked mechanically:
 
 ```yaml
 visual_qa:
@@ -95,109 +115,112 @@ visual_qa:
     - "700x400: no-console-errors"
 ```
 
-Матчеры `text=` / `css=` / `testid=` / `role=`, утверждения `visible` / `hidden` / `click`.
-Отдельный шаг `wait N` держит паузу N секунд и снимает кадр: всё остальное здесь судит о
-странице через 1.2 с после клика и потому слепо к интерфейсу, у которого свои часы —
-анимации, отложенной сцене, обратному отсчёту. Пауза ничего не утверждает, она делает улику,
-поэтому сценарий из одних пауз отклоняется, а объявленные секунды прибавляются к таймауту
-адаптера: контракт, который честно попросил время, не должен падать как «браузер недоступен».
-Харнесс не знает названий ни одного проекта, проверяет, что отрендерен именно тот виюпорт,
-который назван, и отказывается работать, если на URL уже отвечает чужой сервер.
+Matchers `text=` / `css=` / `testid=` / `role=`, assertions `visible` / `hidden` / `click`.
+A separate `wait N` step holds for N seconds and takes a frame: everything else here judges
+the page 1.2 s after a click and is therefore blind to any interface running on its own clock
+— animations, a deferred scene, a countdown. A pause asserts nothing, it makes evidence, so a
+scenario made only of pauses is rejected; and the declared seconds are added to the adapter's
+timeout, because a contract that honestly asked for time should not come back as "browser
+unavailable". The harness knows no project's DOM, verifies that the viewport it rendered is
+the one that was named, and refuses to run if a stranger is already answering on the URL.
 
-**Роль `visual_qa`** — модель, которой скриншоты приходят *вложениями* (`attachments.flag`,
-у codex это `-i`), а не именами файлов. Отвечает только на то, что машина измерить не может:
-обрезанный текст, наложение, развалившаяся раскладка. По умолчанию выключена в политике:
-харнесс бесплатный, взгляд модели стоит вызова вендора.
+**The `visual_qa` role** is a model that receives the screenshots as *attachments*
+(`attachments.flag`, `-i` for codex) or as workspace paths it opens with its own image tool —
+never as bare filenames passed off as pictures. It answers only what a machine cannot measure:
+clipped text, overlap, a collapsed layout. It is off by default in the policy: the harness is
+free, a model's look costs a vendor call.
 
-Провал любого из слоёв возвращается реализатору как обычная непройденная проверка.
+A failure in either layer comes back to the implementer as an ordinary failed check.
 
-## Зачем отдельный репозиторий
+## Why a separate repository
 
-Предыдущая версия жила внутри проекта, который сама же и проверяла. Это неудобно и нечестно
-сразу по трём причинам: правка гейта меняла то, что тестируется; область изменений задачи
-включала скрипты самих гейтов; переиспользовать на втором проекте можно было только копипастой.
+The previous version lived inside the project it was checking. That is inconvenient and
+dishonest in three ways at once: editing a gate changed the thing being tested; the task's
+blast radius included the gate scripts themselves; and reuse on a second project was possible
+only by copy-paste.
 
-Здесь инструмент отделён от проектов, к которым он подключается.
+Here the tool is separated from the projects it connects to.
 
-## Как это устроено
+## How it is put together
 
 ```
-   ~/.warden/  КТО запускает                <проект>/.warden/  ЧТО значит «сделано»
-   ├ policy.yaml      роль → профили        ├ project.yaml   checks, scopes, defaults
-   ├ profiles/*.yaml  вендор, флаги, квота  ├ tasks/*.yaml   цель, риск, scope, visual_qa
-   └ prompts/ schemas/                      └ runs/          улики (runs/.gitignore)
+   ~/.warden/  WHO runs                      <project>/.warden/  WHAT "done" means
+   ├ policy.yaml      role → profiles        ├ project.yaml   checks, scopes, defaults
+   ├ profiles/*.yaml  vendor, flags, quota   ├ tasks/*.yaml   goal, risk, scope, visual_qa
+   └ prompts/ schemas/                       └ runs/          evidence (runs/.gitignore)
                     │                                    │
                     └──────────────────┬─────────────────┘
                                        ▼
-                             warden do "<цель>"
+                             warden do "<goal>"
                                        │
                  ┌─────────────────────┴───────────────────────┐
-                 │  Orca worktree · черновик задачи · линтер   │
-                 │  Warden не создаёт веток и ничего не мёржит │
+                 │  Orca worktree · task draft · linter        │
+                 │  Warden creates no branches and merges none │
                  └─────────────────────┬───────────────────────┘
                                        ▼
-  ╔═══ петля: что делать дальше решает код, не модель ═════════════════════════╗
+  ╔═══ the loop: what happens next is decided by code, not a model ════════════╗
   ║                                                                            ║
   ║   implementer ──▶ machine gates ──▶ reviewer ──▶ browser ──▶ visual_qa     ║
   ║        ▲              │ fail          │ P1        │ fail       │ P1        ║
   ║        └── fix ≤ N ───┴───────────────┴───────────┴────────────┘           ║
   ║                                                                            ║
-  ║   резолвер ролей   verified · независимый вендор · ротация · failover      ║
-  ║   бюджет           считает вызовы вендора, а не роли, и до отправки        ║
+  ║   role resolver    verified · independent vendor · rotation · failover     ║
+  ║   budget           counts vendor calls, not roles, and before dispatch     ║
   ║   runner           direct · orca · local                                   ║
   ╚══════════════════════════════════╤═════════════════════════════════════════╝
                                      ▼
-                  ledger · evidence.jsonl · промпты · сырой вывод · скриншоты
+              ledger · evidence.jsonl · prompts · raw output · screenshots
                                      ▼
-                    human gate ──── единственный, кто мёржит
+                    human gate ──── the only one who merges
 ```
 
-Три места и одна граница. `~/.warden/` — кто запускает: вендор есть свойство подписки
-оператора, а не репозитория, поэтому ни одного имени модели не попадает в **конфигурацию**
-проекта — ни в `project.yaml`, ни в задачи. Отчёт о прогоне вендора называет: это улика, и
-`.gitignore` в `runs/` оставляет `*.json`/`*.jsonl` видимыми для git, а скриншоты и сырые
-транскрипты — нет. `<проект>/.warden/` — что значит «сделано» здесь: команды проверки,
-области, задачи. Сам Warden — как: гейты, роли, петля, улики.
+Three places and one boundary. `~/.warden/` is **who** runs: a vendor is a property of the
+operator's subscription, not of the repository, so no model name reaches a project's
+**configuration** — not `project.yaml`, not any task. A run's report does name the vendor:
+that is evidence, and the `.gitignore` in `runs/` leaves `*.json`/`*.jsonl` visible to Git
+while screenshots and raw transcripts stay out. `<project>/.warden/` is **what "done" means
+here**: check commands, scopes, tasks. Warden itself is **how**: gates, roles, the loop,
+evidence.
 
-Граница проходит по человеческому гейту. Всё, что слева, детерминировано и оставляет улику;
-приёмка — единственный шаг, который считает вывод агента доверенным, и он остаётся за
-человеком. Что из этой схемы уже прогонялось вживую, а что нет — в разделе
-[Состояние](#состояние); статус по блокам — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+The boundary runs through the human gate. Everything to the left is deterministic and leaves
+evidence; acceptance is the only step that treats an agent's output as trusted, and it stays
+with a person. What of this diagram has actually been run live is in [Status](#status);
+per-block status is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-**Отказ человека — это тоже вход, а не точка.** Причина, которую вы напишете при `reject`,
-единственная обратная связь во всей петле, стоившая чьего-то внимания, а не вызова вендора.
-`--continue` передаёт её следующему прогону — дословно, реализатору, как причину человека, а
-не как непройденную проверку:
+**A human's rejection is an input, not a full stop.** The reason you write on `reject` is the
+only feedback in the whole loop that cost someone's attention rather than a vendor call.
+`--continue` hands it to the next run — verbatim, to the implementer, marked as a person's
+objection rather than a failed check:
 
 ```text
-warden approve <run-id> --decision reject --note "костёр вдвое выше человека рядом"
+warden approve <run-id> --decision reject --note "the fire is drawn twice the height of the person beside it"
 warden run <task> --run-id <new> --continue <run-id>
 ```
 
-Разрешения это не даёт: подстановку вендора по-прежнему авторизует только решение
-`switch`. Оно передаёт ровно текст, и передаёт его один раз — дальше контекстом становится
-конкретный провал стадии, и заваливать его несвежим отказом было бы хуже.
+It grants no permission: a vendor substitution is still authorised only by a `switch`
+decision. It carries exactly that text, and carries it once — after that the context becomes
+the specific stage failure, and burying it under a stale rejection would be worse.
 
-**Приговор относится к дереву, а не к прогону.** Прогон, упавший на том, что к работе
-отношения не имеет — браузера нет, порт занят, дерево было грязным до старта, — уносил с
-собой зелёного реализатора и независимое ревью, и единственным путём вперёд было оплатить их
-заново. `--continue` на решении `retry` такого провала переносит уже вынесенные приговоры,
-но только если **и** отпечаток исходников, **и** весь контракт `.warden` побайтово те же:
-иначе роль судила другого кандидата или другие условия. Любое сомнение — полная цепочка
-заново, а причина записывается в `reuse_declined`. Роль, которая прошла, но выставила
-блокирующую находку, не переносится: это не «прошла», это раунд починки, который ещё не
-случился. Первый же раунд починки в новом прогоне отменяет перенос целиком, а что именно
-было перенесено, сказано в вопросе, который задают человеку на гейте.
+**A verdict belongs to a tree, not to a run.** A run that failed on something unrelated to the
+work — no browser, an occupied port, a tree that was dirty before it started — used to take a
+green implementer and an independent review down with it, and the only way forward was to pay
+for both again. `--continue` on a `retry` decision for such a failure carries the verdicts
+already reached, but only if **both** the source fingerprint **and** the entire `.warden`
+contract are byte-for-byte the same: otherwise a role judged a different candidate, or
+different terms. Any doubt means the full chain again, and the reason is recorded in
+`reuse_declined`. A role that passed but filed a blocking finding is not carried: that is not
+"passed", it is a fix round that has not happened yet. The first fix round in the new run
+cancels the carry entirely, and exactly what was carried is stated in the question a human is
+asked at the gate.
 
-Подключить новый проект = запустить `init`, проверить созданный контракт и описать его
-команды проверки. Не копируйте `.warden/` самого Warden: это его собственный контракт, не
-шаблон.
+Connecting a new project = run `init`, review the generated contract, and describe its check
+commands. Do not copy Warden's own `.warden/`: that is Warden's contract, not a template.
 
-## Что видно, пока прогон идёт
+## What you see while a run is going
 
-Петля работает десятки минут. Раньше она за всё это время не печатала ни символа, а в
-конце выдавала один JSON, и «где мы сейчас» приходилось выяснять по датам файлов в четырёх
-каталогах прогона. Теперь `do` и `run` рассказывают о себе **в stderr**:
+The loop runs for tens of minutes. It used to print nothing for all of it and then emit one
+JSON object at the end, so "where are we now" had to be worked out from file timestamps in
+four run directories. Now `do` and `run` narrate themselves **on stderr**:
 
 ```text
 run   chapter-hearth-4
@@ -228,30 +251,30 @@ done  ready_for_human   6 vendor call(s), $3.9098 charged
       warden approve chapter-hearth-4 --decision <accept|reject>
 ```
 
-**stdout при этом не меняется** — там по-прежнему ровно один JSON-объект, который читают
-Conductor и любые скрипты, поэтому перенаправление одного потока не мешает другому.
-`--quiet` выключает рассказ. Ничего из напечатанного не является уликой: каждая строка
-повторяет то, что уже лежит в леджере, — потому её и можно выключить, ничего не потеряв.
+**stdout does not change** — it is still exactly one JSON object, the one Conductor and any
+script reads, so redirecting one stream does not disturb the other. `--quiet` turns the
+narration off. Nothing printed is evidence: every line restates what is already in the ledger,
+which is precisely why it can be turned off without losing anything.
 
-## Сколько это стоило, и почему иногда неизвестно
+## What it cost, and why that is sometimes unknown
 
-Каждый вендор здесь запускается своим CLI по подписке оператора. Цена вызова — это то,
-что этот CLI сам решил сообщить: Grok и Claude печатают цифру, Codex не печатает ничего.
-Warden не досчитывает и не оценивает — он записывает то, что пришло, и считает, сколько
-вызовов не сообщили ничего.
+Every vendor here runs through its own CLI on the operator's subscription. The price of a call
+is whatever that CLI chose to report: Grok and Claude print a number, Codex prints nothing.
+Warden does not estimate the difference — it records what arrived and counts how many calls
+reported nothing.
 
-Отсюда и честная граница `budgets.max_cost_usd`: это потолок для **той части прогона,
-которая сама себя оценила**. Прогон, где ни один вендор цену не назвал, может израсходовать
-все свои вызовы под лимитом в $40 и списать против него $0.00. Поэтому в `task-run.json`
-рядом с `total_cost_usd` лежат `unpriced_calls` и `cost_ceiling_binding`, и рассказ в
-терминале говорит это вслух. Настоящая граница, которая держит всегда, — `max_role_runs`:
-она считает вызовы, а не деньги, и проверяется до отправки.
+Hence the honest boundary of `budgets.max_cost_usd`: it is a ceiling for **the part of the run
+that priced itself**. A run where no vendor named a price can spend every one of its allowed
+calls under a $40 limit and charge $0.00 against it. That is why `task-run.json` carries
+`unpriced_calls` and `cost_ceiling_binding` next to `total_cost_usd`, and why the terminal
+narration says it out loud. The real bound, which always holds, is `max_role_runs`: it counts
+calls rather than money, and it is checked before dispatch.
 
-## Результат прогона
+## The run report
 
-Каждая стадия пишет свой отчёт и никогда не правит чужой — так ничего из уже случившегося
-нельзя тихо переписать задним числом. Это правильно для улик и бесполезно для вопроса «как
-прошёл прогон». Соединение делает отдельная команда:
+Each stage writes its own report and never edits anyone else's — so nothing that already
+happened can be quietly rewritten after the fact. That is right for evidence and useless for
+the question "how did the run go". A separate command joins them:
 
 ```text
 warden report <run-id> --text
@@ -277,17 +300,17 @@ browser  passed  3 screenshot(s)
   ok    1280x720: testid=create-button click -> css=.editor visible
 ```
 
-`?` означает «вендор этого не сообщил», а не ноль: прогон, у которого «$0.00 за четыре
-вызова», в отчёте выглядел бы точно так же, как прогон, где никто не прислал стоимость — и
-ему бы поверили. То же самое поле есть в JSON как `*_unknown_calls`.
+`?` means "the vendor did not report this", not zero: a run with "$0.00 for four calls" would
+otherwise look exactly like a run where nobody sent a cost — and would be believed. The same
+field exists in the JSON as `*_unknown_calls`.
 
-Тот же отчёт пишется автоматически в `.warden/runs/<run-id>/report.json` после `do` и `run`;
-`warden ledger` агрегирует уже все прогоны проекта.
+The same report is written automatically to `.warden/runs/<run-id>/report.json` after `do` and
+`run`; `warden ledger` aggregates every run in the project.
 
-## Цепочка вызовов моделей
+## The chain of model calls
 
-Порядок стадий — не код, а объявление. Он лежит в том же файле, что и роли с вендорами,
-поэтому «кто запускает», «в каком порядке» и «при каком условии» читаются в одном месте:
+The order of stages is a declaration, not code. It lives in the same file as the roles and
+vendors, so "who runs", "in what order" and "under what condition" are read in one place:
 
 ```yaml
 # ~/.warden/policy.yaml
@@ -308,39 +331,39 @@ workflow:
         sees: browser, on_fail: stop, on_findings: fix }
 ```
 
-`run:` — `role`, `machine_gates` или `visual_harness`. `when:` — **закрытый** список условий
-(`review_required`, `visual_qa_required`, `risk_low|medium|high`); неизвестное условие это
-ошибка конфигурации, а не молчаливое «ложь», потому что ложь здесь — разрешающий ответ.
-`on_fail: fix` возвращает точный текст провала реализатору, не больше `max_fix_attempts` раз,
-и заново прогоняет все более ранние стадии с `recheck_after_fix` — иначе починка одной
-проверки может сломать уже пройденную. `sees:` привязывает роль с глазами к конкретной
-стадии браузера: смотреть на пиксели, которых никто не снял, нельзя.
+`run:` is `role`, `machine_gates` or `visual_harness`. `when:` is a **closed** set of
+conditions (`review_required`, `visual_qa_required`, `risk_low|medium|high`); an unknown
+condition is a configuration error rather than a silent "false", because false here is the
+permissive answer. `on_fail: fix` returns the exact failure text to the implementer, no more
+than `max_fix_attempts` times, and re-runs every earlier stage marked `recheck_after_fix` —
+otherwise fixing one check can break one already passed. `sees:` binds the role with eyes to a
+specific browser stage: you cannot look at pixels nobody photographed.
 
-Что **не** настраивается: как называется провал (`gates_not_satisfied` не переименуется
-вместе со стадией), граница бюджета и то, что финал — человек. Блок необязателен: без него
-работает ровно та цепочка, что написана выше. Эффективную цепочку показывает
-`warden doctor` в поле `workflow`, а фактически пройденную — `task-run.json` в полях
-`workflow` и `skipped_stages`.
+What is **not** configurable: what a failure is called (`gates_not_satisfied` is not renamed
+along with your stage), the budget boundary, and the fact that the last word is a human's. The
+block is optional: without it, exactly the chain above runs. `warden doctor` shows the
+effective chain under `workflow`; `task-run.json` shows the one actually taken, in `workflow`
+and `skipped_stages`.
 
-## Что делать, когда у вендора кончилась подписка
+## When a vendor's subscription runs out
 
-Исчерпанная квота — единственный провал, который не про работу. Warden отделяет её от
-обычной ошибки и умеет передать роль другому вендору, но **по умолчанию спрашивает**:
+An exhausted quota is the one failure that is not about the work. Warden classifies it apart
+from an ordinary error and can hand the role to another vendor, but **asks first by default**:
 
 ```yaml
 # ~/.warden/policy.yaml
 failover:
-  on_quota_exhausted: confirm   # confirm (по умолчанию) | auto | stop
+  on_quota_exhausted: confirm   # confirm (default) | auto | stop
 ```
 
-Почему не `auto`: смена вендора меняет автора работы, а на маленьком составе она может стоить
-прогону независимого ревьюера — два вендора минус одна исчерпанная подписка это один вендор, а
-модель, проверяющая саму себя, и есть то, ради чего запускали двух. Это суждение о ценности
-результата, и оно операторское.
+Why not `auto`: swapping vendors changes the author of the work, and on a small roster it can
+cost the run its independent reviewer — two vendors minus one spent subscription is one
+vendor, and a model reviewing itself is the exact thing you started two for. That is a
+judgement about the value of the result, and it belongs to the operator.
 
-При `confirm` прогон останавливается, называет обоих вендоров и пишет durable-решение
-отдельного вида (`kind: failover`, варианты `[abort, switch]` — отказ первым, чтобы
-автоматика отклоняла, а не разрешала):
+Under `confirm` the run stops, names both vendors, and writes a durable decision of its own
+kind (`kind: failover`, options `[abort, switch]` — refusal first, so that automation declines
+rather than permits):
 
 ```text
 role implementer: codex-implement (codex) reported a spent subscription.
@@ -348,93 +371,101 @@ Switch to claude-implement (claude)? the candidate is a different vendor from
 the implementer (codex), so independence is preserved
 ```
 
-Разрешение — это записанное решение, а не флаг:
+Permission is a recorded decision, not a flag:
 
 ```text
 warden approve <run-id> --decision switch
 warden run <task> --run-id <new> --continue <run-id>
 ```
 
-`--continue` читает решение того прогона и разрешает **ровно одну** подстановку: названную
-роль на названный профиль. Флаг разрешал бы кому угодно, а сохранённое «у codex кончилось»
-протухло бы в момент, когда окно квоты откроется. Тот же флаг принимает и **отклонённый**
-прогон — но там он ничего не разрешает, а только переносит причину отказа реализатору. При `auto` подстановка происходит сразу, но
-событие `role_failover` с обоими вендорами и полем `authorized_by` всё равно попадает в улики
-и в `warden report`.
+`--continue` reads that run's decision and permits **exactly one** substitution: the named
+role onto the named profile. A flag would permit anyone, and a stored "codex ran out" would go
+stale the moment the quota window reopened. The same flag also accepts a **rejected** run —
+but there it permits nothing, and only carries the rejection's reason to the implementer.
+Under `auto` the substitution happens immediately, but the `role_failover` event with both
+vendors and an `authorized_by` field still lands in the evidence and in `warden report`.
 
-## Настройка вендоров
+## Configuring vendors
 
-Профиль не выпускается резолвером, пока в нём нет `verification.verified_on` — даты, которая
-означает, что человек прогнал пробу и сверил её вывод. Это единственное поле во всей
-конфигурации, которое записывает суждение, а не факт, и оно стоит перед ролью с правом
-записи в репозиторий.
+The resolver will not release a profile that has no `verification.verified_on` — a date
+meaning a human ran the probe and checked its output. It is the only field in the whole
+configuration that records a judgement rather than a fact, and it stands in front of a role
+with write access to a repository.
 
 ```text
-warden profiles                              что грузится, что пригодно и почему нет
-warden profiles --verify codex-implement     прогнать пробу этого профиля
-warden profiles --verify codex-implement --confirm   проставить дату
+warden profiles                              what loads, what is eligible, and why not
+warden profiles --verify codex-implement     run this profile's own probe
+warden profiles --verify codex-implement --confirm   stamp the date
 ```
 
-`--verify` запускает `verification.probe` профиля, сохраняет транскрипт в
-`~/.warden/verification/` и печатает `what_to_check` — список того, что надо увидеть своими
-глазами. Он **не** проставляет дату по нулевому коду возврата: тогда `verified_on` означало
-бы «бинарник запустился», а это ровно та догадка, ради предотвращения которой поле и
-существует. `--confirm` — отдельный шаг, и он работает только если проба прошла в этом же
-вызове.
+`--verify` runs the profile's `verification.probe`, saves the transcript under
+`~/.warden/verification/`, and prints `what_to_check` — the list of things you must see with
+your own eyes. It does **not** stamp the date on a zero exit code: `verified_on` would then
+mean "the binary started", which is exactly the guess the field exists to prevent. `--confirm`
+is a separate step, and it only works if the probe passed in the same invocation.
 
-Полностью: [`spec/SPEC.md`](spec/SPEC.md).
-Проверенный red/green сценарий: [`docs/SMOKE.md`](docs/SMOKE.md).
+## Status
 
-## Состояние
+Honest by column. **Implemented** means it exists and is covered by tests. **Verified live**
+means it has been run against real vendors on a real project, with a transcript in
+[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md). **Planned** means named and not built — the
+resolver refuses these rather than pretending.
 
-Готово и покрыто тестами:
+| Capability | Implemented | Verified live | Notes |
+|---|:---:|:---:|---|
+| Config model, strict YAML/JSON subsets, schema validation | ✅ | ✅ | Offline, no dependencies |
+| Git merge-base, content fingerprint (renames and untracked files) | ✅ | ✅ | |
+| Bounded process supervisor, preflight and machine gates | ✅ | ✅ | |
+| Evidence ledger, `warden ledger`, `warden report` | ✅ | ✅ | Per-attempt vendor cost, tokens, model as reported |
+| Contract integrity (`contract_mutated`) | ✅ | ✅ | The whole `.warden` tree except `runs/` |
+| Role resolver: verification, rotation, independent vendor | ✅ | ✅ | |
+| Direct CLI adapter | ✅ | ✅ | Live with Codex, Grok and Claude |
+| Quota detection and failover | ✅ | ✅ | Against a genuinely exhausted Codex account |
+| Bounded loop: implement → gates → review → browser → look, fix ≤ N | ✅ | ✅ | Run `chapter-hearth-3`: six vendor calls, $3.91, one fix round |
+| Browser harness (CDP, project-neutral) | ✅ | ✅ | Six scenarios across three viewports |
+| `visual_qa` role on real screenshots | ✅ | ✅ | Filed a P1 the harness could not see; routed back as a fix round |
+| Human gate: durable, cross-process-locked decisions | ✅ | ✅ | `accept` / `reject` / `switch` / `retry` |
+| Carrying a rejection or a verdict into the next run | ✅ | ✅ | `--continue` |
+| `warden do`: Orca worktree isolation, task draft | ✅ | ✅ | Cut from the branch the operator is actually on |
+| Greenfield: `--init-repo`, contract with no invented check | ✅ | ✅ | |
+| `warden land`: commit, push, open a request | ✅ | — | Merges nothing; the forge is never guessed |
+| Orca adapter as a role runner (`runner: orca`) | ✅ | ❌ | Written to Orca's contract; full live lifecycle not yet proven |
+| Local runner (`runner: local`) | ❌ | ❌ | Named only; the resolver refuses `runner_unimplemented` |
+| Per-vendor tool allowlists | ❌ | ❌ | A profile's args are whatever you wrote — see [`SECURITY.md`](SECURITY.md) |
+| Visual QA pixel-diff and baselines | ❌ | ❌ | The harness asserts; it does not compare images |
 
-- разбор JSON (строгий, с восстановлением ответа из болтливого вывода вендора);
-- разбор строгого подмножества YAML для конфигурации;
-- сборка и тестовый прогон без сети и без зависимостей.
-
-Текущий JVM-срез включает модель конфигурации, git/merge-base и content fingerprint,
-bounded process supervisor, preflight/machine gates, evidence ledger, валидацию артефакта по
-схеме, резолвер ролей с переключением на другого вендора при исчерпанной подписке,
-браузерный visual QA и ограниченную петлю
-
-```
-implement → gates → [fix ≤ N] → review → [fix ≤ N]
-          → браузер → [fix ≤ N] → visual_qa → [fix ≤ N] → человек
-```
-
-Команды: `do`, `setup`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
+Commands: `do`, `setup`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
 `doctor`, `ledger`, `report`, `status`, `approve`, `land`.
 
-Прогнано вживую на настоящем проекте (SvelteKit, Orca 1.4.190, Windows) — стенограмма в
-[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md):
+The live runs were made on Windows against a SvelteKit project, with Orca 1.4.190 and Codex,
+Grok and Claude on the operator's own subscriptions.
 
-- `warden do` создал worktree через Orca от **фактической** текущей ветки и разрешил всю цепочку;
-- цикл `gates → review → browser` целиком зелёный: `npm run check` и `npm run build`, ревью
-  Grok 4.6 (`verdict: pass`, $0.0835, 104042/13006 токенов), шесть браузерных сценариев на
-  трёх виюпортах, включая клик и переход в режим студии;
-- отчёт с метриками вендора и `decision.json` в состоянии `pending` — приёмку тул не делает;
-- исчерпанная подписка Codex дала `quota_exhausted`, а не «упавший реализатор», с дословным
-  сообщением вендора в уликах;
-- пустой каталог: `git init`, контракт без выдуманной команды проверки, черновик задачи.
+## Documentation
 
-**Полный цикл до зелёного, с живым реализатором и живой ролью с глазами** — прогон
-`chapter-hearth-3` на том же проекте, стенограмма в
-[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md):
+| Document | What it is |
+|---|---|
+| [`spec/SPEC.md`](spec/SPEC.md) | The full specification: every file, every command, every invariant |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Per-block status, and what each failure is allowed to do |
+| [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) | A guided tour on stub vendors — nothing spent |
+| [`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md) | Transcripts of real runs, including what they broke |
+| [`docs/SETUP.md`](docs/SETUP.md) | The repeatable install and per-project connection procedure |
+| [`docs/SMOKE.md`](docs/SMOKE.md) | The reproducible red/green cross-project smoke |
+| [`examples/demo/`](examples/demo/README.md) | The offline demo and a committed sample evidence ledger |
 
-- шесть вызовов вендора, $3.91 из бюджета $40, один раунд починки, `stale_judgements`
-  пусто — ревьюер перечитал дерево после починки, как объявлено в `recheck_after_fix`;
-- починку заказала не машина. Харнесс был зелёный; роль `visual_qa` (Claude Opus, по
-  скриншотам) выставила **P1**: очаг, камни и путник нарисованы внутри озера, «костёр,
-  горящий на воде, читается как сбой отрисовки, а не как смысл». Реализатор починил,
-  ревьюер перепроверил, на втором заходе роль дала `pass`;
-- `?` в колонке cost — это Codex, который стоимость не сообщил; Grok и Claude сообщили.
+Section 8 of the specification lists the invariants the implementation must hold. Each one is
+a defect that was already found in the previous JavaScript version.
 
-Не выдаются за готовые: live-прогон Orca-адаптера как исполнителя роли и visual QA
-pixel-diff. Точная матрица:
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), разбор на подставных вендорах:
-[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md), повторяемая настройка:
-[`docs/SETUP.md`](docs/SETUP.md).
+Russian versions: [`README.ru.md`](README.ru.md), [`docs/ru/`](docs/ru),
+[`spec/ru/SPEC.md`](spec/ru/SPEC.md).
 
-Инварианты, которые реализация обязана удерживать, перечислены в разделе 8 спецификации.
-Каждый из них — дефект, который уже был найден в предыдущей версии на JavaScript.
+## Contributing, security, licence
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, what a good change looks like, and the
+  one rule (no dependencies) that shapes the rest.
+- [`SECURITY.md`](SECURITY.md) — the threat model, the boundaries Warden actually enforces,
+  and the ones it does not. Read this before pointing Warden at a repository you care about.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed, per release.
+- Licensed under the [Apache License 2.0](LICENSE).
+
+Maintained by [@tolboy](https://github.com/tolboy). Issues and pull requests
+are welcome; questions are best asked as an issue so the answer is findable.

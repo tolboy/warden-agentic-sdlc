@@ -1,26 +1,30 @@
-# Как этим пользоваться: разбор на живом прогоне
+# How to use this: a walkthrough over a real run
 
-Это не описание намерений, а стенограмма. Каждый блок ниже реально выполнялся; вывод
-приведён как есть. Прогон делался на подставных «вендорах» — обычных shell-скриптах, — чтобы
-показать всю схему, ничего не потратив. Реальный вендор подставляется заменой одной строки
-`command:` в профиле.
+Not a description of intentions — a transcript. Every block below was actually executed and
+the output is reproduced as it came. The run used stub "vendors" — ordinary shell scripts — so
+that the whole scheme could be shown without spending anything. A real vendor is substituted
+by replacing one `command:` line in a profile.
 
----
-
-## Шаг 0. Три места, которые надо различать
-
-```
-~/.warden/            КТО запускает        — профили вендоров и политика ролей
-<любой проект>/.warden/  ЧТО значит «сделано» — команды проверки и задачи
-warden                КАК                  — гейты, роли, петля, улики
-```
-
-Вендор — свойство того, кто запускает, а не проекта. Поэтому у проекта в git не лежит ни
-одного имени модели, и тот же `project.yaml` работает у коллеги с другими подписками.
+For a version you can run yourself in seconds with no vendor at all, see
+[`examples/demo/`](../examples/demo/README.md).
 
 ---
 
-## Шаг 1. Настроить себя (один раз)
+## Step 0. Three places you have to keep apart
+
+```
+~/.warden/               WHO runs             — vendor profiles and role policy
+<any project>/.warden/   WHAT "done" means    — check commands and tasks
+warden                   HOW                  — gates, roles, the loop, evidence
+```
+
+A vendor is a property of whoever runs, not of the project. That is why no model name is
+committed to a project's Git, and why the same `project.yaml` works for a colleague with
+different subscriptions.
+
+---
+
+## Step 1. Configure yourself (once)
 
 ```
 warden setup
@@ -33,14 +37,13 @@ warden setup
             "schemas/reviewer.json","schemas/implementer.json"]}
 ```
 
-Существующие файлы **не перезаписываются** — повторный `setup` только сообщит, что оставил
-без изменений.
+Existing files are **not overwritten** — a second `setup` only reports what it left alone.
 
-> Каталог настроек переопределяется переменной `WARDEN_CONFIG_HOME`. Именно `WARDEN_CONFIG_HOME`,
-> а не `WARDEN_HOME`: последнюю launcher `bin\warden.cmd` использует под каталог установки, и
-> на первом же живом прогоне под Windows это столкновение имён увело стартовую конфигурацию
-> внутрь репозитория вместо домашнего каталога. Поймал это не тест, а то, что `setup` печатает
-> `home` — поэтому он его и печатает.
+> The configuration directory is overridden by `WARDEN_CONFIG_HOME`. Specifically
+> `WARDEN_CONFIG_HOME`, not `WARDEN_HOME`: the launcher `bin\warden.cmd` uses the latter for
+> the installation directory, and on the very first live Windows run that name collision moved
+> the starter configuration inside the repository instead of the home directory. What caught
+> it was not a test but the fact that `setup` prints `home` — which is why it prints it.
 
 ```
 warden profiles
@@ -52,12 +55,13 @@ warden profiles
   grok-review        role=reviewer     vendor=grok    verified=True
 ```
 
-Только профиль Grok помечен проверенным, потому что только его флаги были **установлены
-запуском**, а не вычитаны из документации. У остальных вместо даты лежит точная команда
-проверки, и резолвер их не выпустит, пока дата не проставлена. Угадывание флагов Grok уже
-стоило трёх неудачных прогонов; теперь это состояние видно, а не выясняется в середине петли.
+Only the Grok profile is marked verified, because only its flags were **established by
+running it** rather than read out of documentation. The others carry the exact verification
+command where the date would be, and the resolver will not release them until that date is
+stamped. Guessing Grok's flags had already cost three failed runs; now the state is visible
+instead of being discovered halfway through a loop.
 
-Пробу не надо переписывать руками — она запускается своей же командой:
+You do not rewrite the probe by hand — it runs by its own command:
 
 ```
 warden profiles --verify claude-review
@@ -74,26 +78,27 @@ warden profiles --verify claude-review
          warden profiles --verify claude-review --confirm"}
 ```
 
-Обратите внимание на `stamped: false`. Проба прошла — дата не проставлена. `verified_on` —
-единственное поле во всей конфигурации, которое записывает **суждение человека**, а не факт,
-установленный машиной, и стоит оно перед ролью с правом записи в репозиторий. Проставлять его
-по нулевому коду возврата значило бы заменить «человек посмотрел и подтвердил четыре пункта»
-на «бинарник запустился» — то есть ровно ту догадку, ради предотвращения которой поле и
-заведено. Убрана перепечатка команды и ручная правка YAML, а не чтение.
+Note `stamped: false`. The probe passed; the date was not stamped. `verified_on` is the only
+field in the whole configuration that records a **human judgement** rather than a fact
+established by a machine, and it stands in front of a role with write access to a repository.
+Stamping it on a zero exit code would replace "a person looked and confirmed four points" with
+"the binary started" — which is exactly the guess the field exists to prevent. What was removed
+is retyping the command and hand-editing YAML, not the reading.
 
 ```
 warden profiles --verify claude-review --confirm
 → {"ok":true,"code":"verified","verified_on":"2026-08-27","stamped":true}
 ```
 
-Дата дописывается в конец блока `verification:`, комментарии оператора остаются на месте: в
-этих профилях они и есть самое ценное — это флаги, установленные запуском.
+The date is appended to the end of the `verification:` block and the operator's comments stay
+where they are: in these profiles the comments are the most valuable thing in the file — they
+are flags established by running.
 
 ---
 
-## Шаг 2. Подключить проект
+## Step 2. Connect a project
 
-Один файл. Для SvelteKit:
+One file. For SvelteKit:
 
 ```yaml
 # .warden/project.yaml
@@ -109,9 +114,9 @@ defaults:
   risk: medium
 ```
 
-Для JVM-проекта меняется только содержимое `checks` — `./gradlew build`. Больше ничего.
+For a JVM project only the contents of `checks` change — `./gradlew build`. Nothing else.
 
-Задача — минимум четыре строки:
+A task is four lines at minimum:
 
 ```yaml
 # .warden/tasks/hello.yaml
@@ -126,13 +131,13 @@ authority:
 
 ---
 
-## Шаг 3. Проверить настройку, ничего не потратив
+## Step 3. Check the setup without spending anything
 
 ```
 warden role reviewer hello --dry-run
 ```
 
-На машине без установленного Grok это отвечает так:
+On a machine with no Grok installed, this answers:
 
 ```json
 {"ok":false,"code":"role_unresolved",
@@ -140,48 +145,49 @@ warden role reviewer hello --dry-run
    {grok-review=executable_not_found, claude-review=profile_unverified}"}}
 ```
 
-Причина у каждого профиля своя и названа буквально тем, что было проверено. `executable_not_found`
-раньше назывался `unavailable_or_quota_exhausted` — и это было враньём: проба выясняет ровно
-одно, есть ли исполняемый файл. Про исчерпанную подписку до запуска не знает никто, поэтому
-она теперь отдельная причина и появляется только после того, как вендор сам об этом сказал.
+Each profile has its own reason, named after exactly what was checked.
+`executable_not_found` used to be called `unavailable_or_quota_exhausted` — which was a lie:
+the probe establishes precisely one thing, whether the executable exists. Nobody knows about a
+spent subscription before running, so that is now a separate reason and appears only after the
+vendor has said so itself.
 
-Вот это и есть ответ на «почему ничего не запустилось»: по каждому профилю названа причина.
-Ни одного токена не потрачено.
+That is the answer to "why did nothing run": a reason per profile. Not one token spent.
 
-Когда профиль подходит, `--dry-run` резолвит вендора и **пишет на диск точный промпт**,
-который был бы отправлен, но вендора не вызывает:
+When a profile is eligible, `--dry-run` resolves the vendor and **writes the exact prompt to
+disk** that would have been sent, without calling the vendor:
 
 ```
-.warden/runs/dry/prompts/reviewer.md      ← есть
-.warden/runs/dry/raw/                     ← нет, вендор не запускался
+.warden/runs/dry/prompts/reviewer.md      ← exists
+.warden/runs/dry/raw/                     ← does not, the vendor never ran
 ```
 
 ---
 
-## Шаг 4. Красная половина: гейты падают до работы
+## Step 4. The red half: gates fail before the work
 
 ```
 warden gates hello --run-id red
 → {"ok":false,"code":"command_failed"}
 ```
 
-Так и должно быть: `src/result.txt` ещё нет. Это доказывает, что гейт не «подыгрывает».
+As it should be: `src/result.txt` does not exist yet. This proves the gate is not playing
+along.
 
-## Шаг 5. Реализатор делает работу
+## Step 5. The implementer does the work
 
 ```
 warden role implementer hello --run-id live
 → {"ok":true,"profile":"stub-impl","vendor":"stubvendor"}
 ```
 
-## Шаг 6. Зелёная половина
+## Step 6. The green half
 
 ```
 warden gates hello --run-id green
 → {"ok":true,"code":"passed"}
 ```
 
-## Шаг 7. Независимое ревью
+## Step 7. Independent review
 
 ```
 warden role reviewer hello --run-id live --implementer-vendor stubvendor
@@ -189,16 +195,16 @@ warden role reviewer hello --run-id live --implementer-vendor stubvendor
    "rejected_profiles":{"stub-sneaky":"same_vendor_as_implementer"}}
 ```
 
-Ревьюер того же вендора, что писал код, **отклонён механически**. Это единственное
-защитимое обоснование мультивендорности: модель, ревьюящая собственный вывод, делит с ним
-слепые зоны. Ограничение жёсткое — если независимого вендора нет, резолвер падает, а не
-тихо отдаёт код на ревью его же автору.
+A reviewer from the same vendor that wrote the code is **rejected mechanically**. That is the
+only defensible justification for multi-vendor at all: a model reviewing its own output shares
+that output's blind spots. The constraint is hard — if there is no independent vendor, the
+resolver fails rather than quietly handing the code to its own author for review.
 
 ---
 
-## Шаг 8. Что происходит, если read-only роль всё-таки пишет
+## Step 8. What happens when a read-only role writes anyway
 
-Подставной ревьюер, который дописывает строку в файл и при этом возвращает `verdict: pass`:
+A stub reviewer that appends a line to a file while returning `verdict: pass`:
 
 ```
 warden role reviewer hello --run-id trap
@@ -214,27 +220,28 @@ warden role reviewer hello --run-id trap
 }
 ```
 
-Артефакт **не записан**, что бы он ни утверждал. Сравнение идёт по отпечатку содержимого, а
-не по списку путей: в уже грязном дереве — а это норма после работы реализатора — правка
-существующего файла список путей не меняет, и проверка по именам упала бы открытой.
+The artifact is **not written**, whatever it claims. The comparison is by content fingerprint,
+not by a list of paths: in an already-dirty tree — which is normal after an implementer has
+worked — editing an existing file does not change the path list, and a check by name would have
+failed open.
 
-Непокрытый случай назван прямо в отчёте каждого прогона, а не спрятан в документации: пути
-из `.gitignore` git не видит, значит и проверка не видит.
+The uncovered case is named directly in every run's report rather than hidden in
+documentation: Git does not see paths in `.gitignore`, so neither does the check.
 
 ---
 
-## Шаг 9. Что осталось в качестве улик
+## Step 9. What is left as evidence
 
 ```
 .warden/runs/live/
-  prompts/implementer.md            точный отправленный промпт
-  raw/implementer.stdout.txt        сырой вывод вендора, всегда
-  artifacts/implementer.json        разобранный артефакт
+  prompts/implementer.md            the exact prompt sent
+  raw/implementer.stdout.txt        raw vendor output, always
+  artifacts/implementer.json        the parsed artifact
   role-implementer.json             ledger
-  evidence.jsonl                    append-only лента событий
+  evidence.jsonl                    append-only event stream
 ```
 
-В ledger попадает то, что не требует эксперимента — оно накапливается само:
+The ledger gets what needs no experiment — it accumulates by itself:
 
 ```
 role            "implementer"      cost_usd         0.012
@@ -246,13 +253,13 @@ model_reported  "stub-impl-model"  prompt_sha256    37c3698c…
 
 ---
 
-## Шаг 10. Что происходит, когда кончилась подписка
+## Step 10. What happens when a subscription runs out
 
-Этот шаг сделан не на подставных вендорах. У аккаунта Codex к этому моменту была исчерпана
-квота, и это оказался самый удобный из возможных стендов: настоящий отказ, который не надо
-изображать.
+This step was not done on stub vendors. The Codex account's quota was genuinely spent at that
+moment, and it turned out to be the most convenient test rig possible: a real refusal that did
+not have to be faked.
 
-Политика — два ревьюера подряд, Codex первым **намеренно**:
+The policy: two reviewers in order, Codex first **on purpose**:
 
 ```yaml
 roles:
@@ -267,7 +274,8 @@ warden role reviewer create-result --run-id live-stdin
    "rejected_profiles":{"codex-review":"quota_exhausted_this_run"}}
 ```
 
-Роль выполнена, хотя первый вендор до неё не дошёл. В отчёте лежат обе попытки:
+The role completed even though the first vendor never got to it. Both attempts are in the
+report:
 
 ```json
 "vendor_attempts": [
@@ -279,34 +287,34 @@ warden role reviewer create-result --run-id live-stdin
 "failed_over_from": ["codex-review"]
 ```
 
-Почему это отдельный код, а не просто «упал». По коду выхода отличить нельзя: Codex отдаёт
-`1` и на исчерпанную квоту, и на опечатку во флаге. Разница в том, что делать дальше.
-Обычную ошибку правильно вернуть тому же вендору вместе с текстом падения; исчерпанную
-подписку — нельзя, следующий вызов откажет ровно так же, и петля потратит остаток бюджета,
-чтобы это выяснить. Квота — единственное падение, на которое правильный ответ это **другой
-вендор**.
+Why this is a separate code rather than just "it failed". You cannot tell from the exit code:
+Codex returns `1` both for an exhausted quota and for a typo in a flag. The difference is what
+to do next. An ordinary error is correctly returned to the same vendor along with the failure
+text; a spent subscription cannot be — the next call refuses identically, and the loop spends
+the rest of the budget finding that out. Quota is the one failure whose correct answer is
+**a different vendor**.
 
-Три решения, которые видно в этом выводе:
+Three decisions are visible in that output:
 
-- **Срок ретрая записан дословно и не разобран.** Вендор сказал «try again at 9:21 PM»: ни
-  даты, ни зоны. Любой timestamp, который Warden отсюда вывел бы, был бы догадкой в виде
-  факта.
-- **Исключение живёт в памяти процесса, не в файле.** Внутри одной петли вендор, кончившийся
-  на реализации, не будет вызван на ревью. Новый запуск начинает с чистого листа: квота,
-  сбросившаяся ночью, не должна оставаться выключенной вчерашним файлом.
-- **Бюджет считает вызовы вендора, а не роли.** Failover добавляет вызов; если бы бюджет его
-  не видел, одна задача с двумя переключениями заплатила бы втрое от разрешённого.
+- **The retry time is recorded verbatim and not parsed.** The vendor said "try again at
+  9:21 PM": no date, no time zone. Any timestamp Warden derived from that would be a guess in
+  the shape of a fact.
+- **The exclusion lives in process memory, not in a file.** Within one loop, a vendor that ran
+  out during implementation will not be called for review. A new invocation starts clean: a
+  quota that reset overnight must not stay disabled by yesterday's file.
+- **The budget counts vendor calls, not roles.** Failover adds a call; if the budget could not
+  see it, one task with two switches would pay three times the permitted amount.
 
-Распознавание идёт по формулировкам вендора — другого сигнала нет, — поэтому источники
-ранжированы. Структурное событие (`{"type":"error"}`) авторитетно; stderr принимается как
-более слабое `stderr_text`; **свободный текст stdout не рассматривается вообще**. Там живут
-слова самой модели, и ревью, которое разбирает код про rate limiting и при этом падает, не
-должно быть принято за ревью, упёршееся в лимит. Цена этого решения — ложноотрицательные:
-вендор, который сообщает о квоте только прозой на stdout, будет отмечен как обычное падение.
-Поэтому в отчёт о падении теперь попадает хвост **обоих** потоков: даже нераспознанный отказ
-оператор прочитает своими глазами.
+Detection works off the vendor's own wording — there is no other signal — so the sources are
+ranked. A structured event (`{"type":"error"}`) is authoritative; stderr is accepted as the
+weaker `stderr_text`; **free text on stdout is not considered at all**. That is where the
+model's own words live, and a review that discusses rate-limiting code and then fails must not
+be mistaken for a review that hit a limit. The price of that decision is false negatives: a
+vendor that reports quota only in prose on stdout will be recorded as an ordinary failure.
+Which is why a failure report now carries the tail of **both** streams: even an unrecognised
+refusal is something the operator can read with their own eyes.
 
-Когда падать больше не на кого:
+When there is nobody left to fail over to:
 
 ```
 → {"ok":false,"code":"role_quota_exhausted",
@@ -314,35 +322,35 @@ warden role reviewer create-result --run-id live-stdin
                  add a profile from another vendor, or wait for the quota window …"}
 ```
 
-`warden run` останавливается с `reason: quota_exhausted`, а не `implementer_failed`. Это
-разные события: одно зовёт читать транскрипт, в котором ничего не сломано, второе —
-подождать окно.
+`warden run` stops with `reason: quota_exhausted`, not `implementer_failed`. These are
+different events: one sends you to read a transcript in which nothing is broken, the other
+sends you to wait for a window.
 
 ---
 
-## Шаг 11. Как первый живой запуск нашёл молчаливую порчу промпта
+## Step 11. How the first live run found silent prompt corruption
 
-Тот же прогон вскрыл дефект, который тесты на заглушках увидеть не могли, потому что заглушка
-— это `.exe`, а настоящий вендор из npm — это `.cmd`.
+The same run exposed a defect the stub tests could not see, because a stub is an `.exe` while a
+real vendor installed from npm is a `.cmd`.
 
-Windows не умеет запускать `.cmd` напрямую, он отдаёт его в cmd.exe, а у cmd.exe командная
-строка построчная. Замер на этой машине:
+Windows cannot start a `.cmd` directly; it hands it to cmd.exe, and cmd.exe's command line is
+line-based. Measured on that machine:
 
 ```
-передано:  [exec, "# Reviewer line one\nsecond line\nthird line", --json]
-получено:  ARG1[exec]  ARG2[# Reviewer line one]  COUNT=2
+sent:      [exec, "# Reviewer line one\nsecond line\nthird line", --json]
+received:  ARG1[exec]  ARG2[# Reviewer line one]  COUNT=2
 ```
 
-Аргумент обрезан на первом переводе строки, **и все следующие аргументы молча выброшены**.
-Тот же argv доходит до `.exe` целиком — поэтому Grok, у которого один `grok.exe`, ничего не
-показывал, а Codex получил однострочный промпт с оторванным `--json` и выглядел работающим.
-Заплатить за такой ответ и потом его судить хуже, чем не запускаться.
+The argument is cut at the first newline, **and every argument after it is silently dropped**.
+The same argv reaches an `.exe` intact — which is why Grok, a single `grok.exe`, showed nothing
+wrong, while Codex received a one-line prompt with `--json` torn off and looked like it was
+working. Paying for such an answer and then judging it is worse than not starting.
 
-Сначала Warden вообще не доходил до вендора: `where.exe codex` первой строкой отдаёт
-безрасширенный npm-шим, который Java запустить не может (`CreateProcess error=193`). Теперь
-исполняемый файл выбирается по расширению, а не по порядку вывода `where.exe`.
+At first Warden did not reach the vendor at all: `where.exe codex` returns the extensionless
+npm shim on its first line, which Java cannot start (`CreateProcess error=193`). The executable
+is now chosen by extension rather than by the order of `where.exe` output.
 
-Дальше — проверка перед запуском:
+Then, a check before launching:
 
 ```json
 {"ok":false,"code":"role_prompt_undeliverable",
@@ -355,26 +363,26 @@ Windows не умеет запускать `.cmd` напрямую, он отд�
    "resolution":"set prompt_delivery: stdin on this profile, or pass {{prompt_file}} …"}}
 ```
 
-Ничего не потрачено, причина названа, и непокрытый случай — раскрытие `%NAME%` внутри
-аргумента — назван там же, а не спрятан в документации.
+Nothing spent, the reason named, and the uncovered case — `%NAME%` expansion inside an
+argument — named right there rather than hidden in documentation.
 
-Рабочий канал для такого вендора один:
+There is exactly one working channel for such a vendor:
 
 ```yaml
 args: ["exec", "-", "--json", "--skip-git-repo-check"]
 prompt_delivery: stdin
 ```
 
-stdin проходит через `.cmd`-шим неповреждённым — это проверено запуском, а не выведено.
+stdin passes through a `.cmd` shim undamaged — established by running it, not by deduction.
 
 ---
 
-## Шаг 12. Тестировщик, у которого есть глаза
+## Step 12. A tester with eyes
 
-Тестировщик здесь двухслойный, и слои отвечают на разные вопросы.
+The tester here has two layers, and the layers answer different questions.
 
-**Нижний слой — харнесс.** Настоящий headless-браузер по CDP, ноль npm-зависимостей.
-Сценарий пишется в контракте задачи:
+**The lower layer is the harness.** A real headless browser over CDP, zero npm dependencies.
+The scenario is written in the task contract:
 
 ```yaml
 visual_qa:
@@ -388,11 +396,11 @@ visual_qa:
     - "700x400: no-console-errors"
 ```
 
-Матчеры: `text=` (по видимому тексту), `css=`, `testid=`, `role=`. Утверждения: `visible`,
-`hidden`, `click`. Голый `click` проверяет, что нажатие вообще что-то меняет в DOM; всё
-более конкретное пишется после `->`, а не угадывается.
+Matchers: `text=` (by visible text), `css=`, `testid=`, `role=`. Assertions: `visible`,
+`hidden`, `click`. A bare `click` checks that pressing changes anything in the DOM at all;
+anything more specific is written after `->` rather than guessed.
 
-Живой прогон на фикстуре:
+A live run against the fixture:
 
 ```
 warden visual-qa looks-right --run-id green
@@ -405,34 +413,35 @@ warden visual-qa looks-right --run-id green
   visual-qa.json
 ```
 
-**Верхний слой — роль `visual_qa`.** Модель, которой скриншоты приходят **вложениями**:
+**The upper layer is the `visual_qa` role.** A model that receives the screenshots as
+**attachments**:
 
 ```yaml
 attachments:
   flag: "-i"          # codex: `-i shot.png -i after-click.png`
 ```
 
-Это и есть разница между «модели прислали имена файлов» и «модель посмотрела». Warden
-записывает в отчёт, какой из двух случаев произошёл: профиль без `attachments.flag`
-получает пометку `attachments_not_passed_to_vendor`, а не тихое повышение до «посмотрел».
+That is the whole difference between "the model was sent some filenames" and "the model
+looked". Warden records which of the two happened: a profile with no `attachments.flag` is
+marked `attachments_not_passed_to_vendor` rather than being silently promoted to "looked".
 
-Роль запускается только после того, как харнесс уже согласился, и отвечает лишь на то, что
-машина измерить не может: обрезанный текст, наложение, развалившаяся раскладка. Её находки
-имеют ту же форму, что у ревьюера, поэтому возвращаются реализатору тем же механизмом.
+The role runs only after the harness has already agreed, and it answers only what a machine
+cannot measure: clipped text, overlap, a collapsed layout. Its findings have the same shape as
+the reviewer's, so they return to the implementer through the same mechanism.
 
-По умолчанию роль **выключена** в политике. Харнесс — пол, и он бесплатный; взгляд модели
-стоит вызова вендора, и это решение оператора, а не петли.
+By default the role is **off** in the policy. The harness is the floor and it is free; a
+model's look costs a vendor call, and that is the operator's decision rather than the loop's.
 
 ---
 
-## Шаг 13. Три вещи, которые харнесс перестал делать молча
+## Step 13. Three things the harness stopped doing silently
 
-Каждая найдена запуском, не рассуждением.
+Each was found by running, not by reasoning.
 
-**Он тестировал чужое приложение.** На `127.0.0.1:4173` уже висело постороннее
-SvelteKit-приложение из другого проекта. Харнесс увидел, что порт отвечает, свой сервер не
-поднял и снял скриншоты чужой страницы. В тот раз проверка упала — но с тем же успехом могла
-пройти.
+**It was testing somebody else's application.** Another project's SvelteKit app was already
+listening on `127.0.0.1:4173`. The harness saw the port answer, did not start its own server,
+and photographed a stranger's page. That time the check failed — but it could just as easily
+have passed.
 
 ```
 → {"ok":false,"code":"visual_qa_port_occupied"}
@@ -441,23 +450,24 @@ SvelteKit-приложение из другого проекта. Харнес�
     from another: stop it, change visual_qa.url to a free port, or drop visual_qa.start."
 ```
 
-**Он отчитывался о виюпорте, которого не было.** Мобильная эмуляция включалась сама при
-ширине меньше 800, а страница без `<meta name="viewport">` раскладывается в мобильном режиме
-в 980px. Сценарий `700x400` рендерился при 980 и назывался `700x400`. Замер:
+**It reported a viewport that never existed.** Mobile emulation switched itself on below a
+width of 800, and a page with no `<meta name="viewport">` lays out at 980px in mobile mode. A
+`700x400` scenario rendered at 980 and was called `700x400`. Measured:
 
 ```
 asked for 700  →  viewport_effective: {"width": 980}  →  viewport_honoured: false
 ```
 
-Теперь `mobile` включается явно (`"700x400 mobile: ..."`), а несовпадение объявленной и
-фактической ширины — провал сценария с объяснением, а не тихая подмена.
+Now `mobile` is enabled explicitly (`"700x400 mobile: ..."`), and a mismatch between the
+declared and the actual width is a scenario failure with an explanation rather than a silent
+substitution.
 
-**Он знал название чужой кнопки.** В коде харнесса жили `.mode-switch`, `.mobile-view-note`
-и `/growing/i` — приватный DOM одного приложения внутри инструмента, который называется
-общим. А `warden do` для любой UI-цели без явного имени контрола подставлял сценарий с
-кнопкой `Create` — той самой, из того же приложения. Угаданный критерий приёмки — та же
-ошибка, что угаданный blast radius, только полем правее. Теперь, если цель не называет
-контрол, пишется то, что верно для любой страницы:
+**It knew the name of somebody else's button.** The harness code contained `.mode-switch`,
+`.mobile-view-note` and `/growing/i` — one application's private DOM inside a tool that calls
+itself general. And for any UI goal without an explicit control name, `warden do` filled in a
+scenario with a `Create` button — the same one, from the same application. A guessed acceptance
+criterion is the same mistake as a guessed blast radius, one field to the right. Now, if the
+goal names no control, what gets written is what is true of any page:
 
 ```yaml
   scenarios:
@@ -467,12 +477,12 @@ asked for 700  →  viewport_effective: {"width": 980}  →  viewport_honoured: 
     - "700x400: no-console-errors"
 ```
 
-Слабая честная проверка, которая всё равно снимает скриншот для роли `visual_qa`, лучше
-уверенной неправильной.
+A weak honest check that still takes a screenshot for the `visual_qa` role beats a confident
+wrong one.
 
 ---
 
-## Шаг 14. Цель по-русски
+## Step 14. A goal in Russian
 
 ```
 warden do "почини вёрстку экрана настроек" --scope ui
@@ -480,10 +490,10 @@ warden do "почини вёрстку экрана настроек" --scope ui
    "message":"the goal arrived as \"?????? ??????? ?????? ????????\" …"}
 ```
 
-JVM декодирует аргументы командной строки через `sun.jnu.encoding`; на этой машине это
-`Cp1252`, и кириллица становится `?` до входа в `main`. Проверено: `-Dsun.jnu.encoding=UTF-8`,
-`JDK_JAVA_OPTIONS` и `chcp 65001` не меняют ничего. Поэтому испорченная цель отклоняется, а не
-записывается в контракт, и есть канал, который работает:
+The JVM decodes command-line arguments through `sun.jnu.encoding`; on that machine it is
+`Cp1252`, and Cyrillic becomes `?` before `main` is entered. Verified:
+`-Dsun.jnu.encoding=UTF-8`, `JDK_JAVA_OPTIONS` and `chcp 65001` change nothing. So a mangled
+goal is rejected rather than written into a contract, and there is a channel that works:
 
 ```
 warden do --goal-file goal.txt --scope ui
@@ -491,42 +501,44 @@ warden do --goal-file goal.txt --scope ui
    visual_qa: required: true
 ```
 
-`warden doctor` печатает это состояние в `argument_encoding`, чтобы узнавать о нём до того,
-как контракт окажется в вопросительных знаках, а не после.
+`warden doctor` prints this state under `argument_encoding`, so you learn about it before the
+contract is full of question marks rather than after.
 
 ---
 
-## Как подставить настоящего вендора
+## How to substitute a real vendor
 
-Заменить в профиле одну строку:
+Replace one line in the profile:
 
 ```yaml
 command: /tmp/vendors/review.sh     →     command: grok
 ```
 
-и, для непроверенного профиля, выполнить его `verification.probe`, убедиться в четырёх
-пунктах из `what_to_check` и проставить `verified_on`. До этого резолвер профиль не выпустит.
+and, for an unverified profile, run its `verification.probe`, confirm the four points in
+`what_to_check`, and stamp `verified_on`. Until then the resolver will not release it.
 
-**Порядок для Codex важен отдельно.** Это единственная роль с `read_only: false`, то есть
-непроверенный флаг автоаппрува у неё — самое рискованное место во всём пайплайне. Сначала
-прогнать пробу standalone, потом `--dry-run`, и только потом дать петле им управлять.
+**The order matters separately for Codex.** It is the only role with `read_only: false`, which
+makes an unverified auto-approval flag the riskiest single thing in the whole pipeline. Run the
+probe standalone first, then `--dry-run`, and only then let the loop drive it.
 
 ---
 
-## Чего пока нет
+## What this walkthrough does not show
 
-- Живого прогона роли `visual_qa` на настоящем вендоре. Проводка проверена end-to-end на
-  заглушке, которая отказывается отвечать без реальных файлов-вложений; профиль `codex-visual-qa`
-  остаётся непроверенным, пока не выполнена его проба — а непроверенный профиль резолвер не
-  выпускает.
-- Визуального pixel-diff и baseline. Сейчас харнесс проверяет утверждения, а не сравнивает
-  изображения; задача с `visual_qa.required: true` и без браузера падает
-  `visual_qa_unavailable`, а не проходит молча.
-- Совмещённого `warden run` implement + independent review на двух живых вендорах в одном
-  прогоне. Поодиночке оба пути уже гонялись: Codex mini написал `result.txt` и дошёл до
-  `human_gate`; Claude Sonnet прогнал read-only ревью со схемой и fingerprint.
-- Живого прогона `runner: orca` end-to-end. Адаптер написан по контракту Orca CLI:
-  worktree не создаёт, completion только из `worker_done` / dispatch settlement. Пока это
-  не прогнано на живом worker, это не доказанный путь.
-- Распознавание квоты по свободному тексту stdout. Сделано намеренно (Шаг 10): ложное
-  срабатывание там стоит денег, ложный пропуск — нет.
+Everything above runs on stubs and a couple of small live probes. Since it was written, the
+full chain has been run end to end against real vendors on a real project — a writing
+implementer, machine gates, an independent reviewer on a second vendor, the browser harness,
+and a `visual_qa` role that filed a P1 the machine could not see and ordered a fix round. That
+is a different document: [`LIVE-CYCLE.md`](LIVE-CYCLE.md), with the costs, tokens and verdicts.
+
+Still not shown anywhere, because it has not been done:
+
+- **A live `runner: orca` role cycle.** The adapter is written to Orca's CLI contract: it
+  creates no worktrees and completes only on `worker_done` or dispatch settlement. Until that
+  runs against a live worker, it is not a proven path. Orca *did* create the worktrees in the
+  live runs, but that is `OrcaIsolation` — a different code path.
+- **Visual pixel-diff and baselines.** The harness checks assertions; it does not compare
+  images. A task with `visual_qa.required: true` and no browser fails `visual_qa_unavailable`
+  rather than passing quietly.
+- **Quota detection from free-form stdout text.** Left out deliberately (Step 10): a false
+  positive there costs money, a false negative does not.

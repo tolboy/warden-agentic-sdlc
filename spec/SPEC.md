@@ -1,53 +1,56 @@
-# warden — спецификация
+# Warden — specification
 
-> Рабочее имя. Переименование — одна строка в `bin/` и одна в `Main.java`.
+The tool runs AI agents by role inside someone else's repository, checks the result
+mechanically, and stops in front of a human. It **never merges anything**.
 
-Инструмент запускает AI-агентов по ролям внутри чужого репозитория, проверяет результат
-машинно и останавливается перед человеком. Он **никогда ничего не мёржит**.
-
----
-
-## 1. Три места, три ответственности
-
-Главная идея, из которой следует всё остальное:
-
-```
-~/.warden/                      КТО запускает
-  profiles/*.yaml               вендоры: какой CLI, какие флаги, какие лимиты
-  policy.yaml                   роль → профили, ротация, независимость
-
-<любой проект>/.warden/         ЧТО значит «сделано» для этого проекта
-  project.yaml                  команды проверки, области, значения по умолчанию
-  tasks/*.yaml                  задачи
-  runs/                         доказательная база (в .gitignore)
-
-warden (установлен один раз)    КАК: гейты, роли, петля, ledger
-```
-
-**Вендор — свойство того, кто запускает, а не проекта.** У тебя SuperGrok и Codex, у коллеги
-Gemini и локальная модель — `project.yaml` при этом одинаковый. Поэтому выбор вендора не
-попадает в git проекта, где он никому, кроме тебя, не нужен.
-
-Подключить новый проект = описать его команды проверки. Всё.
+This document is the reference. For an introduction read the [README](../README.md); for a
+guided tour read [`docs/WALKTHROUGH.md`](../docs/WALKTHROUGH.md); for what has actually been
+run live, [`docs/LIVE-CYCLE.md`](../docs/LIVE-CYCLE.md).
 
 ---
 
-## 2. Файлы проекта
+## 1. Three places, three responsibilities
 
-### `.warden/project.yaml` — единственный обязательный файл
+The main idea, from which everything else follows:
+
+```
+~/.warden/                      WHO runs
+  profiles/*.yaml               vendors: which CLI, which flags, which limits
+  policy.yaml                   role → profiles, rotation, independence
+
+<any project>/.warden/          WHAT "done" means for this project
+  project.yaml                  check commands, scopes, defaults
+  tasks/*.yaml                  tasks
+  runs/                         the evidence base (gitignored)
+
+warden (installed once)         HOW: gates, roles, the loop, the ledger
+```
+
+**A vendor is a property of whoever runs, not of the project.** You have SuperGrok and Codex;
+a colleague has Gemini and a local model — and `project.yaml` is identical for both. That is
+why the choice of vendor never lands in the project's Git, where it is of use to nobody but
+you.
+
+Connecting a new project = describing its check commands. That is all.
+
+---
+
+## 2. Project files
+
+### `.warden/project.yaml` — the only mandatory file
 
 ```yaml
 version: 1
-project: living-horizon
+project: my-app
 base_ref: origin/main
 
-# Именованные наборы команд. Это вся поверхность «что значит сделано».
+# Named command sets. This is the entire surface of "what done means".
 checks:
   fast: ["npm run check"]
   full: ["npm run check", "npm run build"]
   lint: ["npm run lint"]
 
-# Именованные области, чтобы задачи не повторяли пути
+# Named scopes, so tasks do not repeat paths
 scopes:
   ui:      ["src/routes", "src/lib/components"]
   server:  ["src/lib/server"]
@@ -60,7 +63,7 @@ defaults:
   timeout_minutes: 30
 ```
 
-Для JVM-проекта отличается только содержимое `checks`:
+For a JVM project only the contents of `checks` differ:
 
 ```yaml
 checks:
@@ -68,45 +71,45 @@ checks:
   full: ["./gradlew build", "./gradlew detekt"]
 ```
 
-### `.warden/tasks/<id>.yaml` — задача
+### `.warden/tasks/<id>.yaml` — a task
 
 ```yaml
 version: 1
 id: settings-button
-goal: Добавить кнопку Settings в главное меню
+goal: Add a Settings button to the main menu
 risk: low
-scope: ui                       # имя из scopes, либо явный список путей
-checks: fast                    # имя из checks, либо явный список команд
-acceptance:                     # необязательно, добавляется к checks
+scope: ui                       # a name from scopes, or an explicit list of paths
+checks: fast                    # a name from checks, or an explicit list of commands
+acceptance:                     # optional, appended to checks
   - "npm run test -- settings"
 ```
 
-**Правило имени и списка.** Голая строка — это всегда *имя* из `project.yaml`, список — это
-явные значения:
+**The name-or-list rule.** A bare string is always a *name* from `project.yaml`; a list is
+explicit values:
 
 ```yaml
-scope: ui                     # имя области; должно быть определено в scopes
-scope: ["src/lib", "docs"]    # явные пути
-scope: [ui, "src/extra"]      # в списке имена и пути можно смешивать
+scope: ui                     # a scope name; must be defined in scopes
+scope: ["src/lib", "docs"]    # explicit paths
+scope: [ui, "src/extra"]      # names and paths may be mixed inside a list
 
-checks: fast                  # имя набора; должно быть определено в checks
-checks: ["./gradlew test"]    # явная команда
+checks: fast                  # a set name; must be defined in checks
+checks: ["./gradlew test"]    # an explicit command
 ```
 
-Иначе опечатка в имени области тихо превращалась бы в путь к несуществующему каталогу — а
-такой blast radius никогда ничего не сообщает как выходящее за границы, то есть падает
-открытым. Инструмент вместо этого отказывается и показывает доступные имена.
+Otherwise a typo in a scope name would silently become a path to a directory that does not
+exist — and such a blast radius never reports anything as out of bounds, which is to say it
+fails open. The tool refuses instead, and shows the available names.
 
-Минимальная валидная задача — четыре строки: `version`, `id`, `goal`, `scope`. Остальное
-берётся из `defaults`.
+The minimal valid task is four lines: `version`, `id`, `goal`, `scope`. Everything else comes
+from `defaults`.
 
-**Задача без исполняемого критерия приёмки не принимается.** Это не придирка: все известные
-успешные внедрения агентов работают на механически проверяемой работе, и линтер задач — то
-место, где это требование становится обязательным, а не пожеланием.
+**A task with no executable acceptance criterion is not accepted.** This is not pedantry:
+every known successful agent deployment works on mechanically checkable work, and the task
+linter is the place where that requirement becomes mandatory rather than aspirational.
 
 ---
 
-## 3. Файлы пользователя
+## 3. User files
 
 ### `~/.warden/profiles/grok-review.yaml`
 
@@ -134,40 +137,40 @@ limits:
   wall_clock_minutes: 20
 ```
 
-Проверенные факты про флаги вендоров живут здесь же, рядом с флагами, а не в отдельной
-документации, которая рассинхронизируется.
+Established facts about a vendor's flags live here, next to the flags, rather than in separate
+documentation that drifts out of sync.
 
-Остальные поля профиля существуют потому, что вендоры отличаются не только флагами:
+The remaining profile fields exist because vendors differ in more than their flags:
 
 ```yaml
-prompt_delivery: stdin    # argv (по умолчанию) или stdin
+prompt_delivery: stdin    # argv (default) or stdin
 quota:
-  signatures: ["plan allowance spent"]   # добавляется к встроенным, не заменяет их
+  signatures: ["plan allowance spent"]   # added to the built-in ones, not replacing them
 attachments:
-  flag: "-i"              # повторяется на каждый файл; так роль visual_qa видит скриншоты
-model: grok-4.6-build     # доходит до вендора, только если args содержат {{model}}
+  flag: "-i"              # repeated per file; this is how the visual_qa role sees screenshots
+model: grok-4.6-build     # reaches the vendor only if args contain {{model}}
 ```
 
-`attachments.flag` — то, чем роль тестировщика отличается от роли, которой прислали имена
-файлов. Без него скриншоты попадают только в текст промпта; вендор с собственным read-tool
-их откроет, а вендор без него — прочитает пути как прозу. Warden записывает в отчёт, какой
-из двух случаев произошёл.
+`attachments.flag` is what separates a tester role from a role that was sent some filenames.
+Without it the screenshots only reach the prompt text; a vendor with its own read tool will
+open them, a vendor without one will read the paths as prose. Warden records in the report
+which of the two happened.
 
-`prompt_delivery: stdin` — единственный канал, переживающий Windows `.cmd`-шим: cmd.exe
-обрезает многострочный аргумент на первом переводе строки и молча выбрасывает все
-последующие. Warden отказывается запускать такую комбинацию (`role_prompt_undeliverable`),
-а не отправляет вендору испорченный вопрос.
+`prompt_delivery: stdin` is the only channel that survives a Windows `.cmd` shim: cmd.exe
+truncates a multi-line argument at the first newline and silently drops every argument after
+it. Warden refuses to launch that combination (`role_prompt_undeliverable`) rather than
+sending the vendor a corrupted question.
 
 ```yaml
-runner: direct    # direct (по умолчанию) | orca | local
+runner: direct    # direct (default) | orca | local
 ```
 
-`runner` выбирает адаптер, а не модель. `direct` запускает CLI вендора в этом процессе.
-`orca` стартует supervised worker внутри **уже существующего** Orca worktree: Warden
-worktree не создаёт. Завершение принимается только по `worker_done` / settlement
-dispatch — текст терминала не считается доказательством. `local` — названное намерение,
-резолвер отказывает `runner_unimplemented`, пока адаптера нет. Неизвестный runner
-отклоняется при разборе профиля.
+`runner` selects the adapter, not the model. `direct` runs the vendor's CLI in this process.
+`orca` starts a supervised worker inside an **already existing** Orca worktree: Warden creates
+no worktrees. Completion is accepted only from `worker_done` or dispatch settlement — terminal
+text is not evidence. `local` is a named intention; the resolver answers
+`runner_unimplemented` until the adapter exists. An unknown runner is rejected when the profile
+is parsed.
 
 ### `~/.warden/policy.yaml`
 
@@ -181,195 +184,223 @@ roles:
     profiles: [grok-review, claude-review]
     strategy: rotate
     require_independent_vendor: true
-  visual_qa:                          # необязательная; по умолчанию выключена
+  visual_qa:                          # optional; off by default
     profiles: [codex-visual-qa]
     strategy: first
 review:
   required_for_risk: [medium, high]
 ```
 
-Роль `visual_qa` запускается только если она объявлена здесь **и** задача просит
-`visual_qa.required: true`. Браузерный харнесс работает независимо от неё: он пол, а не
-надстройка. Роль добавляет то, что машина измерить не может, и стоит вызова вендора — поэтому
-включает её оператор, а не петля за него.
+The `visual_qa` role runs only if it is declared here **and** the task asks for
+`visual_qa.required: true`. The browser harness works independently of it: the harness is the
+floor, not a layer on top. The role adds what a machine cannot measure and costs a vendor call
+— so the operator enables it, rather than the loop deciding for them.
 
-`require_independent_vendor` — жёсткое ограничение, а не предпочтение: ревьюер не может
-совпадать по вендору с реализатором. Если независимого вендора нет, резолвер **падает**, а не
-тихо отдаёт код на ревью его же автору. Это единственное защитимое обоснование
-мультивендорности: модель, ревьюящая собственный вывод, делит с ним слепые зоны.
+`require_independent_vendor` is a hard constraint, not a preference: a reviewer may not share a
+vendor with the implementer. If there is no independent vendor the resolver **fails** rather
+than quietly handing the code to its own author for review. This is the only defensible
+justification for multi-vendor: a model reviewing its own output shares that output's blind
+spots.
 
----
+The optional `workflow:` block declares the order of stages, what each runs
+(`role` / `machine_gates` / `visual_harness`), the closed set of conditions gating it, and
+where a failure or a finding routes. Omitting it runs the built-in chain. See the README
+section *The chain of model calls*.
 
-## 4. Команды
-
-```
-warden setup                создать стартовый ~/.warden; ничего не перезаписывает
-warden profiles             какие профили грузятся, какие пригодны и почему нет
-warden profiles --verify N  прогнать пробу профиля N; --confirm проставляет verified_on
-warden init                 создать .warden/project.yaml, угадав checks по package.json,
-                            build.gradle(.kts), pom.xml, Cargo.toml, Makefile
-warden doctor               что установлено, что аутентифицировано, что настроено неверно
-warden do "<цель>"          весь workflow: изоляция (Orca), задача, петля; стоп перед человеком
-                            --project DIR --scope NAME --in-place --dry-run
-warden validate [задача]    проверить project.yaml, задачу, профили и политику
-warden gates <задача>       preflight + машинные гейты, без вендоров и без затрат
-warden role <роль> <задача> одна роль; --dry-run не тратит ничего
-warden run <задача>         вся петля; останавливается перед человеком
-warden ledger               таблица прогонов: вердикты, стоимость, время, находки
-```
-
-`warden do` — команда, которую запускает оператор. Остальные команды — части этой петли.
-Цель плюс проект; область изменений не угадывается (`--scope`, либо единственный scope
-в `project.yaml`). Изоляция — `orca worktree create`; Warden сам `git branch` не вызывает.
-`--in-place` — только для одноразового репозитория без Orca. Ничего не мёржится.
-
-`warden doctor` — ответ на «я не понимаю, работает ли у меня машинная часть». Он проверяет
-Java, project contract, загрузку профилей и политики, и доступность Orca отдельно. Диагностика
-вложенности таймаутов относится к planned Orca role adapter и не выдаётся за готовую.
-
-`warden gates` ничего не тратит: это способ проверить, что проект вообще подключён, не запуская
-ни одного агента.
-
-`warden profiles --verify` запускает `verification.probe` самого профиля, сохраняет транскрипт
-в `~/.warden/verification/` и печатает `what_to_check`. Дату он по нулевому коду возврата **не**
-проставляет: тогда `verified_on` означало бы «бинарник запустился», а это ровно та догадка,
-ради предотвращения которой поле существует. `--confirm` — отдельный шаг, и он работает только
-если проба прошла в этом же вызове.
+The optional `failover:` block declares what happens when a vendor reports a spent
+subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`.
 
 ---
 
-## 5. Петля
+## 4. Commands
 
 ```
-preflight → implement → машинные гейты → [fix ≤ N] → независимое ревью → [fix ≤ N]
-          → браузерный харнесс → [fix ≤ N] → визуальная роль → [fix ≤ N] → человек
+warden setup                create a starter ~/.warden; never overwrites
+warden profiles             which profiles load, which are eligible, and why not
+warden profiles --verify N  run profile N's own probe; --confirm stamps verified_on
+warden init                 create .warden/project.yaml, inferring checks from package.json,
+                            build.gradle(.kts), pom.xml, Cargo.toml or Makefile
+warden doctor               what is installed, authenticated, and misconfigured
+warden do "<goal>"          the whole workflow: isolation (Orca), a task, the loop; stops
+                            before a human. --project DIR --scope NAME --in-place --dry-run
+                            --init-repo --draft-only --goal-file FILE --quiet
+warden validate <task>      check project.yaml, the task, the profiles and the policy
+warden gates <task>         preflight and machine gates, no vendors and no cost
+warden visual-qa <task>     start the preview, screenshot, assert control visibility
+warden role <role> <task>   one role; --dry-run spends nothing
+warden run <task>           the whole loop; stops before a human
+                            --continue <run-id> carries a recorded decision forward
+warden ledger               a table of runs: verdicts, cost, time, findings
+warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
+                            changed files, the human decision. --text for the table
+warden status [run-id]      pending and resolved human decisions
+warden approve <run-id>     record a decision; never lands changes
+warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
+                            commit and request for an accepted run. Merges nothing
 ```
 
-Три свойства заложены намеренно:
+`warden do` is the command an operator runs. Everything else is a piece of that loop. A goal
+plus a project; the blast radius is not guessed (`--scope`, or the single scope in
+`project.yaml`). Isolation is `orca worktree create`; Warden never calls `git branch` itself.
+`--in-place` is for a throwaway repository without Orca. Nothing is merged.
 
-1. **Ничего не мёржится.** Последнее действие — запись сводки и вердикт `human_gate` либо
-   `human_escalation`. Приёмка — единственный шаг, который считает вывод агента доверенным.
-2. **Маршрутизация — код.** Повторять ли фикс, нужно ли ревью, какой вендор заполнит роль —
-   решают счётчики и коды выхода. Ни одну модель об этом не спрашивают.
-3. **Каждая попытка оставляет улику.** Точный отправленный промпт, сырой вывод вендора,
-   машинный отчёт и текст, который получил реализатор при возврате работы.
-4. **У тестировщика есть глаза, и они двухслойные.** Нижний слой — харнесс: настоящий
-   headless-браузер по CDP, который сам находит элемент по `text=` / `css=` / `testid=` /
-   `role=`, проверяет видимость, реакцию на клик и отсутствие ошибок в консоли, и сохраняет
-   скриншот. Он ничего не знает ни об одном конкретном проекте. Верхний слой — роль
-   `visual_qa`: модель, которой скриншоты передаются **вложениями**, а не именами файлов
-   (`attachments.flag`, у codex это `-i`). Она отвечает только на то, что машина измерить не
-   может: обрезанный текст, наложение, развалившаяся раскладка. Роль включается в политике и
-   по умолчанию выключена — харнесс это пол, а платить за взгляд решает оператор.
-5. **Провал визуальной проверки возвращается реализатору**, как провал гейта или ревью, с тем
-   же ограничением по числу попыток. `visual_qa_unavailable` и `visual_qa_port_occupied` —
-   исключения: браузер и чужой сервер на порту реализатор починить не может.
-6. **Исчерпанная подписка — не то же самое, что упавшая работа.** Обычную ошибку правильно
-   вернуть тому же вендору вместе с текстом падения. Исчерпанную квоту — нельзя: следующий
-   вызов откажет так же, и петля потратит остаток бюджета, чтобы это выяснить. Роль
-   переключается на следующего пригодного вендора, исчерпанный исключается до конца процесса,
-   и обе попытки остаются в отчёте. Бюджет считает вызовы вендора, а не роли — иначе
-   переключение обошло бы лимит.
+`warden doctor` is the answer to "I cannot tell whether the machine half works on my box". It
+checks Java, the project contract, profile and policy loading, and Orca availability
+separately, and reports `argument_encoding`.
 
-Различить это по коду выхода нельзя: Codex отдаёт `1` и на исчерпанную квоту, и на опечатку
-во флаге. Решение принимается по формулировке вендора, и в улике записано, какая фраза и в
-каком канале его вызвала, — чтобы ошибочная классификация читалась, а не выводилась из
-поведения.
+`warden gates` costs nothing: it is how you confirm a project is connected at all without
+starting a single agent.
+
+`warden profiles --verify` runs the profile's own `verification.probe`, saves the transcript
+to `~/.warden/verification/`, and prints `what_to_check`. It does **not** stamp the date on a
+zero exit code: `verified_on` would then mean "the binary started", which is exactly the guess
+the field exists to prevent. `--confirm` is a separate step, and it works only if the probe
+passed in the same invocation.
+
+`do` and `run` narrate their stages on stderr while they work; stdout stays a single JSON
+object. `--quiet` turns the narration off.
 
 ---
 
-## 6. Как встраиваются Conductor и Orca
+## 5. The loop
 
 ```
-Orca        worktree на задачу + терминал. warden работает внутри него.
-Conductor   script-узлы, вызывающие warden, внешние лимиты и human gate.
-warden      петля, гейты, роли, улики.
+preflight → implement → machine gates → [fix ≤ N] → independent review → [fix ≤ N]
+          → browser harness → [fix ≤ N] → visual role → [fix ≤ N] → human
 ```
 
-Ни Conductor, ни Orca не знают имени вендора. Узел Conductor выглядит так:
+Properties that are there on purpose:
+
+1. **Nothing is merged.** The last action is writing a summary and a verdict of `human_gate`
+   or `human_escalation`. Acceptance is the only step that treats an agent's output as
+   trusted.
+2. **Routing is code.** Whether to repeat a fix, whether review is needed, which vendor fills
+   a role — decided by counters and exit codes. No model is asked about any of it.
+3. **Every attempt leaves evidence.** The exact prompt sent, the raw vendor output, the
+   machine report, and the text the implementer received when the work came back.
+4. **The tester has eyes, and they come in two layers.** The lower layer is the harness: a real
+   headless browser over CDP that locates an element by `text=` / `css=` / `testid=` /
+   `role=`, checks visibility, the reaction to a click and the absence of console errors, and
+   saves a screenshot. It knows nothing about any particular project. The upper layer is the
+   `visual_qa` role: a model that receives the screenshots as **attachments** rather than
+   filenames (`attachments.flag`, `-i` for codex), and answers only what a machine cannot
+   measure — clipped text, overlap, a collapsed layout. The role is enabled in the policy and
+   is off by default: the harness is the floor, and paying for a look is the operator's call.
+5. **A visual failure returns to the implementer**, like a failed gate or review, under the
+   same attempt limit. `visual_qa_unavailable` and `visual_qa_port_occupied` are the
+   exceptions: an implementer can fix neither a missing browser nor somebody else's server on
+   the port.
+6. **A spent subscription is not the same as failed work.** An ordinary error is correctly
+   returned to the same vendor along with the failure text. An exhausted quota cannot be: the
+   next call refuses identically, and the loop spends the rest of the budget establishing
+   that. The role switches to the next eligible vendor, the exhausted one is excluded for the
+   rest of the process, and both attempts stay in the report. The budget counts vendor calls
+   rather than roles — otherwise a switch would route around the limit.
+
+None of this is distinguishable by exit code: Codex returns `1` both for an exhausted quota
+and for a typo in a flag. The decision is made from the vendor's own wording, and the evidence
+records which phrase in which channel triggered it — so that a misclassification can be read
+rather than inferred from behaviour.
+
+---
+
+## 6. How Conductor and Orca fit in
+
+```
+Orca        a worktree per task, plus a terminal. warden runs inside it.
+Conductor   script nodes calling warden, outer limits, and the human gate.
+warden      the loop, the gates, the roles, the evidence.
+```
+
+Neither Conductor nor Orca knows a vendor's name. A Conductor node looks like this:
 
 ```yaml
   - name: task_loop
     type: script
     command: warden
     args: ["run", "{{ workflow.input.task }}", "--json"]
-    timeout: 7800          # строго больше внутреннего лимита warden
+    timeout: 7800          # strictly greater than warden's internal limit
 ```
 
-**Правило вложенности лимитов.** Внешний обязан быть строго больше внутреннего:
+**The nested-limit rule.** The outer one must be strictly greater than the inner one:
 
 ```
-Conductor node timeout  >  warden wall clock  >  лимиты вендора (--max-turns, effort)
+Conductor node timeout  >  warden wall clock  >  vendor limits (--max-turns, effort)
 ```
 
-Тот лимит, который сработает первым, решает, останется ли у тебя улика. Сработает Conductor —
-процесс убит, ledger не записан, причина неизвестна. Сработает warden — есть `role_timeout`,
-длительность, стоимость и подтверждение, что дерево не тронуто.
+Whichever limit fires first decides whether you are left with evidence. If Conductor fires,
+the process is killed, the ledger is not written and the reason is unknown. If warden fires,
+you have `role_timeout`, a duration, a cost, and confirmation that the tree was not touched.
 
 ---
 
-## 7. Подстановки в промптах
+## 7. Prompt substitutions
 
-Доступны в любом шаблоне промпта роли:
+Available in any role prompt template:
 
 ```
 {{task_id}} {{run_id}} {{goal}} {{risk}} {{project}}
 {{base_ref}} {{diff_base_commit}}
 {{scope_paths}} {{checks}} {{acceptance}}
 {{contract_path}} {{prompt_file}} {{schema_json}} {{schema_pretty}}
-{{context}} {{context_path}}          — машинный отказ или findings при возврате работы
-{{screenshots}}                       — абсолютные пути скриншотов; для visual_qa
-{{visual_scenarios}}                  — что харнессу было велено проверить
+{{context}} {{context_path}}          — the machine refusal or findings on a work return
+{{screenshots}}                       — absolute screenshot paths; for visual_qa
+{{visual_scenarios}}                  — what the harness was told to check
 ```
 
-В аргументах профиля дополнительно доступны `{{prompt}}`, `{{prompt_file}}`, `{{schema_json}}`,
-`{{repo_root}}`, `{{run_id}}`, `{{task_id}}` и `{{model}}`.
+Additionally available in a profile's arguments: `{{prompt}}`, `{{prompt_file}}`,
+`{{schema_json}}`, `{{repo_root}}`, `{{run_id}}`, `{{task_id}}` and `{{model}}`.
 
 ---
 
-## 8. Инварианты, которые инструмент обязан удерживать
+## 8. Invariants the tool must hold
 
-Это то, что проверяется conformance-набором. Каждый пункт — дефект, который уже был найден.
+This is what the conformance suite checks. Every item is a defect that has already been found.
 
-1. Область изменений считается от `git merge-base HEAD <base_ref>`, а не от вершины ветки.
-   Иначе после `git fetch` чужие апстрим-коммиты приписываются задаче.
-2. Контракт задачи хешируется на preflight и перепроверяется после **каждой** команды приёмки.
-   Команда приёмки — произвольный shell и может переписать команды, идущие следом.
-3. Любой запуск процесса обязан завершиться: после kill — grace-таймер и принудительное
-   разрешение. Убитый процесс с внуками, держащими pipe, не даёт события `close`.
-4. Отчёт пишется всегда, включая падения. Оператор не должен оставаться без улики.
-5. Human gate падает закрытым: `reject` — первая опция, потому что её выберет автоматика.
-6. Read-only роль проверяется отпечатком **содержимого** дерева, а не списком путей: в уже
-   грязном дереве правка существующего файла не меняет список путей.
-7. Флаг разрешений вендора никогда не является гарантией. Гарантия — проверка после.
-8. Артефакт, не прошедший схему, не записывается.
-9. Пропуск непроверенного профиля вместо попытки запуска: вендор, чей бинарь не найден,
-   исключается резолвером, а не падает в середине петли. Причина отказа называет ровно то,
-   что было проверено: проба выясняет наличие бинаря и ничего не знает про подписку.
-10. Исчерпанная подписка не возвращается тому же вендору. Она классифицируется отдельно от
-    обычного падения, роль переключается на другого вендора, а исключение живёт в памяти
-    процесса — не в файле, который оставит вендора выключенным после сброса квоты.
-11. Визуальная проверка не имеет права молча измерить не то приложение. Если на URL уже
-    кто-то отвечает, а задача объявила свой `start`, прогон отклоняется: отличить свой сервер
-    от забытого чужого Warden не может, а один такой прогон уже случился — харнесс снял
-    скриншоты постороннего SvelteKit-приложения на 127.0.0.1:4173.
-12. Заявленный виюпорт обязан совпасть с тем, который увидел CSS. Мобильная эмуляция без
-    `<meta name="viewport">` раскладывает страницу в 980px, и отчёт «700x400» был бы ложью.
-13. Цель на любом языке доходит до контракта неповреждённой или не доходит вовсе. JVM
-    декодирует argv через `sun.jnu.encoding`; там, где это не UTF-8, кириллица превращается в
-    `?` до входа в `main`, и ни один флаг JVM этого не меняет — поэтому есть `--goal-file`, а
-    испорченная цель отклоняется, а не записывается в контракт.
-14. Промпт, который не дойдёт до вендора неповреждённым, не отправляется. Многострочный
-    аргумент через Windows `.cmd`-шим теряет всё после первого перевода строки, включая
-    следующие флаги; запуск отклоняется до вызова, а не оплачивается.
+1. The blast radius is computed from `git merge-base HEAD <base_ref>`, not from the branch
+   tip. Otherwise, after a `git fetch`, somebody else's upstream commits get attributed to the
+   task.
+2. The task contract is hashed at preflight and re-checked after **every** acceptance command.
+   An acceptance command is arbitrary shell and can rewrite the commands that follow it.
+3. Every process launch must terminate: after a kill, a grace timer and a forced resolution. A
+   killed process whose grandchildren still hold the pipe never produces a `close` event.
+4. A report is always written, failures included. An operator must never be left without
+   evidence.
+5. The human gate fails closed: `reject` is the first option, because that is the one
+   automation will select.
+6. A read-only role is checked by the **content** fingerprint of the tree, not by a list of
+   paths: in an already-dirty tree, editing an existing file does not change the path list.
+7. A vendor's permission flag is never a guarantee. The guarantee is the check afterwards.
+8. An artifact that fails its schema is not written.
+9. Skip an unverified profile rather than attempting to run it: a vendor whose binary is not
+   found is excluded by the resolver rather than failing in the middle of the loop. The reason
+   given names exactly what was checked — the probe establishes the binary's presence and knows
+   nothing about a subscription.
+10. A spent subscription is not returned to the same vendor. It is classified apart from an
+    ordinary failure, the role switches to another vendor, and the exclusion lives in process
+    memory — not in a file that would leave a vendor disabled after its quota reset.
+11. A visual check may not silently measure the wrong application. If something is already
+    answering on the URL and the task declared its own `start`, the run is refused: Warden
+    cannot tell its own server from a forgotten stranger's, and one such run has already
+    happened — the harness photographed an unrelated SvelteKit app on 127.0.0.1:4173.
+12. The declared viewport must match the one the CSS saw. Mobile emulation without a
+    `<meta name="viewport">` lays the page out at 980px, and a report saying "700x400" would be
+    a lie.
+13. A goal in any language reaches the contract intact or does not reach it at all. The JVM
+    decodes argv through `sun.jnu.encoding`; where that is not UTF-8, Cyrillic becomes `?`
+    before `main` is entered and no JVM flag changes it — hence `--goal-file`, and hence a
+    mangled goal being rejected rather than written into a contract.
+14. A prompt that will not reach the vendor intact is not sent. A multi-line argument through a
+    Windows `.cmd` shim loses everything after the first newline, including the flags that
+    follow; the launch is refused before the call rather than paid for.
 
 ---
 
-## 9. Чего инструмент намеренно не делает
+## 9. What the tool deliberately does not do
 
-- Не мёржит, не пушит, не вызывает `git branch` / `git worktree add`.
-  `warden do` просит Orca создать worktree; без Orca — только `--in-place`.
-- Не выбирает вендора моделью.
-- Не хранит секреты: аутентификация остаётся у CLI вендора.
-- Не претендует на покрытие путей, игнорируемых `.gitignore` — git их не видит, значит и
-  проверка не видит. Это сказано в каждом ledger, а не спрятано в документации.
+- It does not merge, does not push, and does not call `git branch` or `git worktree add`.
+  `warden do` asks Orca to create a worktree; without Orca, `--in-place` only.
+- It does not let a model choose the vendor.
+- It stores no secrets: authentication stays with the vendor's CLI.
+- It does not claim to cover paths ignored by `.gitignore` — Git does not see them, so neither
+  does the check. This is stated in every ledger rather than hidden in documentation.
