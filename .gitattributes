@@ -1,0 +1,15 @@
+# Warden is built and run on both Windows and POSIX, and its own gates compare file content
+# byte for byte. A line ending that changes on checkout would move a fingerprint without
+# anyone editing a file, so normalise in the repository and let checkout decide.
+* text=auto eol=lf
+
+# The two files whose interpreter cares. cmd.exe needs CRLF; /bin/sh must not receive it.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh  text eol=lf
+bin/warden text eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

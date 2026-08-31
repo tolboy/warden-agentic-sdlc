@@ -1,0 +1,4 @@
+# The demo repository is scratch, and Warden compares file content byte for byte. Disabling
+# every line-ending conversion keeps the fingerprints in the sample evidence reproducible and
+# keeps `git add` from warning about CRLF on Windows.
+* -text

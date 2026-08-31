@@ -1,0 +1,30 @@
+{
+	"schema_version": 1,
+	"task_id": "create-result",
+	"project": "warden-demo",
+	"contract_sha256": "2b0a954c760e01141e369086c86ad18d96e4c4237ebd6f04920467403c9ca620",
+	"base_ref": "main",
+	"merge_base": "8620cd97032cc39b667eeb6ec833cf9d14bad92a",
+	"scope_paths": [
+		"result.txt"
+	],
+	"changed_paths": [],
+	"violations": [],
+	"message": "command failed",
+	"commands": [
+		{
+			"index": 0,
+			"command": "java tools/Verify.java",
+			"exit_code": 1,
+			"timed_out": false,
+			"duration_ms": 666,
+			"stdout": "",
+			"stderr": "FAIL: result.txt does not exist\r\n",
+			"stdout_truncated": false,
+			"stderr_truncated": false
+		}
+	],
+	"ok": false,
+	"code": "command_failed",
+	"finished_at": "2026-08-31T13:08:06.610707700Z"
+}

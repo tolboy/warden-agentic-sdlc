@@ -1,0 +1,19 @@
+version: 1
+project: "warden-demo"
+base_ref: "main"
+
+# The whole surface of "what done means" for this project. One command, and it is a real
+# program rather than a shell builtin, so the same contract runs on Windows and POSIX.
+checks:
+  smoke: ["java tools/Verify.java"]
+
+# Named blast radius. A role that writes anywhere else fails the gate, and the failure names
+# the path it touched.
+scopes:
+  outcome: ["result.txt"]
+
+defaults:
+  checks: smoke
+  risk: low
+  max_fix_attempts: 1
+  timeout_minutes: 2

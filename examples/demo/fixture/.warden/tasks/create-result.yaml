@@ -1,0 +1,26 @@
+version: 1
+id: create-result
+goal: Create result.txt containing exactly one line, WARDEN_OK
+
+non_goals:
+  - "Do not modify the checker or any file under .warden"
+
+risk: low
+scope: outcome
+checks: smoke
+
+authority:
+  workspace_write: true
+  network: false
+  land: false
+
+visual_qa:
+  required: false
+  scenarios: []
+
+budgets:
+  max_role_runs: 3
+  max_cost_usd: 2.0
+
+max_fix_attempts: 1
+timeout_minutes: 2
