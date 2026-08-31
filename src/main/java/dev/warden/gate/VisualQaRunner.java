@@ -39,6 +39,51 @@ public final class VisualQaRunner {
         this.script = script;
     }
 
+    /**
+     * Whether this task's browser scenarios can be run at all, asked before anything is paid.
+     *
+     * A contract that says nothing checkable used to be discovered by the browser stage, which
+     * on the built-in chain is after an implementer and an independent reviewer have both been
+     * billed. Run torch-1 lost exactly that to one malformed scenario, and was told
+     * `visual_qa_unavailable` — a code that sends an operator to look at their browser.
+     *
+     * The grammar is not reimplemented here. The adapter is asked, with `--validate-only`, so
+     * there is one definition of what a scenario is and no second copy to drift from it. That
+     * costs a node start and no browser.
+     *
+     * A missing adapter or a node that will not start is deliberately *not* a failure here.
+     * Those are the browser stage's business and it has its own codes for them; refusing a run
+     * at preflight because node is slow to answer would trade one premature stop for another.
+     *
+     * @return the problem to stop on, or null when there is nothing to say
+     */
+    public String contractProblem(ConfigLoader.Loaded loaded) {
+        TaskSpec.VisualQa visual = loaded.resolved().visualQa();
+        if (!visual.required() || script == null || !Files.isRegularFile(script)) return null;
+        if (visual.scenarios().isEmpty()) {
+            return "visual_qa.required is true and the task declares no scenarios";
+        }
+        try {
+            List<String> command = new ArrayList<>(List.of(
+                    nodeExecutable(), script.toString(), "--validate-only"));
+            for (String scenario : visual.scenarios()) {
+                command.add("--scenario");
+                command.add(scenario);
+            }
+            ProcessRunner.Result result = processes.run(command, loaded.root(),
+                    Duration.ofSeconds(30), 64 * 1024);
+            if (result.ok()) return null;
+            Map<String, Object> answer = dev.warden.json.Json.findLastObject(result.stdout());
+            if (answer == null || !(answer.get("message") instanceof String message)) {
+                // The adapter could not be asked. Not a reason to stop: see above.
+                return null;
+            }
+            return message;
+        } catch (Exception adapterUnavailable) {
+            return null;
+        }
+    }
+
     public Outcome run(ConfigLoader.Loaded loaded, String runId) throws IOException, InterruptedException {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
         Map<String, Object> report = new LinkedHashMap<>();

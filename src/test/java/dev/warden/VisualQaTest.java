@@ -49,8 +49,61 @@ public final class VisualQaTest implements Suite {
             waitBudgetChecks(check);
             upgradeHostileServerChecks(check);
             occupiedPortChecks(check, project);
+            contractPreflightChecks(check, project);
         } finally {
             deleteTree(sandbox);
+        }
+    }
+
+    /**
+     * The scenario grammar, asked before anything is paid.
+     *
+     * Run torch-1 spent a green implementer and a green independent review, then refused at the
+     * browser stage because one scenario stated no assertion. That is a contract fault and the
+     * operator's to fix; discovering it after the vendors have been billed is the defect.
+     */
+    private void contractPreflightChecks(Check check, Path project) throws Exception {
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "button");
+
+        // A missing adapter must not stop a run at preflight. Whether node and a browser exist
+        // is the browser stage's business, and it has its own codes for saying so; refusing
+        // here would trade one premature stop for another.
+        check.eq("a missing adapter says nothing at preflight", null,
+                new VisualQaRunner(new ProcessRunner(), Path.of("definitely-missing-visual-qa.mjs"))
+                        .contractProblem(loaded));
+
+        // Node is not a build dependency — `./build.sh && ./test.sh` must work on a bare JDK —
+        // so the half of this that needs it is skipped rather than failed when it is absent.
+        Path adapter = Path.of("scripts", "visual-qa.mjs").toAbsolutePath();
+        if (!Files.isRegularFile(adapter) || !nodeAvailable()) return;
+
+        check.eq("a contract that states an assertion passes preflight", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(loaded));
+
+        Files.writeString(project.resolve(".warden/tasks/silent.yaml"), """
+                version: 1
+                id: silent
+                goal: Fix the Create button
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios: ["1280x720: wait 8"]
+                """);
+        ConfigLoader.Loaded silent = new ConfigLoader().load(project, "silent");
+        String problem = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(silent);
+        check.that("a scenario that only waits is caught before a vendor is paid", problem != null);
+        check.contains("and the message says what to write instead", String.valueOf(problem),
+                "only waits");
+    }
+
+    private static boolean nodeAvailable() {
+        try {
+            return new ProcessRunner().run(
+                    java.util.List.of(System.getProperty("os.name", "").toLowerCase().contains("win")
+                            ? "node.exe" : "node", "--version"),
+                    Path.of("."), java.time.Duration.ofSeconds(20)).ok();
+        } catch (Exception noNode) {
+            return false;
         }
     }
 

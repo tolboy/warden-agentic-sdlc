@@ -60,20 +60,34 @@ function opts(name) {
 const url = opt("--url");
 const outDir = opt("--out");
 const browserBin = opt("--browser");
-if (!url || !outDir) {
-  console.error("usage: visual-qa.mjs --url URL --out DIR --scenario 'WxH: text=Label visible'");
-  process.exit(2);
-}
+
+/**
+ * Answer whether these scenarios are sayable at all, and start no browser.
+ *
+ * The grammar lives here, so the check that a contract is writable has to live here too:
+ * a second copy in Warden would be a second grammar, and the two would drift. Warden runs
+ * this at preflight, before the first vendor is paid — a typo in a scenario used to be
+ * discovered by the browser stage, which is after an implementer and an independent
+ * reviewer have both been billed for work nobody could look at.
+ */
+const validateOnly = args.includes("--validate-only");
 
 const scenarios = opts("--scenario");
-if (scenarios.length === 0) {
-  fail("visual_qa_unavailable", "no scenarios given");
+
+if (!validateOnly) {
+  if (!url || !outDir) {
+    console.error("usage: visual-qa.mjs --url URL --out DIR --scenario 'WxH: text=Label visible'");
+    process.exit(2);
+  }
+  if (scenarios.length === 0) {
+    fail("visual_qa_unavailable", "no scenarios given");
+  }
 }
 
-const browser = browserBin || findBrowser();
-if (!browser) fail("visual_qa_unavailable", "no Chrome/Edge executable found");
+const browser = validateOnly ? null : (browserBin || findBrowser());
+if (!validateOnly && !browser) fail("visual_qa_unavailable", "no Chrome/Edge executable found");
 
-mkdirSync(outDir, { recursive: true });
+if (!validateOnly) mkdirSync(outDir, { recursive: true });
 
 function fail(code, message, extra = {}) {
   const report = { ok: false, code, message, ...extra };
@@ -633,15 +647,22 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
   };
 }
 
-async function main() {
+/**
+ * What is wrong with these scenarios, or null when they are sayable.
+ *
+ * Pure, and deliberately separate from running them: this is the whole of what preflight
+ * can know without a browser, and it is exactly what `--validate-only` returns.
+ */
+function contractProblem(list) {
+  if (list.length === 0) return "no scenarios given";
   let parsed;
   try {
-    parsed = scenarios.map(parseScenario);
+    parsed = list.map(parseScenario);
   } catch (badGrammar) {
     // A scenario the grammar refuses used to throw out of main() before the report
     // existed, and Warden then reported "adapter wrote no visual-qa.json (is node and
     // Edge/Chrome installed?)" — sending an operator to check their browser over a typo.
-    fail("visual_qa_unavailable", String(badGrammar?.message || badGrammar));
+    return String(badGrammar?.message || badGrammar);
   }
   // `no-console-errors` is an assertion wherever it appears, not only when it is the whole
   // scenario. Both guards below used to test `consoleOnly`, which parseScenario sets only for
@@ -654,18 +675,23 @@ async function main() {
   const asserts = (s) => s.consoleOnly || s.noConsoleErrors;
   const empty = parsed.find((s) => !asserts(s) && s.steps.length === 0);
   if (empty) {
-    fail("visual_qa_unavailable",
-      `scenario "${empty.raw}" states no assertion. Use "WxH: text=Label visible", `
-      + `"WxH: css=SELECTOR visible", "WxH: testid=ID click" or "WxH: no-console-errors".`);
+    return `scenario "${empty.raw}" states no assertion. Use "WxH: text=Label visible", `
+      + `"WxH: css=SELECTOR visible", "WxH: testid=ID click" or "WxH: no-console-errors".`;
   }
   const onlyWaiting = parsed.find((s) => !asserts(s) && s.steps.length > 0
     && s.steps.every((step) => step.kind === "wait"));
   if (onlyWaiting) {
-    fail("visual_qa_unavailable",
-      `scenario "${onlyWaiting.raw}" only waits. A wait produces a screenshot; it does not `
+    return `scenario "${onlyWaiting.raw}" only waits. A wait produces a screenshot; it does not `
       + `assert anything, so a scenario made of waits passes without testing the page. `
-      + `Say what should be true once the wait is over: "... -> css=SELECTOR visible".`);
+      + `Say what should be true once the wait is over: "... -> css=SELECTOR visible".`;
   }
+  return null;
+}
+
+async function main() {
+  const problem = contractProblem(scenarios);
+  if (problem) fail("visual_qa_unavailable", problem);
+  const parsed = scenarios.map(parseScenario);
 
   const debugPort = await freePort();
   // Outside --out on purpose: Chrome writes megabytes of its own state into a profile
@@ -733,6 +759,16 @@ async function main() {
       /* a browser that has not exited yet keeps a lock; the temp dir is disposable */
     }
   }
+}
+
+if (validateOnly) {
+  // No browser, no output directory, no page. A distinct code, because "your contract does
+  // not say anything" and "this machine has no browser" send an operator to different places.
+  const problem = contractProblem(scenarios);
+  console.log(JSON.stringify(problem
+    ? { ok: false, code: "visual_qa_contract_invalid", message: problem }
+    : { ok: true, code: "scenarios_valid", scenarios: scenarios.length }));
+  process.exit(problem ? 2 : 0);
 }
 
 await main();

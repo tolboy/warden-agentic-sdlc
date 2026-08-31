@@ -146,7 +146,12 @@ public final class TaskLoop {
      * twenty minutes for a defect that was in Warden itself.
      */
     private static final java.util.Set<String> NOT_ABOUT_THE_WORK = java.util.Set.of(
-            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope");
+            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope",
+            // A malformed scenario usually gets fixed in the contract, which moves the
+            // fingerprint and declines reuse on its own. It is listed anyway for the case
+            // where the fix is in the harness rather than the contract — which is how this
+            // code came to exist.
+            "visual_qa_contract_invalid");
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
@@ -236,6 +241,18 @@ public final class TaskLoop {
             // anything. A preview that stays silent about the one thing that will stop the
             // run is worse than no preview.
             summary.put("would_stop", "preflight_outside_scope");
+        }
+
+        // The other thing that is the operator's to fix and nobody else's. A scenario that
+        // states no assertion is a contract fault, and it used to be found by the browser
+        // stage — after the implementer and the reviewer had been paid to produce and read a
+        // candidate that could then not be looked at. Asked of the adapter itself, so the
+        // grammar has one definition.
+        String scenarioProblem = new VisualQaRunner(processes).contractProblem(loaded);
+        if (scenarioProblem != null) {
+            summary.put("resolution", scenarioProblem);
+            if (!dryRun) return stop(ledger, summary, "visual_qa_contract_invalid", steps, 0, budget);
+            summary.put("would_stop", "visual_qa_contract_invalid");
         }
 
         if (carried.carriesRejection()) {
