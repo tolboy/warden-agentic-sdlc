@@ -807,6 +807,10 @@ public final class Main {
                   warden role <role> <task>    run one role; add --dry-run to spend nothing
                   warden do \"<goal>\" [--project DIR] [--scope NAME] [--goal-file FILE]
                                            the whole workflow; stops at the human gate
+                                           --isolation git|orca picks what makes the worktree;
+                                           without it, Orca when Orca is running and git
+                                           otherwise. --in-place is the one way to say "edit
+                                           the tree I am standing in"
                                            --init-repo for a directory that is not a repo yet
                                            --draft-only stops after writing the contract, so
                                            its browser scenarios can be written before any

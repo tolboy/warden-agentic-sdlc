@@ -7,7 +7,9 @@ import dev.warden.config.TaskDraft;
 import dev.warden.config.UserConfig;
 import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
+import dev.warden.execution.Isolation;
 import dev.warden.execution.orca.OrcaIsolation;
+import dev.warden.git.GitWorktreeIsolation;
 import dev.warden.process.ProcessRunner;
 
 import java.nio.charset.StandardCharsets;
@@ -25,8 +27,12 @@ import java.util.Map;
  *
  *   warden do "what you want" --project C:/path/to/repo
  *
- * It isolates (via Orca), writes a task the linter accepts, runs the bounded loop, and
- * stops at the human gate. It never lands.
+ * It isolates, writes a task the linter accepts, runs the bounded loop, and stops at the human
+ * gate. It never lands.
+ *
+ * Isolation is a `git worktree` unless Orca is running, in which case Orca makes it — and
+ * `--isolation git|orca` settles it either way. Both give the same guarantee: the loop does not
+ * write to the branch the operator is looking at. `--in-place` is the one way to say otherwise.
  *
  * Scope is not guessed. If the project has one named scope, that is used; if it has several,
  * {@code --scope} is required. A guessed blast radius is how a typo fails open.
@@ -36,12 +42,12 @@ public final class DoCommand {
     public record Options(Path project, String goal, String scope, String risk, String taskId,
                           String runId, String baseRef, boolean inPlace, boolean dryRun,
                           boolean conductor, boolean autoRejectGates, boolean initRepo,
-                          boolean draftOnly) {
+                          boolean draftOnly, String isolation) {
         public Options(Path project, String goal, String scope, String risk, String taskId,
                        String runId, String baseRef, boolean inPlace, boolean dryRun,
                        boolean conductor, boolean autoRejectGates, boolean initRepo) {
             this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
-                    conductor, autoRejectGates, initRepo, false);
+                    conductor, autoRejectGates, initRepo, false, null);
         }
 
         public Options(Path project, String goal, String scope, String risk, String taskId,
@@ -154,7 +160,7 @@ public final class DoCommand {
                 hasFlag(args, "--in-place") || hasFlag(args, "--no-worktree"),
                 hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
                 hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"),
-                hasFlag(args, "--draft-only"));
+                hasFlag(args, "--draft-only"), option(args, "--isolation", null));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -192,15 +198,20 @@ public final class DoCommand {
         String runId = options.runId() != null ? options.runId()
                 : "do-" + taskId + "-" + Long.toUnsignedString(System.currentTimeMillis(), 36);
 
-        OrcaIsolation.Placement placement;
+        Isolation.Placement placement;
         String isolateFrom = options.baseRef();
+        // Recorded, because with an automatic default "which program made this worktree" stops
+        // being something the operator can infer from the command they typed.
+        String backend = options.inPlace() ? "none" : "unknown";
         if (options.inPlace()) {
-            placement = OrcaIsolation.Placement.inPlace(requested);
+            placement = Isolation.Placement.inPlace(requested);
         } else {
             try {
                 isolateFrom = branchToIsolateFrom(requested, options.baseRef());
-                placement = new OrcaIsolation(processes).isolate(requested, "w-" + taskId, isolateFrom);
-            } catch (OrcaIsolation.IsolationException isolation) {
+                Isolation isolation = isolationFor(options, requested);
+                backend = isolation instanceof GitWorktreeIsolation ? "git" : "orca";
+                placement = isolation.isolate(requested, "w-" + taskId, isolateFrom);
+            } catch (Isolation.IsolationException isolation) {
                 return fail(isolation.code(), requested, requested, taskId, isolation.getMessage());
             }
         }
@@ -281,7 +292,7 @@ public final class DoCommand {
             return new Outcome(true, "drafted", requested, root, taskId, report);
         }
         if (options.conductor()) {
-            return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
+            return runWithConductor(options, requested, root, placement, backend, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }
         Workspace card = board.at(root);
@@ -304,6 +315,7 @@ public final class DoCommand {
         report.put("worktree", String.valueOf(root));
         report.put("isolated", placement.isolated());
         report.put("isolation", placement.reason());
+        report.put("isolation_backend", backend);
         report.put("worktree_start_ref", isolateFrom);
         report.put("diff_base_ref", loaded.resolved().baseRef());
         report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
@@ -329,7 +341,8 @@ public final class DoCommand {
     }
 
     private Outcome runWithConductor(Options options, Path requested, Path root,
-                                     OrcaIsolation.Placement placement, TaskDraft.Written drafted,
+                                     Isolation.Placement placement, String backend,
+                                     TaskDraft.Written drafted,
                                      ConfigLoader.Loaded loaded, String taskId, String runId,
                                      String scope, String risk, String isolateFrom) throws Exception {
         if (options.dryRun()) {
@@ -365,6 +378,7 @@ public final class DoCommand {
         report.put("worktree", String.valueOf(root));
         report.put("isolated", placement.isolated());
         report.put("isolation", placement.reason());
+        report.put("isolation_backend", backend);
         report.put("worktree_start_ref", isolateFrom);
         report.put("diff_base_ref", loaded.resolved().baseRef());
         report.put("base_refs_differ", !options.baseRef().equals(loaded.resolved().baseRef()));
@@ -395,7 +409,7 @@ public final class DoCommand {
      * picking one would be inventing the baseline.
      */
     private String branchToIsolateFrom(Path project, String baseRef)
-            throws OrcaIsolation.IsolationException {
+            throws Isolation.IsolationException {
         if (!"HEAD".equals(baseRef)) return baseRef;
         try {
             ProcessRunner.Result current = processes.run(
@@ -403,17 +417,44 @@ public final class DoCommand {
                     java.time.Duration.ofSeconds(30));
             String branch = current.ok() ? current.stdout().strip() : "";
             if (branch.isEmpty() || branch.equals("HEAD")) {
-                throw new OrcaIsolation.IsolationException("detached_head",
+                throw new Isolation.IsolationException("detached_head",
                         "HEAD is detached in " + project + ", so there is no branch to cut a "
                                 + "worktree from. Check out a branch, or pass --base-ref <branch>.");
             }
             return branch;
-        } catch (OrcaIsolation.IsolationException already) {
+        } catch (Isolation.IsolationException already) {
             throw already;
         } catch (Exception notAskable) {
-            throw new OrcaIsolation.IsolationException("detached_head",
+            throw new Isolation.IsolationException("detached_head",
                     "could not read the current branch of " + project + ": " + notAskable.getMessage());
         }
+    }
+
+    /**
+     * Which backend makes the room, and why the default is neither of them by name.
+     *
+     * `auto` uses Orca when Orca is running and Git otherwise. Not a fallback in the apologetic
+     * sense: both give the same guarantee, which is that the loop does not write to the branch
+     * the operator is looking at, and the difference is what the operator gets to watch. An
+     * operator with Orca open wants the worktree in their sidebar; one without it wants the
+     * command to work, which before this it did not — the only route left was `--in-place`,
+     * the one path this tool elsewhere calls unsafe.
+     *
+     * `--isolation orca` still fails closed when Orca is down. Asking for a specific backend is
+     * a statement about what you want, and silently substituting the other one would answer a
+     * question nobody asked.
+     */
+    private Isolation isolationFor(Options options, Path project) {
+        String asked = options.isolation() == null ? "" : options.isolation().toLowerCase(Locale.ROOT);
+        if (asked.equals("git")) return new GitWorktreeIsolation(processes);
+        if (asked.equals("orca")) return new OrcaIsolation(processes);
+        if (!asked.isEmpty()) {
+            throw new IllegalArgumentException("--isolation must be git, orca or omitted for "
+                    + "automatic; got '" + options.isolation() + "'");
+        }
+        boolean orcaUp = Boolean.TRUE.equals(
+                new dev.warden.execution.orca.OrcaClient(processes).status(project).get("available"));
+        return orcaUp ? new OrcaIsolation(processes) : new GitWorktreeIsolation(processes);
     }
 
     /**

@@ -1,5 +1,6 @@
 package dev.warden.execution.orca;
 
+import dev.warden.execution.Isolation;
 import dev.warden.process.ProcessRunner;
 
 import java.io.IOException;
@@ -17,18 +18,13 @@ import java.util.Map;
  * through this type: if Orca cannot place the work, the command fails closed rather than
  * editing the branch the operator is looking at.
  */
-public final class OrcaIsolation {
-
-    public record Placement(boolean isolated, Path path, String selector, String reason) {
-        public static Placement inPlace(Path path) {
-            return new Placement(false, path, null, "in_place");
-        }
-    }
+public final class OrcaIsolation implements Isolation {
 
     private final OrcaClient orca;
 
     public OrcaIsolation(ProcessRunner processes) { this.orca = new OrcaClient(processes); }
 
+    @Override
     public Placement isolate(Path project, String name, String baseBranch) throws Exception {
         Path root = project.toAbsolutePath().normalize();
         Map<String, Object> status = orca.status(root);
@@ -126,12 +122,4 @@ public final class OrcaIsolation {
         return text.length() <= limit ? text : text.substring(text.length() - limit);
     }
 
-    public static final class IsolationException extends IOException {
-        private final String code;
-        public IsolationException(String code, String message) {
-            super(message);
-            this.code = code;
-        }
-        public String code() { return code; }
-    }
 }

@@ -69,6 +69,7 @@ public final class DoCommandTest implements Suite {
 
             nonAsciiGoalChecks(check, sandbox, project, user);
             visualDraftChecks(check, sandbox);
+            gitIsolationChecks(check, sandbox);
         } finally {
             deleteTree(sandbox);
         }
@@ -118,6 +119,63 @@ public final class DoCommandTest implements Suite {
      * the visibility of something it had never had. A guessed acceptance criterion is the same
      * failure as a guessed blast radius, one field over.
      */
+    /**
+     * Isolation with nothing but Git.
+     *
+     * The property that matters is not that a directory appeared: it is that the checkout the
+     * operator was standing in is untouched afterwards. That is the whole promise `--in-place`
+     * exists to opt out of, and before this backend a machine without Orca could only opt out.
+     */
+    private void gitIsolationChecks(Check check, Path sandbox) throws Exception {
+        check.eq("a task id is already a legal branch name",
+                "w-add-settings-button",
+                dev.warden.git.GitWorktreeIsolation.sanitize("w-add-settings-button"));
+        check.eq("and one that is not becomes one",
+                "fix-the-create-button",
+                dev.warden.git.GitWorktreeIsolation.sanitize("Fix the Create button!"));
+        check.eq("a name with nothing usable in it still yields a branch",
+                "warden-work", dev.warden.git.GitWorktreeIsolation.sanitize("!!!"));
+
+        Path source = sandbox.resolve("isolated");
+        Files.createDirectories(source.resolve("src"));
+        Files.writeString(source.resolve("src/a.txt"), "x\n");
+        git(source, "init", "-q", "-b", "main", ".");
+        git(source, "config", "user.email", "test@example.invalid");
+        git(source, "config", "user.name", "test");
+        git(source, "add", "-A");
+        git(source, "commit", "-qm", "base");
+
+        dev.warden.execution.Isolation.Placement placement =
+                new dev.warden.git.GitWorktreeIsolation(new ProcessRunner())
+                        .isolate(source, "w-settings", "main");
+        check.that("the worktree is isolated", placement.isolated());
+        check.eq("and says it made it", "created", placement.reason());
+        check.that("it exists on disk", Files.isDirectory(placement.path()));
+        check.that("outside the repository, not inside its blast radius",
+                !placement.path().toAbsolutePath().normalize()
+                        .startsWith(source.toAbsolutePath().normalize()));
+        check.that("carrying the committed file", Files.isRegularFile(placement.path().resolve("src/a.txt")));
+
+        ProcessRunner.Result dirty = new ProcessRunner().run(
+                List.of("git", "status", "--short"), source, Duration.ofSeconds(30));
+        check.eq("and the branch the operator was on is untouched", "", dirty.stdout().strip());
+
+        // Asked twice for the same task: join the worktree rather than refuse. A second
+        // `warden do` on one task id is somebody continuing, not somebody colliding.
+        dev.warden.execution.Isolation.Placement again =
+                new dev.warden.git.GitWorktreeIsolation(new ProcessRunner())
+                        .isolate(source, "w-settings", "main");
+        check.eq("a second ask joins the same worktree", "already_isolated", again.reason());
+        check.eq("at the same path", placement.path(), again.path());
+
+        Path bare = sandbox.resolve("not-a-repo");
+        Files.createDirectories(bare);
+        check.rejects("a directory that is not a repository is refused, not initialised",
+                "not a Git repository",
+                () -> new dev.warden.git.GitWorktreeIsolation(new ProcessRunner())
+                        .isolate(bare, "w-nope", "main"));
+    }
+
     private void visualDraftChecks(Check check, Path sandbox) throws Exception {
         Path drafts = sandbox.resolve("drafts");
         Files.createDirectories(drafts.resolve(".warden/tasks"));
