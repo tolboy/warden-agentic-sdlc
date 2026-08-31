@@ -41,9 +41,19 @@ Build Warden once. After that it is one command — a goal and a project:
 /path/to/warden/bin/warden do --project /path/to/repo --scope code "Add a Settings button"
 ```
 
-Orca must be running: the command creates a worktree and will not write to `main`.
-For a throwaway repository without Orca: `--in-place`.
 Nothing is merged — it stops at the human gate.
+
+**About that worktree.** `warden do` does not edit the branch you are looking at. It asks
+[Orca](https://www.onorca.dev/download) — a desktop app that manages Git worktrees and agent
+terminals — to cut a fresh worktree from your actual current branch, and runs the loop in
+there. So Orca must be running, and if it is not, the command fails rather than falling back
+to editing your checkout.
+
+Warden itself never runs `git branch` or `git worktree add`; isolation is delegated on
+purpose, so one program owns the worktree lifecycle. `--in-place` skips isolation entirely and
+lets the implementer edit the tree you are standing in — fine for a throwaway repository, and
+the wrong choice for anything else. Everything except `do` (`run`, `role`, `gates`,
+`visual-qa`, `report`, `approve`) works with no Orca at all, wherever you already are.
 
 **Before you pay.** `warden do --draft-only` stops as soon as the worktree exists and a draft
 contract has been written, and prints the path to it. Warden does not invent browser

@@ -15,6 +15,7 @@ is the repository you want Warden to work on.
 | Node | Only for the browser harness (`scripts/visual-qa.mjs`). Standard library only |
 | Browser | Only for the browser harness: Chrome or Edge, already installed |
 | Vendor CLIs | Whatever you intend to use — `codex`, `claude`, `grok`, … Installed and signed in by you |
+| [Orca](https://www.onorca.dev/download) | Only for `warden do`, which delegates worktree isolation to it. Every other command runs without it |
 
 Nothing is downloaded at build time. If the build needs the network, that is a bug.
 
@@ -126,12 +127,22 @@ Both must run with the target project as the current directory.
 
 ## 5. Isolation
 
-`warden do` creates an Orca worktree from the branch you are actually
-on, so the loop never writes to your working checkout. Orca must be running.
+`warden do` asks [Orca](https://www.onorca.dev/download) for a worktree cut from the branch you
+are actually on, so the loop never writes to your working checkout. Orca must be running.
+
+Warden itself never runs `git branch` or `git worktree add`. That is a deliberate division:
+Warden owns the bounded role loop, Orca owns the worktree and worker lifecycle, and two
+programs creating checkouts would be two sources of truth for the same state. Orca also runs
+the project's setup in the new worktree (`--setup run`), without which a check command like
+`npm run check` has no `node_modules` to run against.
 
 For a throwaway repository, or when you do not use Orca, `--in-place` skips isolation and lets
 the implementer edit the tree you are standing in. That is the whole difference; decide
 accordingly.
+
+`warden do` is the only command that needs Orca. `run`, `role`, `gates`, `visual-qa`,
+`report`, `status`, `approve` and `land` all work in whatever directory you are already in —
+including a worktree you made yourself with `git worktree add`.
 
 A fresh repository needs one human-reviewed baseline commit before Git or Orca can create
 child worktrees.
