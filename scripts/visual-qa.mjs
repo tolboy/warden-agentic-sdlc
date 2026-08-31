@@ -643,13 +643,22 @@ async function main() {
     // Edge/Chrome installed?)" — sending an operator to check their browser over a typo.
     fail("visual_qa_unavailable", String(badGrammar?.message || badGrammar));
   }
-  const empty = parsed.find((s) => !s.consoleOnly && s.steps.length === 0);
+  // `no-console-errors` is an assertion wherever it appears, not only when it is the whole
+  // scenario. Both guards below used to test `consoleOnly`, which parseScenario sets only for
+  // a scenario that is *nothing but* the console check — so `wait 8 -> no-console-errors` was
+  // refused while the bare `no-console-errors` was accepted, and adding a pause turned a valid
+  // scenario invalid. It was never a grammar problem: `requireQuietConsole` below already
+  // honours `noConsoleErrors`, so the runtime would have judged it correctly all along.
+  // Measured on run torch-1, which paid for a green implementer and a green independent review
+  // and then threw both away over this.
+  const asserts = (s) => s.consoleOnly || s.noConsoleErrors;
+  const empty = parsed.find((s) => !asserts(s) && s.steps.length === 0);
   if (empty) {
     fail("visual_qa_unavailable",
       `scenario "${empty.raw}" states no assertion. Use "WxH: text=Label visible", `
       + `"WxH: css=SELECTOR visible", "WxH: testid=ID click" or "WxH: no-console-errors".`);
   }
-  const onlyWaiting = parsed.find((s) => !s.consoleOnly && s.steps.length > 0
+  const onlyWaiting = parsed.find((s) => !asserts(s) && s.steps.length > 0
     && s.steps.every((step) => step.kind === "wait"));
   if (onlyWaiting) {
     fail("visual_qa_unavailable",
