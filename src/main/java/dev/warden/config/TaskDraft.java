@@ -133,8 +133,22 @@ public final class TaskDraft {
         return slug;
     }
 
+    /**
+     * A YAML double-quoted scalar that survives being read back.
+     *
+     * Newlines are the ones that matter, and they were the ones missing. A goal typed on a
+     * command line has none, so the omission was invisible until the channel built for goals
+     * a command line cannot carry — `--goal-file` — was used for a goal with paragraphs in it.
+     * The draft was written with raw newlines inside the quotes, and Warden then refused to
+     * parse its own file: `line 3: unterminated quoted string`. The four escapes below are
+     * exactly the four the reader in {@code Yaml} accepts, so what is written can be read.
+     */
     static String quote(String value) {
-        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+        return "\"" + value.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t") + "\"";
     }
 
     /**

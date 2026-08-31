@@ -151,6 +151,17 @@ public final class DoCommandTest implements Suite {
         String backend = Files.readString(drafts.resolve(".warden/tasks/backend.yaml"));
         check.contains("a non-UI goal asks for no browser", backend, "required: false");
 
+        // `--goal-file` exists to carry a goal a command line cannot, so it is the channel
+        // whose goals have paragraphs, quotes and Windows paths in them — and it was the one
+        // the drafter could not write back. Newlines went into the double-quoted scalar raw
+        // and Warden refused to parse its own contract: `line 3: unterminated quoted string`.
+        String fromFile = """
+                Hold the night torch still so it can be photographed.
+
+                Add a button carrying data-testid="lab-torch" to the lab panel.
+                Do not edit src\\lib\\landscape.ts.""";
+        new TaskDraft().write(drafts, "fromfile", fromFile, "code", "low");
+
         check.that("no package.json means no npm preview command",
                 !unnamed.contains("npm run preview"));
 
@@ -173,13 +184,16 @@ public final class DoCommandTest implements Suite {
         git(drafts, "config", "user.name", "test");
         git(drafts, "add", "-A");
         git(drafts, "commit", "-qm", "base");
-        for (String id : List.of("named", "unnamed", "russian", "backend")) {
+        for (String id : List.of("named", "unnamed", "russian", "backend", "fromfile")) {
             ConfigLoader.Loaded parsedDraft = new ConfigLoader().load(drafts, id);
             check.that("drafted task '" + id + "' passes the linter", parsedDraft.resolved().id().equals(id));
         }
         ConfigLoader.Loaded russianTask = new ConfigLoader().load(drafts, "russian");
         check.eq("and a non-ASCII goal survives the round trip through YAML",
                 "почини вёрстку экрана настроек", russianTask.resolved().goal());
+        ConfigLoader.Loaded fileTask = new ConfigLoader().load(drafts, "fromfile");
+        check.eq("a goal read from a file keeps its paragraphs, quotes and backslashes",
+                fromFile, fileTask.resolved().goal());
     }
 
     private static void git(Path cwd, String... args) throws Exception {
