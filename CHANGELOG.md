@@ -1,0 +1,122 @@
+# Changelog
+
+Notable changes to Warden. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the
+pre-1.0 caveat that the configuration format may still change between minor versions.
+
+Entries state what a release **can be run against**, not only what was written. A capability
+that exists in code but has never been run live says so.
+
+## [Unreleased]
+
+## [0.1.0] — 2026-08-31
+
+First public release. Everything below already existed in the private history; this release is
+the point at which the repository, its licence and its documentation became something a
+stranger can use.
+
+### Added — the loop
+
+- `warden do` — the one operator command. Isolates the work in an Orca worktree cut from the
+  branch the operator is actually on, drafts a task contract, and drives the bounded loop:
+  implement → machine gates → fix ≤ N → independent review → fix ≤ N → browser harness →
+  fix ≤ N → `visual_qa` role → fix ≤ N → human gate. It never merges.
+- `warden run` — the inner loop, for a contract that already exists.
+- `--draft-only`, which stops after the worktree and the draft contract exist, so browser
+  scenarios can be written before any vendor is paid to satisfy them.
+- `--init-repo` and `--in-place` for a directory that is not a repository yet. An empty
+  directory gets a contract with no invented check command and a `<repository>` scope; a
+  directory with files but an unrecognised build system is still refused.
+- Declarative `workflow.stages` in `~/.warden/policy.yaml`: the order of stages, what each one
+  runs, the closed set of conditions gating it, and where a failure or a finding routes.
+
+### Added — roles and vendors
+
+- Role resolver with rotation, `require_independent_vendor`, and refusal of any profile
+  lacking a human-stamped `verification.verified_on`.
+- Direct CLI adapter with evidence, quota detection and delivery checks; JSONL recovery for
+  vendors that stream their answer.
+- Quota exhaustion classified apart from ordinary failure, with `failover.on_quota_exhausted`
+  defaulting to `confirm`: a durable FAILOVER decision that names both vendors and what the
+  swap costs in independence, authorising exactly one substitution when carried by
+  `--continue`.
+- Orca adapter (`runner: orca`) that attaches to the current worktree and completes only on
+  `worker_done` or dispatch settlement. Written and tested; the full live lifecycle is not
+  claimed as proven.
+- `warden profiles --verify <name>` runs a profile's own probe and keeps the transcript;
+  `--confirm` stamps the date, and only if the probe passed in the same invocation.
+
+### Added — verification and evidence
+
+- Machine gates over a pinned merge base, with blast-radius enforcement before and after every
+  command.
+- Contract integrity: the whole `.warden` tree except `runs/` is snapshotted before the first
+  dispatch and compared after every role and around every gate command. Any change is
+  `contract_mutated`, naming the path.
+- Content fingerprint that survives renames and untracked files, used to discard the artifact
+  of a `read_only` role that wrote.
+- Append-only evidence ledger, `warden ledger` aggregation, and `warden report <run-id>`
+  joining one run into a single view. A value the vendor never reported renders as `?` rather
+  than becoming a zero.
+- Cost honesty: `unpriced_calls` and `cost_ceiling_binding` state how much of a run the
+  `max_cost_usd` ceiling actually measured. `max_role_runs` is the bound that always holds.
+- Strict, dependency-free JSON and YAML subset parsers, and a subset JSON-Schema validator; an
+  artifact that fails its schema is not written.
+
+### Added — visual QA
+
+- A project-neutral browser harness over CDP (`scripts/visual-qa.mjs`) with `text=` / `css=` /
+  `testid=` / `role=` matchers, `visible` / `hidden` / `click` / `click@FX,FY` assertions,
+  `no-console-errors`, and a `wait <n>` step that holds and photographs — without which
+  everything the harness sees is the page 1.2 s after a click.
+- A `visual_qa` role that receives screenshots as vendor attachments or as workspace paths it
+  opens itself, and whose prompt states which of the two it got.
+- Fail-closed outcomes that are distinct on purpose: `visual_qa_unavailable`,
+  `visual_qa_port_occupied`, `visual_qa_no_evidence`.
+
+### Added — the human gate
+
+- Durable per-run `decision.json`: atomic, cross-process locked, with an optimistic-lock
+  token. `warden status` and `warden approve` are the only ways in.
+- `accept` is refused when the worktree fingerprint moved after the decision was shown.
+- A rejection is an input rather than a full stop: `warden run --continue <rejected-run>` hands
+  the reason a person gave to the next implementer verbatim, marked as a person's objection
+  rather than a failed check, and authorises nothing.
+- `retry` on a failure that was never about the work carries verdicts already reached, but only
+  when both the source fingerprint and the entire contract are byte-for-byte unchanged;
+  otherwise the reason is recorded in `reuse_declined`.
+- `warden land <run-id>` plans and, with explicit `--commit` / `--push` / `--pull-request`,
+  carries out the commit and request for an accepted run. The forge is never guessed. Merges
+  nothing.
+
+### Added — operability
+
+- Stage-by-stage narration on stderr from `do` and `run`, while stdout stays a single JSON
+  object. `--quiet` turns it off; nothing printed is evidence.
+- `warden doctor`, including `argument_encoding`, which reports the Windows console encoding
+  that silently turns a Cyrillic goal into question marks before `main` runs. Such a goal is
+  refused rather than written into a contract; `--goal-file` is the channel that works.
+
+### Added — for this release specifically
+
+- Apache License 2.0, `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md` and this changelog.
+- English-first documentation, with the Russian originals kept under `README.ru.md`,
+  `docs/ru/` and `spec/ru/`.
+- GitHub Actions CI across Linux and Windows on JDK 21 and 25, plus a hygiene job that fails
+  the build if an absolute personal path, a machine-local identifier or a broken documentation
+  link returns to the tree.
+- `examples/demo/` — a reproducible fixture that runs a full red/green gate cycle offline with
+  no vendor, no key and no network, and a committed sample evidence ledger.
+
+### Known gaps
+
+These are named rather than hidden, and the code refuses rather than pretending:
+
+- `runner: local` is a name; the resolver answers `runner_unimplemented`.
+- Per-vendor tool allowlists are not implemented. A profile's args are whatever you wrote.
+- Visual QA has no pixel-diff or baseline comparison; the harness asserts, it does not compare
+  images.
+- The Orca adapter's full live lifecycle as a role runner has not been proven end to end.
+
+[Unreleased]: https://github.com/tolboy/warden-agentic-sdlc/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/tolboy/warden-agentic-sdlc/releases/tag/v0.1.0

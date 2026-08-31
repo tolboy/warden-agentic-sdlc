@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }} · JDK ${{ matrix.jdk }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        jdk: ["21", "25"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.jdk }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.jdk }}
+
+      # No cache step on purpose: there is nothing to cache. Warden downloads no
+      # dependency at build time, and a green run here is also the offline-build proof.
+
+      - name: Build and test (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ./build.sh
+          ./test.sh
+
+      - name: Build and test (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call build.cmd || exit /b 1
+          call test.cmd || exit /b 1
+
+      - name: CLI answers without a config (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ./bin/warden --version
+          ./bin/warden --help
+
+      - name: CLI answers without a config (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call bin\warden.cmd --version || exit /b 1
+          call bin\warden.cmd --help || exit /b 1
+
+  demo:
+    name: Demo fixture (no vendor call)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Run the offline demo
+        shell: bash
+        run: |
+          ./build.sh
+          ./examples/demo/run.sh
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # These checks are the release gate that keeps a private path or a machine-local
+      # identifier from returning to the tree. They are checks, not style preferences:
+      # every one of them matched something real before this repository was opened.
+      # `git grep` is deliberate — it looks at tracked files only, so a maintainer's local
+      # run directories under .warden/runs/ cannot make this job fail or pass by accident.
+      - name: No absolute personal paths
+        run: |
+          if git grep -nE '(C:\\+Users\\+[A-Za-z0-9._-]+|/home/[a-z][a-z0-9._-]*|/Users/[a-z][a-z0-9._-]*)' \
+               -- '*.md' '*.java' '*.yaml' '*.yml' '*.mjs' '*.sh' '*.cmd' '*.json' '*.jsonl' ; then
+            echo "::error::an absolute personal path is committed; use <warden> / <project> placeholders"
+            exit 1
+          fi
+
+      - name: No machine-local identifiers in documentation
+        run: |
+          if git grep -nE '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b' \
+               -- 'docs/*.md' 'spec/*.md' 'docs/ru/*.md' 'spec/ru/*.md' README.md README.ru.md ; then
+            echo "::error::a UUID is committed in documentation; describe the id, do not print it"
+            exit 1
+          fi
+
+      - name: Every documentation link resolves
+        run: |
+          status=0
+          while IFS='|' read -r file target; do
+            path="${target%%#*}"
+            [ -z "$path" ] && continue
+            case "$path" in http*|mailto:*) continue ;; esac
+            if [ ! -e "$(dirname "$file")/$path" ]; then
+              echo "::error file=$file::broken link to $path"
+              status=1
+            fi
+          done <<< "$(git grep -noE '\]\([^)#][^)]*\)' -- '*.md' \
+                      | sed -E 's/^([^:]+):[0-9]+:\]\((.*)\)$/\1|\2/')"
+          exit $status
