@@ -63,12 +63,30 @@ public final class DoCommand {
 
     private final ProcessRunner processes;
     private final Progress progress;
+    private final Workspace.Source board;
+    private final boolean watch;
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
     public DoCommand(ProcessRunner processes, Progress progress) {
+        this(processes, progress, Workspace.Source.NONE, false);
+    }
+
+    public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
+                     boolean watch) {
         this.processes = processes;
         this.progress = progress;
+        this.board = board;
+        this.watch = watch;
+    }
+
+    /**
+     * Report to the card of whichever worktree this run ends up in, and — when asked — open a
+     * live view of it there. Both are resolved rather than held, because `do` creates that
+     * worktree partway through and the operator's own checkout is the wrong one to write on.
+     */
+    public DoCommand withWorkspace(Workspace.Source source, boolean watch) {
+        return new DoCommand(processes, progress, source, watch);
     }
 
     /**
@@ -266,7 +284,12 @@ public final class DoCommand {
             return runWithConductor(options, requested, root, placement, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }
-        TaskLoop.Outcome loop = new TaskLoop(processes).withProgress(progress)
+        Workspace card = board.at(root);
+        Path narration = root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
+        if (watch && !options.dryRun()) card.watch(narration, runId);
+        TaskLoop.Outcome loop = new TaskLoop(processes)
+                .withProgress(Progress.tee(progress, Progress.toFile(narration)))
+                .withWorkspace(card)
                 .run(loaded, user, runId, options.dryRun());
 
         Map<String, Object> report = new LinkedHashMap<>();

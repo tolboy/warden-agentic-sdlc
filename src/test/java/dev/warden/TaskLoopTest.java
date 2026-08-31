@@ -7,6 +7,7 @@ import dev.warden.gate.VisualQaRunner;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
 import dev.warden.run.TaskLoop;
+import dev.warden.run.Workspace;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
@@ -170,6 +171,7 @@ public final class TaskLoopTest implements Suite {
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
+            workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
@@ -749,6 +751,115 @@ public final class TaskLoopTest implements Suite {
     private TaskLoop.Outcome loop(Path project, Path home, String runId) throws Exception {
         ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
         return new TaskLoop(new ProcessRunner()).run(loaded, UserConfig.load(home), runId, false);
+    }
+
+    private TaskLoop.Outcome loop(Path project, Path home, String runId, Workspace board)
+            throws Exception {
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        return new TaskLoop(new ProcessRunner()).withWorkspace(board)
+                .run(loaded, UserConfig.load(home), runId, false);
+    }
+
+    private TaskLoop.Outcome dryLoop(Path project, Path home, String runId, Workspace board)
+            throws Exception {
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        return new TaskLoop(new ProcessRunner()).withWorkspace(board)
+                .run(loaded, UserConfig.load(home), runId, true);
+    }
+
+    /** Every note and state the loop pushed at a board, in order. */
+    private static final class Board implements Workspace {
+        private final List<String> notes = new java.util.ArrayList<>();
+        private final List<State> states = new java.util.ArrayList<>();
+
+        @Override public void note(String text) { notes.add(text); }
+        @Override public void state(State state) { states.add(state); }
+
+        State last() { return states.isEmpty() ? null : states.get(states.size() - 1); }
+
+        boolean anyNote(String needle) {
+            return notes.stream().anyMatch(note -> note.contains(needle));
+        }
+    }
+
+    /**
+     * The board is a convenience, and a convenience that can abort a paid twenty-minute loop
+     * is a liability. This is the invariant, not the wiring.
+     */
+    private void workspaceChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path watched = newProject(sandbox, "watched");
+        writeProfiles(home, sandbox, "watched", 1, 1);
+        Board board = new Board();
+        TaskLoop.Outcome ok = loop(watched, home, "wb1", board);
+        check.that("a watched run still reaches the human gate", ok.ok());
+        check.eq("the card ends in the column that means somebody is waited on",
+                Workspace.State.WAITING_FOR_HUMAN, board.last());
+        check.that("the run says it is running before it says it is done",
+                board.states.get(0) == Workspace.State.RUNNING);
+        check.that("every stage reported itself to the card", board.anyNote("gates"));
+        check.that("the last note carries the command that answers it",
+                board.anyNote("warden approve wb1 --decision"));
+        check.that("and what it cost, because a phone cannot run warden report",
+                board.anyNote("call(s)"));
+
+        // A preview has not produced anything a person could act on, so it must not move a
+        // card into a column that says one of them is waiting.
+        Path previewed = newProject(sandbox, "previewed");
+        writeProfiles(home, sandbox, "previewed", 1, 1);
+        Board untouched = new Board();
+        dryLoop(previewed, home, "wb2", untouched);
+        check.that("a dry run leaves the board alone", untouched.notes.isEmpty());
+        check.that("including its column", untouched.states.isEmpty());
+
+        Path unlucky = newProject(sandbox, "unlucky");
+        writeProfiles(home, sandbox, "unlucky", 1, 1);
+        TaskLoop.Outcome survived = loop(unlucky, home, "wb3", new Workspace() {
+            @Override public void note(String text) { throw new IllegalStateException("orca died"); }
+            @Override public void state(State state) { throw new IllegalStateException("orca died"); }
+            @Override public void watch(Path narration, String runId) {
+                throw new IllegalStateException("orca died");
+            }
+        });
+        check.that("a board that throws on every call does not fail the run", survived.ok());
+        check.eq("nor change where the run ended", "human_gate", survived.nextAction());
+        Workspace guarded = Workspace.guarded(new Workspace() {
+            @Override public void note(String text) { throw new IllegalStateException("orca died"); }
+            @Override public void state(State state) { throw new IllegalStateException("orca died"); }
+            @Override public void watch(Path narration, String runId) {
+                throw new IllegalStateException("orca died");
+            }
+        });
+        guarded.note("x");
+        guarded.state(Workspace.State.RUNNING);
+        guarded.watch(sandbox.resolve("nowhere.log"), "wb3");
+        check.that("and the guard covers opening a live view, not just writing to the card", true);
+
+        narrationChecks(check, sandbox);
+    }
+
+    /**
+     * The account of a run, kept where a closed terminal cannot take it.
+     *
+     * It is what `--watch` follows, which is why it has to survive a directory that does not
+     * exist yet: the header is printed before the ledger has made anything.
+     */
+    private void narrationChecks(Check check, Path sandbox) throws Exception {
+        Path log = sandbox.resolve("unmade/run/narration.log");
+        dev.warden.run.Progress toFile = dev.warden.run.Progress.toFile(log);
+        toFile.line("run   n1");
+        toFile.line("bound 3 vendor call(s)");
+        check.that("the narration sink makes its own directory", Files.isRegularFile(log));
+        String written = Files.readString(log);
+        check.contains("and keeps the first line", written, "run   n1");
+        check.contains("appending rather than replacing", written, "bound 3 vendor call(s)");
+
+        StringBuilder terminal = new StringBuilder();
+        Path teed = sandbox.resolve("teed/narration.log");
+        dev.warden.run.Progress both = dev.warden.run.Progress.tee(
+                text -> terminal.append(text).append('\n'), dev.warden.run.Progress.toFile(teed));
+        both.line("[1/3] implement  running");
+        check.contains("a teed line reaches the terminal", terminal.toString(), "[1/3] implement");
+        check.contains("and the file, from one call", Files.readString(teed), "[1/3] implement");
     }
 
     private Path newProject(Path sandbox, String name) throws Exception {

@@ -72,6 +72,7 @@ public final class TaskLoop {
     private final ProcessRunner processes;
     private final VisualCheck visualCheck;
     private final Progress progress;
+    private final Workspace workspace;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (loaded, runId) -> new VisualQaRunner(processes).run(loaded, runId));
@@ -87,13 +88,28 @@ public final class TaskLoop {
      * would be ambiguous at every call site and a lambda could silently pick the wrong one.
      */
     public TaskLoop withProgress(Progress narration) {
-        return new TaskLoop(processes, visualCheck, narration);
+        return new TaskLoop(processes, visualCheck, narration, workspace);
+    }
+
+    /**
+     * The same loop, reporting to the board it is running on. Separate from the terminal
+     * narration because the two carry different things: every line goes to the terminal, and
+     * only what a person would act on goes to the card.
+     */
+    public TaskLoop withWorkspace(Workspace board) {
+        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board));
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
+        this(processes, visualCheck, progress, Workspace.NONE);
+    }
+
+    public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
+                    Workspace workspace) {
         this.processes = processes;
         this.visualCheck = visualCheck;
         this.progress = progress;
+        this.workspace = workspace;
     }
 
     /**
@@ -471,6 +487,8 @@ public final class TaskLoop {
             attempt++;
             progress.line("      -> fix round " + attempt + " of " + task.maxFixAttempts()
                     + ": " + stage.name() + " sends the work back to " + stage.fixWith());
+            workspace.note("fix " + attempt + "/" + task.maxFixAttempts() + " · " + stage.name()
+                    + " sent the work back to " + stage.fixWith());
             Path file = writeContext(ledger, attempt, stage.contextKind(), context);
             String role = stage.fixWith();
             RoleRunner.Outcome fix = roles.run(loaded, user, role,
@@ -492,8 +510,40 @@ public final class TaskLoop {
             announce(stage);
             long started = System.nanoTime();
             Object outcome = dispatch(stage);
-            narrate(outcome, (System.nanoTime() - started) / 1_000_000L);
+            long millis = (System.nanoTime() - started) / 1_000_000L;
+            narrate(outcome, millis);
+            post(stage, outcome, millis);
             return outcome;
+        }
+
+        /**
+         * The card, after a stage. One line, replacing the last one — a board says where the
+         * work is, and a person who wants the history has the terminal and the ledger.
+         */
+        private void post(Workflow.Stage stage, Object outcome, long millis) {
+            if (dryRun || outcome == null) return;
+            StringBuilder note = new StringBuilder(position(stage))
+                    .append(' ').append(stage.name()).append(" · ");
+            if (outcome instanceof RoleRunner.Outcome role) {
+                note.append(role.ok() ? "ok" : "failed " + role.code());
+                Map<String, Object> details = role.details() == null ? Map.of() : role.details();
+                if (details.get("vendor") != null) note.append(" · ").append(details.get("vendor"));
+                if (details.get("cost_usd") instanceof Number) {
+                    note.append(" · ").append(Progress.money(details.get("cost_usd")));
+                }
+                if (details.get("verdict") != null) note.append(" · ").append(details.get("verdict"));
+            } else if (outcome instanceof GateRunner.Outcome gate) {
+                note.append(gate.ok() ? "ok" : "failed " + gate.code());
+            } else if (outcome instanceof VisualQaRunner.Outcome visual) {
+                note.append(visual.ok() ? "ok" : "failed " + visual.code());
+            } else {
+                return;
+            }
+            workspace.note(note.append(" · ").append(Progress.elapsed(millis)).toString());
+        }
+
+        private String position(Workflow.Stage stage) {
+            return "[" + (1 + workflow.stages().indexOf(stage)) + "/" + workflow.stages().size() + "]";
         }
 
         /** `[3/5] review   role=reviewer` — where the loop is, in the plan it printed. */
@@ -508,6 +558,13 @@ public final class TaskLoop {
             progress.line("[" + position + "/" + workflow.stages().size() + "] "
                     + pad(stage.name(), 10)
                     + (attempt > 0 ? "(after fix " + attempt + ")  " : "") + what);
+            // The card is told before the stage as well as after it, because the stage that
+            // most needs a card is the one that takes sixteen minutes to answer.
+            if (!dryRun) {
+                workspace.note("[" + position + "/" + workflow.stages().size() + "] "
+                        + stage.name() + " · running"
+                        + (attempt > 0 ? " (after fix " + attempt + ")" : ""));
+            }
         }
 
         /** How it went, in the same two-line shape for every kind of stage. */
@@ -860,6 +917,10 @@ public final class TaskLoop {
                 + Progress.money(task.budget().maxCostUsd()) + " ceiling, fix rounds <= "
                 + task.maxFixAttempts());
         progress.blank();
+        if (!dryRun) {
+            workspace.state(Workspace.State.RUNNING);
+            workspace.note(task.id() + " · " + String.join(" -> ", names) + " · starting");
+        }
     }
 
     /** Where the run ended and what the person watching is now expected to do about it. */
@@ -886,6 +947,21 @@ public final class TaskLoop {
                     + ">");
         }
         progress.blank();
+
+        // The card the whole channel exists for. A run that ends waiting for a person is the
+        // one worth seeing from another room, so it carries what it cost and the command that
+        // answers it — a phone can read the first and paste the second.
+        workspace.state(Workspace.State.WAITING_FOR_HUMAN);
+        StringBuilder note = new StringBuilder(
+                "human_gate".equals(nextAction) ? "ready for you" : "stopped: " + reason);
+        note.append(" · ").append(budget.runs()).append(" call(s) · ")
+                .append(Progress.money(budget.spent()));
+        if (options instanceof List<?> list && !list.isEmpty()) {
+            note.append(" · warden approve ").append(runId).append(" --decision ")
+                    .append(list.stream().map(String::valueOf)
+                            .collect(java.util.stream.Collectors.joining("|")));
+        }
+        workspace.note(note.toString());
     }
 
     private void record(List<Map<String, Object>> steps, Budget budget, String role, int attempt,

@@ -30,6 +30,46 @@ public interface Progress {
         };
     }
 
+    /**
+     * The same account, appended to a file as it happens.
+     *
+     * A run takes forty minutes and tells its story to one terminal. Close that terminal —
+     * or start the run from a script, or over ssh, or from a scheduler — and the story is
+     * gone. The ledger still holds every fact, which is what makes this safe to lose; what
+     * it does not hold is the order a person watched them arrive in, or the sentence that
+     * said which vendor was busy for sixteen minutes. Writing that costs nothing.
+     *
+     * Still not evidence, for exactly the reason the interface says: every line restates
+     * something already in the ledger. It lives beside the evidence rather than in it, and
+     * `runs/.gitignore` keeps it out of Git along with the raw transcripts.
+     *
+     * A failure to write is swallowed. A narration that cannot be saved must not end a run
+     * that is otherwise going fine.
+     */
+    static Progress toFile(java.nio.file.Path file) {
+        return text -> {
+            try {
+                // Created here rather than by the caller, so the sink has no ordering
+                // dependency on whoever makes the run directory. The header lines are written
+                // before the first stage, which is before the ledger has made anything.
+                java.nio.file.Files.createDirectories(file.getParent());
+                java.nio.file.Files.writeString(file, text + System.lineSeparator(),
+                        java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception notOurProblem) {
+                // See above: the ledger is the record, this is the retelling.
+            }
+        };
+    }
+
+    /** Every sink, in order. Silent sinks cost nothing, so callers need no special case. */
+    static Progress tee(Progress... sinks) {
+        return text -> {
+            for (Progress sink : sinks) sink.line(text);
+        };
+    }
+
     default void blank() { line(""); }
 
     /** `5m29s`, `18.5s`, `640ms` — a duration a person reads rather than converts. */

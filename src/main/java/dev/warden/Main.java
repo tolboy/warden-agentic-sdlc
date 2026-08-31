@@ -315,7 +315,15 @@ public final class Main {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
             UserConfig user = UserConfig.load();
             Carried carried = continuation(loaded.root(), continueFrom);
-            outcome = new TaskLoop(new ProcessRunner()).withProgress(narration(args))
+            dev.warden.run.Workspace card = board(args).at(loaded.root());
+            java.nio.file.Path narration = narrationFile(loaded.root(), runId);
+            // Not for a preview. A dry run answers in seconds and dispatches nobody; opening a
+            // window on the operator's board for it is the same overreach as moving its card.
+            if (hasFlag(args, "--watch") && !dryRun) card.watch(narration, runId);
+            outcome = new TaskLoop(new ProcessRunner())
+                    .withProgress(dev.warden.run.Progress.tee(narration(args),
+                            dev.warden.run.Progress.toFile(narration)))
+                    .withWorkspace(card)
                     .run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
@@ -493,7 +501,8 @@ public final class Main {
     private static int doIntent(String[] args) throws Exception {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
-        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args)).run(options, user);
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
+                .withWorkspace(board(args), hasFlag(args, "--watch")).run(options, user);
         Map<String, Object> report = new LinkedHashMap<>(outcome.report());
         Object runId = report.get("run_id");
         if (runId instanceof String id && outcome.worktree() != null) {
@@ -513,6 +522,32 @@ public final class Main {
     private static dev.warden.run.Progress narration(String[] args) {
         return hasFlag(args, "--quiet") ? dev.warden.run.Progress.SILENT
                 : dev.warden.run.Progress.toStderr();
+    }
+
+    /**
+     * The same run, on the board it is running on.
+     *
+     * Not tied to `--quiet`: that silences one terminal, and a run piped to a file is exactly
+     * the run whose progress you want on a card instead. Outside an Orca worktree the attach
+     * probe finds no board and every call is a no-op, so this needs no condition of its own —
+     * `--no-workspace-status` exists for the operator who has a board and does not want Warden
+     * writing to it.
+     */
+    /**
+     * Where a run's own account of itself is kept.
+     *
+     * Beside the evidence, not in it. `warden report` never reads this: the ledger holds every
+     * fact, and this holds the order a person would have watched them arrive in. It exists so
+     * a run started from a script, a scheduler or a closed terminal still has one, and so
+     * `--watch` has something to follow.
+     */
+    private static java.nio.file.Path narrationFile(Path root, String runId) {
+        return root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
+    }
+
+    private static dev.warden.run.Workspace.Source board(String[] args) {
+        if (hasFlag(args, "--no-workspace-status")) return dev.warden.run.Workspace.Source.NONE;
+        return worktree -> dev.warden.execution.orca.OrcaWorkspace.attach(new ProcessRunner(), worktree);
     }
 
     private static boolean hasFlag(String[] args, String name) {
@@ -674,6 +709,16 @@ public final class Main {
                     "decided_at", resolved.updatedAt().toString(),
                     "wait_millis", waitMillis,
                     "updated_at", resolved.updatedAt().toString(), "lands", false));
+            // The card stops asking. `accept` and `abort` close the run; every other decision
+            // expects another one, so it goes back to the running column rather than to a
+            // column that reads as done to whoever glances at the board next.
+            dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
+            card.state("accept".equals(choice) || "abort".equals(choice)
+                    ? dev.warden.run.Workspace.State.SETTLED
+                    : dev.warden.run.Workspace.State.RUNNING);
+            card.note(runId + " · " + choice + " by " + actor
+                    + (note.isBlank() ? "" : " · " + note) + " · nothing was landed");
+
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", true);
             result.put("code", "decision_recorded");
@@ -787,6 +832,19 @@ public final class Main {
                 `do` and `run` narrate the stages on stderr while they work — which role is
                 dispatched, to which vendor, what it cost and where it went next. stdout stays
                 one JSON object. `--quiet` turns the narration off.
+
+                Every run also writes that account to .warden/runs/<run-id>/narration.log, so a
+                run started from a script, a scheduler or a terminal you have since closed
+                still has one. It is not evidence; the ledger is.
+
+                Inside an Orca worktree the same run writes its state to that worktree's card —
+                stage, cost, and the approve command when it stops for a person — so a run
+                waiting on you is visible from the board, including on a phone.
+                `--no-workspace-status` turns that off.
+
+                `--watch` additionally asks the board to open a window following that log, so
+                the run can be watched from the board while still being launched from anywhere.
+                Warden is not run *by* the board: closing the window does not touch the loop.
 
                 The command to use is `warden do`. Everything else is a piece of that loop.
                 Vendor configuration lives in ~/.warden/, project configuration in .warden/.
