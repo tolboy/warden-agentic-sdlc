@@ -1,0 +1,16 @@
+Warden
+Copyright 2026 Anatoly Rudakov
+
+This product includes software developed by Anatoly Rudakov.
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+Warden has no third-party dependencies. It compiles and runs against the JDK alone,
+and the visual-QA harness (scripts/visual-qa.mjs) runs on Node's standard library and
+speaks CDP to a browser already installed on the host. Nothing is vendored here, so
+this file carries no third-party attributions.
+
+The vendor CLIs Warden dispatches to (for example `codex`, `claude`, `grok`) are not
+part of this distribution, are not redistributed with it, and are governed by their own
+licences and terms of service. Warden invokes whatever the operator has installed and
+configured under `~/.warden/profiles/`.
