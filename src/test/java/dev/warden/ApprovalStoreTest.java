@@ -104,6 +104,14 @@ public final class ApprovalStoreTest implements Suite {
         check.rejects("unknown run is rejected", "unknown_run",
                 () -> store.resolve("does-not-exist", pending.updatedAt().toString(),
                         "accept", "operator", ""));
+        String unknown = "";
+        try {
+            store.read("no-such-run");
+        } catch (Exception thrown) {
+            unknown = String.valueOf(thrown.getMessage());
+        }
+        check.contains("unknown_run names the project that was consulted", unknown,
+                root.toAbsolutePath().normalize().toString());
         check.eq("failed attempts leave decision pending", HumanDecision.State.PENDING,
                 store.read("run-guarded").state());
         check.rejects("path traversal run id is rejected", "unsafe_run_id",
@@ -119,6 +127,15 @@ public final class ApprovalStoreTest implements Suite {
         check.eq("list is stable by run id",
                 List.of("run-concurrent", "run-failure", "run-guarded", "run-success"),
                 listed.stream().map(HumanDecision::runId).toList());
+
+        // A listing that answers `ok: true` while silently omitting a decision it could not
+        // read is the failure this whole command exists to end. `--worktrees` reports such a
+        // file per row and has its own reader; plain `status` refuses rather than under-report.
+        Path broken = root.resolve(".warden/runs/zz-broken");
+        Files.createDirectories(broken);
+        Files.writeString(broken.resolve(ApprovalStore.FILE_NAME), "{");
+        check.rejects("an unreadable decision.json is not silently dropped from the listing",
+                "zz-broken", store::list);
     }
 
     private void concurrentStoresStillResolveOnlyOnce(Check check, Path root) throws Exception {

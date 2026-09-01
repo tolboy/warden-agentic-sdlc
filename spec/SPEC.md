@@ -234,7 +234,12 @@ warden ledger               a table of runs: verdicts, cost, time, findings
 warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
                             changed files, the human decision. --text for the table
 warden status [run-id]      pending and resolved human decisions
-warden approve <run-id>     record a decision; never lands changes
+                            --worktrees lists pending decisions across every
+                            worktree of this repository
+warden approve <run-id>     record a decision; never lands changes.
+                            Must be run from the worktree the run lives in.
+                            Outside a Warden project the code is
+                            `not_a_warden_project`, not `unknown_run`
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```
