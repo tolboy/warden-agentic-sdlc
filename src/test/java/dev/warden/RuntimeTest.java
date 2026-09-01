@@ -103,6 +103,30 @@ public final class RuntimeTest implements Suite {
             Files.delete(repository.resolve(".warden/operator-note.txt"));
             Files.writeString(repository.resolve("src/value.txt"), "changed\n");
 
+            // Committing the accepted change must not invalidate the acceptance. The candidate
+            // is the content, not where it is sitting: measured on run torch-2, where
+            // `warden land --commit` made the commit and `warden land --push` then refused it
+            // as `candidate_changed`, because `git diff --raw` reports a zeroed destination
+            // blob while a change is uncommitted and a real one once it is not.
+            String beforeCommit = git.sourceFingerprint(base);
+            command(repository, "git", "add", "--", "src/value.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid",
+                    "commit", "-m", "land the accepted change");
+            check.eq("committing the accepted change leaves the candidate fingerprint alone",
+                    beforeCommit, git.sourceFingerprint(base));
+
+            // The raw line is still there for a reason: a deletion has no bytes to hash, so
+            // only the status letter can carry it.
+            Files.delete(repository.resolve("src/value.txt"));
+            check.that("while deleting the file still moves it",
+                    !beforeCommit.equals(git.sourceFingerprint(base)));
+            // Put it back exactly as committed, so the fingerprint returns to where it was —
+            // which is the other half of the property: content decides, nothing else.
+            Files.writeString(repository.resolve("src/value.txt"), "changed\n");
+            check.eq("and restoring the same bytes brings it back",
+                    beforeCommit, git.sourceFingerprint(base));
+
             ConfigLoader.Loaded visual = new ConfigLoader().load(repository, "needs-eyes");
             GateRunner.Outcome eyes = new GateRunner(runner).run(visual, "test-visual");
             check.that("machine gates no longer stand in for visual QA",

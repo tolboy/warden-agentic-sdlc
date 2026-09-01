@@ -86,8 +86,8 @@ public final class GitRepository {
         MessageDigest digest = sha256();
         // Raw metadata catches deletion, rename and mode/status changes. File bytes catch
         // edits to already-dirty and binary files without decoding a binary patch as text.
-        digest.update(git(List.of("diff", "--raw", "-z", mergeBase, "--"))
-                .stdout().getBytes(StandardCharsets.UTF_8));
+        digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout())
+                .getBytes(StandardCharsets.UTF_8));
         Set<String> paths = changedPaths(mergeBase);
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
         List<String> changed = paths.stream().sorted().toList();
@@ -103,6 +103,42 @@ public final class GitRepository {
             }
         }
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    /**
+     * `git diff --raw` with the blob hashes removed, keeping the modes, the status and the path.
+     *
+     * The hashes are why this exists. A raw record is
+     * {@code :<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>}, and the destination hash
+     * is all zeroes while a change sits in the working tree and a real object once it is
+     * committed. So the same bytes in the same file produced two different fingerprints
+     * depending only on whether they had been committed yet — which is not a change to the
+     * candidate, and it broke the one flow that matters: `warden land --commit` made a commit
+     * and then `warden land --push` refused it as `candidate_changed`, having been invalidated
+     * by Warden's own previous step.
+     *
+     * What the raw line is here for survives: a deletion, a rename and a mode change all show
+     * in the modes, the status letter and the path. The content is hashed separately below and
+     * never depended on the blob ids at all.
+     */
+    static String shapeOf(String raw) {
+        StringBuilder shape = new StringBuilder();
+        for (String record : raw.split("\0", -1)) {
+            if (record.isEmpty()) continue;
+            if (record.charAt(0) != ':') {
+                shape.append(record).append('\0');
+                continue;
+            }
+            String[] fields = record.substring(1).trim().split("\\s+");
+            // :srcmode dstmode srcsha dstsha status — keep everything but the two hashes.
+            if (fields.length < 5) {
+                shape.append(record).append('\0');
+                continue;
+            }
+            shape.append(':').append(fields[0]).append(' ').append(fields[1]).append(' ')
+                    .append(fields[fields.length - 1]).append('\0');
+        }
+        return shape.toString();
     }
 
     public List<String> outsideScope(Set<String> paths, List<String> scopes) {

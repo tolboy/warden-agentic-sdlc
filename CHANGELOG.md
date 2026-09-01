@@ -33,6 +33,14 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- The candidate fingerprint no longer changes when the accepted work is committed.
+  `git diff --raw` reports a zeroed destination blob while a change sits in the working tree
+  and a real one once it does not, so `warden land --commit` invalidated the acceptance it had
+  just acted on and `warden land --push` refused it as `candidate_changed`. Deletions, renames
+  and mode changes are still caught; the blob ids were never what carried them.
+  **A run accepted before this release cannot be landed after it:** its stored fingerprint was
+  computed by the old definition, and failing closed on a value that cannot be compared is the
+  correct answer. Commit and push such a run by hand.
 - `--goal-file`: a goal with paragraphs was written into the drafted contract with raw
   newlines, and Warden then refused to parse its own file.
 - The browser harness rejected `wait N -> no-console-errors` as "only waits" while accepting
