@@ -19,6 +19,7 @@ public record ProjectConfig(
         String baseRef,
         Map<String, List<String>> checks,
         Map<String, List<String>> scopes,
+        List<String> setup,
         Land land,
         String defaultChecks,
         String defaultRisk,
@@ -53,7 +54,7 @@ public record ProjectConfig(
     }
 
     private static final Set<String> TOP_LEVEL = Set.of(
-            "version", "project", "base_ref", "checks", "scopes", "defaults", "land");
+            "version", "project", "base_ref", "checks", "scopes", "setup", "defaults", "land");
     private static final Set<String> LAND_KEYS = Set.of("remote", "base", "pull_request", "note");
     private static final Set<String> DEFAULTS = Set.of(
             "checks", "risk", "max_fix_attempts", "timeout_minutes");
@@ -105,13 +106,20 @@ public record ProjectConfig(
         long maxFixAttempts = defaults.optInt("max_fix_attempts", 2, 0, 10);
         long timeoutMinutes = defaults.optInt("timeout_minutes", 30, 1, 240);
 
+        // What has to happen in a checkout before any of `checks` can run. Empty for most
+        // projects and load-bearing for the rest: a `git worktree` of an npm project has no
+        // node_modules, so `npm run check` there fails for a reason that has nothing to do
+        // with the task. Orca runs its own setup when Orca made the worktree, so this is read
+        // only when Warden made it.
+        List<String> setup = root.optStringList("setup", List.of());
+
         Values landing = root.optMap("land").rejectUnknownKeys(LAND_KEYS);
         List<String> pullRequest = landing.optStringList("pull_request", List.of());
         Land land = new Land(landing.optString("remote", null),
                 landing.optString("base", null), pullRequest);
 
         root.throwIfAny();
-        return new ProjectConfig(project, baseRef, checks, scopes, land,
+        return new ProjectConfig(project, baseRef, checks, scopes, setup, land,
                 defaultChecks, defaultRisk, maxFixAttempts, timeoutMinutes);
     }
 

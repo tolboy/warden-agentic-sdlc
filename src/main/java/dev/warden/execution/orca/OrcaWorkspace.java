@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Warden's run, written onto the Orca workspace card that holds it.
@@ -35,6 +36,10 @@ public final class OrcaWorkspace implements Workspace {
     private final OrcaClient orca;
     private final Path worktree;
     private final String selector;
+
+    /** The live view this run opened, if it opened one. Null until {@link #watch} succeeds. */
+    private String terminal;
+    private String runId;
 
     private OrcaWorkspace(OrcaClient orca, Path worktree, String selector) {
         this.orca = orca;
@@ -74,6 +79,31 @@ public final class OrcaWorkspace implements Workspace {
     @Override
     public void state(State state) {
         set(List.of("--workspace-status", column(state)));
+        retitle(state);
+    }
+
+    /**
+     * Say on the tab what the run now wants.
+     *
+     * A tab is the one surface an operator cannot fail to notice: it is in front of them, it
+     * has a name, and it survives the run that made it. The card is a better summary and it is
+     * only better if you can find it — which on this Orca build the operator could not, while
+     * they could list their tabs from memory. So the tab says it too, and at the one moment it
+     * matters most it says it in words that are hard to read past.
+     */
+    private void retitle(State state) {
+        if (terminal == null || runId == null) return;
+        String title = switch (state) {
+            case RUNNING -> "warden " + runId;
+            case WAITING_FOR_HUMAN -> "warden " + runId + " - NEEDS YOU";
+            case SETTLED -> "warden " + runId + " - done";
+        };
+        try {
+            orca.invoke(worktree, TIMEOUT, List.of("terminal", "rename",
+                    "--terminal", terminal, "--title", title));
+        } catch (Exception notOurProblem) {
+            // The window is still there with the narration in it; only its name is stale.
+        }
     }
 
     /**
@@ -108,24 +138,36 @@ public final class OrcaWorkspace implements Workspace {
                 Files.createDirectories(narration.getParent());
                 Files.writeString(narration, "");
             }
-            orca.invoke(worktree, TIMEOUT, List.of(
+            OrcaClient.Rpc opened = orca.invoke(worktree, TIMEOUT, List.of(
                     "terminal", "create",
                     "--worktree", selector,
                     "--title", "warden " + runId,
                     "--command", follow(narration)));
+            if (opened.ok()) {
+                this.runId = runId;
+                this.terminal = handleOf(opened.result());
+            }
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
         }
     }
 
-    /** `tail -f` under whichever shell Orca will start this terminal with. */
+    /**
+     * Follow the narration, and leave a shell behind when the following stops.
+     *
+     * `-NoExit` and the `exec` are the point. A tab that dies the moment you interrupt the tail
+     * leaves the operator reading the approve command in a window they then have to close and
+     * replace with another one, in the right directory, typed from memory. The command they
+     * need is on the screen; the prompt to type it into should be underneath it.
+     */
     private static String follow(Path narration) {
         String path = narration.toAbsolutePath().toString();
         if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
-            return "powershell -NoLogo -NoProfile -Command \"Get-Content -LiteralPath '"
+            return "powershell -NoLogo -NoProfile -NoExit -Command \"Get-Content -LiteralPath '"
                     + path.replace("'", "''") + "' -Wait -Tail 200\"";
         }
-        return "tail -n 200 -f '" + path.replace("'", "'\\''") + "'";
+        String quoted = "'" + path.replace("'", "'\\''") + "'";
+        return "sh -c 'tail -n 200 -f " + quoted + "; exec ${SHELL:-sh}'";
     }
 
     private void set(List<String> fields) {
@@ -137,6 +179,16 @@ public final class OrcaWorkspace implements Workspace {
         } catch (Exception notOurProblem) {
             // Deliberately silent. See the class comment: this channel may not cost a run.
         }
+    }
+
+    /** `result.terminal.handle`, or `result.handle` — Orca has answered both shapes. */
+    private static String handleOf(Map<String, Object> result) {
+        Object nested = result.get("terminal");
+        if (nested instanceof Map<?, ?> map && map.get("handle") != null) {
+            return String.valueOf(map.get("handle"));
+        }
+        Object handle = result.get("handle");
+        return handle == null ? null : String.valueOf(handle);
     }
 
     private static String clip(String text) {

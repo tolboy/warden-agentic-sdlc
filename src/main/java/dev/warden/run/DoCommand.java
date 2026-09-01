@@ -261,6 +261,18 @@ public final class DoCommand {
             return fail("task_conflict", requested, root, taskId, conflict.getMessage());
         }
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
+
+        // A worktree Warden made is empty of everything the project needs to check itself. Orca
+        // runs a repo's setup when Orca made the checkout; when git made it, this is the only
+        // thing that will. Only on a fresh one: joining a worktree that already exists means
+        // the setup already ran there, and running `npm install` again is minutes for nothing.
+        if ("git".equals(backend) && "created".equals(placement.reason())) {
+            String failedSetup = runSetup(loaded.project().setup(), root);
+            if (failedSetup != null) {
+                return fail("setup_failed", requested, root, taskId, failedSetup);
+            }
+        }
+
         if (options.draftOnly()) {
             // The contract is where a run's whole meaning lives, and the drafter writes it
             // from one sentence. Every real task so far needed its browser scenarios written
@@ -428,6 +440,40 @@ public final class DoCommand {
             throw new Isolation.IsolationException("detached_head",
                     "could not read the current branch of " + project + ": " + notAskable.getMessage());
         }
+    }
+
+    /**
+     * The project's own setup, in the checkout Warden just made.
+     *
+     * Narrated rather than silent: `npm install` is minutes, and a command that says nothing
+     * for four of them looks hung. Failure stops the run before a vendor is paid — a checkout
+     * whose setup failed will fail every gate afterwards, and for a reason no implementer put
+     * there.
+     *
+     * @return the message to stop with, or null when every command succeeded
+     */
+    private String runSetup(List<String> commands, Path root) throws Exception {
+        if (commands.isEmpty()) return null;
+        progress.line("setup " + String.join(", ", commands));
+        for (String command : commands) {
+            ProcessRunner.Result result = processes.run(shell(command), root, Duration.ofMinutes(20));
+            progress.line("      " + (result.ok() ? "ok" : "FAILED") + "  "
+                    + Progress.elapsed(result.durationMillis()) + "  " + command);
+            if (!result.ok()) {
+                String tail = result.stderr().isBlank() ? result.stdout() : result.stderr();
+                return "setup command `" + command + "` failed in " + root + " with exit "
+                        + result.exitCode() + ". Its output ended with: "
+                        + (tail.length() <= 600 ? tail.strip()
+                            : tail.substring(tail.length() - 600).strip());
+            }
+        }
+        return null;
+    }
+
+    private static List<String> shell(String command) {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
+                ? List.of("cmd.exe", "/d", "/s", "/c", command)
+                : List.of("/bin/sh", "-lc", command);
     }
 
     /**

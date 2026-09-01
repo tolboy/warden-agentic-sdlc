@@ -38,6 +38,14 @@ public final class ConfigTest implements Suite {
         check.eq("named check set", List.of("npm run check", "npm run build"), project.checks().get("full"));
         check.eq("named scope", List.of("src/routes", "src/lib/components"), project.scopes().get("ui"));
         check.eq("default risk", "medium", project.defaultRisk());
+        check.eq("a project that declares no setup asks for none", List.of(), project.setup());
+
+        // What has to happen in a checkout before any of `checks` can run. Most projects have
+        // nothing to say here; a `git worktree` of an npm project has no node_modules, and
+        // without this its gates fail for a reason no implementer put there.
+        ProjectConfig staged = ProjectConfig.parse(PROJECT.replace("checks:\n",
+                "setup:\n  - \"npm ci\"\nchecks:\n"), "project.yaml");
+        check.eq("and one that does keeps the order it wrote", List.of("npm ci"), staged.setup());
 
         // A project with no executable definition of "done" cannot be gated at all.
         check.rejects("checks are mandatory", "at least one named command set",
