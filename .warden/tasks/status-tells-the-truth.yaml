@@ -1,0 +1,22 @@
+version: 1
+id: status-tells-the-truth
+goal: "Make `warden status` and `warden approve` tell the truth when they are run outside the project, and let an operator find a run that is waiting on them without knowing which worktree it is in.\n\nThis was measured, not imagined. An operator ran `warden approve torch-2 --decision accept` from the Warden repository instead of from the worktree the run lives in. The answer was `{\"ok\":false,\"code\":\"unknown_run\",\"message\":\"unknown_run: no decision exists for run torch-2\"}`, exit 1. That is a lie in the only way that matters: the run exists, the decision exists, and the operator is standing in the wrong directory. They believed the acceptance had been recorded; it had not, and nothing said so.\n\nTwo changes, both in src/main/java/dev/warden/Main.java and the approval package.\n\nFIRST. Distinguish \"this directory is not a Warden project\" from \"this project has no such run\".\n\n`ConfigLoader.findProjectRoot` is what locates the project. When there is no `.warden` anywhere above the current directory, `status` and `approve` must answer with a distinct code — `not_a_warden_project` — naming the directory that was searched from, and saying that the run may exist elsewhere. When there IS a project but the run id is unknown to it, keep `unknown_run`, and add the project root to the message so the operator can see which project was consulted.\n\nSECOND. Add `warden status --worktrees`.\n\nIt lists every pending human decision across the worktrees of the current repository, so a run waiting on somebody is findable without remembering where it was created. Use `git worktree list --porcelain` from the current repository to enumerate the checkouts, read `.warden/runs/*/decision.json` in each one, and report every decision whose state is pending: the worktree path, the run id, the task id, the kind, the options, and the exact `warden approve` command that would answer it, including the directory to run it from.\n\nA worktree that is not a Warden project is skipped silently — it is not an error for a checkout to have no `.warden`. A `decision.json` that cannot be parsed is reported with its path and the parse problem rather than dropped, because a decision nobody can read is exactly the thing an operator needs told.\n\n`warden status --worktrees` must work when the current directory is any worktree of the repository, including one with no pending decisions of its own. It must not require Orca, and it must not create or modify anything: this command reads.\n\nKeep the output shape of `warden status` as it is today for callers that already parse it — one JSON object on stdout. `--worktrees` adds a `worktrees` key; it does not replace `decisions`.\n\nAdd tests to src/test/java/dev/warden/ApprovalStoreTest.java or a new suite registered in TestMain, covering: a directory that is not a Warden project answers `not_a_warden_project`; a project without that run answers `unknown_run` and names the project; and `--worktrees` finds a pending decision that lives in a sibling worktree rather than the current one."
+non_goals:
+  - "Do not edit .warden contract files or acceptance commands to make checks pass"
+risk: medium
+scope: platform
+authority:
+  workspace_write: true
+  network: false
+  land: false
+# Warden run against Warden. Modest on purpose: the change is small and the chain is
+# implement -> gates -> review, with no browser stage to pay for.
+budgets:
+  max_role_runs: 6
+  max_cost_usd: 6.0
+max_fix_attempts: 1
+timeout_minutes: 45
+
+visual_qa:
+  required: false
+  scenarios: []

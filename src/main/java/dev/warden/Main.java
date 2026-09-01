@@ -3,6 +3,7 @@ package dev.warden;
 import dev.warden.approval.ApprovalException;
 import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
+import dev.warden.approval.StatusCommand;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -639,21 +641,9 @@ public final class Main {
 
     /** Pending and resolved human decisions are Warden state, not terminal prose. */
     private static int status(String[] args) throws Exception {
-        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
-        ApprovalStore store = new ApprovalStore(root);
-        String runId = args.length > 1 && !args[1].startsWith("--") ? args[1] : null;
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("ok", true);
-        result.put("project", root.toString());
-        if (runId != null) {
-            HumanDecision decision = store.read(runId);
-            result.put("decision", decision.toMap());
-            result.put("decision_path", store.decisionPath(runId).toString());
-        } else {
-            result.put("decisions", store.list().stream().map(HumanDecision::toMap).toList());
-        }
-        System.out.println(Json.write(result));
-        return 0;
+        StatusCommand.Outcome outcome = new StatusCommand(new ProcessRunner()).run(Path.of("."), args);
+        System.out.println(Json.write(outcome.report()));
+        return outcome.ok() ? 0 : 1;
     }
 
     /**
@@ -672,7 +662,15 @@ public final class Main {
         String noteFile = option(args, "--note-file", null);
         if (noteFile != null) note = java.nio.file.Files.readString(Path.of(noteFile));
 
-        Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        Path start = Path.of(".");
+        Optional<Path> found = new ConfigLoader().locateProjectRoot(start);
+        if (found.isEmpty()) {
+            Map<String, Object> result = new LinkedHashMap<>(StatusCommand.notAWardenProject(start));
+            result.put("lands", false);
+            System.out.println(Json.write(result));
+            return 1;
+        }
+        Path root = found.get();
         ApprovalStore store = new ApprovalStore(root);
         try {
             HumanDecision pending = store.read(runId);
@@ -735,6 +733,7 @@ public final class Main {
             result.put("ok", false);
             result.put("code", failure.code());
             result.put("message", failure.getMessage());
+            result.put("project", root.toString());
             result.put("lands", false);
             System.out.println(Json.write(result));
             return 1;
@@ -827,8 +826,11 @@ public final class Main {
                                                one run joined: stages, vendors, cost, tokens,
                                                screenshots, changed files, human decision
                   warden status [run-id]       show pending/resolved human decisions
+                                               --worktrees lists pending decisions across
+                                               every worktree of this repository
                   warden approve <run-id> --decision <choice>
-                                               record a decision; never lands changes
+                                               record a decision; never lands changes.
+                                               Must be run from the worktree the run lives in
                   warden land <run-id>         plan the commit, branch and request for an
                                                accepted run; --commit/--push/--pull-request
                                                carry it out. Merges nothing

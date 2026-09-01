@@ -24,6 +24,10 @@ that exists in code but has never been run live says so.
 - Preflight validation of browser scenarios, via the adapter's own `--validate-only`, so a
   contract that states no assertion costs no vendor call. New code
   `visual_qa_contract_invalid`.
+- `warden status --worktrees` lists every pending human decision across the worktrees of the
+  current repository — worktree path, run id, task, kind, options, and the `warden approve`
+  command including the directory to run it from. A checkout with no `.warden` is skipped;
+  a `decision.json` that cannot be parsed is reported rather than dropped. Reads only.
 
 ### Changed
 
@@ -45,6 +49,16 @@ that exists in code but has never been run live says so.
   newlines, and Warden then refused to parse its own file.
 - The browser harness rejected `wait N -> no-console-errors` as "only waits" while accepting
   the bare console check, so adding a pause made a valid scenario invalid.
+- `warden status` and `warden approve` from a directory that is not a Warden project now
+  answer `not_a_warden_project`, naming that directory and saying the run may exist
+  elsewhere. When the directory is a project that simply has no such run, `unknown_run`
+  names the project that was consulted. The previous answer was `unknown_run` either way,
+  which is how an acceptance typed from the wrong checkout looked recorded when it was not.
+- `warden status --worktrees` now emits an `approve` instruction that can be pasted into
+  PowerShell or cmd.exe: a concrete listed choice rather than `<retry|abort>`, and a
+  directory change that switches drive (`pushd` on Windows, because `cd /d` is not a
+  PowerShell command). A malformed `decision.json` in the current checkout is reported in
+  `worktrees` instead of aborting the command as `warden_error`.
 
 ## [0.1.0] — 2026-08-31
 

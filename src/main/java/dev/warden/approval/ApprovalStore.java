@@ -176,7 +176,8 @@ public final class ApprovalStore {
         validateRunId(runId);
         Path target = decisionPath(runId);
         if (!Files.isRegularFile(target)) {
-            throw new ApprovalException("unknown_run", "no decision exists for run " + runId);
+            throw new ApprovalException("unknown_run",
+                    "no decision exists for run " + runId + " in project " + projectRoot);
         }
         try {
             HumanDecision decision = HumanDecision.fromMap(
@@ -198,6 +199,23 @@ public final class ApprovalStore {
         return Optional.of(read(runId));
     }
 
+    /**
+     * Every run in this project that has a {@code decision.json}, readable or not.
+     *
+     * Separate from {@link #list()} so a caller that reports unreadable files itself can walk
+     * them one at a time. {@code list()} is all-or-nothing on purpose.
+     */
+    public List<String> runIds() throws IOException {
+        if (!Files.isDirectory(runsDirectory)) return List.of();
+        try (var paths = Files.list(runsDirectory)) {
+            return paths.filter(Files::isDirectory)
+                    .filter(directory -> Files.isRegularFile(directory.resolve(FILE_NAME)))
+                    .map(directory -> directory.getFileName().toString())
+                    .sorted()
+                    .toList();
+        }
+    }
+
     public List<HumanDecision> list() throws IOException {
         if (!Files.isDirectory(runsDirectory)) return List.of();
         List<HumanDecision> decisions = new ArrayList<>();
@@ -205,9 +223,14 @@ public final class ApprovalStore {
             for (Path runDirectory : paths.filter(Files::isDirectory)
                     .sorted(Comparator.comparing(path -> path.getFileName().toString())).toList()) {
                 Path target = runDirectory.resolve(FILE_NAME);
-                if (Files.isRegularFile(target)) {
-                    decisions.add(read(runDirectory.getFileName().toString()));
-                }
+                if (!Files.isRegularFile(target)) continue;
+                // A decision nobody can read is the one an operator most needs told about, so
+                // this propagates. It briefly did not: a version of this method swallowed the
+                // failure so `--worktrees` could report it per file, which quietly turned plain
+                // `warden status` into a listing that answers `ok: true` while omitting a
+                // decision that exists. `--worktrees` has its own reader and needs nothing
+                // from here.
+                decisions.add(read(runDirectory.getFileName().toString()));
             }
         }
         return List.copyOf(decisions);
