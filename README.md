@@ -43,17 +43,19 @@ Build Warden once. After that it is one command — a goal and a project:
 
 Nothing is merged — it stops at the human gate.
 
-**About that worktree.** `warden do` does not edit the branch you are looking at. It asks
-[Orca](https://www.onorca.dev/download) — a desktop app that manages Git worktrees and agent
-terminals — to cut a fresh worktree from your actual current branch, and runs the loop in
-there. So Orca must be running, and if it is not, the command fails rather than falling back
-to editing your checkout.
+**About that worktree.** `warden do` does not edit the branch you are looking at. It cuts a
+fresh worktree from your actual current branch and runs the loop in there — with `git worktree`
+by default, or with [Orca](https://www.onorca.dev/download) when Orca is running, in which case
+the worktree appears in Orca's sidebar and on its mobile app. `--isolation git|orca` settles it
+either way. Both give the same guarantee, and if isolation cannot be made the command fails
+rather than falling back to editing your checkout.
 
-Warden itself never runs `git branch` or `git worktree add`; isolation is delegated on
-purpose, so one program owns the worktree lifecycle. `--in-place` skips isolation entirely and
-lets the implementer edit the tree you are standing in — fine for a throwaway repository, and
-the wrong choice for anything else. Everything except `do` (`run`, `role`, `gates`,
-`visual-qa`, `report`, `approve`) works with no Orca at all, wherever you already are.
+A `git worktree` starts empty of whatever your checks need, so `setup:` in `project.yaml` says
+what to run in a fresh one — `npm ci`, or nothing at all for most projects. Orca runs the repo's
+own setup when Orca made the worktree.
+
+`--in-place` skips isolation entirely and lets the implementer edit the tree you are standing
+in — fine for a throwaway repository, and the wrong choice for anything else.
 
 **Before you pay.** `warden do --draft-only` stops as soon as the worktree exists and a draft
 contract has been written, and prints the path to it. Warden does not invent browser
@@ -397,22 +399,27 @@ vendors and an `authorized_by` field still lands in the evidence and in `warden 
 
 ## Configuring vendors
 
-The resolver will not release a profile that has no `verification.verified_on` — a date
-meaning a human ran the probe and checked its output. It is the only field in the whole
-configuration that records a judgement rather than a fact, and it stands in front of a role
-with write access to a repository.
+The resolver will not release a profile whose probe has never run: `verification.verified_on`
+is the date this profile's own probe was executed and passed. Swapping the vendor behind a
+role is therefore a config edit and one command, not a ceremony.
 
 ```text
 warden profiles                              what loads, what is eligible, and why not
-warden profiles --verify codex-implement     run this profile's own probe
-warden profiles --verify codex-implement --confirm   stamp the date
+warden profiles --verify codex-implement     run this profile's probe; stamp it if it passes
 ```
 
 `--verify` runs the profile's `verification.probe`, saves the transcript under
-`~/.warden/verification/`, and prints `what_to_check` — the list of things you must see with
-your own eyes. It does **not** stamp the date on a zero exit code: `verified_on` would then
-mean "the binary started", which is exactly the guess the field exists to prevent. `--confirm`
-is a separate step, and it only works if the probe passed in the same invocation.
+`~/.warden/verification/`, prints `what_to_check`, and stamps the date when the probe passes.
+
+Read the transcript anyway. `what_to_check` is where you learn which envelope key carries the
+answer, whether the vendor prompts for approval, and whether it reports a cost at all — every
+one of those was established by reading, and none of it is in the vendor's documentation. What
+the date does *not* claim is that you did: the field once said it meant a human judgement, and
+nothing enforced that, which made it a guarantee everyone downstream relied on and nobody held.
+
+The enforcement that does hold is mechanical and elsewhere: a `read_only` role that writes gets
+`role_violated_read_only` and its artifact discarded, whatever any flag or date claimed. Still
+do the implementer last and deliberately — it is the only role with `read_only: false`.
 
 ## Status
 

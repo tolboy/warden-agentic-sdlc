@@ -15,7 +15,7 @@ is the repository you want Warden to work on.
 | Node | Only for the browser harness (`scripts/visual-qa.mjs`). Standard library only |
 | Browser | Only for the browser harness: Chrome or Edge, already installed |
 | Vendor CLIs | Whatever you intend to use — `codex`, `claude`, `grok`, … Installed and signed in by you |
-| [Orca](https://www.onorca.dev/download) | Only for `warden do`, which delegates worktree isolation to it. Every other command runs without it |
+| [Orca](https://www.onorca.dev/download) | Optional. `warden do` uses it for isolation when it is running, and shows the run on its board and mobile app. Without it, `git worktree` |
 
 Nothing is downloaded at build time. If the build needs the network, that is a bug.
 
@@ -70,26 +70,25 @@ The shipped profiles are examples, and none of them is usable yet. That is the n
 
 ## 3. Verify each profile before you let it run
 
-A profile is not released by the resolver until it carries `verification.verified_on` — a date
-that means a human ran its probe and read the output. It is the only field in the whole
-configuration that records a judgement rather than a fact, and it stands in front of a role
-with write access to a repository.
+A profile is not released by the resolver until its own probe has run and passed:
+`verification.verified_on` is the date that happened. Changing which vendor fills a role is an
+edit to these files plus one command.
 
 ```text
 warden profiles                                       what loads, what is eligible, and why not
-warden profiles --verify grok-review                  run this profile's probe, keep the transcript
-warden profiles --verify grok-review --confirm        stamp the date
+warden profiles --verify grok-review                  run this profile's probe; stamp it if it passes
 ```
 
-`--verify` prints `what_to_check`: the specific things you must see with your own eyes. It
-does **not** stamp the date on a zero exit code — `verified_on` would then mean "the binary
-started", which is exactly the guess the field exists to prevent. `--confirm` only works if
-the probe passed in the same invocation.
+`--verify` keeps the transcript and prints `what_to_check`. Read it: that list is where you
+find out which envelope key carries the answer, whether the vendor opens an interactive prompt,
+and whether it reports a cost at all. The date does not claim you read it — it once did, and
+nothing enforced that.
 
-**Do the implementer last, and do it carefully.** It is the only role with
+**Do the implementer last, and do it deliberately.** It is the only role with
 `read_only: false` — the only one that writes to your worktree, and the one whose profile
 carries whatever auto-approval flag its vendor needs. Run its probe standalone, then
-`warden role implementer <task> --dry-run`, and only then let the loop drive it.
+`warden role implementer <task> --dry-run`, and only then let the loop drive it. What protects
+the repository is not the date: it is the fingerprint taken around every role.
 
 ## 4. Connect a project
 
@@ -127,25 +126,36 @@ Both must run with the target project as the current directory.
 
 ## 5. Isolation
 
-`warden do` asks [Orca](https://www.onorca.dev/download) for a worktree cut from the branch you
-are actually on, so the loop never writes to your working checkout. Orca must be running.
+`warden do` cuts a worktree from the branch you are actually on, so the loop never writes to
+your working checkout. Two backends, one guarantee:
 
-Warden itself never runs `git branch` or `git worktree add`. That is a deliberate division:
-Warden owns the bounded role loop, Orca owns the worktree and worker lifecycle, and two
-programs creating checkouts would be two sources of truth for the same state. Orca also runs
-the project's setup in the new worktree (`--setup run`), without which a check command like
-`npm run check` has no `node_modules` to run against.
+| | |
+|---|---|
+| `git worktree` | The default. Needs nothing you do not already have. The checkout goes in `<repo>-worktrees/<name>`, beside the repository rather than inside it |
+| Orca | Used automatically when Orca is running. The worktree appears on its board and its mobile app, which is the reason to prefer it |
 
-For a throwaway repository, or when you do not use Orca, `--in-place` skips isolation and lets
-the implementer edit the tree you are standing in. That is the whole difference; decide
-accordingly.
+`--isolation git` or `--isolation orca` settles it explicitly. Asking for Orca when Orca is down
+fails rather than quietly substituting the other: asking for a backend is a statement.
 
-`warden do` is the only command that needs Orca. `run`, `role`, `gates`, `visual-qa`,
-`report`, `status`, `approve` and `land` all work in whatever directory you are already in —
-including a worktree you made yourself with `git worktree add`.
+A fresh `git worktree` has none of what your checks need — an npm project has no
+`node_modules` — so declare it once in the project contract:
 
-A fresh repository needs one human-reviewed baseline commit before Git or Orca can create
-child worktrees.
+```yaml
+setup:
+  - "npm ci"
+```
+
+That runs only in a worktree Warden made, and only when it is new. Orca runs the repository's
+own setup when Orca made the checkout, so this is not read then.
+
+`--in-place` skips isolation and lets the implementer edit the tree you are standing in. That
+is the whole difference; decide accordingly.
+
+`do` is the only command that isolates anything. `run`, `role`, `gates`, `visual-qa`, `report`,
+`status`, `approve` and `land` all work in whatever directory you are already in — including a
+worktree you made yourself.
+
+A fresh repository needs one commit before Git can create worktrees from it.
 
 **On Windows, if Orca and your vendor CLI run under different local identities**, Git will
 refuse to operate on the checkout until you add one narrow trust entry:

@@ -14,19 +14,21 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Runs a profile's own verification probe, and — separately — stamps the date once a human
- * has read the result.
+ * Runs a profile's own verification probe and stamps the date it passed.
  *
- * The separation is the whole point. `verified_on` does not mean "the binary exited 0"; it
- * means a person ran the probe and confirmed the specific things listed in `what_to_check`:
- * that the vendor exits without prompting for approval, which envelope key carries the answer,
- * whether a cost figure appears and under which name. A command that stamped the date on a
- * zero exit code would turn the one deliberate human checkpoint in the configuration into
- * another automatic guess, which is the failure this field exists to prevent.
+ * `verified_on` was once described as a human judgement — that somebody read the transcript
+ * against `what_to_check` before stamping. The tool never enforced that and could not: the
+ * stamp was a command, and whoever typed it was trusted to have read. A field whose stated
+ * meaning cannot be held is worse than a plain fact, because everyone downstream relies on a
+ * guarantee that is not there.
  *
- * So `--verify` runs the probe and shows what it produced; `--verify --confirm` stamps, and
- * only when the probe succeeded in that same invocation. What is removed is the retyping and
- * the hand-editing of YAML, not the judgement.
+ * It now records what it can check: this probe ran on this date and passed. That is also what
+ * the resolver needs — nothing is dispatched whose flags have never been executed — and it
+ * makes changing the vendor behind a role an edit and one command rather than a ceremony.
+ *
+ * `what_to_check` and the kept transcript are still printed, because reading them is still
+ * how an operator learns which envelope key carries the answer and whether a cost appears at
+ * all. What is gone is the claim that the date proves they did.
  */
 public final class ProfileVerifier {
 

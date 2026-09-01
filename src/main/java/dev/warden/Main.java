@@ -204,16 +204,24 @@ public final class Main {
     }
 
     /**
-     * Run a profile's own verification probe, and stamp the date only when asked separately.
+     * Run a profile's own verification probe, and stamp the date when it passes.
      *
-     * `verified_on` is the one field in the whole configuration that records a human
-     * judgement: that someone ran the probe and confirmed the points in `what_to_check` —
-     * which envelope key carries the answer, whether it exits without asking for approval,
-     * whether a cost figure appears at all. Stamping that automatically on a zero exit code
-     * would replace the judgement with "the binary ran", and this profile is the gate in front
-     * of a role that writes to the repository.
+     * `verified_on` used to be described as a human judgement — that somebody read the
+     * transcript against `what_to_check` before stamping. Nothing enforced that and nothing
+     * could: `--verify --confirm` was one command, and whoever ran it was trusted to have
+     * read. A field whose stated meaning the tool cannot hold is worse than a plain fact,
+     * because it invites everyone to rely on a guarantee that is not there.
      *
-     * So the command removes the retyping and the hand-edited YAML, and leaves the reading.
+     * So it now records the fact it can: this profile's probe ran on this date and passed.
+     * That is what the resolver actually needs — no profile is dispatched whose flags have
+     * never been executed — and changing which vendor fills a role is a config edit and one
+     * command, not a ceremony.
+     *
+     * The reading is still worth doing, so `what_to_check` and the transcript path are still
+     * printed. What is gone is the pretence that the date proves somebody did it. The
+     * enforcement that does hold is elsewhere and is mechanical: a `read_only` role that
+     * writes gets `role_violated_read_only` and its artifact discarded, whatever any flag or
+     * date claimed.
      */
     private static int verifyProfile(String name, boolean confirm) throws Exception {
         UserConfig user = UserConfig.load();
@@ -241,16 +249,6 @@ public final class Main {
                     + "nothing was stamped");
             System.out.println(Json.write(result));
             return 1;
-        }
-
-        if (!confirm) {
-            result.put("ok", true);
-            result.put("code", "probe_passed");
-            result.put("next", "read the transcript against what_to_check above. If every point "
-                    + "holds, run: warden profiles --verify " + name + " --confirm");
-            result.put("stamped", false);
-            System.out.println(Json.write(result));
-            return 0;
         }
 
         Path file = user.home().resolve("profiles").resolve(name + ".yaml");
@@ -799,7 +797,9 @@ public final class Main {
                   warden setup                 create a starter ~/.warden (never overwrites)
                   warden doctor                verify Java, vendor profiles and live Orca readiness
                   warden profiles              which profiles load, which are eligible, and why not
-                  warden profiles --verify N   run profile N's own probe; --confirm stamps the date
+                  warden profiles --verify N   run profile N's own probe; stamps verified_on
+                                           when it passes, so swapping a vendor is an edit and
+                                           one command. Read the transcript it keeps anyway
                   warden init [--base-ref REF] create a conservative project starter config
                   warden validate <task>       validate and resolve the project task contract
                   warden gates <task>          preflight and machine gates only; spends nothing

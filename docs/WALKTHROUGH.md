@@ -74,21 +74,21 @@ warden profiles --verify claude-review
                   "stdout is a JSON envelope; note which key carries the answer",
                   "--allowedTools is accepted and the run still completes",
                   "whether a cost figure is reported, and under which key"],
- "next":"read the transcript against what_to_check above. If every point holds, run:
-         warden profiles --verify claude-review --confirm"}
+ "verified_on":"2026-08-27","stamped":true}
 ```
 
-Note `stamped: false`. The probe passed; the date was not stamped. `verified_on` is the only
-field in the whole configuration that records a **human judgement** rather than a fact
-established by a machine, and it stands in front of a role with write access to a repository.
-Stamping it on a zero exit code would replace "a person looked and confirmed four points" with
-"the binary started" — which is exactly the guess the field exists to prevent. What was removed
-is retyping the command and hand-editing YAML, not the reading.
+The probe passed, so the date is stamped: `verified_on` records that this profile's own probe
+ran and passed, which is the thing the resolver needs to know before dispatching flags nobody
+has ever executed.
 
-```
-warden profiles --verify claude-review --confirm
-→ {"ok":true,"code":"verified","verified_on":"2026-08-27","stamped":true}
-```
+It used to mean more than that on paper — that a person had read the transcript against
+`what_to_check` — and nothing enforced it, because the stamp was a command and whoever typed it
+was trusted to have read. A field whose stated meaning the tool cannot hold is worse than a
+plain fact, so it now says the fact.
+
+Read `what_to_check` regardless. Every useful thing in these profiles was established that way:
+which envelope key carries the answer, whether the vendor opens an interactive session, whether
+a cost figure appears at all. None of it is in the vendor's documentation.
 
 The date is appended to the end of the `verification:` block and the operator's comments stay
 where they are: in these profiles the comments are the most valuable thing in the file — they

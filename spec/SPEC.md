@@ -217,7 +217,7 @@ subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`.
 ```
 warden setup                create a starter ~/.warden; never overwrites
 warden profiles             which profiles load, which are eligible, and why not
-warden profiles --verify N  run profile N's own probe; --confirm stamps verified_on
+warden profiles --verify N  run profile N's own probe; stamps verified_on when it passes
 warden init                 create .warden/project.yaml, inferring checks from package.json,
                             build.gradle(.kts), pom.xml, Cargo.toml or Makefile
 warden doctor               what is installed, authenticated, and misconfigured
@@ -252,10 +252,15 @@ separately, and reports `argument_encoding`.
 starting a single agent.
 
 `warden profiles --verify` runs the profile's own `verification.probe`, saves the transcript
-to `~/.warden/verification/`, and prints `what_to_check`. It does **not** stamp the date on a
-zero exit code: `verified_on` would then mean "the binary started", which is exactly the guess
-the field exists to prevent. `--confirm` is a separate step, and it works only if the probe
-passed in the same invocation.
+to `~/.warden/verification/`, prints `what_to_check`, and stamps `verified_on` when the probe
+passes. The field records a fact the tool can check — this probe ran on this date and passed —
+which is what the resolver needs: nothing is dispatched whose flags have never been executed.
+
+It was once described as a human judgement, that somebody had read the transcript. Nothing
+enforced that and nothing could, and a stated guarantee the tool cannot hold is worse than a
+plain fact. Read `what_to_check` anyway: it is where an operator learns which envelope key
+carries the answer and whether a cost is reported at all. What protects the repository is
+invariant 6, not this date.
 
 `do` and `run` narrate their stages on stderr while they work; stdout stays a single JSON
 object. `--quiet` turns the narration off.

@@ -9,6 +9,35 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Added
+
+- `Workspace`: a run writes its stage, cost and pending decision onto the Orca worktree card it
+  is running on, and `warden approve` closes it. Three columns, not one per stage.
+- The narration is also written to `.warden/runs/<id>/narration.log`, so a run started from a
+  script, a scheduler or a terminal since closed still has an account of itself.
+- `--watch`: Warden asks the board to open a terminal following that log, titled `warden
+  <run-id>` and renamed `- NEEDS YOU` when the loop stops for a person. Warden calls Orca, not
+  the other way round: the run is not hosted by the board and survives closing the window.
+- `GitWorktreeIsolation`: `warden do` no longer needs Orca. Without `--isolation`, Orca is used
+  when it is running and `git worktree` otherwise; `--isolation git|orca` settles it.
+- `setup:` in `project.yaml` — what to run in a worktree Warden made, before any check can pass.
+- Preflight validation of browser scenarios, via the adapter's own `--validate-only`, so a
+  contract that states no assertion costs no vendor call. New code
+  `visual_qa_contract_invalid`.
+
+### Changed
+
+- `verification.verified_on` now records that a profile's probe ran and passed, and `--verify`
+  stamps it. It was documented as a human judgement that nothing enforced and nothing could;
+  swapping the vendor behind a role is a config edit and one command.
+
+### Fixed
+
+- `--goal-file`: a goal with paragraphs was written into the drafted contract with raw
+  newlines, and Warden then refused to parse its own file.
+- The browser harness rejected `wait N -> no-console-errors` as "only waits" while accepting
+  the bare console check, so adding a pause made a valid scenario invalid.
+
 ## [0.1.0] — 2026-08-31
 
 First public release. Everything below already existed in the private history; this release is
@@ -32,8 +61,8 @@ stranger can use.
 
 ### Added — roles and vendors
 
-- Role resolver with rotation, `require_independent_vendor`, and refusal of any profile
-  lacking a human-stamped `verification.verified_on`.
+- Role resolver with rotation, `require_independent_vendor`, and refusal of any profile whose
+  own probe has never run and passed (`verification.verified_on`).
 - Direct CLI adapter with evidence, quota detection and delivery checks; JSONL recovery for
   vendors that stream their answer.
 - Quota exhaustion classified apart from ordinary failure, with `failover.on_quota_exhausted`
