@@ -834,6 +834,27 @@ public final class TaskLoopTest implements Suite {
         guarded.watch(sandbox.resolve("nowhere.log"), "wb3");
         check.that("and the guard covers opening a live view, not just writing to the card", true);
 
+        // `--watch` writes narration.log before the loop reserves the run, so the reservation
+        // has to know that file is not evidence. It did not, and every watched run failed its
+        // first attempt with `run_id_exists` — found on the first run of Warden against Warden.
+        Path watched2 = newProject(sandbox, "watched-fresh");
+        writeProfiles(home, sandbox, "watched-fresh", 1, 1);
+        Path narration = watched2.resolve(".warden/runs/wb4/narration.log");
+        Files.createDirectories(narration.getParent());
+        Files.writeString(narration, "run   wb4\n");
+        TaskLoop.Outcome watchedFirst = loop(watched2, home, "wb4", new Board());
+        check.that("a run whose narration file already exists still starts", watchedFirst.ok());
+        check.that("and the narration it was following is still there",
+                Files.isRegularFile(narration));
+
+        Path occupied = newProject(sandbox, "occupied");
+        writeProfiles(home, sandbox, "occupied", 1, 1);
+        Path stray = occupied.resolve(".warden/runs/wb5/machine-gate.json");
+        Files.createDirectories(stray.getParent());
+        Files.writeString(stray, "{}");
+        check.rejects("but real evidence in the directory still fences the run",
+                "already contains evidence", () -> loop(occupied, home, "wb5"));
+
         narrationChecks(check, sandbox);
     }
 

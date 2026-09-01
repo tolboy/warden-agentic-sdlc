@@ -142,7 +142,7 @@ public final class OrcaWorkspace implements Workspace {
                     "terminal", "create",
                     "--worktree", selector,
                     "--title", "warden " + runId,
-                    "--command", follow(narration)));
+                    "--command", follow(narration, runId)));
             if (opened.ok()) {
                 this.runId = runId;
                 this.terminal = handleOf(opened.result());
@@ -153,21 +153,45 @@ public final class OrcaWorkspace implements Workspace {
     }
 
     /**
-     * Follow the narration, and leave a shell behind when the following stops.
+     * A command line with no quotes in it, and a script beside the narration that has them.
      *
-     * `-NoExit` and the `exec` are the point. A tab that dies the moment you interrupt the tail
-     * leaves the operator reading the approve command in a window they then have to close and
-     * replace with another one, in the right directory, typed from memory. The command they
-     * need is on the screen; the prompt to type it into should be underneath it.
+     * The first version put the whole thing on the command line —
+     * {@code powershell -NoExit -Command "Get-Content -LiteralPath '...' -Wait"} — and Orca
+     * answered {@code Unknown command: terminal create -LiteralPath '...' -Wait -Tail 200}.
+     * The argument had been torn apart at the first double quote, which is precisely the
+     * Windows argv defect this codebase already documents and guards against for vendor
+     * prompts: the JVM wraps an argument containing a space but does not escape a quote inside
+     * it. Writing the guard and then walking into it one class over is worth recording.
+     *
+     * So nothing quoted goes on the command line. The path lives inside a script file, where
+     * quoting is somebody else's problem, and the terminal is pointed at that script by a
+     * repository-relative path — no absolute path, no spaces, nothing to escape.
+     *
+     * `-NoExit` and the trailing `exec` are the other half. A tab that dies the moment the
+     * tail is interrupted leaves the operator reading the approve command in a window they
+     * then have to close and replace with another one, in the right directory, typed from
+     * memory. The command they need is on the screen; the prompt should be underneath it.
      */
-    private static String follow(Path narration) {
+    private String follow(Path narration, String runId) throws java.io.IOException {
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        String name = windows ? "follow.ps1" : "follow.sh";
+        Path script = narration.getParent().resolve(name);
         String path = narration.toAbsolutePath().toString();
-        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
-            return "powershell -NoLogo -NoProfile -NoExit -Command \"Get-Content -LiteralPath '"
-                    + path.replace("'", "''") + "' -Wait -Tail 200\"";
+        if (windows) {
+            Files.writeString(script, "Get-Content -LiteralPath '"
+                    + path.replace("'", "''") + "' -Wait -Tail 200\r\n");
+        } else {
+            Files.writeString(script, "#!/bin/sh\ntail -n 200 -f '"
+                    + path.replace("'", "'\\''") + "'\nexec ${SHELL:-sh}\n");
         }
-        String quoted = "'" + path.replace("'", "'\\''") + "'";
-        return "sh -c 'tail -n 200 -f " + quoted + "; exec ${SHELL:-sh}'";
+        String relative = ".warden/runs/" + runId + "/" + name;
+        // `-ExecutionPolicy Bypass` because the default policy refuses to load a .ps1 at all,
+        // and the first window this opened said so instead of showing the run. It applies to
+        // this one process, and the script is three lines Warden wrote a moment ago into the
+        // run's own directory.
+        return windows
+                ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File " + relative
+                : "sh " + relative;
     }
 
     private void set(List<String> fields) {

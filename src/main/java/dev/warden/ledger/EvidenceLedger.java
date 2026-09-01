@@ -45,14 +45,43 @@ public final class EvidenceLedger {
         } catch (java.nio.file.FileAlreadyExistsException duplicate) {
             throw new RunExistsException("run id already reserved: " + runDirectory.getFileName(), duplicate);
         }
+        // The narration is not evidence, and this is the check that has to know it. `--watch`
+        // opens a window following `narration.log` before the loop starts, which means the file
+        // exists before the reservation does — and every watched run then failed its first
+        // attempt with `run_id_exists`. Found by running Warden against Warden, on the first
+        // dogfood run, which is the only place it could have been found: no test exercises the
+        // flag through `main`, and the file is created by the flag rather than by the loop.
         try (var entries = Files.list(runDirectory)) {
-            if (entries.anyMatch(path -> !path.equals(marker))) {
+            if (entries.anyMatch(path -> !path.equals(marker) && !isNarration(path))) {
                 Files.deleteIfExists(marker);
                 throw new RunExistsException("run directory already contains evidence: "
                         + runDirectory.getFileName(), null);
             }
         }
         return marker;
+    }
+
+    /**
+     * The one file in a run directory that a run may find already there.
+     *
+     * It holds the terminal narration, which every comment in this codebase describes as not
+     * being evidence: each line restates something the ledger already has. A reservation that
+     * counted it would make the two statements contradict each other, and it did.
+     */
+    public static final String NARRATION = "narration.log";
+
+    /**
+     * The files a run may find already in its own directory, all of them belonging to `--watch`.
+     *
+     * The narration and the tiny script a terminal follows it with are written before the loop
+     * starts, because the window has to exist before there is anything to show in it. None of
+     * them is evidence, so none of them may make a fresh run look like a used one.
+     */
+    private static final java.util.Set<String> WATCH_FILES =
+            java.util.Set.of(NARRATION, "follow.ps1", "follow.sh");
+
+    private static boolean isNarration(java.nio.file.Path path) {
+        return WATCH_FILES.contains(path.getFileName().toString());
     }
 
     @SuppressWarnings("serial")
