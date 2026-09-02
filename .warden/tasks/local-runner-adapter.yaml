@@ -1,0 +1,26 @@
+version: 1
+id: local-runner-adapter
+goal: "Add the `local` runner: a role executor that talks to a local model over HTTP instead of starting a vendor CLI.\n\n`runner: local` has been a named intention since the beginning. `Executors.forProfile` maps it to `UnimplementedRunner`, which answers `role_runner_unimplemented`. The three runners differ by where the model's process lives: `direct` starts a vendor CLI on this machine, `orca` starts a supervised worker in an Orca worktree, and `local` should reach a model already running here with no subscription behind it — which today means an HTTP endpoint, not a command.\n\nSCOPE OF THIS TASK. Build the adapter and its transport only. Do not attempt evidence parity with DirectCliExecutor in this task: no fingerprint checking, no artifact schema validation, no ledger fields. Those are a separate task and adding them here will make this one too large to review.\n\nWhat to build.\n\n1. `Profile` gains two optional fields, parsed and validated like the existing ones:\n   - `endpoint` — an absolute http:// or https:// URL. Required when `runner: local`; a profile with `runner: local` and no endpoint is a configuration error naming the field, refused when the profile is parsed, exactly as an unknown runner already is.\n   - `api_key_env` — the name of an environment variable holding a bearer token. Optional. Warden reads the variable at dispatch; it never stores a token and never writes one to evidence.\n\n2. `dev.warden.execution.LocalHttpExecutor implements RoleExecutor`, using `java.net.http.HttpClient`. No new dependency: this project builds with javac alone and that must stay true.\n\n   It POSTs to the endpoint an OpenAI-compatible chat completion body — `{\"model\": ..., \"messages\": [{\"role\":\"user\",\"content\": <the rendered prompt>}], \"stream\": false}` — and reads the assistant's text out of `choices[0].message.content`. Ollama, LM Studio and llama.cpp all serve this shape at `/v1/chat/completions`. Use the existing `dev.warden.json.Json` to build and parse; do not hand-roll string concatenation for the request body, because a prompt containing a quote or a newline must survive.\n\n   `model` comes from the profile's existing `model` field.\n\n3. Wire it into `Executors.forProfile` so `runner: local` returns it.\n\nFailure codes, each distinct because each sends an operator somewhere different:\n   - `role_local_endpoint_unreachable` — the connection failed or timed out. Name the endpoint.\n   - `role_local_http_error` — the server answered with a non-2xx status. Name the status and the first 500 characters of the body.\n   - `role_local_response_unreadable` — 2xx, but the body is not JSON or has no `choices[0].message.content`. Name what was found instead.\n   The profile's `limits.wall_clock_minutes` bounds the request, the way it bounds a CLI today.\n\n4. Tests, in a new suite registered in TestMain. Use `com.sun.net.httpserver.HttpServer` from the JDK to stand up a stub endpoint on a free port — no network, no Ollama, no dependency. Cover: a well-formed answer is returned; a 500 gives `role_local_http_error` with the status in it; a body without `choices` gives `role_local_response_unreadable`; a refused connection gives `role_local_endpoint_unreachable`; and a prompt containing a double quote and a newline arrives at the server intact, because that is the defect class this project has already been bitten by twice.\n\nDo not change any existing executor, and do not change what any existing failure code means. Do not edit documentation beyond one line in the `runner:` description in spec/SPEC.md.\n\nThe target this will eventually be pointed at, for context only — do not depend on it in tests: an Ollama container on http://127.0.0.1:11434 serving `gemma4:e4b`."
+non_goals:
+  - "Do not edit .warden contract files or acceptance commands to make checks pass"
+risk: medium
+scope: platform
+authority:
+  workspace_write: true
+  network: false
+  land: false
+# Sliced deliberately. The previous Warden-on-Warden run gave the implementer two features
+# plus tests, took 56 minutes and came back with three defects. One feature, one round.
+budgets:
+  max_role_runs: 6
+  max_cost_usd: 6.0
+# Raised from 1 after run local-1. Slicing cut the findings per round from three to one,
+# but each round surfaced a *new*, deeper one — a leaked token, then a visual verdict from a
+# model that never saw pixels. One round could never close that; the question is whether
+# three can.
+max_fix_attempts: 3
+timeout_minutes: 45
+
+visual_qa:
+  required: false
+  scenarios: []

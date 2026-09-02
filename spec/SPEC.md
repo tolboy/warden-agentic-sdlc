@@ -168,8 +168,9 @@ runner: direct    # direct (default) | orca | local
 `runner` selects the adapter, not the model. `direct` runs the vendor's CLI in this process.
 `orca` starts a supervised worker inside an **already existing** Orca worktree: Warden creates
 no worktrees. Completion is accepted only from `worker_done` or dispatch settlement — terminal
-text is not evidence. `local` is a named intention; the resolver answers
-`runner_unimplemented` until the adapter exists. An unknown runner is rejected when the profile
+text is not evidence. `local` POSTs an OpenAI-compatible chat completion to the profile's
+`endpoint` and reads `choices[0].message.content`. A local profile cannot declare
+`capabilities.vision`: the adapter sends only text. An unknown runner is rejected when the profile
 is parsed.
 
 ### `~/.warden/policy.yaml`

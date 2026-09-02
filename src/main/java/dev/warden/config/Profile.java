@@ -2,6 +2,7 @@ package dev.warden.config;
 
 import dev.warden.yaml.Yaml;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Set;
 
@@ -33,6 +34,8 @@ public record Profile(
         String attachmentFlag,
         VisionCapability vision,
         String runner,
+        String endpoint,
+        String apiKeyEnv,
         String verificationProbe,
         List<String> verificationChecks,
         boolean verified) {
@@ -40,7 +43,8 @@ public record Profile(
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
-            "prompt_delivery", "attachments", "capabilities", "runner", "verification", "notes");
+            "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
+            "verification", "notes");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
     private static final Set<String> QUOTA = Set.of("signatures");
@@ -65,8 +69,9 @@ public record Profile(
     /**
      * How the role is launched. {@code direct} is a vendor CLI in this process. {@code orca}
      * is a supervised worker inside the current Orca worktree — Warden never creates that
-     * worktree. {@code local} is a named intent for a future in-process runner and is refused
-     * at resolve time until it exists.
+     * worktree. {@code local} POSTs an OpenAI-compatible chat completion to {@code endpoint};
+     * {@code api_key_env} names an environment variable holding a bearer token, read at
+     * dispatch and never written to evidence.
      */
     public static final Set<String> RUNNERS = Set.of("direct", "orca", "local");
     public static final Set<String> VISION_DELIVERIES = Set.of("cli_attachment", "workspace_file");
@@ -127,6 +132,15 @@ public record Profile(
         Values attachments = root.optMap("attachments").rejectUnknownKeys(ATTACHMENTS);
         String attachmentFlag = attachments.optString("flag", null);
         String runner = root.requireEnum("runner", RUNNERS, "direct");
+        String endpoint = root.optString("endpoint", null);
+        String apiKeyEnv = root.optString("api_key_env", null);
+        if ("local".equals(runner) && endpoint == null) {
+            root.collector().add("endpoint is required when runner is local");
+        }
+        if (endpoint != null && !absoluteHttpUrl(endpoint)) {
+            root.collector().add("endpoint must be an absolute http:// or https:// URL, got '"
+                    + endpoint + "'");
+        }
 
         Values capabilities = root.optMap("capabilities").rejectUnknownKeys(CAPABILITIES);
         boolean declaresVision = capabilities.has("vision");
@@ -169,6 +183,12 @@ public record Profile(
         if (vision != null && "orca".equals(runner) && !"workspace_file".equals(vision.delivery())) {
             root.collector().add("runner: orca supports vision only with delivery: workspace_file");
         }
+        // The local adapter POSTs text. A vision claim would let visual QA pass without
+        // pixels ever leaving the workspace, so refuse it here rather than at dispatch.
+        if ("local".equals(runner) && declaresVision) {
+            root.collector().add("runner: local does not support capabilities.vision; "
+                    + "the HTTP adapter sends only text");
+        }
 
         Values verification = root.optMap("verification").rejectUnknownKeys(VERIFICATION);
         boolean verified = verification.has("verified_on");
@@ -181,6 +201,26 @@ public record Profile(
         root.throwIfAny();
         return new Profile(name, role, vendor, model, command, args, readOnly, wallClock,
                 promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
-                promptDelivery, attachmentFlag, vision, runner, probe, whatToCheck, verified);
+                promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                probe, whatToCheck, verified);
+    }
+
+    /**
+     * {@code http://} or {@code https://} with a host. A path-only value or another scheme
+     * would send the POST somewhere other than an HTTP server, and fail later as an
+     * unreachable endpoint — which is the wrong code for a profile the operator can fix now.
+     */
+    private static boolean absoluteHttpUrl(String value) {
+        try {
+            URI uri = URI.create(value);
+            String scheme = uri.getScheme();
+            return uri.isAbsolute()
+                    && scheme != null
+                    && (scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))
+                    && uri.getHost() != null
+                    && !uri.getHost().isBlank();
+        } catch (IllegalArgumentException bad) {
+            return false;
+        }
     }
 }
