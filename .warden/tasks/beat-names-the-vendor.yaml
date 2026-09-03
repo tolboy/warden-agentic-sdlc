@@ -1,0 +1,22 @@
+version: 1
+id: beat-names-the-vendor
+goal: "Say which vendor is filling the role while a stage is still running.\n\nThe loop now beats once a minute while a stage runs (dev.warden.run.Heartbeat). The beat says `implementer still working`: the role, and nothing about who is inside it. On a roster where the implementer can be grok-implement or codex-implement and the reviewer can be codex-review or claude-review, the role name is the one thing the operator already knew. What they cannot see is which profile and vendor is spending the minutes.\n\nWHAT TO BUILD. A beat, a stage-start card note, and the `--watch` tab title that name the resolved profile and vendor as well as the role, from the first beat of a role stage onwards:\n\n  narration   ... 12m00s   implementer (grok-implement / grok) still working\n  card        [1/5] implement . implementer (grok-implement / grok) . running . 12m00s\n  tab         warden <run-id> . implementer (grok-implement) 12m00s\n\n(the separator on the card and the tab stays whatever those lines use today; only the bracketed pair is new)\n\nA stage that runs no vendor keeps exactly what it says today. `gates` and `browser harness` have no profile, and must not grow an empty pair of brackets.\n\nTHE TRAP, AND WHY THIS IS NOT A ONE-LINE CHANGE. The profile is chosen inside RoleRunner, by RoleResolver, after TaskLoop has already dispatched the stage. Do not resolve it a second time in TaskLoop to find out the name: resolution advances rotation state and consults the run's exclusion list, so asking twice would rotate twice and could name a profile that was not the one dispatched. The name has to come out of the resolution that actually happened, published to whoever is beating as soon as it is known.\n\nA role whose verdict was carried over from an earlier run dispatches nobody. It has no profile to name, and its beat must not invent one.\n\nCONSTRAINTS.\n- Nothing in this change may become evidence. The ledger already records the profile and the vendor per attempt; this is a retelling for a person, so it keeps the existing rules: a beat that cannot be written is dropped, a beat that throws cannot fail the run, and a dry run still has no beats.\n- Do not change when a beat fires, how often it fires, or the ordering guard that refuses a beat arriving after the run has stopped.\n- Do not change any failure code, any ledger field, or any report shape.\n- The narration line stays ASCII. It goes to a Windows console as well as to a UTF-8 file.\n\nTESTS. Extend the existing suites rather than adding a runner: dev.warden.HeartbeatTest owns the beat, dev.warden.TaskLoopTest owns what the loop pushes at a board. Cover a role stage naming its resolved profile and vendor, a machine-gates stage naming neither and growing no brackets, and a board that throws on the beat still not failing the run."
+non_goals:
+  - "Do not edit .warden contract files or acceptance commands to make checks pass"
+  - "Do not change the heartbeat interval, the ordering guard, or any failure code"
+risk: medium
+scope: platform
+authority:
+  workspace_write: true
+  network: false
+  land: false
+# One plumbing change plus tests. The slices that came back clean before were this size.
+budgets:
+  max_role_runs: 4
+  max_cost_usd: 3.0
+max_fix_attempts: 2
+timeout_minutes: 45
+
+visual_qa:
+  required: false
+  scenarios: []
