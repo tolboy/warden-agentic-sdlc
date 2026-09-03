@@ -74,6 +74,10 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `warden land` no longer repeats the subject in the commit message it drafts, and no
+  longer claims machine gates, an independent review and the browser harness all passed
+  when they did not run. The sentence is built from the run's own `stages` and
+  `skipped_stages`; a run that skipped nothing grows no empty skip clause.
 - The candidate fingerprint no longer changes when the accepted work is committed.
   `git diff --raw` reports a zeroed destination blob while a change sits in the working tree
   and a real one once it does not, so `warden land --commit` invalidated the acceptance it had

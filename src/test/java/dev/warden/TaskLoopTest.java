@@ -56,7 +56,7 @@ public final class TaskLoopTest implements Suite {
                     evidenceBeforeDuplicate,
                     Files.readString(clean.resolve(".warden/runs/r1/evidence.jsonl")));
             reportChecks(check, clean, "r1");
-            landChecks(check, clean, "r1");
+            landChecks(check, sandbox, home, clean, "r1");
 
             // A failing gate sends the work back with the machine output attached.
             Path fixable = newProject(sandbox, "fixable");
@@ -208,7 +208,8 @@ public final class TaskLoopTest implements Suite {
      * Warden's own evidence riding along in the commit.
      */
     @SuppressWarnings("unchecked")
-    private void landChecks(Check check, Path project, String runId) throws Exception {
+    private void landChecks(Check check, Path sandbox, Path home, Path project, String runId)
+            throws Exception {
         dev.warden.run.LandCommand land = new dev.warden.run.LandCommand(new ProcessRunner());
         dev.warden.run.LandCommand.Options plan = new dev.warden.run.LandCommand.Options(
                 runId, false, false, false, null, null, null, null, null);
@@ -237,6 +238,13 @@ public final class TaskLoopTest implements Suite {
         check.eq("and it says outright that it merges nothing",
                 Boolean.FALSE, planned.report().get("lands"));
 
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(project, runId);
+        check.that("the accepted run skipped a browser stage",
+                listOf(report.get("skipped_stages")).stream().anyMatch(item ->
+                        item instanceof Map<?, ?> row && "browser".equals(row.get("stage"))));
+        String message = String.valueOf(planned.report().get("commit_message"));
+        landMessageTellsTheTruth(check, report, message, planned.report());
+
         // The acceptance is of one tree, not of a task in general.
         String accepted = Files.readString(project.resolve("src/result.txt"));
         Files.writeString(project.resolve("src/result.txt"), accepted + "changed after the yes\n");
@@ -260,6 +268,99 @@ public final class TaskLoopTest implements Suite {
                 Duration.ofSeconds(60));
         check.eq("the commit holds the source file", "src/result.txt", show.stdout().strip());
         check.that("and none of Warden's own evidence", !show.stdout().contains(".warden"));
+
+        // A declared chain with no conditional stages: the message must not grow an empty
+        // clause about skipping just because the skipped list is present and empty.
+        Path noSkip = newProject(sandbox, "land-no-skip");
+        writeProfiles(home, sandbox, "land-no-skip", 1, 1);
+        workflowPolicy(home, """
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                """);
+        TaskLoop.Outcome noSkipRun = loop(noSkip, home, "ln1");
+        check.that("a chain with nothing to skip still finishes", noSkipRun.ok());
+        dev.warden.approval.ApprovalStore noSkipStore = new dev.warden.approval.ApprovalStore(noSkip);
+        dev.warden.approval.HumanDecision noSkipPending = noSkipStore.read("ln1");
+        noSkipStore.resolve("ln1", noSkipPending.updatedAt().toString(), "accept", "tester", "");
+        new ProcessRunner().run(List.of("git", "checkout", "-q", "-b", "land-no-skip"), noSkip,
+                Duration.ofSeconds(60));
+        dev.warden.run.LandCommand.Outcome noSkipPlanned = land.run(
+                new dev.warden.run.LandCommand.Options(
+                        "ln1", false, false, false, null, null, null, null, null), noSkip);
+        check.that("and its land still plans", noSkipPlanned.ok());
+        Map<String, Object> noSkipReport = new dev.warden.ledger.RunReport().of(noSkip, "ln1");
+        check.that("and that chain really skipped nothing",
+                listOf(noSkipReport.get("skipped_stages")).isEmpty());
+        landMessageTellsTheTruth(check, noSkipReport,
+                String.valueOf(noSkipPlanned.report().get("commit_message")),
+                noSkipPlanned.report());
+    }
+
+    /**
+     * The commit message is what a later reader has. It must not repeat its subject, must
+     * not name a check the run never performed, and must keep the evidence pointer and
+     * {@code Ran-by:} lines the rest of the land step already documented.
+     */
+    @SuppressWarnings("unchecked")
+    private void landMessageTellsTheTruth(Check check, Map<String, Object> report, String message,
+                                          Map<String, Object> landReport) {
+        String goal = String.valueOf(report.get("goal"));
+        int newline = goal.indexOf('\n');
+        String subject = (newline < 0 ? goal : goal.substring(0, newline)).strip();
+        check.eq("the subject appears once and not twice", 1, countExactLines(message, subject));
+        check.eq("the pull request title is that subject",
+                subject, landReport.get("pull_request_title"));
+        check.contains("the evidence directory is pointed at", message,
+                "the evidence is in .warden/runs/" + report.get("run_id") + ".");
+        for (Object item : listOf(report.get("vendors"))) {
+            if (!(item instanceof Map<?, ?> row)) continue;
+            check.contains("Ran-by lines survive unchanged", message,
+                    "Ran-by: " + row.get("vendor") + "/" + row.get("model"));
+        }
+
+        List<Map<String, Object>> skipped = new java.util.ArrayList<>();
+        for (Object item : listOf(report.get("skipped_stages"))) {
+            if (item instanceof Map<?, ?> row) skipped.add((Map<String, Object>) row);
+        }
+        if (skipped.isEmpty()) {
+            check.that("a run with nothing skipped grows no empty skip clause",
+                    !message.toLowerCase().contains("skipped"));
+        } else {
+            check.contains("a run with a skipped stage says so", message.toLowerCase(), "skipped");
+            String passedClause = passedClause(message);
+            for (Map<String, Object> row : skipped) {
+                String stage = String.valueOf(row.get("stage"));
+                check.contains("and names the skipped stage", message, stage);
+                check.that("and does not claim that stage passed",
+                        !passedClause.contains(stage));
+                if (row.get("reason") != null) {
+                    check.contains("with the reason the run recorded", message,
+                            String.valueOf(row.get("reason")));
+                }
+            }
+            check.that("and does not credit the browser harness that never ran",
+                    !message.contains("browser harness") && !message.contains("all passed"));
+        }
+    }
+
+    /** The clause that names what passed, or empty when the message never says so. */
+    private static String passedClause(String message) {
+        for (String clause : message.split("\\. ")) {
+            if (clause.contains("passed") && !clause.toLowerCase().contains("skipped")) return clause;
+        }
+        return "";
+    }
+
+    private static int countExactLines(String text, String line) {
+        int count = 0;
+        for (String row : text.split("\\R", -1)) {
+            if (row.equals(line)) count++;
+        }
+        return count;
+    }
+
+    private static List<Object> listOf(Object value) {
+        return value instanceof List<?> rows ? List.copyOf(rows) : List.of();
     }
 
     /**

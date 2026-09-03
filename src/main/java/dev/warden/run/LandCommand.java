@@ -263,17 +263,64 @@ public final class LandCommand {
         return List.copyOf(paths);
     }
 
+    /**
+     * Subject once. Every later claim is answered by {@code stages} and
+     * {@code skipped_stages}: a commit message outlives the run directory, so it
+     * must not name a check nobody performed.
+     */
     private static String commitMessage(Map<String, Object> report) {
         String goal = String.valueOf(report.getOrDefault("goal", report.get("task_id")));
         StringBuilder message = new StringBuilder(firstLine(goal)).append("\n\n");
-        message.append(goal).append("\n\n");
-        message.append("Machine gates, an independent review and the browser harness all passed;\n");
+        String rest = afterFirstLine(goal);
+        if (!rest.isEmpty()) message.append(rest).append("\n\n");
+        String checks = checksFrom(report);
+        if (!checks.isEmpty()) message.append(checks);
         message.append("the evidence is in .warden/runs/").append(report.get("run_id")).append(".\n");
         for (Object item : list(report.get("vendors"))) {
             if (!(item instanceof Map<?, ?> row)) continue;
             message.append("\nRan-by: ").append(row.get("vendor")).append('/').append(row.get("model"));
         }
         return message.toString().strip() + "\n";
+    }
+
+    /**
+     * What ran and passed, and what was skipped, in the report's own names.
+     * Nothing skipped produces no skip clause.
+     */
+    private static String checksFrom(Map<String, Object> report) {
+        LinkedHashMap<String, Boolean> lastOk = new LinkedHashMap<>();
+        for (Object item : list(report.get("stages"))) {
+            if (!(item instanceof Map<?, ?> row)) continue;
+            String step = textOrNull(row.get("step"));
+            if (step == null) continue;
+            lastOk.put(step, Boolean.TRUE.equals(row.get("ok")));
+        }
+        List<String> passed = new ArrayList<>();
+        for (Map.Entry<String, Boolean> entry : lastOk.entrySet()) {
+            if (entry.getValue()) passed.add(entry.getKey());
+        }
+
+        LinkedHashMap<String, List<String>> skippedByReason = new LinkedHashMap<>();
+        for (Object item : list(report.get("skipped_stages"))) {
+            if (!(item instanceof Map<?, ?> row)) continue;
+            String stage = textOrNull(row.get("stage"));
+            if (stage == null) continue;
+            String reason = textOrNull(row.get("reason"));
+            List<String> names = skippedByReason.computeIfAbsent(
+                    reason == null ? "" : reason, ignored -> new ArrayList<>());
+            if (!names.contains(stage)) names.add(stage);
+        }
+
+        List<String> clauses = new ArrayList<>();
+        if (!passed.isEmpty()) clauses.add(joinEnglish(passed) + " passed");
+        for (Map.Entry<String, List<String>> entry : skippedByReason.entrySet()) {
+            List<String> names = entry.getValue();
+            String clause = joinEnglish(names) + (names.size() == 1 ? " was skipped" : " were skipped");
+            if (!entry.getKey().isEmpty()) clause += " (" + entry.getKey() + ")";
+            clauses.add(clause);
+        }
+        if (clauses.isEmpty()) return "";
+        return String.join(". ", clauses) + ";\n";
     }
 
     /**
@@ -482,6 +529,30 @@ public final class LandCommand {
         int newline = text.indexOf('\n');
         String line = newline < 0 ? text : text.substring(0, newline);
         return line.strip();
+    }
+
+    /** The goal after its subject line, or empty when the goal is a single line. */
+    private static String afterFirstLine(String text) {
+        int newline = text.indexOf('\n');
+        return newline < 0 ? "" : text.substring(newline + 1).strip();
+    }
+
+    private static String textOrNull(Object value) {
+        if (value == null) return null;
+        String text = String.valueOf(value).strip();
+        return text.isEmpty() ? null : text;
+    }
+
+    private static String joinEnglish(List<String> items) {
+        if (items.isEmpty()) return "";
+        if (items.size() == 1) return items.get(0);
+        if (items.size() == 2) return items.get(0) + " and " + items.get(1);
+        StringBuilder out = new StringBuilder();
+        for (int index = 0; index < items.size(); index++) {
+            if (index > 0) out.append(index == items.size() - 1 ? " and " : ", ");
+            out.append(items.get(index));
+        }
+        return out.toString();
     }
 
     private static List<Object> list(Object value) {
