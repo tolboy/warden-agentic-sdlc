@@ -178,8 +178,11 @@ public final class Main {
             row.put("profile", profile.name());
             row.put("role", profile.role());
             row.put("vendor", profile.vendor());
+            // Null for `runner: local`, which starts no process. The endpoint is what an
+            // operator would have looked at the command for, so it is listed beside it.
             row.put("command", profile.command());
             row.put("runner", profile.runner());
+            if ("local".equals(profile.runner())) row.put("endpoint", profile.endpoint());
             row.put("read_only", profile.readOnly());
             row.put("verified", profile.verified());
             row.put("eligible", profile.verified());

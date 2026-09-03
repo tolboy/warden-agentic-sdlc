@@ -447,7 +447,7 @@ resolver refuses these rather than pretending.
 | Greenfield: `--init-repo`, contract with no invented check | ✅ | ✅ | |
 | `warden land`: commit, push, open a request | ✅ | — | Merges nothing; the forge is never guessed |
 | Orca adapter as a role runner (`runner: orca`) | ✅ | ❌ | Written to Orca's contract; full live lifecycle not yet proven |
-| Local runner (`runner: local`) | ❌ | ❌ | Named only; the resolver refuses `runner_unimplemented` |
+| Local runner (`runner: local`) | ✅ | ❌ | Reaches a model already serving here over the OpenAI chat-completion shape, and holds it to the same artifact, schema, token and read-only evidence as a CLI vendor. No dated smoke row yet |
 | Per-vendor tool allowlists | ❌ | ❌ | A profile's args are whatever you wrote — see [`SECURITY.md`](SECURITY.md) |
 | Visual QA pixel-diff and baselines | ❌ | ❌ | The harness asserts; it does not compare images |
 

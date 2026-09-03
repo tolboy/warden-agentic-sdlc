@@ -179,6 +179,19 @@ public final class LocalHttpExecutor implements RoleExecutor {
         evidence.put("runner", "local");
         evidence.put("endpoint", endpoint);
 
+        // Resolved before anything is sent. A profile that names `api_key_env` has declared a
+        // secret channel; posting anyway with no Authorization header would answer a
+        // configuration fault as an HTTP 401, and send the operator to read server logs
+        // instead of exporting the variable. Same family as role_prompt_undeliverable.
+        String token;
+        try {
+            token = bearerToken(profile);
+        } catch (MissingApiKeyException missing) {
+            evidence.put("api_key_env", missing.variable());
+            return fail("role_local_api_key_missing", elapsed(started), "", evidence,
+                    missing.getMessage(), null);
+        }
+
         String prompt = Files.readString(request.promptFile(), StandardCharsets.UTF_8);
         String body = chatCompletionBody(profile.model(), prompt);
 
@@ -199,7 +212,6 @@ public final class LocalHttpExecutor implements RoleExecutor {
                     .timeout(limit)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
-            String token = bearerToken(profile);
             if (token != null) builder.header("Authorization", "Bearer " + token);
 
             HttpResponse<String> response;
@@ -302,12 +314,32 @@ public final class LocalHttpExecutor implements RoleExecutor {
      * Reads {@code api_key_env} at dispatch. The value is used as a request header and then
      * dropped: it must not appear in evidence, the ledger, or the raw output we keep, even
      * when the endpoint reflects the Authorization header it received.
+     *
+     * There are two honest configurations, and this returns one or refuses: no
+     * {@code api_key_env} means no auth on purpose; {@code api_key_env} naming a variable
+     * that holds a value means a bearer header. A name with nothing behind it is neither,
+     * and it fails closed rather than quietly downgrading to an unauthenticated POST.
      */
-    private String bearerToken(Profile profile) {
+    private String bearerToken(Profile profile) throws MissingApiKeyException {
         if (profile.apiKeyEnv() == null) return null;
         String token = environment.apply(profile.apiKeyEnv());
-        if (token == null || token.isBlank()) return null;
+        if (token == null || token.isBlank()) throw new MissingApiKeyException(profile);
         return token;
+    }
+
+    /** Names the variable, never a value — there is no value, and there never will be one here. */
+    private static final class MissingApiKeyException extends Exception {
+        private static final long serialVersionUID = 1L;
+        private final String variable;
+
+        MissingApiKeyException(Profile profile) {
+            super("profile '" + profile.name() + "' declares api_key_env " + profile.apiKeyEnv()
+                    + ", and that environment variable is unset or blank; export it, or drop "
+                    + "api_key_env if the endpoint needs no authorization");
+            this.variable = profile.apiKeyEnv();
+        }
+
+        String variable() { return variable; }
     }
 
     private static String chatCompletionBody(String model, String prompt) {

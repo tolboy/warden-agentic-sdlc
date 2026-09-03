@@ -15,6 +15,9 @@ import java.util.Set;
  * `readOnly` is a declaration of intent, never a guarantee. The guarantee comes from the
  * worktree fingerprint taken around the run. Two vendor permission flags were tried and both
  * silently ended the run at the first tool call; a flag is a claim, a check is a fact.
+ *
+ * `command` is the executable for the runners that start one, and is null for `runner: local`,
+ * which starts nothing. Anything that reaches for it must know which runner it is holding.
  */
 public record Profile(
         String name,
@@ -98,7 +101,16 @@ public record Profile(
         String role = root.requireEnum("role", ROLES, null);
         if (role == null) root.collector().add("role is required and must be one of " + ROLES);
         String vendor = root.requireString("vendor");
-        String command = root.requireString("command");
+
+        // Read before `command`, because it decides whether there is a command at all.
+        String runner = root.requireEnum("runner", RUNNERS, "direct");
+
+        // `local` starts no process, so there is no executable to name. Requiring one would
+        // make every local profile invent a dummy — and the moment the `runner` line is
+        // deleted or misspelt, Warden would try to spawn that dummy as a Direct CLI vendor.
+        String command = "local".equals(runner)
+                ? root.optString("command", null)
+                : root.requireString("command");
         List<String> args = root.optStringList("args", List.of());
         String model = root.optString("model", null);
 
@@ -131,7 +143,6 @@ public record Profile(
         // with its own read tool, so the field is optional rather than required.
         Values attachments = root.optMap("attachments").rejectUnknownKeys(ATTACHMENTS);
         String attachmentFlag = attachments.optString("flag", null);
-        String runner = root.requireEnum("runner", RUNNERS, "direct");
         String endpoint = root.optString("endpoint", null);
         String apiKeyEnv = root.optString("api_key_env", null);
         if ("local".equals(runner) && endpoint == null) {

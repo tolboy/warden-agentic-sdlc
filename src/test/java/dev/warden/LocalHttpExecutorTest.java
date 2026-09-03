@@ -54,6 +54,9 @@ public final class LocalHttpExecutorTest implements Suite {
         blockedStatusIsNotAPass(check, promptFile);
         rawTranscriptIsRedactedOnDisk(check, scratch);
         readOnlyIsCheckedForLocalRolesToo(check, scratch);
+        schemaIsEnforcedOnLocalAnswersToo(check, scratch);
+        reportedUsageBecomesTokensAndNothingBecomesCost(check, promptFile);
+        declaredApiKeyWithNoValueFailsClosed(check, promptFile);
         check.that("runner local is the HTTP adapter, not a CLI",
                 Executors.forProfile(localProfile("http://127.0.0.1:9/v1/chat/completions"),
                         null, null) instanceof LocalHttpExecutor);
@@ -141,6 +144,35 @@ public final class LocalHttpExecutorTest implements Suite {
                         runner: local
                         endpoint: https://127.0.0.1:11434/v1/chat/completions
                         """, "p.yaml").endpoint());
+
+        // A local profile that had to invent a command would become a Direct CLI dispatch of
+        // that invention the moment the `runner` line is deleted or misspelt.
+        Profile commandless = Profile.parse("""
+                version: 1
+                profile: local-gemma
+                role: reviewer
+                vendor: ollama
+                model: gemma4:e4b
+                runner: local
+                endpoint: http://127.0.0.1:11434/v1/chat/completions
+                """, "local-gemma.yaml");
+        check.that("a local profile needs no command", commandless.command() == null);
+        check.rejects("and every other runner still does", "command",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: grok
+                        """, "p.yaml"));
+        check.rejects("including one that only looks local", "command",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: ollama
+                        runner: direct
+                        endpoint: http://127.0.0.1:11434/v1/chat/completions
+                        """, "p.yaml"));
     }
 
     private static void wellFormedAnswer(Check check, Path promptFile) throws Exception {
@@ -282,6 +314,106 @@ public final class LocalHttpExecutorTest implements Suite {
             check.that("a local role that edited the tree fails", !result.ok());
             check.eq("and says exactly why", "role_violated_read_only", result.code());
             check.that("its artifact is discarded whatever it claimed", result.artifact() == null);
+        }
+    }
+
+    /**
+     * The parity claim that had no test on this adapter: every earlier case passes
+     * {@code schemaFile: null}, so {@code schemaErrors} returned empty before it read
+     * anything. It matters most here — the first live run was answered by a 4B model that
+     * copied `type`, `required` and `properties` out of the schema it had been handed, and
+     * the only thing standing between that habit and a passed stage is this check.
+     */
+    private static void schemaIsEnforcedOnLocalAnswersToo(Check check, Path scratch) throws Exception {
+        Path schemaFile = scratch.resolve("reviewer.schema.json");
+        Files.writeString(schemaFile, Json.write(Map.of(
+                "type", "object",
+                "required", List.of("verdict"),
+                "properties", Map.of("verdict", Map.of("enum", List.of("pass", "fail"))))),
+                StandardCharsets.UTF_8);
+        Path promptFile = scratch.resolve("schema-prompt.md");
+        Files.writeString(promptFile, "review this change", StandardCharsets.UTF_8);
+
+        // Well-formed JSON, every required field present: nothing before the schema check
+        // has any reason to stop it.
+        String offSchema = Json.write(Map.of(
+                "status", "completed", "verdict", "probably-fine",
+                "summary", "read the diff", "findings", List.of()));
+        try (Stub stub = new Stub(200, completion(offSchema))) {
+            RoleExecutor.Result result = new LocalHttpExecutor().execute(request(
+                    localProfile(stub.url), promptFile, scratch, null, schemaFile));
+            check.that("an artifact the schema rejects is not a pass", !result.ok());
+            check.eq("and it is named as a schema violation",
+                    "role_artifact_schema_violation", result.code());
+            check.contains("the failing field is named rather than counted",
+                    String.valueOf(result.evidence().get("schema_errors")), "verdict");
+            check.that("no artifact is written from an answer that failed the schema",
+                    result.artifact() == null);
+        }
+
+        try (Stub stub = new Stub(200, completion(artifact("pass", "completed")))) {
+            RoleExecutor.Result result = new LocalHttpExecutor().execute(request(
+                    localProfile(stub.url), promptFile, scratch, null, schemaFile));
+            check.that("and the same schema still admits a valid answer", result.ok());
+        }
+    }
+
+    /**
+     * Ollama reports tokens in the OpenAI `usage` shape and reports no price. Both halves are
+     * the claim: the tokens reach evidence, and no cost is invented, so the ledger counts the
+     * call as unpriced instead of as one that was free.
+     */
+    private static void reportedUsageBecomesTokensAndNothingBecomesCost(Check check, Path promptFile)
+            throws Exception {
+        String withUsage = Json.write(Map.of(
+                "choices", List.of(Map.of("message", Map.of(
+                        "content", artifact("pass", "completed")))),
+                "usage", Map.of("prompt_tokens", 2418, "completion_tokens", 1276,
+                        "total_tokens", 3694)));
+        try (Stub stub = new Stub(200, withUsage)) {
+            RoleExecutor.Result result = new LocalHttpExecutor().execute(request(
+                    localProfile(stub.url), promptFile));
+            check.that("a completion carrying usage still passes", result.ok());
+            check.eq("input tokens are the server's prompt_tokens",
+                    Map.of("input", 2418L, "output", 1276L), result.evidence().get("tokens"));
+            check.that("and no cost is invented for a call nobody priced",
+                    !result.evidence().containsKey("cost_usd"));
+        }
+        // A server that reports nothing must not grow a zero-token reading either.
+        try (Stub stub = new Stub(200, completion(artifact("pass", "completed")))) {
+            RoleExecutor.Result result = new LocalHttpExecutor().execute(request(
+                    localProfile(stub.url), promptFile));
+            check.that("a server that reports no usage records no tokens",
+                    !result.evidence().containsKey("tokens"));
+        }
+    }
+
+    /**
+     * The operator configured a secret channel. Sending the request anyway with the header
+     * dropped turns a variable nobody exported into a 401 from the server, and sends them to
+     * read server logs instead of to their own shell.
+     */
+    private static void declaredApiKeyWithNoValueFailsClosed(Check check, Path promptFile)
+            throws Exception {
+        try (Stub stub = new Stub(200, completion(artifact("pass", "completed")))) {
+            LocalHttpExecutor unset = new LocalHttpExecutor(name -> null);
+            RoleExecutor.Result result = unset.execute(request(keyedProfile(stub.url), promptFile));
+            check.that("a declared api_key_env with nothing behind it is not ok", !result.ok());
+            check.eq("and it is a configuration fault with its own name",
+                    "role_local_api_key_missing", result.code());
+            check.eq("the variable is named so the operator can export it",
+                    "LOCAL_WARDEN_KEY", result.evidence().get("api_key_env"));
+            check.that("and nothing was sent to the endpoint", stub.lastBody.isEmpty());
+
+            LocalHttpExecutor blank = new LocalHttpExecutor(name -> "   ");
+            check.eq("a blank variable is the same fault, not a token", "role_local_api_key_missing",
+                    blank.execute(request(keyedProfile(stub.url), promptFile)).code());
+
+            // The other honest configuration: no api_key_env at all is no auth, on purpose.
+            RoleExecutor.Result unauthenticated = new LocalHttpExecutor(name -> null)
+                    .execute(request(localProfile(stub.url), promptFile));
+            check.that("a profile that declares no key still dispatches", unauthenticated.ok());
+            check.eq("with no Authorization header", "", stub.lastAuthorization);
         }
     }
 
@@ -446,13 +578,13 @@ public final class LocalHttpExecutorTest implements Suite {
         }
     }
 
+    /** No `command`: the runner starts nothing, and the whole path must hold without one. */
     private static Profile localProfile(String endpoint) {
         return Profile.parse("""
                 version: 1
                 profile: local-gemma
                 role: reviewer
                 vendor: ollama
-                command: ollama
                 model: gemma4:e4b
                 runner: local
                 endpoint: %s
@@ -483,9 +615,15 @@ public final class LocalHttpExecutorTest implements Suite {
 
     private static RoleExecutor.Request request(Profile profile, Path promptFile,
                                                 Path runDirectory, String diffBaseCommit) {
+        return request(profile, promptFile, runDirectory, diffBaseCommit, null);
+    }
+
+    private static RoleExecutor.Request request(Profile profile, Path promptFile,
+                                                Path runDirectory, String diffBaseCommit,
+                                                Path schemaFile) {
         return new RoleExecutor.Request(
                 "run-1", "wf-1", "reviewer", profile, null, diffBaseCommit,
-                runDirectory, runDirectory, promptFile, null,
+                runDirectory, runDirectory, promptFile, schemaFile,
                 "", "reviewer", List.of());
     }
 
