@@ -26,7 +26,13 @@ public final class StatusCommandTest implements Suite {
     @Override public String name() { return "status-command"; }
 
     @Override public void run(Check check) throws Exception {
-        Path sandbox = Files.createTempDirectory("warden-status-");
+        // toRealPath, because these cases compare a path this test built against a path Git
+        // printed. On a Windows account whose name is longer than eight characters the temp
+        // directory arrives as an 8.3 alias — `RUNNER~1` where the account is `runneradmin` —
+        // while `git worktree list` prints the long form, so every such comparison fails on
+        // a CI runner and passes on a developer's machine. The alias is this test's, not the
+        // product's: nothing in Warden builds a path that way.
+        Path sandbox = Files.createTempDirectory("warden-status-").toRealPath();
         try {
             notAWardenProject(check, sandbox);
             unknownRunNamesTheProject(check, sandbox);
