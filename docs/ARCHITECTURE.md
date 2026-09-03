@@ -68,3 +68,48 @@ Every vendor failure resolves to exactly one of these, and the choice is made in
 The exclusion list for quota lives in memory for the lifetime of one process, deliberately.
 Persisting it would leave a vendor disabled after its quota window rolled over, and that kind
 of stale state is only ever discovered when it is already wrong.
+
+## What Orca shows during a run
+
+Warden calls Orca; Orca never calls Warden. Everything below is something Warden asks for,
+which is why closing any of it leaves the loop running.
+
+| Surface | What it says | Written by |
+|---|---|---|
+| Workspace card comment | `[1/5] implement · implementer · running · 12m00s` — position, stage, role, and the clock while the stage is still going | `Workspace.note` at each stage boundary, `Workspace.working` once a minute in between |
+| Workspace status column | `in-progress` / `in-review` / `completed` — three columns, because the card answers one question: is this waiting for me | `Workspace.state` |
+| Terminal tab (`--watch` only) | `warden <run-id> · implementer 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person | `terminal create`, then `terminal rename` on every beat and every state change |
+| Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
+
+The tab and the card can disagree for at most one beat, and only in one direction: once the
+run has said it stopped, the board refuses any beat that arrives afterwards. A heartbeat is
+closed before its stage returns, but closing it only stops the next beat — one already inside
+a fifteen-second Orca call can still land, and `implementer 12m05s` written a moment after
+`NEEDS YOU` would be the board's own doing, not the loop's.
+
+### Why the roles are not in Orca's Agent Dashboard
+
+Measured against Orca 1.4.194, not read from documentation:
+
+- The dashboard lists **agent sessions** — terminals in which Orca itself started a known agent
+  CLI. Its `NEEDS YOU` / `WORKING` / `DONE` buckets come from the title the process in that
+  terminal emits, and the row's label is the tab title Warden already sets.
+- A plain terminal does not become a row by being renamed, even to a title Orca parses as an
+  agent status. Renaming one to `✦ …` is enough for Orca to infer an agent *identity* — it
+  reads the glyph as Gemini's — and still not enough to produce a row. Warden therefore uses
+  no status glyphs: a tab that claims to be a vendor nobody dispatched is worse than a tab
+  that says nothing.
+- Orchestration objects are not agents. A Run and a task created through
+  `orca orchestration task-create --display-name …` leave the dashboard at `0 total`.
+- A terminal whose command *is* a vendor CLI does produce a row, including a headless
+  invocation that exits — `claude -p … --output-format json` was listed as a row under its tab
+  title within seconds.
+
+So the dashboard is reachable, and the price is moving the vendor process out of Warden's own
+runner into an Orca pseudo-terminal. That costs the guarantees `direct` exists to provide:
+`prompt_delivery: stdin` has no channel through a PTY, and it is the delivery two of the three
+verified profiles depend on precisely because Windows argv mangles a prompt containing a quote
+or a newline; the wall-clock bound, the descendant kill and the exit code stop being Warden's
+to enforce. Trading those for a row in a list is not a trade Warden makes by default. The
+`runner: orca` adapter remains the place where anyone who wants it can pay that price
+deliberately, per profile.

@@ -30,6 +30,24 @@ public interface Workspace {
     void state(State state);
 
     /**
+     * The stage that is running now, and how long it has been running.
+     *
+     * {@link #note} is written at the edges of a stage; this is written while one is in the
+     * middle. The difference matters because the middle is where the time goes: a role can
+     * hold the loop for twenty minutes, and for those twenty minutes a card that says
+     * "implement · running" is telling the truth and answering nothing. The operator's
+     * question is which role, and since when.
+     *
+     * Called about once a minute from a separate thread, so an implementation that touches
+     * shared state has to say so. Best-effort like the rest of this interface: a beat that
+     * could not be delivered is the beat the next one supersedes.
+     *
+     * @param who   the role's name, or the kind of stage when no role is filling it
+     * @param millis how long this stage has been running
+     */
+    default void working(String who, long millis) { }
+
+    /**
      * Open a live view of the run on this board, following the narration file.
      *
      * A file rather than a stream, and that is not an implementation detail. A board can be
@@ -86,6 +104,10 @@ public interface Workspace {
 
             @Override public void state(State state) {
                 try { board.state(state); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void working(String who, long millis) {
+                try { board.working(who, millis); } catch (RuntimeException | Error notOurProblem) { }
             }
 
             @Override public void watch(java.nio.file.Path narration, String runId) {

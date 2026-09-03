@@ -1,6 +1,7 @@
 package dev.warden.execution.orca;
 
 import dev.warden.process.ProcessRunner;
+import dev.warden.run.Progress;
 import dev.warden.run.Workspace;
 
 import java.nio.file.Files;
@@ -41,6 +42,25 @@ public final class OrcaWorkspace implements Workspace {
     private String terminal;
     private String runId;
 
+    /**
+     * The last line written to the card, so a beat can re-say it with the clock attached.
+     *
+     * Volatile because {@link #note} is called from the loop and {@link #working} from the
+     * heartbeat, a minute apart and never in step.
+     */
+    private volatile String lastNote = "";
+
+    /**
+     * Set once the run has told the board it stopped, after which no beat may say otherwise.
+     *
+     * A heartbeat is closed before its stage returns, but closing it only stops the next beat;
+     * one already inside a fifteen-second Orca call can still land afterwards. Without this
+     * flag the last thing an operator would read on a run that ended waiting for them is
+     * `reviewer 5m00s`, written a moment after the tab had correctly said NEEDS YOU. The
+     * ordering is the board's to defend, not the caller's to get right every time.
+     */
+    private volatile boolean stopped;
+
     private OrcaWorkspace(OrcaClient orca, Path worktree, String selector) {
         this.orca = orca;
         this.worktree = worktree;
@@ -73,13 +93,40 @@ public final class OrcaWorkspace implements Workspace {
 
     @Override
     public void note(String text) {
-        set(List.of("--comment", clip(text)));
+        String flat = clip(text);
+        lastNote = flat;
+        set(List.of("--comment", flat));
     }
 
     @Override
     public void state(State state) {
+        if (state != State.RUNNING) stopped = true;
         set(List.of("--workspace-status", column(state)));
         retitle(state);
+    }
+
+    /**
+     * Once a minute, on both surfaces Orca gives a worktree: the tab and the card.
+     *
+     * The tab is what an operator with three runs going reads without clicking anything, and
+     * `warden lh-eyes-2` on all three of them says nothing at all; `warden lh-eyes-2 ·
+     * implementer 12m00s` says which one to leave alone. The card is the same sentence for
+     * the phone, which cannot see a tab strip — the note the stage already wrote, with the
+     * clock appended, so the position and the stage name survive.
+     *
+     * Both are best-effort and both are skipped when their surface is not there: a run without
+     * `--watch` has no tab to name, and one that never wrote a card has nothing to extend.
+     */
+    @Override
+    public void working(String who, long millis) {
+        if (stopped) return;
+        if (runId != null && terminal != null) {
+            rename("warden " + runId + " · " + who + " " + Progress.elapsed(millis));
+        }
+        String note = lastNote;
+        if (!note.isEmpty()) {
+            set(List.of("--comment", clip(note + " · " + Progress.elapsed(millis))));
+        }
     }
 
     /**
@@ -98,6 +145,12 @@ public final class OrcaWorkspace implements Workspace {
             case WAITING_FOR_HUMAN -> "warden " + runId + " - NEEDS YOU";
             case SETTLED -> "warden " + runId + " - done";
         };
+        rename(title);
+    }
+
+    /** One name onto one tab. Never fails a run; a stale tab name is not a stale run. */
+    private void rename(String title) {
+        if (terminal == null) return;
         try {
             orca.invoke(worktree, TIMEOUT, List.of("terminal", "rename",
                     "--terminal", terminal, "--title", title));

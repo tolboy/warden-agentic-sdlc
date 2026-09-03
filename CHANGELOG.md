@@ -33,6 +33,16 @@ that exists in code but has never been run live says so.
 - `--watch`: Warden asks the board to open a terminal following that log, titled `warden
   <run-id>` and renamed `- NEEDS YOU` when the loop stops for a person. Warden calls Orca, not
   the other way round: the run is not hosted by the board and survives closing the window.
+- A heartbeat while a stage runs. A role is one subprocess that prints nothing until it is
+  finished, and the longest measured stage said nothing for twenty-two minutes — during which
+  a hung vendor, a dead loop and a finished run look identical from outside. Once a minute the
+  loop now says which role is holding it and for how long: a line in the narration, the same
+  sentence on the workspace card, and `warden <run-id> · implementer 12m00s` on the tab. The
+  card note at the start of a stage names the role too, not only the stage. Nothing here is
+  evidence — every beat restates a fact the ledger will hold anyway — so a beat that cannot be
+  written is dropped, a beat that throws cannot fail the run, a dry run has none, and a beat
+  that wakes after its stage ended is refused rather than allowed to contradict the result
+  printed under it. Verified live against Orca 1.4.194.
 - `GitWorktreeIsolation`: `warden do` no longer needs Orca. Without `--isolation`, Orca is used
   when it is running and `git worktree` otherwise; `--isolation git|orca` settles it.
 - `setup:` in `project.yaml` — what to run in a worktree Warden made, before any check can pass.

@@ -539,11 +539,40 @@ public final class TaskLoop {
         private Object execute(Workflow.Stage stage) throws Exception {
             announce(stage);
             long started = System.nanoTime();
-            Object outcome = dispatch(stage);
+            Object outcome;
+            // The only place a stage is dispatched, so the only place that has to say it is
+            // still going. Inside the try, because a stage that throws is exactly the stage
+            // whose beats must stop.
+            try (Heartbeat alive = beating(stage)) {
+                outcome = dispatch(stage);
+            }
             long millis = (System.nanoTime() - started) / 1_000_000L;
             narrate(outcome, millis);
             post(stage, outcome, millis);
             return outcome;
+        }
+
+        /**
+         * A beat per minute while this stage runs, naming whoever is holding the loop.
+         *
+         * A dry run gets none: it dispatches nobody, returns in milliseconds, and a card that
+         * announced a working role during a preview would be claiming work that never started.
+         */
+        private Heartbeat beating(Workflow.Stage stage) {
+            return dryRun ? Heartbeat.none() : Heartbeat.over(who(stage), progress, workspace);
+        }
+
+        /**
+         * The name a person would use for whoever is busy. A role answers with its own name;
+         * the two stages that call no vendor answer with what they are, because "machine_gates
+         * still working" is the loop's vocabulary and not the operator's.
+         */
+        private static String who(Workflow.Stage stage) {
+            return switch (stage.kind()) {
+                case MACHINE_GATES -> "gates";
+                case VISUAL_HARNESS -> "browser harness";
+                default -> stage.role();
+            };
         }
 
         /**
@@ -591,8 +620,11 @@ public final class TaskLoop {
             // The card is told before the stage as well as after it, because the stage that
             // most needs a card is the one that takes sixteen minutes to answer.
             if (!dryRun) {
+                // The role's name and not only the stage's. On a phone the card is the whole
+                // view, and "implement · running" leaves out the one word — which vendor role
+                // is holding this up — that the operator was asking for.
                 workspace.note("[" + position + "/" + workflow.stages().size() + "] "
-                        + stage.name() + " · running"
+                        + stage.name() + " · " + who(stage) + " · running"
                         + (attempt > 0 ? " (after fix " + attempt + ")" : ""));
             }
         }

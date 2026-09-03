@@ -771,9 +771,11 @@ public final class TaskLoopTest implements Suite {
     private static final class Board implements Workspace {
         private final List<String> notes = new java.util.ArrayList<>();
         private final List<State> states = new java.util.ArrayList<>();
+        private final List<String> beats = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         @Override public void note(String text) { notes.add(text); }
         @Override public void state(State state) { states.add(state); }
+        @Override public void working(String who, long millis) { beats.add(who); }
 
         State last() { return states.isEmpty() ? null : states.get(states.size() - 1); }
 
@@ -797,6 +799,8 @@ public final class TaskLoopTest implements Suite {
         check.that("the run says it is running before it says it is done",
                 board.states.get(0) == Workspace.State.RUNNING);
         check.that("every stage reported itself to the card", board.anyNote("gates"));
+        check.that("and the card names the role holding the loop, not only the stage",
+                board.anyNote("implement · implementer · running"));
         check.that("the last note carries the command that answers it",
                 board.anyNote("warden approve wb1 --decision"));
         check.that("and what it cost, because a phone cannot run warden report",
@@ -810,12 +814,17 @@ public final class TaskLoopTest implements Suite {
         dryLoop(previewed, home, "wb2", untouched);
         check.that("a dry run leaves the board alone", untouched.notes.isEmpty());
         check.that("including its column", untouched.states.isEmpty());
+        check.that("and it announces no working role, because none was dispatched",
+                untouched.beats.isEmpty());
 
         Path unlucky = newProject(sandbox, "unlucky");
         writeProfiles(home, sandbox, "unlucky", 1, 1);
         TaskLoop.Outcome survived = loop(unlucky, home, "wb3", new Workspace() {
             @Override public void note(String text) { throw new IllegalStateException("orca died"); }
             @Override public void state(State state) { throw new IllegalStateException("orca died"); }
+            @Override public void working(String who, long millis) {
+                throw new IllegalStateException("orca died");
+            }
             @Override public void watch(Path narration, String runId) {
                 throw new IllegalStateException("orca died");
             }
