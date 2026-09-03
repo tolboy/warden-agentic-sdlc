@@ -77,7 +77,11 @@ that exists in code but has never been run live says so.
 - `warden land` no longer repeats the subject in the commit message it drafts, and no
   longer claims machine gates, an independent review and the browser harness all passed
   when they did not run. The sentence is built from the run's own `stages` and
-  `skipped_stages`; a run that skipped nothing grows no empty skip clause.
+  `skipped_stages`; a run that skipped nothing grows no empty skip clause. A stage that ran
+  and did not pass is named first and named as failed, rather than dropped from the sentence
+  the way it was: landing needs an acceptance and an acceptance needs a green run, so today
+  that clause cannot fire, but the silence lived in the message builder rather than in that
+  rule and the first path to `land` that skipped it would have inherited it.
 - The candidate fingerprint no longer changes when the accepted work is committed.
   `git diff --raw` reports a zeroed destination blob while a change sits in the working tree
   and a real one once it does not, so `warden land --commit` invalidated the acceptance it had

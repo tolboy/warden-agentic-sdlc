@@ -22,6 +22,7 @@ public final class TestMain {
                 new dev.warden.WorkflowTest(),
                 new dev.warden.TaskLoopTest(),
                 new dev.warden.HeartbeatTest(),
+                new dev.warden.LandMessageTest(),
                 new dev.warden.DoCommandTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),

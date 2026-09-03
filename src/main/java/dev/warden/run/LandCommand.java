@@ -284,10 +284,14 @@ public final class LandCommand {
     }
 
     /**
-     * What ran and passed, and what was skipped, in the report's own names.
-     * Nothing skipped produces no skip clause.
+     * What ran and passed, what ran and did not, and what was skipped, in the report's own
+     * names. Nothing skipped produces no skip clause, and nothing failed produces no fail one.
+     *
+     * Public for the same reason {@code OrcaClient.summarize} is: it is a pure function of the
+     * report, and the run shapes worth checking here are ones the loop cannot easily be made
+     * to produce on demand.
      */
-    private static String checksFrom(Map<String, Object> report) {
+    public static String checksFrom(Map<String, Object> report) {
         LinkedHashMap<String, Boolean> lastOk = new LinkedHashMap<>();
         for (Object item : list(report.get("stages"))) {
             if (!(item instanceof Map<?, ?> row)) continue;
@@ -296,8 +300,9 @@ public final class LandCommand {
             lastOk.put(step, Boolean.TRUE.equals(row.get("ok")));
         }
         List<String> passed = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
         for (Map.Entry<String, Boolean> entry : lastOk.entrySet()) {
-            if (entry.getValue()) passed.add(entry.getKey());
+            (entry.getValue() ? passed : failed).add(entry.getKey());
         }
 
         LinkedHashMap<String, List<String>> skippedByReason = new LinkedHashMap<>();
@@ -312,6 +317,14 @@ public final class LandCommand {
         }
 
         List<String> clauses = new ArrayList<>();
+        // Named first, and named at all. A stage that ran and did not pass used to be dropped
+        // from this sentence entirely: not among the passed, not among the skipped, absent. On
+        // the path that exists today it cannot happen, because landing requires an acceptance
+        // and an acceptance requires a green run — but the silence was in the message builder
+        // rather than in that rule, so the first path to `land` that did not come through a
+        // green run would have inherited it. A failure is also the one thing a reader of this
+        // line must not have to look for.
+        if (!failed.isEmpty()) clauses.add(joinEnglish(failed) + " failed");
         if (!passed.isEmpty()) clauses.add(joinEnglish(passed) + " passed");
         for (Map.Entry<String, List<String>> entry : skippedByReason.entrySet()) {
             List<String> names = entry.getValue();
