@@ -465,6 +465,7 @@ Grok and Claude on the operator's own subscriptions.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Per-block status, and what each failure is allowed to do |
 | [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) | A guided tour on stub vendors — nothing spent |
 | [`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md) | Transcripts of real runs, including what they broke |
+| [`docs/METRICS.md`](docs/METRICS.md) | What `warden ledger` measures about the loop, and why a value nobody reported never becomes a zero |
 | [`docs/SETUP.md`](docs/SETUP.md) | The repeatable install and per-project connection procedure |
 | [`docs/SMOKE.md`](docs/SMOKE.md) | The reproducible red/green cross-project smoke |
 | [`examples/demo/`](examples/demo/README.md) | The offline demo and a committed sample evidence ledger |
