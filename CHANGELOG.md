@@ -43,6 +43,12 @@ that exists in code but has never been run live says so.
   written is dropped, a beat that throws cannot fail the run, a dry run has none, and a beat
   that wakes after its stage ended is refused rather than allowed to contradict the result
   printed under it. Verified live against Orca 1.4.194.
+- The heartbeat, the stage-start card and the `--watch` tab name the profile and vendor filling
+  a role, not only the role: `implementer (grok-implement / grok) still working` in the
+  narration and on the card, `implementer (grok-implement)` on the tab. The name comes from the
+  resolution that dispatched, not a second lookup — asking twice would rotate twice. A stage
+  that runs no vendor (`gates`, `browser harness`) keeps the bare name and grows no empty
+  brackets; a role whose verdict was carried over dispatches nobody and invents no pair.
 - `GitWorktreeIsolation`: `warden do` no longer needs Orca. Without `--isolation`, Orca is used
   when it is running and `git worktree` otherwise; `--isolation git|orca` settles it.
 - `setup:` in `project.yaml` — what to run in a worktree Warden made, before any check can pass.

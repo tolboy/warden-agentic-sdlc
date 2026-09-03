@@ -693,14 +693,22 @@ public final class TaskLoopTest implements Suite {
                 "installed a browser");
 
         List<String> printed = new java.util.ArrayList<>();
+        Board reusedBoard = new Board();
         TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner(),
                 (l, r) -> stubVisual(true))
                 .withProgress(printed::add)
+                .withWorkspace(reusedBoard)
                 .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "ru2",
                         false, Map.of(), new TaskLoop.Continuation("ru1", null, true));
         check.that("the second run reaches the human gate", resumed.ok());
         check.that("and says which verdicts it kept",
                 String.join("\n", printed).contains("reused from ru1"));
+        java.util.List<String> carried = reusedBoard.notes.stream()
+                .filter(note -> note.contains("implement · implementer"))
+                .toList();
+        check.that("a carried-over verdict still has a running card", !carried.isEmpty());
+        check.that("and names no vendor, because nobody was dispatched",
+                carried.stream().noneMatch(note -> note.contains("(")));
         check.eq("recording where they came from", Map.of("from", "ru1",
                         "roles", List.of("implementer", "reviewer")),
                 resumed.summaryReport().get("reused_judgements"));
@@ -801,6 +809,11 @@ public final class TaskLoopTest implements Suite {
         check.that("every stage reported itself to the card", board.anyNote("gates"));
         check.that("and the card names the role holding the loop, not only the stage",
                 board.anyNote("implement · implementer · running"));
+        check.that("and which profile and vendor are inside that role, from the resolution that ran",
+                board.anyNote("implement · implementer (loop-impl / implvendor) · running"));
+        check.that("a machine-gates stage names neither a profile nor a vendor",
+                board.notes.stream().anyMatch(note ->
+                        note.contains("gates · gates · running") && !note.contains("(")));
         check.that("the last note carries the command that answers it",
                 board.anyNote("warden approve wb1 --decision"));
         check.that("and what it cost, because a phone cannot run warden report",

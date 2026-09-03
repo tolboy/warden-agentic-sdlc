@@ -74,7 +74,22 @@ public final class RoleRunner {
         void requireDispatch();
     }
 
+    /**
+     * The profile this resolution just chose, so a beat can name who is actually inside the
+     * role without asking the resolver a second time.
+     *
+     * Resolution advances rotation state and consults the run's exclusion list. A second
+     * lookup from the loop would rotate twice and could name a profile that was not the one
+     * dispatched. Throwing here is swallowed: naming the vendor is a retelling, not a reason
+     * to stop a paid call.
+     */
+    @FunctionalInterface
+    public interface Occupied {
+        void by(String profile, String vendor);
+    }
+
     private static final DispatchGate ALWAYS = () -> { };
+    private static final Occupied NOBODY = (profile, vendor) -> { };
 
     private final ProcessRunner processes;
     private final DispatchGate gate;
@@ -82,6 +97,7 @@ public final class RoleRunner {
     private final String workflowRunId;
     private final Map<String, String> authorizedFailover;
     private final dev.warden.run.Progress progress;
+    private Occupied occupied = NOBODY;
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
@@ -126,6 +142,18 @@ public final class RoleRunner {
         this.workflowRunId = workflowRunId;
         this.authorizedFailover = Map.copyOf(authorizedFailover);
         this.progress = progress;
+    }
+
+    /**
+     * Who should hear the profile the next resolution actually chooses.
+     *
+     * One runner is reused for every role in a loop. The loop points this at a callback that
+     * reads the beat currently wrapping the dispatch, so a fix round that runs with no beat
+     * is a no-op rather than a name invented for a stage that has already ended.
+     */
+    public RoleRunner occupying(Occupied occupied) {
+        this.occupied = occupied == null ? NOBODY : occupied;
+        return this;
     }
 
     /** Profiles this runner has seen run out, in the order they did. */
@@ -185,6 +213,9 @@ public final class RoleRunner {
             }
 
             Profile profile = resolution.selected();
+            // Published from this resolution, not looked up again: a second resolve would
+            // advance rotation and could name a profile that was not dispatched.
+            publish(profile);
 
             // An implementer needs write authority from the task itself, not only from its
             // profile. This is a contract error, not a vendor failure: no failover applies.
@@ -647,6 +678,19 @@ public final class RoleRunner {
         preview.put("endpoint", profile.endpoint());
         preview.put("model", profile.model());
         return preview;
+    }
+
+    /**
+     * The beat and the card learn the name here, from the resolution that is about to
+     * dispatch. A failure to tell anyone is dropped: this is a retelling, not evidence.
+     */
+    private void publish(Profile profile) {
+        if (profile == null) return;
+        try {
+            occupied.by(profile.name(), profile.vendor());
+        } catch (RuntimeException | Error notOurProblem) {
+            // Naming the vendor is not a reason to stop the run.
+        }
     }
 
     /** A vendor whose executable is absent is skipped, never attempted mid-loop. */

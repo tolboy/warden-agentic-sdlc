@@ -428,6 +428,9 @@ public final class TaskLoop {
         private final Map<String, VisualQaRunner.Outcome> harness = new LinkedHashMap<>();
         private final List<Map<String, Object>> skipped = new ArrayList<>();
         private int attempt;
+        /** The beat wrapping the stage that is running now; {@link Heartbeat#none()} otherwise. */
+        private Heartbeat heartbeat = Heartbeat.none();
+        private Workflow.Stage heartbeatStage;
 
         Engine(ConfigLoader.Loaded loaded, UserConfig user, RoleRunner roles, GateRunner gates,
                EvidenceLedger ledger, String runId, boolean dryRun,
@@ -454,6 +457,7 @@ public final class TaskLoop {
             this.progress = progress;
             this.carried = carried;
             this.reusable = new LinkedHashMap<>(reusable);
+            roles.occupying(this::named);
         }
 
         int attempt() { return attempt; }
@@ -542,9 +546,15 @@ public final class TaskLoop {
             Object outcome;
             // The only place a stage is dispatched, so the only place that has to say it is
             // still going. Inside the try, because a stage that throws is exactly the stage
-            // whose beats must stop.
+            // whose beats must stop. The beat starts knowing only the role; the profile
+            // arrives from the resolution that actually dispatched, via named().
             try (Heartbeat alive = beating(stage)) {
+                heartbeat = alive;
+                heartbeatStage = stage;
                 outcome = dispatch(stage);
+            } finally {
+                heartbeat = Heartbeat.none();
+                heartbeatStage = null;
             }
             long millis = (System.nanoTime() - started) / 1_000_000L;
             narrate(outcome, millis);
@@ -566,6 +576,10 @@ public final class TaskLoop {
          * The name a person would use for whoever is busy. A role answers with its own name;
          * the two stages that call no vendor answer with what they are, because "machine_gates
          * still working" is the loop's vocabulary and not the operator's.
+         *
+         * The profile is not resolved here. Resolution lives in {@link RoleRunner} and
+         * advances rotation state; asking twice could name a profile that was not dispatched.
+         * The pair arrives via {@link RoleRunner.Occupied} from the resolution that happened.
          */
         private static String who(Workflow.Stage stage) {
             return switch (stage.kind()) {
@@ -573,6 +587,20 @@ public final class TaskLoop {
                 case VISUAL_HARNESS -> "browser harness";
                 default -> stage.role();
             };
+        }
+
+        /**
+         * The profile RoleRunner just chose. The beat and the card learn it here because
+         * asking the resolver again would rotate twice.
+         *
+         * A fix round dispatches a vendor without wrapping it in a beat, so heartbeatStage
+         * is unset and this is a no-op. A carried-over verdict runs inside a beat but never
+         * calls RoleRunner, so nobody publishes a name and the card stays the bare role.
+         */
+        private void named(String profile, String vendor) {
+            heartbeat.filledBy(profile, vendor);
+            if (dryRun || heartbeatStage == null) return;
+            workspace.note(runningNote(heartbeatStage, profile, vendor));
         }
 
         /**
@@ -618,15 +646,25 @@ public final class TaskLoop {
                     + pad(stage.name(), 10)
                     + (attempt > 0 ? "(after fix " + attempt + ")  " : "") + what);
             // The card is told before the stage as well as after it, because the stage that
-            // most needs a card is the one that takes sixteen minutes to answer.
+            // most needs a card is the one that takes sixteen minutes to answer. The profile
+            // is not known yet — resolution happens inside the dispatch — so this line names
+            // the role, and named() rewrites it with the pair as soon as it is.
             if (!dryRun) {
-                // The role's name and not only the stage's. On a phone the card is the whole
-                // view, and "implement · running" leaves out the one word — which vendor role
-                // is holding this up — that the operator was asking for.
-                workspace.note("[" + position + "/" + workflow.stages().size() + "] "
-                        + stage.name() + " · " + who(stage) + " · running"
-                        + (attempt > 0 ? " (after fix " + attempt + ")" : ""));
+                workspace.note(runningNote(stage, null, null));
             }
+        }
+
+        /**
+         * `[1/5] implement · implementer (grok-implement / grok) · running`.
+         *
+         * The role is always there; the bracketed pair is only there when a profile was
+         * actually resolved. `gates` and `browser harness` pass nulls and stay bare.
+         */
+        private String runningNote(Workflow.Stage stage, String profile, String vendor) {
+            return position(stage) + " " + stage.name() + " · "
+                    + Heartbeat.spoken(who(stage), profile, vendor)
+                    + " · running"
+                    + (attempt > 0 ? " (after fix " + attempt + ")" : "");
         }
 
         /** How it went, in the same two-line shape for every kind of stage. */

@@ -42,7 +42,9 @@ public interface Workspace {
      * shared state has to say so. Best-effort like the rest of this interface: a beat that
      * could not be delivered is the beat the next one supersedes.
      *
-     * @param who   the role's name, or the kind of stage when no role is filling it
+     * @param who   the live name of whoever is holding the loop: the role, plus the
+     *              profile in brackets when one was resolved, or the kind of stage when
+     *              no vendor is filling it
      * @param millis how long this stage has been running
      */
     default void working(String who, long millis) { }

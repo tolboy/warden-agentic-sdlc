@@ -76,10 +76,10 @@ which is why closing any of it leaves the loop running.
 
 | Surface | What it says | Written by |
 |---|---|---|
-| Workspace card comment | `[1/5] implement · implementer · running · 12m00s` — position, stage, role, and the clock while the stage is still going | `Workspace.note` at each stage boundary, `Workspace.working` once a minute in between |
+| Workspace card comment | `[1/5] implement · implementer (grok-implement / grok) · running · 12m00s` — position, stage, role, the profile and vendor filling it, and the clock while the stage is still going. A stage that runs no vendor (`gates`, `browser harness`) keeps the bare name and grows no brackets | `Workspace.note` at each stage boundary (rewritten with the resolved pair as soon as RoleRunner chooses it), `Workspace.working` once a minute in between |
 | Workspace status column | `in-progress` / `in-review` / `completed` — three columns, because the card answers one question: is this waiting for me | `Workspace.state` |
-| Terminal tab (`--watch` only) | `warden <run-id> · implementer 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person | `terminal create`, then `terminal rename` on every beat and every state change |
-| Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
+| Terminal tab (`--watch` only) | `warden <run-id> · implementer (grok-implement) 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person. The tab is short: profile, not vendor | `terminal create`, then `terminal rename` on every beat and every state change |
+| Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer (grok-implement / grok) still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
 
 The tab and the card can disagree for at most one beat, and only in one direction: once the
 run has said it stopped, the board refuses any beat that arrives afterwards. A heartbeat is

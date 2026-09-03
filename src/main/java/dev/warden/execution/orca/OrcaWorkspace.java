@@ -110,9 +110,10 @@ public final class OrcaWorkspace implements Workspace {
      *
      * The tab is what an operator with three runs going reads without clicking anything, and
      * `warden lh-eyes-2` on all three of them says nothing at all; `warden lh-eyes-2 ·
-     * implementer 12m00s` says which one to leave alone. The card is the same sentence for
-     * the phone, which cannot see a tab strip — the note the stage already wrote, with the
-     * clock appended, so the position and the stage name survive.
+     * implementer (grok-implement) 12m00s` says which one to leave alone, and which profile
+     * is spending the minutes. The card is the same sentence for the phone, which cannot
+     * see a tab strip — the note the stage already wrote, with the clock appended, so the
+     * position, the stage name and the vendor survive.
      *
      * Both are best-effort and both are skipped when their surface is not there: a run without
      * `--watch` has no tab to name, and one that never wrote a card has nothing to extend.
