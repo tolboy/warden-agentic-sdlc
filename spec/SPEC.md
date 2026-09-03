@@ -168,9 +168,42 @@ runner: direct    # direct (default) | orca | local
 `runner` selects the adapter, not the model. `direct` runs the vendor's CLI in this process.
 `orca` starts a supervised worker inside an **already existing** Orca worktree: Warden creates
 no worktrees. Completion is accepted only from `worker_done` or dispatch settlement — terminal
-text is not evidence. `local` is a named intention; the resolver answers
-`runner_unimplemented` until the adapter exists. An unknown runner is rejected when the profile
+text is not evidence. `local` POSTs an OpenAI-compatible chat completion to the profile's
+`endpoint` and reads `choices[0].message.content`. A local profile cannot declare
+`capabilities.vision`: the adapter sends only text. An unknown runner is rejected when the profile
 is parsed.
+
+A model already serving on this machine — Ollama, LM Studio, llama.cpp — is reached like this:
+
+```yaml
+version: 1
+profile: local-gemma
+role: reviewer
+vendor: ollama
+runner: local
+endpoint: http://127.0.0.1:11434/v1/chat/completions   # absolute http/https; required
+api_key_env: LOCAL_WARDEN_KEY   # the NAME of a variable, never a token. Optional
+model: gemma4:e4b
+read_only: true
+limits:
+  wall_clock_minutes: 20
+```
+
+`command` is absent on purpose: this runner starts no process, so there is no executable to
+name, and the report says `dispatch_preview` (method, endpoint, model) rather than claiming an
+argv that was never spawned. Every other runner still requires `command` — a local profile that
+invented one would become a Direct CLI dispatch of that invention the moment the `runner` line
+was deleted.
+
+`api_key_env` is read at dispatch and never stored: not in evidence, not in the ledger, not in
+the raw transcript kept beside the run, even when the server reflects the header back. Naming a
+variable that is unset or blank is a configuration fault (`role_local_api_key_missing`, naming
+the variable), not an unauthenticated POST that comes back as somebody else's 401.
+
+A local answer is settled exactly as a CLI answer is — raw transcript on disk, required fields,
+JSON schema, a reported `blocked`/`failed`/`aborted` refused, and the worktree fingerprint
+compared around the call. Tokens are recorded from `usage` when the server reports them; a cost
+is never invented, so an unpriced call is counted as unpriced rather than as free.
 
 ### `~/.warden/policy.yaml`
 

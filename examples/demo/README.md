@@ -27,6 +27,9 @@ So this runs the machine half of the loop twice over the same contract.
 | 6 | the green run's `machine-gate.json` | Pinned base commit, contract hash, changed paths, the command's exit code and both streams, and the worktree fingerprint |
 | 7 | `warden ledger` | Both runs joined: one passed, one failed, and a metrics block whose vendor fields are honestly empty because no vendor ran |
 
+Step 7 is dense on purpose. What each field of that metrics block means, and why a value
+nobody reported is `null` rather than `0`, is [`docs/METRICS.md`](../../docs/METRICS.md).
+
 ## What it does not prove
 
 No language model participates in any of this. The role loop, the vendor resolver, failover,

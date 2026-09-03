@@ -5,16 +5,13 @@ import dev.warden.execution.orca.OrcaExecutor;
 import dev.warden.git.GitRepository;
 import dev.warden.process.ProcessRunner;
 
-import java.time.Duration;
-import java.util.LinkedHashMap;
-import java.util.Map;
-
 /**
  * Chooses an adapter from the profile's {@code runner} field. Routing stays in code: a model
  * never picks how it is launched.
  *
- * {@code local} is accepted as a name so a profile can declare the intent, and refused at
- * dispatch so the gap is visible rather than silently turned into a direct CLI call.
+ * {@code local} POSTs to the profile's {@code endpoint}. It is never rewritten as a direct
+ * CLI call — a missing local server must fail as itself, not as a vendor that was never asked
+ * for.
  */
 public final class Executors {
 
@@ -23,24 +20,9 @@ public final class Executors {
     public static RoleExecutor forProfile(Profile profile, ProcessRunner processes, GitRepository git) {
         return switch (profile.runner()) {
             case "orca" -> new OrcaExecutor(processes, git);
-            case "local" -> new UnimplementedRunner(profile.runner());
+            // git, so a read_only local role is held to the same fingerprint as a CLI one.
+            case "local" -> new LocalHttpExecutor(System::getenv, null, git);
             default -> new DirectCliExecutor(processes, git);
         };
-    }
-
-    private static final class UnimplementedRunner implements RoleExecutor {
-        private final String runner;
-
-        UnimplementedRunner(String runner) { this.runner = runner; }
-
-        @Override
-        public Result execute(Request request) {
-            Map<String, Object> evidence = new LinkedHashMap<>();
-            evidence.put("runner", runner);
-            evidence.put("failure", "role_runner_unimplemented");
-            evidence.put("resolution", "this runner is named in the architecture and not yet wired; "
-                    + "use runner: direct, or runner: orca inside an Orca worktree");
-            return new Result(false, "role_runner_unimplemented", Duration.ZERO, "", null, evidence);
-        }
     }
 }

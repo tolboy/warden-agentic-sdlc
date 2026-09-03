@@ -241,7 +241,11 @@ public final class RoleRunner {
             report.put("prompt_sha256", GitRepository.sha256(promptFile));
             report.put("diff_base_commit", mergeBase);
             report.put("wall_clock_minutes", profile.wallClockMinutes());
-            report.put("command_preview", commandPreview(profile));
+            if ("local".equals(profile.runner())) {
+                report.put("dispatch_preview", dispatchPreview(profile));
+            } else {
+                report.put("command_preview", commandPreview(profile));
+            }
             report.put("attachment_count", (long) (attachments == null ? 0 : attachments.size()));
             if (profile.vision() != null) {
                 report.put("vision_capability", Map.of(
@@ -629,8 +633,27 @@ public final class RoleRunner {
                 profile.args().stream()).toList();
     }
 
+    /**
+     * What actually leaves this process for a runner that starts none.
+     *
+     * `command_preview` names an argv, and a local profile has no argv to name. Publishing
+     * `["ollama"]` as the dispatch for an HTTP POST would put a process that was never
+     * started into the report of every local role, dry runs included — the same class of
+     * claim the adapter itself was added to stop making.
+     */
+    private static Map<String, Object> dispatchPreview(Profile profile) {
+        Map<String, Object> preview = new LinkedHashMap<>();
+        preview.put("method", "POST");
+        preview.put("endpoint", profile.endpoint());
+        preview.put("model", profile.model());
+        return preview;
+    }
+
     /** A vendor whose executable is absent is skipped, never attempted mid-loop. */
     private boolean available(Profile profile) {
+        // A local profile has no process to find: the model is already listening on HTTP.
+        // Probing `command` would skip every local profile whose command is a label.
+        if ("local".equals(profile.runner())) return true;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command.contains("/") || command.contains("\\")) return Files.isExecutable(Path.of(command));
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");

@@ -287,6 +287,19 @@ public final class ConfigTest implements Suite {
                         capabilities:
                           vision: { delivery: cli_attachment, verification: required }
                         """, "eyes.yaml"));
+        check.rejects("local cannot claim vision; the HTTP adapter sends only text",
+                "does not support capabilities.vision",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: eyes
+                        role: visual_qa
+                        vendor: ollama
+                        command: ollama
+                        runner: local
+                        endpoint: http://127.0.0.1:11434/v1/chat/completions
+                        capabilities:
+                          vision: { delivery: workspace_file, verification: required }
+                        """, "eyes.yaml"));
         check.rejects("vision verification requirement is mandatory", "capabilities.vision.verification",
                 () -> Profile.parse("""
                         version: 1

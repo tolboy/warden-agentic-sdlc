@@ -51,8 +51,9 @@ public final class RoleResolverTest implements Suite {
                 profile: local-only
                 role: reviewer
                 vendor: local
-                command: opencode
+                command: ollama
                 runner: local
+                endpoint: http://127.0.0.1:11434/v1/chat/completions
                 verification:
                   verified_on: "2026-08-27"
                 """, "local-only.yaml"));
@@ -63,8 +64,11 @@ public final class RoleResolverTest implements Suite {
                     profiles: [local-only]
                     strategy: first
                 """, "policy.yaml");
-        check.rejects("an unimplemented runner is skipped, not launched as direct CLI", "runner_unimplemented",
-                () -> resolver.resolve("reviewer", localPolicy, profiles, null, 0, profile -> true));
+        RoleResolver.Resolution local = resolver.resolve("reviewer", localPolicy, profiles,
+                null, 0, profile -> true);
+        check.eq("a local runner is eligible, not skipped as unimplemented",
+                "local-only", local.selected().name());
+        check.eq("and is not rewritten as a direct CLI", "local", local.selected().runner());
 
         Policy visualPolicy = Policy.parse("""
                 version: 1

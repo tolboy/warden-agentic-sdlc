@@ -367,6 +367,19 @@ public final class TaskLoop {
             "gate_internal_error");
 
     /**
+     * Role failures about the endpoint rather than about the work. A model that is not
+     * serving, a bearer variable nobody exported, a 500 from the server, an envelope that is
+     * not a chat completion: no implementer can fix any of them from inside the diff, and
+     * handing one back spends a role run and then fails in exactly the same place. Same
+     * reason {@code visual_qa_unavailable} and the {@code role_orca_*} codes are terminal.
+     */
+    private static final java.util.Set<String> ROLE_OPERATOR_MUST_RESOLVE = java.util.Set.of(
+            "role_local_endpoint_unreachable",
+            "role_local_api_key_missing",
+            "role_local_http_error",
+            "role_local_response_unreadable");
+
+    /**
      * Raised by a stage that has run out of options. It carries the reason an operator greps
      * for, and the only thing the caller does with it is stop at the human boundary —
      * threading a "should I stop now" flag through every nested loop is how one of the
@@ -767,9 +780,10 @@ public final class TaskLoop {
          * Which failures may be handed back to an implementer at all.
          *
          * The excluded ones are not about the work. No implementer can install a browser,
-         * evict another project's dev server, resolve a base ref, or revert a file outside
-         * the blast radius it was given — and asking one to try spends a role run on the
-         * operator's configuration and then fails the same way.
+         * evict another project's dev server, resolve a base ref, start a local model that
+         * is not serving, or revert a file outside the blast radius it was given — and
+         * asking one to try spends a role run on the operator's configuration and then
+         * fails the same way.
          */
         private boolean fixable(Object outcome) {
             if (outcome instanceof VisualQaRunner.Outcome visual) {
@@ -777,6 +791,9 @@ public final class TaskLoop {
             }
             if (outcome instanceof GateRunner.Outcome gate) {
                 return !OPERATOR_MUST_RESOLVE.contains(gate.code());
+            }
+            if (outcome instanceof RoleRunner.Outcome role) {
+                return !ROLE_OPERATOR_MUST_RESOLVE.contains(role.code());
             }
             return true;
         }

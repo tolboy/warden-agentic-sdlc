@@ -20,6 +20,8 @@ public final class LedgerReader {
     private static final Set<String> CONFIGURATION_FAILURES = Set.of(
             "authority_denied",
             "configuration_changed",
+            "role_local_api_key_missing",
+            "role_local_endpoint_unreachable",
             "role_orca_no_coordinator",
             "role_orca_no_worktree",
             "role_orca_unavailable",

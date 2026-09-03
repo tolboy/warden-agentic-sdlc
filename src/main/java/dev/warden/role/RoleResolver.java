@@ -60,7 +60,6 @@ public final class RoleResolver {
                 continue;
             }
             if (!profile.verified()) { rejected.put(name, "profile_unverified"); continue; }
-            if ("local".equals(profile.runner())) { rejected.put(name, "runner_unimplemented"); continue; }
             if (exhausted.contains(name)) { rejected.put(name, "quota_exhausted_this_run"); continue; }
             if (roleSpec.requireIndependentVendor() && implementerVendor != null
                     && profile.vendor().equals(implementerVendor)) {

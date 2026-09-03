@@ -11,6 +11,21 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- `runner: local` — the third runner, named in the spec since the beginning and until now
+  answering `role_runner_unimplemented`. It POSTs an OpenAI-compatible chat completion to the
+  profile's `endpoint`, reaching a model already serving on this machine (Ollama, LM Studio,
+  llama.cpp): no vendor subscription, and no process spawned, so no argv for a quote or a
+  newline in the prompt to be torn apart by. `command` is not required, because nothing is
+  started; the report carries `dispatch_preview` (method, endpoint, model) instead of naming a
+  process that was never launched. `api_key_env` names an environment variable, read at
+  dispatch and never written to evidence, the ledger or the raw transcript. A local answer is
+  settled by the same functions `direct` uses — artifact, required fields, JSON schema,
+  reported status, worktree fingerprint — so a role nobody can argue with cannot pass as a
+  role nobody ran. Tokens come from `usage`; cost is never invented as `$0`. New codes:
+  `role_local_endpoint_unreachable`, `role_local_api_key_missing`, `role_local_http_error`,
+  `role_local_response_unreadable` — none of them handed back to an implementer as a fix
+  round, because none of them is about the work. Implemented and covered by tests against a
+  JDK `HttpServer`; no dated live smoke row yet.
 - `Workspace`: a run writes its stage, cost and pending decision onto the Orca worktree card it
   is running on, and `warden approve` closes it. Three columns, not one per stage.
 - The narration is also written to `.warden/runs/<id>/narration.log`, so a run started from a
@@ -59,6 +74,19 @@ that exists in code but has never been run live says so.
   directory change that switches drive (`pushd` on Windows, because `cd /d` is not a
   PowerShell command). A malformed `decision.json` in the current checkout is reported in
   `worktrees` instead of aborting the command as `warden_error`.
+
+### Known gaps
+
+Supersedes the list under 0.1.0, which stays as it was written:
+
+- Per-vendor tool allowlists are not implemented. A profile's args are whatever you wrote.
+- Visual QA has no pixel-diff or baseline comparison; the harness asserts, it does not compare
+  images.
+- The Orca adapter's full live lifecycle as a role runner has not been proven end to end.
+- The local runner is implemented and tested, but has no dated row in `docs/SMOKE.md`. A small
+  model reached this way is cheap enough to run on every change and should be read as a smoke
+  test, not as the independent review: a 4B model will happily return an artifact whose fields
+  were copied out of the schema it was handed.
 
 ## [0.1.0] — 2026-08-31
 
@@ -163,7 +191,8 @@ stranger can use.
 
 These are named rather than hidden, and the code refuses rather than pretending:
 
-- `runner: local` is a name; the resolver answers `runner_unimplemented`.
+- `runner: local` is a name; the resolver answers `runner_unimplemented`. *(Closed after
+  0.1.0 — see Unreleased.)*
 - Per-vendor tool allowlists are not implemented. A profile's args are whatever you wrote.
 - Visual QA has no pixel-diff or baseline comparison; the harness asserts, it does not compare
   images.
