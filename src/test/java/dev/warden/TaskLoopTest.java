@@ -61,9 +61,21 @@ public final class TaskLoopTest implements Suite {
             // A failing gate sends the work back with the machine output attached.
             Path fixable = newProject(sandbox, "fixable");
             writeProfiles(home, sandbox, "fixable", 2, 1);
-            TaskLoop.Outcome fixed = loop(fixable, home, "r2");
+            Board fixBoard = new Board();
+            TaskLoop.Outcome fixed = loop(fixable, home, "r2", fixBoard);
             check.that("a fixable failure still ends green", fixed.ok());
             check.eq("exactly one fix round was used", 1L, fixed.summaryReport().get("attempts_used"));
+            // A fix round is a second vendor call of the same length as the first, and it used
+            // to run outside any beat, so the loop went quiet exactly where it is most likely
+            // to be waited on.
+            check.that("a fix round says who it sent the work back to",
+                    fixBoard.anyNote("sent the work back to implementer"));
+            check.that("and which profile and vendor took it, once the resolution had run",
+                    fixBoard.anyNote("sent the work back to implementer (loop-impl / implvendor)"));
+            // The pair can only reach the card through the note builder set alongside the
+            // beat that wraps the fix dispatch, so a fix round running unwatched again would
+            // take this check with it. A stub vendor answers in milliseconds, so no beat of
+            // its own can fire inside a one-minute interval; HeartbeatTest owns the timing.
             String gateContext = Files.readString(
                     fixable.resolve(".warden/runs/r2/context/fix-1-gates.md"));
             check.contains("the implementer is handed the machine failure", gateContext, "Machine gate failed");

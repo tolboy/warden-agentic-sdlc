@@ -81,6 +81,12 @@ which is why closing any of it leaves the loop running.
 | Terminal tab (`--watch` only) | `warden <run-id> · implementer (grok-implement) 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person. The tab is short: profile, not vendor | `terminal create`, then `terminal rename` on every beat and every state change |
 | Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer (grok-implement / grok) still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
 
+Every dispatch that can take minutes runs under a beat, including a fix round. A fix round is
+a second call to the same vendor, of the same length, after the operator has already waited
+once, and it is the moment a run is most likely to be watched; its card line says which stage
+sent the work back and who took it (`fix 1/2 · review sent the work back to implementer
+(grok-implement / grok)`).
+
 The tab and the card can disagree for at most one beat, and only in one direction: once the
 run has said it stopped, the board refuses any beat that arrives afterwards. A heartbeat is
 closed before its stage returns, but closing it only stops the next beat — one already inside

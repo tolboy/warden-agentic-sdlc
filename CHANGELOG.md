@@ -49,6 +49,12 @@ that exists in code but has never been run live says so.
   resolution that dispatched, not a second lookup — asking twice would rotate twice. A stage
   that runs no vendor (`gates`, `browser harness`) keeps the bare name and grows no empty
   brackets; a role whose verdict was carried over dispatches nobody and invents no pair.
+- A fix round beats too. It is a second vendor call of the same length as the one that
+  provoked it, dispatched after the operator has already spent half an hour, and it ran
+  outside any beat: the one place a run is most likely to be waited on was the one place that
+  went silent. It now runs under its own beat naming the role that took the work, and its card
+  line gains the same bracketed pair: `fix 1/2 · review sent the work back to implementer
+  (grok-implement / grok)`.
 - `GitWorktreeIsolation`: `warden do` no longer needs Orca. Without `--isolation`, Orca is used
   when it is running and `git worktree` otherwise; `--isolation git|orca` settles it.
 - `setup:` in `project.yaml` — what to run in a worktree Warden made, before any check can pass.

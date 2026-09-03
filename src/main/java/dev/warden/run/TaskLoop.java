@@ -428,9 +428,16 @@ public final class TaskLoop {
         private final Map<String, VisualQaRunner.Outcome> harness = new LinkedHashMap<>();
         private final List<Map<String, Object>> skipped = new ArrayList<>();
         private int attempt;
-        /** The beat wrapping the stage that is running now; {@link Heartbeat#none()} otherwise. */
+        /** The beat wrapping the dispatch that is running now; {@link Heartbeat#none()} otherwise. */
         private Heartbeat heartbeat = Heartbeat.none();
-        private Workflow.Stage heartbeatStage;
+        /**
+         * How the card should say what is running, once the profile behind it is known.
+         *
+         * A builder rather than the stage itself, because the two things that dispatch a
+         * vendor say different sentences: a stage says where it is in the plan, a fix round
+         * says which stage sent the work back. Null when nothing is dispatching.
+         */
+        private java.util.function.BinaryOperator<String> heartbeatNote;
 
         Engine(ConfigLoader.Loaded loaded, UserConfig user, RoleRunner roles, GateRunner gates,
                EvidenceLedger ledger, String runId, boolean dryRun,
@@ -521,12 +528,24 @@ public final class TaskLoop {
             attempt++;
             progress.line("      -> fix round " + attempt + " of " + task.maxFixAttempts()
                     + ": " + stage.name() + " sends the work back to " + stage.fixWith());
-            workspace.note("fix " + attempt + "/" + task.maxFixAttempts() + " · " + stage.name()
-                    + " sent the work back to " + stage.fixWith());
+            workspace.note(fixNote(stage, null, null));
             Path file = writeContext(ledger, attempt, stage.contextKind(), context);
             String role = stage.fixWith();
-            RoleRunner.Outcome fix = roles.run(loaded, user, role,
-                    stepRunId(runId, role, attempt), null, file, false);
+            // A fix round is the same vendor, the same silence and the same twenty minutes as
+            // the stage that provoked it. It went without a beat in the first version of this,
+            // so the one place a run is most likely to be waited on — a second implementer
+            // call, after the operator has already spent half an hour — was the one place that
+            // said nothing at all.
+            RoleRunner.Outcome fix;
+            try (Heartbeat alive = beating(role)) {
+                heartbeat = alive;
+                heartbeatNote = (profile, vendor) -> fixNote(stage, profile, vendor);
+                fix = roles.run(loaded, user, role,
+                        stepRunId(runId, role, attempt), null, file, false);
+            } finally {
+                heartbeat = Heartbeat.none();
+                heartbeatNote = null;
+            }
             record(steps, budget, role, attempt, fix);
             vendors.putIfAbsent(role, fix.vendor());
             if (!fix.ok()) throw new StopException(reasonFor(fix, "fix_attempt_failed"));
@@ -548,13 +567,13 @@ public final class TaskLoop {
             // still going. Inside the try, because a stage that throws is exactly the stage
             // whose beats must stop. The beat starts knowing only the role; the profile
             // arrives from the resolution that actually dispatched, via named().
-            try (Heartbeat alive = beating(stage)) {
+            try (Heartbeat alive = beating(who(stage))) {
                 heartbeat = alive;
-                heartbeatStage = stage;
+                heartbeatNote = (profile, vendor) -> runningNote(stage, profile, vendor);
                 outcome = dispatch(stage);
             } finally {
                 heartbeat = Heartbeat.none();
-                heartbeatStage = null;
+                heartbeatNote = null;
             }
             long millis = (System.nanoTime() - started) / 1_000_000L;
             narrate(outcome, millis);
@@ -568,8 +587,8 @@ public final class TaskLoop {
          * A dry run gets none: it dispatches nobody, returns in milliseconds, and a card that
          * announced a working role during a preview would be claiming work that never started.
          */
-        private Heartbeat beating(Workflow.Stage stage) {
-            return dryRun ? Heartbeat.none() : Heartbeat.over(who(stage), progress, workspace);
+        private Heartbeat beating(String who) {
+            return dryRun ? Heartbeat.none() : Heartbeat.over(who, progress, workspace);
         }
 
         /**
@@ -593,14 +612,16 @@ public final class TaskLoop {
          * The profile RoleRunner just chose. The beat and the card learn it here because
          * asking the resolver again would rotate twice.
          *
-         * A fix round dispatches a vendor without wrapping it in a beat, so heartbeatStage
-         * is unset and this is a no-op. A carried-over verdict runs inside a beat but never
-         * calls RoleRunner, so nobody publishes a name and the card stays the bare role.
+         * A carried-over verdict runs inside a beat but never calls RoleRunner, so nobody
+         * publishes a name and the card stays the bare role. Anything dispatching outside a
+         * beat leaves the builder null and this is a no-op rather than a sentence attached
+         * to a stage that has already ended.
          */
         private void named(String profile, String vendor) {
             heartbeat.filledBy(profile, vendor);
-            if (dryRun || heartbeatStage == null) return;
-            workspace.note(runningNote(heartbeatStage, profile, vendor));
+            java.util.function.BinaryOperator<String> note = heartbeatNote;
+            if (dryRun || note == null) return;
+            workspace.note(note.apply(profile, vendor));
         }
 
         /**
@@ -660,6 +681,19 @@ public final class TaskLoop {
          * The role is always there; the bracketed pair is only there when a profile was
          * actually resolved. `gates` and `browser harness` pass nulls and stay bare.
          */
+        /**
+         * `fix 1/2 · review sent the work back to implementer (grok-implement / grok)`.
+         *
+         * The same shape the card already used, with the bracketed pair once the resolution
+         * that answers the fix has chosen one. Written twice on purpose: the first call
+         * happens before the dispatch, when nobody knows who will take it.
+         */
+        private String fixNote(Workflow.Stage stage, String profile, String vendor) {
+            return "fix " + attempt + "/" + task.maxFixAttempts() + " · " + stage.name()
+                    + " sent the work back to "
+                    + Heartbeat.spoken(stage.fixWith(), profile, vendor);
+        }
+
         private String runningNote(Workflow.Stage stage, String profile, String vendor) {
             return position(stage) + " " + stage.name() + " · "
                     + Heartbeat.spoken(who(stage), profile, vendor)
