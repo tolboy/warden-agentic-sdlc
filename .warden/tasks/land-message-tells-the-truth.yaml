@@ -1,0 +1,22 @@
+version: 1
+id: land-message-tells-the-truth
+goal: "Make the commit message `warden land` builds tell the truth about the run behind it.\n\nTwo defects, both in dev.warden.run.LandCommand.commitMessage, both found by reading the plan `warden land beat-1` printed for a real accepted run.\n\nDEFECT 1: the subject is repeated. The builder writes `firstLine(goal)`, a blank line, and then the whole `goal`, which starts with that same first line. Every message it produces says its own subject twice before it says anything else.\n\nDEFECT 2: it claims checks that never ran. The builder appends a fixed sentence, `Machine gates, an independent review and the browser harness all passed`, whatever the run actually did. Run beat-1 skipped both browser stages on `condition_not_met:visual_qa_required` and the message still credited the harness. A commit message outlives every other artifact of a run: the ledger stays in the worktree, the report stays in .warden/runs, and this line goes into the repository's history, where a reader has nothing to check it against. It must not name a check nobody performed.\n\nWHAT TO BUILD. The sentence is derived from the run's own report instead of being a constant. The report already carries everything needed and no new field may be added to it:\n\n  stages          a list of {step, kind, ok, vendor, model}, the stages that actually ran\n  skipped_stages  a list of {stage, reason}, the stages that did not\n\nThe message says what ran and passed, in the run's own stage names, and says which stages were skipped rather than staying silent about them. A run where nothing was skipped must not grow an empty clause about skipping. Keep the existing pointer to the evidence directory and the `Ran-by: <vendor>/<model>` lines exactly as they are, and keep the subject once.\n\nThe shape of the wording is yours. What is fixed is that every claim in it is answerable from `stages` and `skipped_stages`, and that a reader who never sees the run cannot be misled by it.\n\nALSO CHECK, and change only if the same untruth is there: `pullRequestBody` builds an evidence table from the same `stages` list. Omitting the skipped stages from a table is not the same defect as claiming they passed, so leave it alone unless it makes a claim it cannot support.\n\nCONSTRAINTS.\n- `warden land` still lands nothing on its own. Do not touch when `--commit`, `--push` or `--pull-request` act, what they run, or the argv substitution that keeps a title containing a quote as one argument.\n- Do not change any failure code, any ledger field or the report schema. LandCommand reads the report; it may not start requiring a field the report does not already write.\n- `pull_request_title` stays the first line of the message.\n- Do not impose ASCII on the message. A goal may legitimately contain any text, and this is a commit message, not the run narration.\n\nTESTS. Extend landChecks in dev.warden.TaskLoopTest, which already plans a land for an accepted run. Cover: the subject appears once and not twice; a run with a skipped stage does not claim that stage passed and does say it was skipped; a run with nothing skipped grows no empty clause; and the `Ran-by:` lines and the evidence-directory pointer survive unchanged."
+non_goals:
+  - "Do not edit .warden contract files or acceptance commands to make checks pass"
+  - "Do not change what --commit, --push or --pull-request actually run"
+risk: medium
+scope: platform
+authority:
+  workspace_write: true
+  network: false
+  land: false
+# One method plus tests. Smaller than the last slice, which came back clean in one round.
+budgets:
+  max_role_runs: 4
+  max_cost_usd: 3.0
+max_fix_attempts: 2
+timeout_minutes: 45
+
+visual_qa:
+  required: false
+  scenarios: []
