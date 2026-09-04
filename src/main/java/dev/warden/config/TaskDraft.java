@@ -206,9 +206,10 @@ public final class TaskDraft {
      * a Gradle project's contract produces a check that fails for a reason unrelated to the task.
      */
     private static String previewBlock(Path projectRoot) {
-        if (!Files.isRegularFile(projectRoot.resolve("package.json"))) return "";
-        return "  start: \"npm run preview -- --host 127.0.0.1 --port 4173\"\n"
-                + "  url: \"http://127.0.0.1:4173/\"\n";
+        PreviewServer serving = PreviewServer.detect(projectRoot);
+        if (serving == null) return "";
+        return "  start: \"" + serving.command() + "\"\n"
+                + "  url: \"" + serving.url() + "\"\n";
     }
 
     /**

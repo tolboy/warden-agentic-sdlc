@@ -235,6 +235,30 @@ public final class DoCommandTest implements Suite {
         check.that("no package.json means no npm preview command",
                 !unnamed.contains("npm run preview"));
 
+        // The drafter used to write `npm run preview` for any package.json at all, while the
+        // browser stage's own fallback already knew to look for the script and to fall back to
+        // `dev` on its own port. A project with only `dev` was handed a contract whose server
+        // could never come up, and the failure said nothing about why.
+        Path onlyDev = sandbox.resolve("only-dev");
+        Files.createDirectories(onlyDev.resolve(".warden/tasks"));
+        Files.writeString(onlyDev.resolve("package.json"),
+                "{\"scripts\": {\"dev\": \"vite\", \"build\": \"vite build\"}}\n");
+        new TaskDraft().write(onlyDev, "devonly", "Add a Settings button to the header", "code", "low");
+        String devDraft = Files.readString(onlyDev.resolve(".warden/tasks/devonly.yaml"));
+        check.contains("a project with only a dev script gets dev, on its own port",
+                devDraft, "npm run dev -- --host 127.0.0.1 --port 5173");
+        check.contains("and the url matches the port that was pinned", devDraft,
+                "http://127.0.0.1:5173/");
+
+        Path hasPreview = sandbox.resolve("has-preview");
+        Files.createDirectories(hasPreview.resolve(".warden/tasks"));
+        Files.writeString(hasPreview.resolve("package.json"),
+                "{\"scripts\": {\"dev\": \"vite\", \"preview\": \"vite preview\"}}\n");
+        new TaskDraft().write(hasPreview, "prev", "Add a Settings button to the header", "code", "low");
+        check.contains("preview still wins where it exists: a check is about a build",
+                Files.readString(hasPreview.resolve(".warden/tasks/prev.yaml")),
+                "npm run preview -- --host 127.0.0.1 --port 4173");
+
         // Every draft must parse: the indentation of a generated block is not cosmetic.
         Files.writeString(drafts.resolve(".warden/project.yaml"), """
                 version: 1

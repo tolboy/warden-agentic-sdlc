@@ -295,18 +295,8 @@ public final class VisualQaRunner {
     }
 
     private static String defaultStart(Path root) {
-        Path pkg = root.resolve("package.json");
-        if (!Files.isRegularFile(pkg)) return null;
-        try {
-            String text = Files.readString(pkg);
-            if (text.contains("\"preview\"")) {
-                return "npm run preview -- --host 127.0.0.1 --port 4173";
-            }
-            if (text.contains("\"dev\"")) {
-                return "npm run dev -- --host 127.0.0.1 --port 5173";
-            }
-        } catch (IOException ignored) { }
-        return null;
+        dev.warden.config.PreviewServer serving = dev.warden.config.PreviewServer.detect(root);
+        return serving == null ? null : serving.command();
     }
 
     /** The last few lines a started server printed, for a message about it not answering. */

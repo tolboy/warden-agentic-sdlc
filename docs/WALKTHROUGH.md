@@ -410,6 +410,25 @@ control is the part a later task is free to change, and a check that fails over 
 fails for a reason that has nothing to do with the task. A `text=` step is still fine
 alongside an anchored one, and a scenario that is only `no-console-errors` needs no locator.
 
+### How the loop tests a button
+
+This is the question that gets asked most, and the answer has three layers rather than one:
+
+1. **The harness clicks and asserts.** A real browser over CDP finds the control, presses it,
+   checks that what was promised is on the screen afterwards, and photographs the page after
+   every step. A red scenario is `visual_qa_failed` and a fix round for the implementer,
+   bounded by `max_fix_attempts`.
+2. **The `visual_qa` role looks at the frames.** It answers only what the machine cannot
+   measure: clipped, overlapped, drawn in the wrong place. Its objections are another fix
+   round; still objecting afterwards sends the run to a person as `visual_findings_remain`.
+3. **A person accepts.** The last word is always theirs, and the loop never lands anything.
+
+The reviewer is not in that sentence, and its absence is deliberate. It reads the diff and runs
+nothing. Mixing vision into the review would spend a second vendor on pixels the harness
+already owns, and would break `require_independent_vendor` for a job that is not reading a
+diff. If the button is missing entirely, nothing beyond the first layer is needed: the scenario
+is red and the implementer gets the failing step and the screenshot.
+
 A live run against the fixture:
 
 ```
