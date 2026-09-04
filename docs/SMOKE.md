@@ -290,3 +290,113 @@ smoke gate tolerate surrounding blank lines. That does not invalidate the runner
 proof—the gate reads the declared project file and fails on wrong non-whitespace content—but
 the fixture should not be mistaken for a production-strength acceptance suite. Mobile display
 and resolving a Warden human decision from Orca Mobile were explicitly left for a later smoke.
+
+
+### Proven 2026-09-04 — human control and a recoverable Orca lifecycle
+
+Same throwaway repository and isolated `WARDEN_CONFIG_HOME`, in the already-trusted Orca
+worktree `w-dashboard-proof-20260904` on Orca 1.4.196. The reviewer profile stays Claude
+`opus` (Opus 5) on `runner: orca`. Every line below is a command that ran, not a design note.
+
+**Warden was killed while its worker was running, and did not start a second one.**
+`warden role reviewer review-smoke --run-id restart-1-20260904` recorded run `run_eaace88c90d2`,
+task `task_907905028954` and dispatch `ctx_0ea77dc4fd6d` in
+`.warden/runs/restart-1-20260904/orca.json` before the agent was ready. The Java process was
+then killed; `worker-show` still reported `dispatched` and `worker-list` still showed one
+active terminal. The same command run again attached: `resumed: true`, recovery verdict
+`resume` / `dispatch_in_flight`, `coordinator_reused: true`, and 84s later
+`worker_done_succeeded`, `worker_release_ok`, `delivery_accounted`. One dispatch, one agent,
+one settlement.
+
+**A second run refused to start beside it.** While that worker was live,
+`warden role reviewer review-smoke --run-id contend-1-20260904` failed in 2.7s with
+`role_orca_worker_active`, naming `ctx_0ea77dc4fd6d` and how to fence it. Nothing was dispatched
+and nothing was spent.
+
+**The read-only window survives the restart.** The fingerprint recorded at `worker-start` is
+what the resumed process compares against, so the evidence reads
+`read_only_check.since: worker_start` rather than measuring only from the attach. A file
+written before the kill would still be a violation.
+
+**A timeout leaves nothing running.** With the same profile at `wall_clock_minutes: 1`,
+`timeout-3-20260904` ended after 63.9s with `role_orca_timeout`. Orca refused the fence with
+`dispatch_inactive` — it does not stop what is already stopped — so Warden verified the claim
+instead of trusting it: `worker-show` reported the dispatch `failed`, stage `process_exited`,
+`observation.status: exited`, and `worker-list` showed zero in flight. The record marks the
+worker `stopped`, so no later run tries to attach to it. Two earlier attempts,
+`timeout-1` and `timeout-2`, are why the verification exists: they reported
+`role_orca_lifecycle_unaccounted` over a worker that was provably gone.
+
+**A read-only role that writes is still refused after a successful settlement.** A profile
+deliberately declared `read_only: true` behind the implementer prompt was pointed at task
+`note-smoke`, whose goal is a new file. The Orca-hosted agent created `agent-note.txt`, sent
+`worker_done` with `outcome: succeeded`, and Warden released the worker, acknowledged the
+delivery, and then failed the role `role_violated_read_only` on the moved fingerprint
+(`readonly-2-20260904`). A clean settlement does not buy a pass.
+
+An earlier attempt at the same proof failed for the right reason and is worth recording:
+against a goal that contradicted its own gate, Claude Opus 5 changed nothing, reported
+`worker_done` BLOCKED, and named both the contradiction and the mislabelled dispatch.
+
+**A question from the agent, an answer from a person, and the same worker finished the job.**
+Profile `orca-claude-asks` requires one blocking `orchestration ask` before any review work.
+`question-1-20260904` returned `role_human_input_required` in 27s naming message
+`msg_02d426898eaf`, retained the coordinator, and recorded the worker `active` /
+`awaiting: human` with that message id. A person answered from a separate Orca terminal
+(`run-use`, then `orchestration reply --id msg_02d426898eaf`). Running the same role again
+attached to `ctx_56b8bbf08bf8`, reused the coordinator, and returned `ok` with
+`verdict: pass`; the reviewer's own summary quotes the answer it was given. The worker was
+released and the delivery acknowledged.
+
+That last step needed two fixes found by running it. Warden was not acknowledging the question
+delivery, so the FIFO replayed the same question to every later attach and an answered worker
+could never be collected; and a delivery carrying both a question and a `worker_done` read the
+question first. Completion now outranks a question in the same delivery, and a question is
+acknowledged and then waited past, so an answer given while the controller is still running
+lets that same process finish.
+
+**A decision made in Orca, admitted by Warden only on Warden's terms.** `accept-gate-20260904`
+ran the loop green — Grok implementer, machine gates, Claude Opus 5 reviewer on Orca — and
+published gate `gate_aa4a43cdc9d5` with options `accept` and `reject`. Answering it from an
+Orca terminal and running `warden approve accept-gate-20260904 --from-orca` recorded the
+decision with actor `orca-gate:gate_aa4a43cdc9d5` and `lands: false`. Around that, four
+refusals, each measured:
+
+| What was tried | What Warden answered |
+|---|---|
+| Import before anyone answered | `gate_pending` |
+| Gate answered "please retry if you can" | `gate_resolution_unmapped` |
+| Accept while the candidate had moved | `candidate_changed` |
+| Import a second time, and after the gate was re-answered `abort` | `stale_decision` |
+
+The last row is the one that matters. Orca gates are editable: `gate-resolve` takes free text
+rather than a declared option, and re-resolving a settled gate replaces the answer — both
+measured here. The gate for `gate-a3-20260904` was changed from `retry` to `abort` after the
+fact and `decision.json` still reads `retry`. The gate is a doorbell; the record is the record.
+
+**Answering a gate needs a bound Run.** `gate-resolve` from an unbound shell fails
+`run_required`. The recipe that works from any Orca terminal, desktop or mobile, is
+`orca orchestration run-use --id <run>` and then
+`orca orchestration gate-resolve --id <gate> --resolution accept`. Warden closes its own
+coordinator after publishing, because a gate is addressed to a Run and not to a terminal.
+
+**A Windows argv defect, found by the first publish failing.** `--options ["accept","reject"]`
+arrived at `orca.exe` as `[accept,reject]`: Java quotes only arguments containing whitespace,
+and a compact JSON array has none, so the receiving command line parser stripped the quotes.
+Orca named it exactly — `invalid_argument`, "its quotes are missing". `OrcaClient.jsonArgument`
+now escapes them, verified by sending all three spellings to the live CLI and watching which
+one it accepted.
+
+**The Agent Dashboard row is the live terminal title, and the agent overwrites it.** Warden now
+renames the worker terminal at start (`worker_row_named: true`, e.g. `claude reviewer -
+note-smoke`), which is what a row shows for an agent that never titles itself. Claude Code then
+replaces it with its own summary within seconds — the observed titles were `◑ Warden role
+reviewer for task review-smoke` and `◐ Warden reviewer for note-smoke`, both compressions of
+the first sentence of the spec Warden writes. The task's `display_name` (`reviewer / claude`)
+is stored by Orca and does not appear in the row. Closing that gap fully is an Orca change, not
+a Warden one.
+
+**Still not proven.** Orca Mobile: every gate here was answered through the Orca CLI on this
+desktop, and whether a decision gate renders anywhere in the Orca UI was not established.
+Fault injection on acknowledgement and release is still code and unit tests only. The Orca
+runner reports no cost, so its calls land in `unpriced_calls`.

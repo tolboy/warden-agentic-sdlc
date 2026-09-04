@@ -11,6 +11,48 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- A Warden process killed while an Orca worker is running can be started again. The Run, task,
+  dispatch and coordinator identities, and the read-only fingerprint taken at start, are written
+  to `.warden/runs/<run-id>/orca.json` before the worker is launched, so the next invocation
+  attaches to the same dispatch instead of opening a second agent in the same checkout. A
+  worktree already held by anybody's supervised worker is `role_orca_worker_active` and costs
+  nothing. An unreadable record, an unreachable `worker-list`, or a dispatch Orca will not
+  describe is `role_orca_lifecycle_unaccounted`: "cannot tell" is never read as "nothing is
+  running". Proven live by killing a run mid-flight and collecting its worker afterwards
+  (`docs/SMOKE.md`).
+- A pending human decision is mirrored into Orca as a decision gate, so it can be answered from
+  another machine. `warden approve <run-id> --from-orca` imports the answer, and admits it only
+  if it maps exactly onto one of Warden's own options, only while the pending decision has not
+  moved, and — for an acceptance — only while the candidate fingerprint still matches.
+  `decision.json` stays the only decision: measured on Orca 1.4.196, `gate-resolve` accepts free
+  text and re-resolving a settled gate replaces the answer, and a gate edited from `retry` to
+  `abort` after the fact left the recorded decision untouched. `--no-orca-gate` turns the mirror
+  off; publishing never fails a finished run, and records the reason it did not publish.
+- A question from an Orca-hosted agent is now a wait, not an ending. Warden acknowledges the
+  question delivery, keeps watching for the role's whole budget, and reports
+  `role_human_input_required` only if nobody answered in time — retaining the worker and
+  recording the message id, so answering it and running the role again finishes on the same
+  worker. Proven live end to end, including the reviewer quoting the answer it was given.
+
+### Fixed
+
+- A timeout no longer reports an unaccounted lifecycle over a worker that is provably gone.
+  Orca answers `dispatch_inactive` when asked to stop something already stopped, so a refused
+  fence is now verified with `worker-show`: a settled or unknown dispatch is fenced, and only a
+  dispatch still in flight, or one Orca will not describe, blocks later stages.
+- A delivery carrying both a question and a `worker_done` read the question first, which
+  reported a finished run as waiting on a person. Completion now outranks a question in the
+  same delivery.
+- Leaving a question delivery unacknowledged made Orca replay it to every later attach, so an
+  answered worker could never be collected.
+- A JSON argument to the Orca CLI lost its quotes on Windows: Java quotes only arguments
+  containing whitespace, and a compact JSON array has none, so `["accept","reject"]` arrived as
+  `[accept,reject]` and the first gate publish was refused `invalid_argument`.
+  `OrcaClient.jsonArgument` escapes them, checked against the live CLI.
+- Warden names the Orca worker terminal at start, which is what the Agent Dashboard shows for
+  an agent that does not title itself. An agent CLI that sets its own title still wins, and the
+  task's `display_name` is stored by Orca but not rendered in the row.
+
 - `defaults.baseline_checks` — an optional named check set run in the worktree before the
   first vendor. Red is `baseline_failed` and zero vendor calls, so an agent is never asked to
   repair a breakage it did not cause. The same commands become the floor of the later

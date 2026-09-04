@@ -7,6 +7,8 @@ import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
 import dev.warden.config.Workflow;
+import dev.warden.execution.orca.OrcaDecisionGate;
+import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.gate.GateRunner;
 import dev.warden.gate.VisualQaRunner;
 import dev.warden.git.GitRepository;
@@ -73,6 +75,7 @@ public final class TaskLoop {
     private final VisualCheck visualCheck;
     private final Progress progress;
     private final Workspace workspace;
+    private final boolean orcaGate;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (loaded, runId) -> new VisualQaRunner(processes).run(loaded, runId));
@@ -88,7 +91,7 @@ public final class TaskLoop {
      * would be ambiguous at every call site and a lambda could silently pick the wrong one.
      */
     public TaskLoop withProgress(Progress narration) {
-        return new TaskLoop(processes, visualCheck, narration, workspace);
+        return new TaskLoop(processes, visualCheck, narration, workspace, orcaGate);
     }
 
     /**
@@ -97,19 +100,38 @@ public final class TaskLoop {
      * only what a person would act on goes to the card.
      */
     public TaskLoop withWorkspace(Workspace board) {
-        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board));
+        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board), orcaGate);
+    }
+
+    /**
+     * Whether a pending decision is also published to Orca as a decision gate.
+     *
+     * Off unless a caller asks, and `warden run` and `warden do` ask, for the same reason they
+     * write the card: a run that stops for a person stops wherever that person is not, and
+     * inside an Orca worktree there is already a surface that reaches them. Outside one,
+     * publishing finds nothing and records that it did not. The gate never decides anything —
+     * see {@link dev.warden.execution.orca.OrcaDecisionGate}.
+     */
+    public TaskLoop withOrcaGate(boolean publish) {
+        return new TaskLoop(processes, visualCheck, progress, workspace, publish);
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
-        this(processes, visualCheck, progress, Workspace.NONE);
+        this(processes, visualCheck, progress, Workspace.NONE, false);
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
                     Workspace workspace) {
+        this(processes, visualCheck, progress, workspace, false);
+    }
+
+    public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
+                    Workspace workspace, boolean orcaGate) {
         this.processes = processes;
         this.visualCheck = visualCheck;
         this.progress = progress;
         this.workspace = workspace;
+        this.orcaGate = orcaGate;
     }
 
     /**
@@ -425,6 +447,7 @@ public final class TaskLoop {
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
                 verdict, file, git.sourceFingerprint(diffBaseCommit));
         addDecision(summary, root, decision);
+        publishGate(summary, root, decision, task.goal());
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
                 "run_id", runId, "kind", decision.kind().jsonValue(),
@@ -1477,6 +1500,7 @@ public final class TaskLoop {
             decision = store.createFailure(runIdentity, taskIdentity, reason, file, fingerprint);
         }
         addDecision(summary, root, decision);
+        publishGate(summary, root, decision, String.valueOf(summary.get("task_id")));
         ledger.writeReport("task-run", summary);
         ledger.append("human_decision_pending", Map.of(
                 "run_id", decision.runId(), "kind", decision.kind().jsonValue(),
@@ -1540,6 +1564,28 @@ public final class TaskLoop {
                 + " (" + pending.get("from_vendor") + ") reported a spent subscription. "
                 + "Switch to " + pending.get("to_profile") + " (" + pending.get("to_vendor")
                 + ")? " + pending.get("independence_after_switch");
+    }
+
+    /**
+     * Mirror the pending decision onto Orca so it can be answered from somewhere else.
+     *
+     * Recorded either way, and never fatal. The decision is already durable on disk by the
+     * time this runs; a second surface that could not be reached is worth saying out loud and
+     * is not worth failing a finished run over.
+     */
+    private void publishGate(Map<String, Object> summary, Path root, HumanDecision decision,
+                             String objective) {
+        if (!orcaGate) {
+            summary.put("orca_gate", Map.of("published", false, "reason", "disabled"));
+            return;
+        }
+        OrcaDecisionGate.Publication published = new OrcaDecisionGate(processes)
+                .publish(root, new OrcaLifecycle(root, decision.runId()), decision, objective);
+        summary.put("orca_gate", published.toMap());
+        if (published.published()) {
+            progress.line("      answer from Orca: warden approve " + decision.runId()
+                    + " --from-orca   (gate " + published.gate().gateId() + ")");
+        }
     }
 
     private static void addDecision(Map<String, Object> summary, Path root, HumanDecision decision)

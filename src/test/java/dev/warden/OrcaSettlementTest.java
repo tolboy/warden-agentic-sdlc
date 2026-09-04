@@ -197,5 +197,30 @@ public final class OrcaSettlementTest implements Suite {
                 """);
         check.eq("worktree current uses the nested worktree id from a live Orca 1.4 receipt",
                 "repo::C:/proj", OrcaSettlement.worktreeSelector(current));
+
+        // One delivery carrying both. A worker that asked something and then finished has
+        // answered its own question; reading the question first would report a run as waiting
+        // on a person who has nothing left to decide, and would strand the completion.
+        OrcaSettlement.Outcome both = OrcaSettlement.fromCheck(Json.parseObject("""
+                {"ok":true,"result":{"deliveryId":"delivery_1","count":2,"messages":[
+                  {"id":"msg_q","type":"question","taskId":"task_1","dispatchId":"ctx_1",
+                   "payload":"may I count untracked files?"},
+                  {"id":"msg_d","type":"worker_done","taskId":"task_1","dispatchId":"ctx_1",
+                   "outcome":"succeeded","payload":{"warden_artifact":{"status":"completed"}}}]}}
+                """), "task_1", "ctx_1");
+        check.eq("completion outranks a question in the same delivery",
+                OrcaSettlement.Kind.COMPLETED, both.kind());
+        check.eq("and it is the worker_done message that is named", "msg_d", both.messageId());
+
+        OrcaSettlement.Outcome onlyQuestion = OrcaSettlement.fromCheck(Json.parseObject("""
+                {"ok":true,"result":{"deliveryId":"delivery_2","count":1,"messages":[
+                  {"id":"msg_q","type":"question","taskId":"task_1","dispatchId":"ctx_1",
+                   "payload":"may I count untracked files?"}]}}
+                """), "task_1", "ctx_1");
+        check.eq("a question on its own is still a question",
+                OrcaSettlement.Kind.QUESTION, onlyQuestion.kind());
+        check.eq("and carries the delivery that has to be acknowledged",
+                "delivery_2", onlyQuestion.deliveryId());
     }
+
 }

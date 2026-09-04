@@ -131,3 +131,60 @@ and disappeared after Warden acknowledged and released it. Orca exposes concise 
 tool activity, not a model's private chain-of-thought. Direct-runner roles still do not become
 Agent Dashboard sessions; they remain visible through Warden narration, worktree cards and the
 evidence ledger.
+
+What the row is *called* is the live terminal title, not the task's `display_name`. Warden sets
+that title as soon as the worker exists, which is what an agent that never titles itself would
+otherwise show as an internal worker handle. An agent CLI that does set its own title wins
+within seconds: the observed rows read `◑ Warden role reviewer for task review-smoke`, which is
+Claude Code compressing the first sentence of the spec Warden wrote. The `display_name` Warden
+sends (`reviewer / claude`) is stored on the task and rendered nowhere. Naming the row
+deterministically for every agent would be a change in Orca.
+
+## A supervised worker outlives the process that started it
+
+That is the point of `runner: orca` — an agent parked on a question nobody has answered yet
+should still be there tomorrow — and it is why the identities cannot live in memory. Before a
+worker is started, `.warden/runs/<run-id>/orca.json` records the Run, task, dispatch and
+coordinator handles, the worktree, the vendor and model, and the read-only fingerprint taken at
+that moment. The file sits in the one directory both the read-only fingerprint and the contract
+snapshot deliberately exclude, so writing it during a run changes no judgement.
+
+Two guards, because they fail in different situations:
+
+| Question | Answered by | When it is the only one that can answer |
+|---|---|---|
+| Is *my* worker still there? | the record, then `orchestration worker-show` | after a clean kill, where the record exists |
+| Does *anybody's* worker hold this worktree? | `orchestration worker-list` | after a crash mid-`worker-start`, where no record was written |
+
+Neither is allowed to read "cannot tell" as "no". A dispatch Orca cannot describe, an
+unreadable record and an unreachable census are all `role_orca_lifecycle_unaccounted`; a live
+worker in this worktree is `role_orca_worker_active`, refused in seconds and costing nothing.
+Only `dispatch_not_found` — Orca saying it has never heard of the dispatch — clears the way for
+a fresh start.
+
+A refused fence is not a failed fence. Orca answers `dispatch_inactive` when asked to stop a
+worker that has already stopped, so Warden verifies the refusal with `worker-show` rather than
+trusting either answer: a settled or unknown dispatch is fenced, and a dispatch still in flight
+is not.
+
+## The human decision, and where it can be answered
+
+`decision.json` is the decision. What the Orca gate adds is reach: a run stops for a person,
+and the person is not at the worktree. So the pending decision is mirrored into Orca as a
+decision gate carrying Warden's own options, and `warden approve --from-orca` carries the
+answer back.
+
+The mirror decides nothing, and that is enforced rather than trusted. An imported answer is
+admitted only if it maps exactly onto one of the decision's declared options, only while the
+pending decision has not moved since the gate was published, and — for an acceptance — only
+while the candidate fingerprint still matches. The reason is measured, not hypothetical: on
+Orca 1.4.196 `gate-resolve` accepts free text rather than a declared option, and re-resolving a
+settled gate silently replaces the answer. A gate changed from `retry` to `abort` after the
+fact left the recorded decision reading `retry`.
+
+A question from the agent is handled the same way round. It is a healthy wait, not an ending:
+Warden takes delivery of it, keeps watching for the role's whole budget so an answer given
+while the controller is still running finishes the work in the same process, and only reports
+`role_human_input_required` when the budget expires with the question still open. The worker is
+retained and the message id recorded, so answering it and running the role again attaches to
+that same worker.

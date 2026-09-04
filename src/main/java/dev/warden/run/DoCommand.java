@@ -71,6 +71,7 @@ public final class DoCommand {
     private final Progress progress;
     private final Workspace.Source board;
     private final boolean watch;
+    private final boolean orcaGate;
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
@@ -80,10 +81,21 @@ public final class DoCommand {
 
     public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
                      boolean watch) {
+        this(processes, progress, board, watch, false);
+    }
+
+    public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
+                     boolean watch, boolean orcaGate) {
         this.processes = processes;
         this.progress = progress;
         this.board = board;
         this.watch = watch;
+        this.orcaGate = orcaGate;
+    }
+
+    /** Publish the run's pending decision to Orca as a gate, so it can be answered elsewhere. */
+    public DoCommand withOrcaGate(boolean publish) {
+        return new DoCommand(processes, progress, board, watch, publish);
     }
 
     /**
@@ -92,7 +104,7 @@ public final class DoCommand {
      * worktree partway through and the operator's own checkout is the wrong one to write on.
      */
     public DoCommand withWorkspace(Workspace.Source source, boolean watch) {
-        return new DoCommand(processes, progress, source, watch);
+        return new DoCommand(processes, progress, source, watch, orcaGate);
     }
 
     /**
@@ -313,6 +325,7 @@ public final class DoCommand {
         TaskLoop.Outcome loop = new TaskLoop(processes)
                 .withProgress(Progress.tee(progress, Progress.toFile(narration)))
                 .withWorkspace(card)
+                .withOrcaGate(orcaGate && !options.dryRun())
                 .run(loaded, user, runId, options.dryRun());
 
         Map<String, Object> report = new LinkedHashMap<>();

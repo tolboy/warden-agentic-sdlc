@@ -1,15 +1,13 @@
 package dev.warden.approval;
 
 import dev.warden.json.Json;
+import dev.warden.json.JsonFile;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -17,7 +15,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Durable, fail-closed storage for the only action Warden delegates to a human.
@@ -28,9 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class ApprovalStore {
     public static final String FILE_NAME = "decision.json";
-    /** File locks protect processes; these monitors prevent overlapping-lock errors in one JVM. */
-    private static final Map<Path, Object> JVM_LOCKS = new ConcurrentHashMap<>();
-
     private final Path projectRoot;
     private final Path runsDirectory;
     private final Clock clock;
@@ -253,47 +247,17 @@ public final class ApprovalStore {
     }
 
     private void writeAtomically(Path target, Map<String, Object> value) throws IOException {
-        Files.createDirectories(target.getParent());
-        Path temporary = Files.createTempFile(target.getParent(), ".decision-", ".tmp");
         try {
-            Files.writeString(temporary, Json.writePretty(value) + System.lineSeparator(),
-                    StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
-            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
-                channel.force(true);
-            }
-            try {
-                Files.move(temporary, target,
-                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException unsupported) {
-                throw new ApprovalException("atomic_write_unsupported",
-                        "filesystem cannot atomically replace " + target, unsupported);
-            }
-        } finally {
-            Files.deleteIfExists(temporary);
+            JsonFile.writeAtomically(target, value);
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            throw new ApprovalException("atomic_write_unsupported",
+                    "filesystem cannot atomically replace " + target, unsupported);
         }
     }
 
-    /**
-     * Compare-and-swap decisions across both threads and independent Warden processes.
-     * The lock file is deliberately retained: deleting and recreating it can split waiters
-     * across two different filesystem objects and make the critical section illusory.
-     */
-    private <T> T underExclusiveLock(Path target, IoOperation<T> operation) throws IOException {
-        Files.createDirectories(target.getParent());
-        Path lockPath = target.resolveSibling(FILE_NAME + ".lock").toAbsolutePath().normalize();
-        Object monitor = JVM_LOCKS.computeIfAbsent(lockPath, ignored -> new Object());
-        synchronized (monitor) {
-            try (FileChannel channel = FileChannel.open(lockPath,
-                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 var ignored = channel.lock()) {
-                return operation.run();
-            }
-        }
-    }
-
-    @FunctionalInterface
-    private interface IoOperation<T> {
-        T run() throws IOException;
+    /** Compare-and-swap decisions across both threads and independent Warden processes. */
+    private <T> T underExclusiveLock(Path target, JsonFile.IoOperation<T> operation) throws IOException {
+        return JsonFile.underExclusiveLock(target, FILE_NAME + ".lock", operation);
     }
 
     private static void validateRunId(String runId) throws ApprovalException {

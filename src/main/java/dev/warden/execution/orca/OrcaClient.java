@@ -48,6 +48,42 @@ public final class OrcaClient {
         }
     }
 
+    /**
+     * One JSON value, spelled so it survives the Windows command line.
+     *
+     * Windows has no argv. A process is handed one string and unpacks it itself, and the C
+     * runtime rules every CLI follows strip bare double quotes: {@code ["a","b"]} arrives as
+     * {@code [a,b]}, which is not JSON. Java does not escape them, because it only quotes
+     * arguments containing whitespace and a compact JSON array has none — so the damage
+     * happens between two components that are each behaving correctly.
+     *
+     * Measured, not assumed: Orca 1.4.196 answered {@code invalid_argument} with the message
+     * "--options is not valid JSON: its quotes are missing", and the same call with the quotes
+     * escaped was accepted. Backslashes are doubled ahead of a quote as those same rules
+     * require, so a value that legitimately contains one still arrives intact.
+     */
+    public static String jsonArgument(Object value) {
+        String json = Json.write(value);
+        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return json;
+        StringBuilder escaped = new StringBuilder(json.length() + 8);
+        int backslashes = 0;
+        for (int index = 0; index < json.length(); index++) {
+            char character = json.charAt(index);
+            if (character == '\\') {
+                backslashes++;
+                escaped.append(character);
+                continue;
+            }
+            if (character == '"') {
+                for (int repeat = 0; repeat < backslashes; repeat++) escaped.append('\\');
+                escaped.append('\\');
+            }
+            backslashes = 0;
+            escaped.append(character);
+        }
+        return escaped.toString();
+    }
+
     public Rpc invoke(Path workingDirectory, Duration timeout, List<String> args) throws Exception {
         List<String> command = new ArrayList<>();
         command.add(DirectCliExecutor.resolveExecutable("orca", workingDirectory));

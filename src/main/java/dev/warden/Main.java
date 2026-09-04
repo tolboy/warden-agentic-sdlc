@@ -13,6 +13,8 @@ import dev.warden.config.UserSetup;
 import dev.warden.gate.GateRunner;
 import dev.warden.gate.VisualQaRunner;
 import dev.warden.execution.orca.OrcaClient;
+import dev.warden.execution.orca.OrcaDecisionGate;
+import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.json.Json;
 import dev.warden.ledger.LedgerReader;
 import dev.warden.ledger.RunReport;
@@ -328,6 +330,7 @@ public final class Main {
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
+                    .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"))
                     .run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
@@ -506,7 +509,9 @@ public final class Main {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
-                .withWorkspace(board(args), hasFlag(args, "--watch")).run(options, user);
+                .withWorkspace(board(args), hasFlag(args, "--watch"))
+                .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
+                .run(options, user);
         Map<String, Object> report = new LinkedHashMap<>(outcome.report());
         Object runId = report.get("run_id");
         if (runId instanceof String id && outcome.worktree() != null) {
@@ -656,12 +661,20 @@ public final class Main {
      */
     private static int approve(String[] args) throws Exception {
         if (args.length < 2) {
-            throw new IllegalArgumentException("approve requires a run id and --decision");
+            throw new IllegalArgumentException(
+                    "approve requires a run id and either --decision or --from-orca");
         }
         String runId = args[1];
+        boolean fromOrca = hasFlag(args, "--from-orca");
         String choice = option(args, "--decision", null);
-        if (choice == null) throw new IllegalArgumentException("approve requires --decision <choice>");
-        String actor = option(args, "--actor", System.getProperty("user.name", "human"));
+        if (choice == null && !fromOrca) {
+            throw new IllegalArgumentException("approve requires --decision <choice> or --from-orca");
+        }
+        if (choice != null && fromOrca) {
+            throw new IllegalArgumentException("approve takes --decision or --from-orca, not both");
+        }
+        String actor = option(args, "--actor", fromOrca ? null
+                : System.getProperty("user.name", "human"));
         String note = option(args, "--note", "");
         String noteFile = option(args, "--note-file", null);
         if (noteFile != null) note = java.nio.file.Files.readString(Path.of(noteFile));
@@ -678,6 +691,55 @@ public final class Main {
         ApprovalStore store = new ApprovalStore(root);
         try {
             HumanDecision pending = store.read(runId);
+            Map<String, Object> gateReport = null;
+            if (fromOrca) {
+                OrcaLifecycle.Gate gate;
+                try {
+                    gate = new OrcaLifecycle(root, runId).read().gate();
+                } catch (java.io.IOException unreadable) {
+                    // A record Warden cannot read is not a record that says no gate exists.
+                    throw new ApprovalException("orca_lifecycle_unreadable",
+                            "cannot read the Orca record for run " + runId + ": "
+                                    + unreadable.getMessage());
+                }
+                if (gate == null) {
+                    throw new ApprovalException("no_orca_gate",
+                            "run " + runId + " never published a decision gate to Orca");
+                }
+                // The version token. A gate answers the question it was published about; if the
+                // pending decision has moved since, the answer is about something else.
+                if (!gate.decisionUpdatedAt().equals(pending.updatedAt().toString())) {
+                    throw new ApprovalException("stale_decision",
+                            "gate " + gate.gateId() + " was published for an older version of run "
+                                    + runId);
+                }
+                OrcaDecisionGate bridge = new OrcaDecisionGate(new ProcessRunner());
+                OrcaDecisionGate.Answer answer = bridge.read(root, gate);
+                if (answer == null) {
+                    throw new ApprovalException("gate_unreadable",
+                            "Orca did not return gate " + gate.gateId());
+                }
+                if (!answer.resolved()) {
+                    throw new ApprovalException("gate_pending",
+                            "gate " + gate.gateId() + " has not been answered yet");
+                }
+                choice = OrcaDecisionGate.choose(answer.resolution(), pending.options());
+                if (choice == null) {
+                    // Orca accepts free text as a resolution. Warden accepts one of its own
+                    // options and nothing else, because guessing what a sentence meant is the
+                    // judgement being delegated in the first place.
+                    throw new ApprovalException("gate_resolution_unmapped",
+                            "gate " + gate.gateId() + " was resolved as "
+                                    + Json.write(answer.resolution()) + ", which is not one of "
+                                    + pending.options());
+                }
+                if (actor == null) actor = "orca-gate:" + gate.gateId();
+                gateReport = new LinkedHashMap<>();
+                gateReport.put("gate_id", gate.gateId());
+                gateReport.put("task_id", gate.taskId());
+                gateReport.put("orca_run_id", gate.orcaRunId());
+                gateReport.put("resolution", answer.resolution());
+            }
             String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
 
             // Acceptance is valid only for the exact candidate the human inspected. Reject,
@@ -703,12 +765,17 @@ public final class Main {
             boolean summaryProjectionUpdated = updateDecisionProjection(root, resolved);
             long waitMillis = Math.max(0L,
                     Duration.between(resolved.createdAt(), resolved.updatedAt()).toMillis());
-            new dev.warden.ledger.EvidenceLedger(root, runId).append("human_decision", Map.of(
-                    "decision", choice, "actor", actor,
-                    "created_at", resolved.createdAt().toString(),
-                    "decided_at", resolved.updatedAt().toString(),
-                    "wait_millis", waitMillis,
-                    "updated_at", resolved.updatedAt().toString(), "lands", false));
+            Map<String, Object> recorded = new LinkedHashMap<>();
+            recorded.put("decision", choice);
+            recorded.put("actor", actor);
+            recorded.put("source", fromOrca ? "orca_gate" : "cli");
+            if (gateReport != null) recorded.put("orca_gate", gateReport);
+            recorded.put("created_at", resolved.createdAt().toString());
+            recorded.put("decided_at", resolved.updatedAt().toString());
+            recorded.put("wait_millis", waitMillis);
+            recorded.put("updated_at", resolved.updatedAt().toString());
+            recorded.put("lands", false);
+            new dev.warden.ledger.EvidenceLedger(root, runId).append("human_decision", recorded);
             // The card stops asking. `accept` and `abort` close the run; every other decision
             // expects another one, so it goes back to the running column rather than to a
             // column that reads as done to whoever glances at the board next.
@@ -723,6 +790,7 @@ public final class Main {
             result.put("ok", true);
             result.put("code", "decision_recorded");
             result.put("decision", resolved.toMap());
+            if (gateReport != null) result.put("orca_gate", gateReport);
             result.put("summary_projection_updated", summaryProjectionUpdated);
             result.put("lands", false);
             result.put("next", "accept".equals(choice)
@@ -819,6 +887,8 @@ public final class Main {
                                            its browser scenarios can be written before any
                                            vendor is paid to satisfy them
                   warden run <task>            the bounded loop; stops at the human gate
+                                               --no-orca-gate does not mirror the pending
+                                               decision into Orca as a decision gate
                                                --continue <run-id> carries a recorded decision
                                                from that run into this one: an authorised
                                                `switch`, a rejection's reason, or a `retry`
@@ -835,6 +905,13 @@ public final class Main {
                   warden approve <run-id> --decision <choice>
                                                record a decision; never lands changes.
                                                Must be run from the worktree the run lives in
+                  warden approve <run-id> --from-orca
+                                               take the decision from the Orca gate the run
+                                               published, so it can be answered from another
+                                               machine or a phone. The gate is a doorbell:
+                                               the answer must be one of Warden's own options,
+                                               the pending decision must not have moved, and an
+                                               acceptance still needs the same fingerprint
                   warden land <run-id>         plan the commit, branch and request for an
                                                accepted run; --commit/--push/--pull-request
                                                carry it out. Merges nothing

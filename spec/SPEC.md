@@ -271,6 +271,8 @@ warden visual-qa <task>     start the preview, screenshot, assert control visibi
 warden role <role> <task>   one role; --dry-run spends nothing
 warden run <task>           the whole loop; stops before a human
                             --continue <run-id> carries a recorded decision forward
+                            --no-orca-gate does not mirror the pending decision
+                            into Orca
 warden ledger               a table of runs: verdicts, cost, time, findings
 warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
                             changed files, the human decision. --text for the table
@@ -280,7 +282,10 @@ warden status [run-id]      pending and resolved human decisions
 warden approve <run-id>     record a decision; never lands changes.
                             Must be run from the worktree the run lives in.
                             Outside a Warden project the code is
-                            `not_a_warden_project`, not `unknown_run`
+                            `not_a_warden_project`, not `unknown_run`.
+                            --from-orca takes the answer from the Orca decision
+                            gate the run published, so a decision can be made
+                            from another machine or a phone
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```
@@ -366,6 +371,27 @@ Conductor   optional external workflow adapter; not part of the primary path
 Neither Conductor nor Orca knows a vendor's name. Warden writes `decision.json`; Orca may
 show the wait; Conductor may wrap the same command with an outer timeout and an external
 gate. The cut is [`docs/adr/0001-layer-split.md`](../docs/adr/0001-layer-split.md).
+
+**The Orca objects a run owns are written down.** `.warden/runs/<run-id>/orca.json` records the
+Run, task, dispatch and coordinator identities before the worker is started, plus the
+read-only fingerprint taken at that moment. A Warden process that is killed while a worker is
+running can therefore be started again: it attaches to the same dispatch instead of opening a
+second agent in the same checkout. Two guards, because they fail differently — the record
+answers "is my worker still there", and an `orchestration worker-list` scan answers "does
+anybody's worker hold this worktree", which is the question that still has an answer when the
+record was never written. Neither may read "cannot tell" as "no": an unreadable record, an
+unreachable census or a dispatch Orca will not describe is `role_orca_lifecycle_unaccounted`,
+and a live worker in this worktree is `role_orca_worker_active`.
+
+**A pending decision is mirrored to Orca as a decision gate, and the mirror decides nothing.**
+The run publishes its question with Warden's own options and stores the gate id, the decision's
+version token and the candidate fingerprint. `warden approve --from-orca` admits the answer
+only if it maps exactly onto one of those options, only while the pending decision has not
+moved, and — for an acceptance — only while the candidate fingerprint still matches. This is
+not defensiveness about Orca: measured on 1.4.196, `gate-resolve` takes free text rather than a
+declared option, and re-resolving a settled gate replaces the answer. Both are reasonable for a
+primitive that coordinates agents, and neither may reach an authorization record. `decision.json`
+stays the only decision.
 
 A Conductor node, when one is used, looks like this:
 

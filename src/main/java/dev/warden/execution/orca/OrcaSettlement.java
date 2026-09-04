@@ -166,39 +166,44 @@ public final class OrcaSettlement {
         if (count instanceof Number number && number.longValue() == 0) {
             return new Outcome(Kind.CHECKPOINT, expectedTaskId, expectedDispatchId, null, result, "empty_delivery");
         }
-        for (Map<String, Object> message : messagesOf(result)) {
-            String type = String.valueOf(first(message, "type", "kind"));
-            Map<String, Object> payload = payloadOf(message);
-            String task = string(first(message, "taskId", "task_id", "task"));
-            if (task == null) task = string(first(payload, "taskId", "task_id", "task"));
-            String dispatch = string(first(message, "dispatchId", "dispatch_id", "dispatch"));
-            if (dispatch == null) {
-                dispatch = string(first(payload, "dispatchId", "dispatch_id", "dispatch"));
-            }
-            if (expectedTaskId != null && task != null && !expectedTaskId.equals(task)) continue;
-            if (expectedDispatchId != null && dispatch != null && !expectedDispatchId.equals(dispatch)) continue;
-            if ("worker_done".equals(type) || "worker-done".equals(type)) {
-                String outcome = string(first(message, "outcome", "workerOutcome", "worker_outcome"));
-                if (outcome == null) {
-                    outcome = string(first(payload, "outcome", "workerOutcome", "worker_outcome"));
+        // Two passes, because one delivery can carry both. A worker that asked something and
+        // then finished has answered the question by finishing; reading the question first
+        // would report a run as waiting on a person who has nothing left to decide.
+        for (int pass = 0; pass < 2; pass++) {
+            for (Map<String, Object> message : messagesOf(result)) {
+                String type = String.valueOf(first(message, "type", "kind"));
+                Map<String, Object> payload = payloadOf(message);
+                String task = string(first(message, "taskId", "task_id", "task"));
+                if (task == null) task = string(first(payload, "taskId", "task_id", "task"));
+                String dispatch = string(first(message, "dispatchId", "dispatch_id", "dispatch"));
+                if (dispatch == null) {
+                    dispatch = string(first(payload, "dispatchId", "dispatch_id", "dispatch"));
                 }
-                Kind kind = successOutcome(outcome) ? Kind.COMPLETED : Kind.FAILED;
-                String reason = successOutcome(outcome) ? "worker_done_succeeded"
-                        : failureOutcome(outcome) ? "worker_done_failed"
-                        : "worker_done_missing_or_unknown_outcome";
-                return new Outcome(kind, task != null ? task : expectedTaskId,
-                        dispatch != null ? dispatch : expectedDispatchId, type, payload, reason,
-                        deliveryId, messageId(message));
-            }
-            if ("escalation".equals(type)) {
-                return new Outcome(Kind.ESCALATED, task != null ? task : expectedTaskId,
-                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "escalation",
-                        deliveryId, messageId(message));
-            }
-            if ("question".equals(type)) {
-                return new Outcome(Kind.QUESTION, task != null ? task : expectedTaskId,
-                        dispatch != null ? dispatch : expectedDispatchId, type, payload, "question",
-                        deliveryId, messageId(message));
+                if (expectedTaskId != null && task != null && !expectedTaskId.equals(task)) continue;
+                if (expectedDispatchId != null && dispatch != null && !expectedDispatchId.equals(dispatch)) continue;
+                if (pass == 0 && ("worker_done".equals(type) || "worker-done".equals(type))) {
+                    String outcome = string(first(message, "outcome", "workerOutcome", "worker_outcome"));
+                    if (outcome == null) {
+                        outcome = string(first(payload, "outcome", "workerOutcome", "worker_outcome"));
+                    }
+                    Kind kind = successOutcome(outcome) ? Kind.COMPLETED : Kind.FAILED;
+                    String reason = successOutcome(outcome) ? "worker_done_succeeded"
+                            : failureOutcome(outcome) ? "worker_done_failed"
+                            : "worker_done_missing_or_unknown_outcome";
+                    return new Outcome(kind, task != null ? task : expectedTaskId,
+                            dispatch != null ? dispatch : expectedDispatchId, type, payload, reason,
+                            deliveryId, messageId(message));
+                }
+                if (pass == 0 && "escalation".equals(type)) {
+                    return new Outcome(Kind.ESCALATED, task != null ? task : expectedTaskId,
+                            dispatch != null ? dispatch : expectedDispatchId, type, payload, "escalation",
+                            deliveryId, messageId(message));
+                }
+                if (pass == 1 && "question".equals(type)) {
+                    return new Outcome(Kind.QUESTION, task != null ? task : expectedTaskId,
+                            dispatch != null ? dispatch : expectedDispatchId, type, payload, "question",
+                            deliveryId, messageId(message));
+                }
             }
         }
         if (Boolean.FALSE.equals(envelope.get("ok"))) {
@@ -206,6 +211,55 @@ public final class OrcaSettlement {
                     "check_not_ok");
         }
         return new Outcome(Kind.CHECKPOINT, expectedTaskId, expectedDispatchId, null, result, "no_terminal_message");
+    }
+
+    /**
+     * Orca's machine-readable name for why a call refused, or null when it did not.
+     *
+     * Only the code is read. The message beside it is prose meant for a person and has already
+     * changed shape between Orca releases; a decision that turned on it would be a decision
+     * that turns on wording.
+     */
+    public static String errorCode(Map<String, Object> envelope) {
+        if (envelope == null) return null;
+        Object error = envelope.get("error");
+        if (error instanceof Map<?, ?> map) {
+            Object code = first(cast(map), "code", "kind");
+            if (code != null) return String.valueOf(code);
+        }
+        Object direct = envelope.get("errorCode");
+        return direct == null ? null : String.valueOf(direct);
+    }
+
+    /** The worktree a supervised worker is running in, as {@code worker-show} reports it. */
+    public static String workerWorktreeId(Map<String, Object> envelope) {
+        Map<String, Object> result = resultOf(envelope);
+        Object worker = result.get("worker");
+        if (worker instanceof Map<?, ?> map) {
+            Object id = first(cast(map), "worktree_id", "worktreeId");
+            if (id != null) return String.valueOf(id);
+        }
+        Object terminal = result.get("terminal");
+        if (terminal instanceof Map<?, ?> map) {
+            Object id = first(cast(map), "worktreeId", "worktree_id");
+            if (id != null) return String.valueOf(id);
+        }
+        return null;
+    }
+
+    /** The agent terminal a supervised worker owns, so a caller can name or rename it. */
+    public static String agentTerminalHandle(Map<String, Object> envelope) {
+        Map<String, Object> result = resultOf(envelope);
+        Object worker = result.get("worker");
+        if (worker instanceof Map<?, ?> map) {
+            Object handle = first(cast(map), "agent_terminal_handle", "agentTerminalHandle");
+            if (handle != null) return String.valueOf(handle);
+        }
+        Object terminal = result.get("terminal");
+        if (terminal instanceof Map<?, ?> map && map.get("handle") != null) {
+            return String.valueOf(map.get("handle"));
+        }
+        return null;
     }
 
     public static String worktreeSelector(Map<String, Object> envelope) {
