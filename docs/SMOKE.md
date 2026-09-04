@@ -396,7 +396,19 @@ the first sentence of the spec Warden writes. The task's `display_name` (`review
 is stored by Orca and does not appear in the row. Closing that gap fully is an Orca change, not
 a Warden one.
 
+**A decision gate renders nowhere in Orca's desktop UI.** Checked by publishing a pending gate
+and looking: the Agent Dashboard shows agent sessions and read `0 total` with no worker running,
+and global search returns worktrees, not orchestration objects. What a person actually sees is
+the worktree card Warden already writes, which the search surfaces as
+`stopped: preflight_outside_scope · 0 call(s) · $0.0000 · warden approve ui-gate-2-20260904
+--decision retry|abort · or orca gate gate_a4d86…`. So the run now says, in its own narration
+and on that card, both the gate id and the two commands that answer it from any Orca terminal:
+`orchestration run-use --id <run>` then `orchestration gate-resolve --id <gate> --resolution
+<choice>`. A gate is answerable from anywhere Orca reaches; it is not visible from anywhere
+Orca draws.
+
 **Still not proven.** Orca Mobile: every gate here was answered through the Orca CLI on this
-desktop, and whether a decision gate renders anywhere in the Orca UI was not established.
-Fault injection on acknowledgement and release is still code and unit tests only. The Orca
-runner reports no cost, so its calls land in `unpriced_calls`.
+desktop, and no phone was involved. A `switch`/`abort` failover gate was never published live —
+only `accept`/`reject` and `retry`/`abort`. Fault injection on acknowledgement and release is
+still code and unit tests only. The Orca runner reports no cost, so its calls land in
+`unpriced_calls`.

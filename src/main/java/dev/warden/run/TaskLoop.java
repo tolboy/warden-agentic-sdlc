@@ -1286,6 +1286,20 @@ public final class TaskLoop {
                     + list.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining("|"))
                     + ">");
         }
+        // An Orca gate renders nowhere in Orca's own UI — checked in 1.4.196 — so the way to
+        // answer one has to be told, not discovered. From any Orca terminal, including a
+        // phone's: bind the Run, then resolve the gate.
+        String gate = publishedGate(summary, "gate_id");
+        if (gate != null) {
+            progress.line("      warden approve " + runId + " --from-orca      (Orca gate " + gate + ")");
+            progress.line("      to answer that gate from any Orca terminal, phone included:");
+            progress.line("        orca orchestration run-use --id " + publishedGate(summary, "orca_run_id"));
+            progress.line("        orca orchestration gate-resolve --id " + gate + " --resolution <"
+                    + (options instanceof List<?> chosen && !chosen.isEmpty()
+                        ? chosen.stream().map(String::valueOf)
+                            .collect(java.util.stream.Collectors.joining("|"))
+                        : "choice") + ">");
+        }
         progress.blank();
 
         // The card the whole channel exists for. A run that ends waiting for a person is the
@@ -1301,6 +1315,7 @@ public final class TaskLoop {
                     .append(list.stream().map(String::valueOf)
                             .collect(java.util.stream.Collectors.joining("|")));
         }
+        if (gate != null) note.append(" · or orca gate ").append(gate);
         workspace.note(note.toString());
     }
 
@@ -1566,6 +1581,15 @@ public final class TaskLoop {
                 + ")? " + pending.get("independence_after_switch");
     }
 
+    /** One field of the gate this run published, or null if it published none. */
+    private static String publishedGate(Map<String, Object> summary, String field) {
+        Object published = summary.get("orca_gate");
+        if (!(published instanceof Map<?, ?> map)) return null;
+        if (!Boolean.TRUE.equals(map.get("published"))) return null;
+        Object value = map.get(field);
+        return value == null ? null : String.valueOf(value);
+    }
+
     /**
      * Mirror the pending decision onto Orca so it can be answered from somewhere else.
      *
@@ -1581,11 +1605,8 @@ public final class TaskLoop {
         }
         OrcaDecisionGate.Publication published = new OrcaDecisionGate(processes)
                 .publish(root, new OrcaLifecycle(root, decision.runId()), decision, objective);
+        // Not narrated here: the footer says it once, with the commands that answer it.
         summary.put("orca_gate", published.toMap());
-        if (published.published()) {
-            progress.line("      answer from Orca: warden approve " + decision.runId()
-                    + " --from-orca   (gate " + published.gate().gateId() + ")");
-        }
     }
 
     private static void addDecision(Map<String, Object> summary, Path root, HumanDecision decision)
