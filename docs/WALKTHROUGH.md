@@ -114,6 +114,10 @@ defaults:
   risk: medium
 ```
 
+Optional, and off unless you name it: `defaults.baseline_checks: fast` runs that set
+**before the first vendor**. Red is `baseline_failed` and nothing is dispatched. Existing
+projects that omit the key keep the behaviour this walkthrough has always had.
+
 For a JVM project only the contents of `checks` change — `./gradlew build`. Nothing else.
 
 A task is four lines at minimum:
@@ -531,12 +535,13 @@ implementer, machine gates, an independent reviewer on a second vendor, the brow
 and a `visual_qa` role that filed a P1 the machine could not see and ordered a fix round. That
 is a different document: [`LIVE-CYCLE.md`](LIVE-CYCLE.md), with the costs, tokens and verdicts.
 
-Still not shown anywhere, because it has not been done:
+Not demonstrated step by step in this walkthrough:
 
-- **A live `runner: orca` role cycle.** The adapter is written to Orca's CLI contract: it
-  creates no worktrees and completes only on `worker_done` or dispatch settlement. Until that
-  runs against a live worker, it is not a proven path. Orca *did* create the worktrees in the
-  live runs, but that is `OrcaIsolation` — a different code path.
+- **A live `runner: orca` role cycle.** It has now been proven separately: Claude Opus 5 was
+  visible in Orca's desktop Agent Dashboard, ran the project's declared gate, sent a typed
+  `worker_done`, and was acknowledged and released. See the dated 2026-09-04 row in
+  [`SMOKE.md`](SMOKE.md). The adapter creates no worktrees; `OrcaIsolation` remains a separate
+  code path.
 - **Visual pixel-diff and baselines.** The harness checks assertions; it does not compare
   images. A task with `visual_qa.required: true` and no browser fails `visual_qa_unavailable`
   rather than passing quietly.

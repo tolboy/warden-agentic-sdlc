@@ -22,6 +22,7 @@ public record ProjectConfig(
         List<String> setup,
         Land land,
         String defaultChecks,
+        String defaultBaselineChecks,
         String defaultRisk,
         long defaultMaxFixAttempts,
         long defaultTimeoutMinutes) {
@@ -57,7 +58,7 @@ public record ProjectConfig(
             "version", "project", "base_ref", "checks", "scopes", "setup", "defaults", "land");
     private static final Set<String> LAND_KEYS = Set.of("remote", "base", "pull_request", "note");
     private static final Set<String> DEFAULTS = Set.of(
-            "checks", "risk", "max_fix_attempts", "timeout_minutes");
+            "checks", "baseline_checks", "risk", "max_fix_attempts", "timeout_minutes");
 
     public static ProjectConfig parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -102,6 +103,18 @@ public record ProjectConfig(
         if (defaultChecks != null && !checks.containsKey(defaultChecks)) {
             root.collector().add("defaults.checks names '" + defaultChecks + "', which is not defined under checks");
         }
+        // Optional for backwards compatibility and for a greenfield project that has no
+        // pre-existing suite yet. When declared, this is the project-health set Warden runs
+        // before it pays a vendor; TaskSpec also folds it into the later acceptance gate so
+        // an agent cannot break a test that was green at dispatch time.
+        String defaultBaselineChecks = defaults.optString("baseline_checks", null);
+        if (defaultBaselineChecks != null && !checks.containsKey(defaultBaselineChecks)) {
+            root.collector().add("defaults.baseline_checks names '" + defaultBaselineChecks
+                    + "', which is not defined under checks");
+        } else if (defaultBaselineChecks != null && checks.get(defaultBaselineChecks).isEmpty()) {
+            root.collector().add("defaults.baseline_checks names an empty command set; omit it "
+                    + "when this project has no baseline check yet");
+        }
         String defaultRisk = defaults.requireEnum("risk", RISK_LEVELS, "medium");
         long maxFixAttempts = defaults.optInt("max_fix_attempts", 2, 0, 10);
         long timeoutMinutes = defaults.optInt("timeout_minutes", 30, 1, 240);
@@ -120,7 +133,7 @@ public record ProjectConfig(
 
         root.throwIfAny();
         return new ProjectConfig(project, baseRef, checks, scopes, setup, land,
-                defaultChecks, defaultRisk, maxFixAttempts, timeoutMinutes);
+                defaultChecks, defaultBaselineChecks, defaultRisk, maxFixAttempts, timeoutMinutes);
     }
 
     static List<String> normalizePaths(Values root, String field, List<String> raw) {

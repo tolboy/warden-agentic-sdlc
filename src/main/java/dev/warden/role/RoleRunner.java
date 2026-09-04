@@ -496,11 +496,18 @@ public final class RoleRunner {
         entry.put("attempt", (long) attempt);
         entry.put("profile", profile.name());
         entry.put("vendor", profile.vendor());
+        entry.put("runner", profile.runner());
+        Object reportedModel = result.evidence().get("model_reported");
+        Object model = reportedModel != null ? reportedModel
+                : result.evidence().getOrDefault("model", profile.model());
+        if (model != null) entry.put("model", model);
         entry.put("ok", result.ok());
         entry.put("code", result.code());
         entry.put("duration_millis", result.duration().toMillis());
         Object cost = result.evidence().get("cost_usd");
         if (cost != null) entry.put("cost_usd", cost);
+        Object tokens = result.evidence().get("tokens");
+        if (tokens != null) entry.put("tokens", tokens);
         Object raw = result.evidence().get("raw_stdout");
         if (raw != null) entry.put("raw_stdout", raw);
         Object quota = result.evidence().get("quota");

@@ -1,5 +1,7 @@
 package dev.warden.execution.orca;
 
+import dev.warden.json.Json;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,6 +62,11 @@ public final class OrcaSettlement {
         Map<String, Object> result = resultOf(envelope);
         Object nested = result.get("task");
         if (nested instanceof Map<?, ?> map && map.get("id") != null) return String.valueOf(map.get("id"));
+        Object dispatch = result.get("dispatch");
+        if (dispatch instanceof Map<?, ?> map) {
+            Object nestedTask = first(cast(map), "taskId", "task_id");
+            if (nestedTask != null) return String.valueOf(nestedTask);
+        }
         Object id = first(result, "taskId", "task_id");
         return id == null ? null : String.valueOf(id);
     }
@@ -97,6 +104,56 @@ public final class OrcaSettlement {
     }
 
     /**
+     * Classify Orca's direct observation of a native agent prompt.
+     *
+     * <p>This is deliberately three-valued. A non-null {@code observation.agentWait} is
+     * positive evidence that the exact worker is parked on input only a person can provide.
+     * An explicit null means Orca inspected that worker and found no such wait. A missing
+     * field means Orca could not inspect it (older runtime, stale identity, unreadable pane or
+     * a probe timeout) and must never be read as "not waiting".</p>
+     *
+     * <p>{@link Kind#QUESTION} here describes a live, healthy wait. Callers must keep polling;
+     * it becomes a terminal Warden result only when the role's own wall-clock budget expires
+     * while the wait is still proven.</p>
+     */
+    public static Outcome fromWorkerShow(Map<String, Object> envelope) {
+        if (envelope == null || !envelopeOk(envelope)) {
+            return new Outcome(Kind.UNKNOWN, null, null, "agent_wait", Map.of(),
+                    "agent_wait_observation_unavailable");
+        }
+        Map<String, Object> result = resultOf(envelope);
+        String task = taskId(envelope);
+        String dispatch = dispatchId(envelope);
+        Object body = result.get("observation");
+        if (!(body instanceof Map<?, ?> rawObservation)) {
+            return new Outcome(Kind.UNKNOWN, task, dispatch, "agent_wait", Map.of(),
+                    "agent_wait_observation_missing");
+        }
+        Map<String, Object> observation = cast(rawObservation);
+        if (!Boolean.TRUE.equals(observation.get("exactWorker"))) {
+            return new Outcome(Kind.UNKNOWN, task, dispatch, "agent_wait", Map.of(),
+                    "agent_wait_worker_not_exact");
+        }
+        String key = observation.containsKey("agentWait") ? "agentWait"
+                : observation.containsKey("agent_wait") ? "agent_wait" : null;
+        if (key == null) {
+            return new Outcome(Kind.UNKNOWN, task, dispatch, "agent_wait", Map.of(),
+                    "agent_wait_not_observed");
+        }
+        Object wait = observation.get(key);
+        if (wait == null) {
+            return new Outcome(Kind.CHECKPOINT, task, dispatch, "agent_wait", Map.of(),
+                    "agent_wait_checked_clear");
+        }
+        if (!(wait instanceof Map<?, ?> rawWait)) {
+            return new Outcome(Kind.UNKNOWN, task, dispatch, "agent_wait", Map.of(),
+                    "agent_wait_unrecognised");
+        }
+        return new Outcome(Kind.QUESTION, task, dispatch, "agent_wait",
+                new LinkedHashMap<>(cast(rawWait)), "agent_wait_proven");
+    }
+
+    /**
      * One {@code orchestration check} Delivery. An empty or timed-out check is a checkpoint,
      * not a worker failure: long tasks routinely run past a single wait window.
      */
@@ -111,11 +168,15 @@ public final class OrcaSettlement {
         }
         for (Map<String, Object> message : messagesOf(result)) {
             String type = String.valueOf(first(message, "type", "kind"));
+            Map<String, Object> payload = payloadOf(message);
             String task = string(first(message, "taskId", "task_id", "task"));
+            if (task == null) task = string(first(payload, "taskId", "task_id", "task"));
             String dispatch = string(first(message, "dispatchId", "dispatch_id", "dispatch"));
+            if (dispatch == null) {
+                dispatch = string(first(payload, "dispatchId", "dispatch_id", "dispatch"));
+            }
             if (expectedTaskId != null && task != null && !expectedTaskId.equals(task)) continue;
             if (expectedDispatchId != null && dispatch != null && !expectedDispatchId.equals(dispatch)) continue;
-            Map<String, Object> payload = payloadOf(message);
             if ("worker_done".equals(type) || "worker-done".equals(type)) {
                 String outcome = string(first(message, "outcome", "workerOutcome", "worker_outcome"));
                 if (outcome == null) {
@@ -193,6 +254,20 @@ public final class OrcaSettlement {
     static Map<String, Object> payloadOf(Map<String, Object> message) {
         Object payload = first(message, "payload", "body", "result");
         if (payload instanceof Map<?, ?> map) return new LinkedHashMap<>((Map<String, Object>) map);
+        // Orca 1.4 inbox/check receipts serialize --payload as a JSON string even though the
+        // send command accepts a JSON object. Normalize that live wire shape before reading
+        // dispatch provenance, outcome, or the typed Warden artifact. Malformed strings fall
+        // through to the message envelope so completion still fails closed.
+        if (payload instanceof String text) {
+            try {
+                Object parsed = Json.parse(text);
+                if (parsed instanceof Map<?, ?> map) {
+                    return new LinkedHashMap<>((Map<String, Object>) map);
+                }
+            } catch (Json.JsonException ignored) {
+                // Not JSON (for example a plain-text question body).
+            }
+        }
         return new LinkedHashMap<>(message);
     }
 

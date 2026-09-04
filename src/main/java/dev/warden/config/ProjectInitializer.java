@@ -47,7 +47,12 @@ public final class ProjectInitializer {
         for (String command : detection.checks()) yaml.append("    - ").append(quote(command)).append('\n');
         yaml.append("\nscopes:\n  code:\n");
         for (String scope : scopes) yaml.append("    - ").append(quote(scope)).append('\n');
-        yaml.append("\ndefaults:\n  checks: fast\n  risk: medium\n")
+        yaml.append("\ndefaults:\n  checks: fast\n");
+        // A detected build gives us a real project-health command. Run it before the first
+        // vendor and again in the final gate. A greenfield's `fast` set is deliberately
+        // empty, so naming it as a baseline would turn "nothing was checked" into a pass.
+        if (!detection.greenfield()) yaml.append("  baseline_checks: fast\n");
+        yaml.append("  risk: medium\n")
                 .append("  max_fix_attempts: 2\n  timeout_minutes: 30\n")
                 .append(LAND_NOTE);
         Files.writeString(projectFile, yaml, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);

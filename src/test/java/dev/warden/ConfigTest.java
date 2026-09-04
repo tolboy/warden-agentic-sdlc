@@ -39,6 +39,38 @@ public final class ConfigTest implements Suite {
         check.eq("named scope", List.of("src/routes", "src/lib/components"), project.scopes().get("ui"));
         check.eq("default risk", "medium", project.defaultRisk());
         check.eq("a project that declares no setup asks for none", List.of(), project.setup());
+        check.eq("an existing project opts into no pre-agent baseline by default",
+                null, project.defaultBaselineChecks());
+
+        ProjectConfig withBaseline = ProjectConfig.parse(PROJECT.replace(
+                "  checks: full\n", "  checks: full\n  baseline_checks: fast\n"), "project.yaml");
+        check.eq("the baseline names an explicit project check set", "fast",
+                withBaseline.defaultBaselineChecks());
+        TaskSpec.ResolvedTask baselineResolved = TaskSpec.parse("""
+                version: 1
+                id: baseline-order
+                goal: preserve project health while adding a focused behaviour
+                scope: ui
+                checks: ["npm run focused"]
+                acceptance: ["npm run check", "npm run acceptance"]
+                """, "task.yaml").resolve(withBaseline, "task.yaml");
+        check.eq("baseline commands are retained separately",
+                List.of("npm run check"), baselineResolved.baselineCommands());
+        check.eq("and form an ordered deduplicated floor under final acceptance",
+                List.of("npm run check", "npm run focused", "npm run acceptance"),
+                baselineResolved.acceptanceCommands());
+        check.rejects("a baseline must name a declared check set",
+                "defaults.baseline_checks names 'missing'",
+                () -> ProjectConfig.parse(PROJECT.replace(
+                        "  checks: full\n", "  checks: full\n  baseline_checks: missing\n"),
+                        "project.yaml"));
+        check.rejects("an empty check set cannot masquerade as a green baseline",
+                "names an empty command set",
+                () -> ProjectConfig.parse(PROJECT.replace(
+                        "  checks: full\n", "  checks: full\n  baseline_checks: empty\n")
+                        .replace("  full: [\"npm run check\", \"npm run build\"]",
+                                "  full: [\"npm run check\", \"npm run build\"]\n  empty: []"),
+                        "project.yaml"));
 
         // What has to happen in a checkout before any of `checks` can run. Most projects have
         // nothing to say here; a `git worktree` of an npm project has no node_modules, and

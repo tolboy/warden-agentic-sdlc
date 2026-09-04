@@ -25,6 +25,11 @@ public final class InitializerTest implements Suite {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(root, "example");
             check.eq("generated project resolves", root.getFileName().toString(), loaded.project().project());
             check.eq("base ref retained", "origin/trunk", loaded.resolved().baseRef());
+            check.eq("a detected project opts its real test set into the pre-agent baseline",
+                    "fast", loaded.project().defaultBaselineChecks());
+            check.eq("the resolved baseline contains the detected project commands",
+                    java.util.List.of("npm run test", "npm run build"),
+                    loaded.resolved().baselineCommands());
             check.that("generated task is fail-closed for landing", !loaded.resolved().authority().land());
             check.rejects("init refuses overwrite", "never overwrites", () ->
                     new ProjectInitializer().initialize(root, "origin/main"));
@@ -45,6 +50,10 @@ public final class InitializerTest implements Suite {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(empty, "example");
             check.eq("no command is invented for it", java.util.List.of(),
                     loaded.project().checks().get("fast"));
+            check.eq("and an empty command set is not presented as a green baseline", null,
+                    loaded.project().defaultBaselineChecks());
+            check.eq("so the resolved task asks for no baseline command", java.util.List.of(),
+                    loaded.resolved().baselineCommands());
             check.eq("and the whole repository is the declared blast radius",
                     java.util.List.of("<repository>"), loaded.resolved().scopePaths());
             check.that("which the task inherits as its scope",

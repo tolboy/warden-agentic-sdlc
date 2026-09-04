@@ -402,8 +402,10 @@ outcome  ok  ready_for_human  next=human_gate
 
 ## 7. Чего этот файл всё ещё не утверждает
 
-* Orca-адаптер (`runner: orca`) как исполнитель роли живьём не подтверждён. Orca в этих
-  прогонах создавала worktree — это `OrcaIsolation`, другой путь кода.
+* Этот прогон не подтверждал Orca-адаптер (`runner: orca`) как исполнитель роли: Orca здесь
+  создавала worktree через другой путь, `OrcaIsolation`. Позднейший отдельный живой smoke с
+  Claude Opus 5, Agent Dashboard, `worker_done`, ACK и release записан в
+  [`../SMOKE.md`](../SMOKE.md) за 2026-09-04.
 * `warden do --conductor` (Conductor, запущенный самим Warden) не прогонялся: проверялся тот
   же workflow, запущенный напрямую из CLI Conductor.
 * Подтверждение failover по решению человека (`--continue`) покрыто тестами, но на живой

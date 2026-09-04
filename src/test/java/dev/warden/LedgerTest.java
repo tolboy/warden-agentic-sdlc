@@ -19,6 +19,8 @@ public final class LedgerTest implements Suite {
         try {
             new EvidenceLedger(root, "pass").append("machine_gate", Map.of("ok", true, "code", "passed"));
             new EvidenceLedger(root, "fail").append("machine_gate", Map.of("ok", false, "code", "failed"));
+            new EvidenceLedger(root, "fail").append("baseline_gate",
+                    Map.of("ok", false, "code", "command_failed"));
 
             Map<String, Object> knownRole = new LinkedHashMap<>();
             knownRole.put("ok", true);
@@ -32,8 +34,14 @@ public final class LedgerTest implements Suite {
             knownRole.put("cost_usd", 0.5);
             knownRole.put("tokens", Map.of("input", 10L, "output", 20L, "total", 30L));
             knownRole.put("vendor_attempts", List.of(
-                    Map.of("vendor", "anthropic", "code", "role_quota_exhausted"),
-                    Map.of("vendor", "openai", "code", "ok")));
+                    Map.of("profile", "claude", "vendor", "anthropic", "model", "claude-test",
+                            "runner", "direct", "code", "role_quota_exhausted", "ok", false,
+                            "duration_millis", 50L, "cost_usd", 0.25,
+                            "tokens", Map.of("input", 1L, "output", 2L, "total", 3L)),
+                    Map.of("profile", "codex", "vendor", "openai", "model", "declared-model",
+                            "model_reported", "gpt-test", "runner", "direct", "code", "ok", "ok", true,
+                            "duration_millis", 100L, "cost_usd", 0.5,
+                            "tokens", Map.of("input", 10L, "output", 20L, "total", 30L))));
             new EvidenceLedger(root, "pass").append("role_run", knownRole);
 
             Map<String, Object> unknownRole = new LinkedHashMap<>();
@@ -69,26 +77,32 @@ public final class LedgerTest implements Suite {
 
             Map<String, Object> metrics = object(summary.get("metrics"));
             Map<String, Object> roleRuns = object(metrics.get("role_runs"));
-            check.eq("actual role runs counted", 2L, roleRuns.get("total"));
+            check.eq("every actual vendor attempt is counted", 3L, roleRuns.get("total"));
+            check.eq("role attempts grouped by profile", 2L,
+                    object(roleRuns.get("by_profile")).get("claude"));
             check.eq("role runs grouped by vendor", 1L,
                     object(roleRuns.get("by_vendor")).get("openai"));
-            check.eq("missing model is an explicit dimension", 1L,
+            check.eq("legacy role run without a model stays explicit", 1L,
                     object(roleRuns.get("by_model")).get("<unknown>"));
+            check.eq("reported model wins over the declared model", 1L,
+                    object(roleRuns.get("by_model")).get("gpt-test"));
             check.eq("role runs grouped by runner", 1L,
                     object(roleRuns.get("by_runner")).get("orca"));
+            check.eq("failed failover attempt keeps its own outcome", 1L,
+                    object(roleRuns.get("by_outcome")).get("role_quota_exhausted"));
             check.eq("role runs grouped by outcome", 1L,
                     object(roleRuns.get("by_outcome")).get("role_command_failed"));
 
             Map<String, Object> telemetry = object(metrics.get("telemetry"));
             Map<String, Object> costs = object(telemetry.get("cost_usd"));
-            check.eq("known cost is totalled", 0.5, costs.get("total"));
-            check.eq("known cost count is explicit", 1L, costs.get("known_count"));
+            check.eq("cost from every priced attempt is totalled", 0.75, costs.get("total"));
+            check.eq("known cost count is per attempt", 2L, costs.get("known_count"));
             check.eq("missing cost is not converted to zero", 1L, costs.get("unknown_count"));
             Map<String, Object> tokenTotals = object(object(telemetry.get("tokens")).get("total"));
-            check.eq("known tokens are totalled", 30L, tokenTotals.get("total"));
+            check.eq("tokens from every reporting attempt are totalled", 33L, tokenTotals.get("total"));
             check.eq("missing tokens are explicit", 1L, tokenTotals.get("unknown_count"));
             Map<String, Object> durations = object(telemetry.get("duration_millis"));
-            check.eq("durations are totalled", 400L, durations.get("total"));
+            check.eq("attempt durations are totalled without the role total twice", 450L, durations.get("total"));
             check.eq("duration p50 uses nearest rank", 100L, durations.get("p50"));
             check.eq("duration p95 uses nearest rank", 300L, durations.get("p95"));
 
@@ -99,6 +113,8 @@ public final class LedgerTest implements Suite {
                     iterations.get("fix_rounds_unknown_runs"));
 
             Map<String, Object> failures = object(metrics.get("failures"));
+            check.eq("pre-existing baseline failures counted separately", 1L,
+                    failures.get("baseline"));
             check.eq("machine gate failures counted", 1L, failures.get("machine_gate"));
             check.eq("visual failures counted", 1L, failures.get("visual_qa"));
             check.eq("quota refusals counted once", 1L, failures.get("quota"));
@@ -124,6 +140,47 @@ public final class LedgerTest implements Suite {
             Map<String, Object> unknownTokens = object(object(unknownTelemetry.get("tokens")).get("total"));
             check.eq("all-unknown token total is null", null, unknownTokens.get("total"));
             check.eq("all-unknown tokens are counted", 1L, unknownTokens.get("unknown_count"));
+
+            Path oldFailover = root.resolve("old-failover-project");
+            Map<String, Object> oldEvent = new LinkedHashMap<>();
+            oldEvent.put("ok", true);
+            oldEvent.put("code", "ok");
+            oldEvent.put("role", "reviewer");
+            oldEvent.put("profile", "codex");
+            oldEvent.put("vendor", "openai");
+            oldEvent.put("model", "gpt-old");
+            oldEvent.put("runner", "direct");
+            oldEvent.put("duration_millis", 90L);
+            oldEvent.put("cost_usd", 0.4);
+            oldEvent.put("tokens", Map.of("total", 9L));
+            oldEvent.put("vendor_attempts", List.of(
+                    Map.of("profile", "claude", "vendor", "anthropic",
+                            "code", "role_quota_exhausted", "duration_millis", 10L),
+                    Map.of("profile", "codex", "vendor", "openai", "code", "ok")));
+            new EvidenceLedger(oldFailover, "old").append("role_run", oldEvent);
+            Map<String, Object> oldMetrics = object(new LedgerReader().summarize(oldFailover).get("metrics"));
+            Map<String, Object> oldRoleRuns = object(oldMetrics.get("role_runs"));
+            check.eq("sparse historical attempt arrays still count both calls", 2L,
+                    oldRoleRuns.get("total"));
+            check.eq("the historical final attempt inherits its top-level model", 1L,
+                    object(oldRoleRuns.get("by_model")).get("gpt-old"));
+            Map<String, Object> oldTelemetry = object(oldMetrics.get("telemetry"));
+            check.eq("historical final telemetry is inherited exactly once", 0.4,
+                    object(oldTelemetry.get("cost_usd")).get("total"));
+            check.eq("historical earlier missing cost remains unknown", 1L,
+                    object(oldTelemetry.get("cost_usd")).get("unknown_count"));
+            check.eq("historical durations combine nested and final top-level values", 100L,
+                    object(oldTelemetry.get("duration_millis")).get("total"));
+
+            Path orcaTimeout = root.resolve("orca-timeout-project");
+            new EvidenceLedger(orcaTimeout, "timeout").append("role_run", Map.of(
+                    "ok", false, "code", "role_orca_timeout", "role", "reviewer", "runner", "orca"));
+            Map<String, Object> timeoutFailures = object(object(
+                    new LedgerReader().summarize(orcaTimeout).get("metrics")).get("failures"));
+            check.eq("an Orca wall-clock stop is configuration, not a machine gate", 1L,
+                    timeoutFailures.get("configuration"));
+            check.eq("and is not counted as a baseline or acceptance failure", 0L,
+                    timeoutFailures.get("baseline"));
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);

@@ -180,6 +180,8 @@ public final class TaskLoopTest implements Suite {
             check.eq("and says what it would have stopped for", "preflight_outside_scope",
                     previewed.summaryReport().get("would_stop"));
 
+            baselineChecks(check, sandbox, home);
+            roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
@@ -888,6 +890,114 @@ public final class TaskLoopTest implements Suite {
                 .run(loaded, UserConfig.load(home), runId, true);
     }
 
+    /**
+     * A project-owned test suite is green before a vendor, red changes never become the
+     * implementer's mystery, and the same commands remain in the post-agent gate.
+     */
+    private void baselineChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path red = baselineProject(sandbox, "baseline-red", false);
+        writeProfiles(home, sandbox, "baseline-red", 1, 1);
+        Board redBoard = new Board();
+        TaskLoop.Outcome refused = loop(red, home, "base-red-1", redBoard);
+        check.that("a red project baseline stops the run", !refused.ok());
+        check.eq("and is named independently of a candidate gate failure", "baseline_failed",
+                refused.reason());
+        check.eq("no vendor is charged for a failure that predates it", 0L,
+                refused.summaryReport().get("role_runs"));
+        check.that("the implementer process was never launched",
+                !Files.exists(sandbox.resolve("baseline-red-impl.count")));
+        check.that("only baseline evidence precedes the stop",
+                steps(refused).size() == 1 && "baseline".equals(steps(refused).get(0).get("step")));
+        check.eq("the Orca-facing card asks for a person", Workspace.State.WAITING_FOR_HUMAN,
+                redBoard.last());
+        check.that("and says no vendor was dispatched",
+                redBoard.anyNote("no vendor dispatched"));
+
+        Path green = baselineProject(sandbox, "baseline-green", true);
+        // The first implementer deliberately leaves the focused project check red. This one
+        // fixture therefore proves the complete boundary we care about: known-green project
+        // baseline -> vendor change -> real command failure -> bounded repair -> green gate.
+        writeProfiles(home, sandbox, "baseline-green", 2, 1);
+        TaskLoop.Outcome first = loop(green, home, "base-green-1");
+        check.that("a green project baseline allows the normal loop", first.ok());
+        check.eq("a real failed project command caused exactly one repair round", 1L,
+                first.summaryReport().get("attempts_used"));
+        String repairContext = Files.readString(
+                green.resolve(".warden/runs/base-green-1/context/fix-1-gates.md"));
+        check.contains("the failing project command is returned to the same implementer",
+                repairContext, "Machine gate failed");
+        check.eq("the baseline is the first recorded step", "baseline",
+                steps(first).get(0).get("step"));
+        check.eq("the baseline report is a distinct machine receipt", "passed",
+                first.summaryReport().get("baseline_code"));
+        Map<String, Object> joined = new dev.warden.ledger.RunReport()
+                .of(green, "base-green-1");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> joinedStages =
+                (List<Map<String, Object>>) (List<?>) joined.get("stages");
+        check.eq("the joined report classifies baseline as a machine gate", "machine_gates",
+                joinedStages.get(0).get("kind"));
+        check.eq("without confusing it with post-agent acceptance", "baseline",
+                joinedStages.get(0).get("phase"));
+        Map<String, Object> finalGate = steps(first).stream()
+                .filter(step -> "gates".equals(step.get("step"))).findFirst().orElseThrow();
+        Map<String, Object> gateReport = Json.parseObject(Files.readString(
+                Path.of(String.valueOf(finalGate.get("report")))));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> commands = (List<Map<String, Object>>) gateReport.get("commands");
+        check.eq("the final gate runs both baseline and focused task checks", 2, commands.size());
+        check.contains("the baseline command remains first after the agent changed the tree",
+                String.valueOf(commands.get(0).get("command")), "health.txt");
+        check.contains("and the task check follows it", String.valueOf(commands.get(1).get("command")),
+                "result.txt");
+
+        dev.warden.approval.ApprovalStore approvals =
+                new dev.warden.approval.ApprovalStore(green);
+        dev.warden.approval.HumanDecision pending = approvals.read("base-green-1");
+        approvals.resolve("base-green-1", pending.updatedAt().toString(), "reject", "test",
+                "exercise a continuation without changing the candidate");
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(green, "hello");
+        TaskLoop.Outcome continued = new TaskLoop(new ProcessRunner()).run(
+                loaded, UserConfig.load(home), "base-green-2", false, Map.of(),
+                new TaskLoop.Continuation("base-green-1",
+                        "exercise a continuation without changing the candidate"));
+        check.eq("an unchanged continuation reuses the original green receipt", "base-green-1",
+                continued.summaryReport().get("baseline_reused_from"));
+        Map<String, Object> reused = steps(continued).stream()
+                .filter(step -> "baseline".equals(step.get("step"))).findFirst().orElseThrow();
+        check.eq("the timeline marks reuse rather than pretending a command ran again", true,
+                reused.get("reused"));
+        check.eq("and points to the receipt that was actually trusted", "base-green-1",
+                reused.get("reused_from"));
+
+        Files.writeString(green.resolve("src/health.txt"), "red\n");
+        TaskLoop.Outcome moved = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(green, "hello"), UserConfig.load(home),
+                "base-green-3", false, Map.of(),
+                new TaskLoop.Continuation("base-green-1",
+                        "candidate changed after the receipt"));
+        check.eq("a changed continuation cannot borrow the old baseline", "baseline_failed",
+                moved.reason());
+        check.contains("the refusal says why reuse was declined",
+                String.valueOf(moved.summaryReport().get("baseline_reuse_declined")),
+                "worktree changed");
+        check.eq("and it still spends no new vendor call", 0L,
+                moved.summaryReport().get("role_runs"));
+    }
+
+    private void roleFailureRoutingChecks(Check check) {
+        check.that("a native agent waiting for a person is never sent to a new implementer",
+                TaskLoop.roleFailureRequiresOperator("role_human_input_required"));
+        check.that("an unfenced Orca worker blocks every later dispatch",
+                TaskLoop.roleFailureRequiresOperator("role_orca_lifecycle_unaccounted"));
+        check.that("an Orca wall-clock stop is infrastructure, not failed work",
+                TaskLoop.roleFailureRequiresOperator("role_orca_timeout"));
+        check.that("a direct CLI timeout may retry after ProcessRunner killed its process tree",
+                !TaskLoop.roleFailureRequiresOperator("role_timeout"));
+        check.that("a schema defect still belongs to the agent repair loop",
+                !TaskLoop.roleFailureRequiresOperator("role_artifact_schema_violation"));
+    }
+
     /** Every note and state the loop pushed at a board, in order. */
     private static final class Board implements Workspace {
         private final List<String> notes = new java.util.ArrayList<>();
@@ -1070,6 +1180,55 @@ public final class TaskLoopTest implements Suite {
                   max_cost_usd: 10.0
                 max_fix_attempts: 2
                 """.formatted(risk, visualBlock, maxRoleRuns));
+        Files.writeString(project.resolve("README.md"), "seed\n");
+        ProcessRunner runner = new ProcessRunner();
+        for (List<String> command : List.of(
+                List.of("git", "init", "-q", "-b", "main", "."),
+                List.of("git", "config", "user.email", "test@example.invalid"),
+                List.of("git", "config", "user.name", "test"),
+                List.of("git", "add", "-A"),
+                List.of("git", "commit", "-qm", "base"))) {
+            runner.run(command, project, Duration.ofSeconds(60));
+        }
+        return project;
+    }
+
+    private Path baselineProject(Path sandbox, String name, boolean green) throws Exception {
+        Path project = sandbox.resolve(name);
+        Files.createDirectories(project.resolve(".warden/tasks"));
+        Files.createDirectories(project.resolve("src"));
+        String healthCheck = WINDOWS
+                ? "powershell -NoLogo -NoProfile -Command \"if ((Get-Content -Raw -LiteralPath "
+                    + "'src/health.txt').Trim() -eq 'green') { exit 0 } else { exit 1 }\""
+                : "test \"$(cat src/health.txt)\" = green";
+        String resultCheck = WINDOWS
+                ? "if exist src\\result.txt (exit /b 0) else (exit /b 1)"
+                : "test -f src/result.txt";
+        Files.writeString(project.resolve(".warden/project.yaml"), """
+                version: 1
+                project: %s
+                base_ref: HEAD
+                checks:
+                  health: [%s]
+                  task: [%s]
+                scopes:
+                  app: ["src"]
+                defaults:
+                  checks: task
+                  baseline_checks: health
+                  risk: medium
+                """.formatted(name, yaml(healthCheck), yaml(resultCheck)));
+        Files.writeString(project.resolve(".warden/tasks/hello.yaml"), """
+                version: 1
+                id: hello
+                goal: Create src/result.txt without breaking project health
+                risk: medium
+                scope: app
+                authority: { workspace_write: true }
+                budgets: { max_role_runs: 6, max_cost_usd: 10.0 }
+                max_fix_attempts: 2
+                """);
+        Files.writeString(project.resolve("src/health.txt"), green ? "green\n" : "red\n");
         Files.writeString(project.resolve("README.md"), "seed\n");
         ProcessRunner runner = new ProcessRunner();
         for (List<String> command : List.of(

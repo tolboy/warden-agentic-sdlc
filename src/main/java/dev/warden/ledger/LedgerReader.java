@@ -80,6 +80,7 @@ public final class LedgerReader {
     private static final class Metrics {
         private long roleRuns;
         private final Map<String, Long> byRole = new LinkedHashMap<>();
+        private final Map<String, Long> byProfile = new LinkedHashMap<>();
         private final Map<String, Long> byVendor = new LinkedHashMap<>();
         private final Map<String, Long> byModel = new LinkedHashMap<>();
         private final Map<String, Long> byRunner = new LinkedHashMap<>();
@@ -93,6 +94,7 @@ public final class LedgerReader {
         private long failoverRoleRuns;
         private long fixRounds;
         private long fixRoundsUnknown;
+        private long baselineFailures;
         private long machineGateFailures;
         private long visualHarnessFailures;
         private long visualRoleFailures;
@@ -125,6 +127,9 @@ public final class LedgerReader {
                     if (!"task_run".equals(type)) configurationFailures++;
                 }
 
+                if ("baseline_gate".equals(type) && Boolean.FALSE.equals(event.get("ok"))) {
+                    baselineFailures++;
+                }
                 if ("machine_gate".equals(type) && Boolean.FALSE.equals(event.get("ok"))) {
                     machineGateFailures++;
                 }
@@ -141,25 +146,18 @@ public final class LedgerReader {
 
         @SuppressWarnings("unchecked")
         private void acceptRoleRun(Map<String, Object> event) {
-            roleRuns++;
-            increment(byRole, dimension(event.get("role")));
-            increment(byVendor, dimension(event.get("vendor")));
-            increment(byModel, dimension(event.get("model")));
-            increment(byRunner, dimension(event.get("runner")));
-            Object outcome = event.get("code");
-            if (outcome == null && event.get("ok") instanceof Boolean ok) {
-                outcome = ok ? "passed" : "failed";
+            if (event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty()) {
+                for (int index = 0; index < attempts.size(); index++) {
+                    Object body = attempts.get(index);
+                    Map<String, Object> attempt = body instanceof Map<?, ?> map
+                            ? (Map<String, Object>) map : Map.of();
+                    acceptRoleAttempt(event, attempt, index == attempts.size() - 1);
+                }
+            } else {
+                // Ledgers written before vendor_attempts existed represented one actual call
+                // directly on role_run. Keep reading that format indefinitely.
+                acceptRoleAttempt(event, event, true);
             }
-            increment(byOutcome, dimension(outcome));
-
-            cost.accept(event.get("cost_usd"));
-            durationMillis.accept(firstPresent(event, "duration_millis", "duration_ms"));
-            Object tokenBody = event.get("tokens");
-            Map<String, Object> tokens = tokenBody instanceof Map<?, ?> map
-                    ? (Map<String, Object>) map : Map.of();
-            inputTokens.accept(firstPresent(tokens, "input", "input_tokens", "inputTokens"));
-            outputTokens.accept(firstPresent(tokens, "output", "output_tokens", "outputTokens"));
-            totalTokens.accept(firstPresent(tokens, "total", "total_tokens", "totalTokens"));
 
             long transitions = 0;
             if (event.get("vendor_attempts") instanceof List<?> attempts && attempts.size() > 1) {
@@ -172,6 +170,37 @@ public final class LedgerReader {
                 failoverRoleRuns++;
                 failovers += transitions;
             }
+        }
+
+        @SuppressWarnings("unchecked")
+        private void acceptRoleAttempt(Map<String, Object> roleRun, Map<String, Object> attempt,
+                                       boolean finalAttempt) {
+            roleRuns++;
+            increment(byRole, dimension(inherited(attempt, roleRun, "role", true)));
+            increment(byProfile, dimension(inherited(attempt, roleRun, "profile", finalAttempt)));
+            increment(byVendor, dimension(inherited(attempt, roleRun, "vendor", finalAttempt)));
+            increment(byModel, dimension(model(attempt, roleRun, finalAttempt)));
+            increment(byRunner, dimension(inherited(attempt, roleRun, "runner", finalAttempt)));
+            Object outcome = inherited(attempt, roleRun, "code", finalAttempt);
+            Object okBody = inherited(attempt, roleRun, "ok", finalAttempt);
+            if (outcome == null && okBody instanceof Boolean ok) {
+                outcome = ok ? "passed" : "failed";
+            }
+            increment(byOutcome, dimension(outcome));
+
+            cost.accept(inherited(attempt, roleRun, "cost_usd", finalAttempt));
+            Object duration = firstPresent(attempt, "duration_millis", "duration_ms");
+            if (duration == null && finalAttempt) {
+                duration = firstPresent(roleRun, "duration_millis", "duration_ms");
+            }
+            durationMillis.accept(duration);
+            Object tokenBody = attempt.get("tokens");
+            if (tokenBody == null && finalAttempt) tokenBody = roleRun.get("tokens");
+            Map<String, Object> tokens = tokenBody instanceof Map<?, ?> map
+                    ? (Map<String, Object>) map : Map.of();
+            inputTokens.accept(firstPresent(tokens, "input", "input_tokens", "inputTokens"));
+            outputTokens.accept(firstPresent(tokens, "output", "output_tokens", "outputTokens"));
+            totalTokens.accept(firstPresent(tokens, "total", "total_tokens", "totalTokens"));
         }
 
         private void acceptTaskRun(Map<String, Object> event) {
@@ -210,6 +239,7 @@ public final class LedgerReader {
             Map<String, Object> role = new LinkedHashMap<>();
             role.put("total", roleRuns);
             role.put("by_role", byRole);
+            role.put("by_profile", byProfile);
             role.put("by_vendor", byVendor);
             role.put("by_model", byModel);
             role.put("by_runner", byRunner);
@@ -232,6 +262,7 @@ public final class LedgerReader {
             iterations.put("fix_rounds_unknown_runs", fixRoundsUnknown);
 
             Map<String, Object> failures = new LinkedHashMap<>();
+            failures.put("baseline", baselineFailures);
             failures.put("machine_gate", machineGateFailures);
             failures.put("visual_qa", visualHarnessFailures + visualRoleFailures);
             failures.put("visual_harness", visualHarnessFailures);
@@ -329,6 +360,21 @@ public final class LedgerReader {
         return null;
     }
 
+    private static Object inherited(Map<String, Object> attempt, Map<String, Object> roleRun,
+                                    String name, boolean inheritFinal) {
+        Object value = attempt.get(name);
+        return value != null || !inheritFinal ? value : roleRun.get(name);
+    }
+
+    private static Object model(Map<String, Object> attempt, Map<String, Object> roleRun,
+                                boolean finalAttempt) {
+        Object reported = firstPresent(attempt, "model_reported");
+        if (reported == null && finalAttempt) reported = firstPresent(roleRun, "model_reported");
+        if (reported != null) return reported;
+        Object declared = firstPresent(attempt, "model");
+        return declared != null || !finalAttempt ? declared : firstPresent(roleRun, "model");
+    }
+
     private static String firstText(Map<String, Object> map, String... names) {
         Object value = firstPresent(map, names);
         return value == null ? null : String.valueOf(value);
@@ -350,7 +396,8 @@ public final class LedgerReader {
         if (code == null) return false;
         return CONFIGURATION_FAILURES.contains(code)
                 || code.startsWith("config_")
-                || code.startsWith("configuration_");
+                || code.startsWith("configuration_")
+                || code.startsWith("role_orca_");
     }
 
     private static String dimension(Object value) {

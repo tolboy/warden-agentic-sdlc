@@ -145,6 +145,18 @@ public record TaskSpec(
         }
         commands.addAll(acceptance);
 
+        List<String> baselineCommands = project.defaultBaselineChecks() == null
+                ? List.of() : project.checks().get(project.defaultBaselineChecks());
+        if (!baselineCommands.isEmpty()) {
+            // A baseline is not merely a pre-dispatch observation. These commands become the
+            // floor of the final gate as well, or an agent could break the project tests that
+            // were green before it ran and still satisfy a narrower task check. Preserve the
+            // cheap project-health order and avoid executing an identical command twice.
+            Set<String> allCommands = new LinkedHashSet<>(baselineCommands);
+            allCommands.addAll(commands);
+            commands = new ArrayList<>(allCommands);
+        }
+
         // Browser scenarios are an executable definition of done, and a stricter one than
         // most test commands for work a person looks at. Accepting them here is what lets a
         // project with no build system yet — a directory that was empty this morning — be
@@ -173,6 +185,7 @@ public record TaskSpec(
                 risk != null ? risk : project.defaultRisk(),
                 project.baseRef(),
                 List.copyOf(paths),
+                List.copyOf(baselineCommands),
                 List.copyOf(commands),
                 authority,
                 visualQa,
@@ -189,6 +202,7 @@ public record TaskSpec(
             String risk,
             String baseRef,
             List<String> scopePaths,
+            List<String> baselineCommands,
             List<String> acceptanceCommands,
             Authority authority,
             VisualQa visualQa,

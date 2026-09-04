@@ -215,6 +215,78 @@ file.
 Still not proven anywhere, and refused rather than faked:
 
 - visual QA pixel-diff and baseline comparison (not implemented);
-- a live `runner: orca` `worker_done` cycle as a role runner;
 - tamper-evident external ledger storage;
 - automatic landing — which is not a gap but a decision. Warden never merges.
+
+### Attempted 2026-09-03 — `runner: orca` reviewer, Claude `opus`
+
+Throwaway repo `warden-orca-review-smoke`, Orca worktree
+`w-orca-claude-review`, isolated `WARDEN_CONFIG_HOME` (operator `~/.warden` not
+written). Codex session quota was 100%; the reviewer profile was Claude
+`opus` (Opus 5 alias) on `runner: orca`, not a failover from Codex.
+
+- `--dry-run` resolved `orca-claude-review` / `runner: orca` / `model: opus` and
+  wrote the prompt. No `raw/`.
+- Live `warden role reviewer review-smoke --run-id orca-claude-live` (39s):
+  Orca 1.4.196 created a **visible** agent terminal (`surface: visible`,
+  `agentIdentity: claude`, dispatch `ctx_731cacb05fa5`). That is the Agents /
+  Dashboard row.
+- Claude Code printed the folder-trust / “Quick safety check” screen and did
+  not become a ready TUI. Orca settled `worker-start` as `ok: true` with
+  `state: failed`, `lastError: agent_prompt_stalled`. Warden mapped that to
+  `role_orca_start_failed`, `worker_stop_ok: true` (already settled,
+  `processAction: none`), closed the coordinator, one `vendor_attempts` row,
+  $0. Not `worker_done`. Direct CLI remains the default.
+
+The leftover Claude tab was closed after the run. The failed dispatch remains
+`reclaimable` in `worker-list`; it is not a live worker.
+
+Same day, the **loop** (`warden run review-smoke --run-id orca-loop-1`), not a
+lone `warden role`:
+
+- Direct CLI implementer (`grok-implement`, grok-4.6, 54.6s, $0.013): worktree
+  card said `implement · implementer (grok-implement / grok) · running`.
+  `orca terminal list` on that worktree had **no** `agentIdentity` — Grok did
+  not appear in Agents.
+- Machine gates passed (`java tools/Verify.java`).
+- Orca-hosted reviewer (`orca-claude-review`, claude/opus): Warden called
+  `orchestration worker-start` (not a human `orca --agent`). A second visible
+  Claude terminal appeared (`agentIdentity: claude`, dispatch `ctx_30af11a51417`)
+  and stalled the same way (`agent_prompt_stalled` → `role_orca_start_failed`,
+  39.9s). Card: `stopped: reviewer_failed · 2 call(s) · $0.0130`.
+  `decision.json` pending `retry|abort`. Still not `worker_done`.
+
+### Proven 2026-09-04 — `runner: orca` reviewer in Agent Dashboard
+
+The same throwaway repository was opened in a fresh Orca worktree,
+`w-dashboard-proof-20260904`, with the isolated `WARDEN_CONFIG_HOME`. Claude's one-time folder
+trust screen was accepted before the measured run; without that preflight Orca correctly
+reported `agent_prompt_stalled` and Warden failed `role_orca_start_failed` rather than claiming
+an agent was ready.
+
+`warden role reviewer review-smoke --run-id dashboard-proof-green2-20260904` then completed in
+148.1s with Claude `opus` (the installed Claude Code 2.1.259 UI identified it as Opus 5 with
+high effort) on Orca 1.4.196:
+
+- run `run_2656a32b63ea`, task `task_367b76c01219`, dispatch `ctx_4571f80b7920`;
+- while Warden was running, the desktop Agent Dashboard showed `1 total`, `WORKING 1`,
+  `NEEDS YOU 0`, `DONE 0`, the exact smoke worktree, and live activity including
+  `java tools/Verify.java`;
+- the archived Orca transcript contains the reviewer's short progress summaries, file reads,
+  tool calls, and the gate result `PASS: result.txt contains WARDEN_OK` (exit 0). It does not
+  expose private chain-of-thought;
+- message `msg_d4642fd42a65` delivered an explicit `outcome: succeeded` and the typed
+  `warden_artifact`. Orca 1.4 represented its payload as a JSON string, which the adapter now
+  normalizes while still checking the nested task and dispatch IDs;
+- Warden returned `ok`, `settlement: completed`, `worker_done_succeeded`, accepted the typed
+  artifact, matched the read-only content fingerprint, acknowledged delivery
+  `delivery_9058ec7506fc`, and released the worker;
+- `worker-show` ended at `dispatchStatus: completed`, `workerState: succeeded`, terminal
+  resource `released`, transcript archive `captured`; the desktop dashboard returned to
+  `0 total` / `WORKING 0`.
+
+The fixture's reviewer also reported a P2 in `tools/Verify.java`: `strip()` makes this tiny
+smoke gate tolerate surrounding blank lines. That does not invalidate the runner lifecycle
+proof—the gate reads the declared project file and fails on wrong non-whitespace content—but
+the fixture should not be mistaken for a production-strength acceptance suite. Mobile display
+and resolving a Warden human decision from Orca Mobile were explicitly left for a later smoke.

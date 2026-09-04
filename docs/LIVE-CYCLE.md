@@ -416,8 +416,10 @@ a green review.
 
 ## 8. What this file still does not claim
 
-* The Orca adapter (`runner: orca`) as a **role runner** is not confirmed live. Orca created
-  worktrees in these runs — that is `OrcaIsolation`, a different code path.
+* This run did not exercise the Orca adapter (`runner: orca`) as a **role runner**: Orca
+  created worktrees here through the separate `OrcaIsolation` path. A later live smoke with
+  Claude Opus 5, Agent Dashboard, `worker_done`, acknowledgement and release is recorded in
+  [`SMOKE.md`](SMOKE.md) under 2026-09-04.
 * `warden do --conductor` (Conductor launched by Warden itself) has not been run: what was
   tested is the same workflow launched directly from Conductor's own CLI.
 * Failover confirmed by a human decision (`--continue`) is covered by tests but has not been

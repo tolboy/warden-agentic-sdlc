@@ -196,8 +196,9 @@ public final class OrcaExecutor implements RoleExecutor {
 
         Duration startBudget = remaining(deadline);
         if (startBudget.isZero() || startBudget.isNegative()) {
-            evidence.put("failure", "role_timeout");
-            return fail("role_timeout", evidence, Duration.ofMinutes(profile.wallClockMinutes()), "");
+            evidence.put("failure", "role_orca_timeout");
+            evidence.put("resolution", "the role wall-clock expired before worker-start; no dispatch exists to fence");
+            return fail("role_orca_timeout", evidence, Duration.ofMinutes(profile.wallClockMinutes()), "");
         }
         OrcaClient.Rpc started = orca.invoke(request.projectRoot(),
                 startBudget.compareTo(START_TIMEOUT) < 0 ? startBudget : START_TIMEOUT, startArgs);
@@ -206,20 +207,29 @@ public final class OrcaExecutor implements RoleExecutor {
         String dispatchId = OrcaSettlement.dispatchId(started.envelope());
         if (dispatchId != null) evidence.put("orca_dispatch_id", dispatchId);
         if (!started.ok() || !OrcaSettlement.startReady(started.envelope())) {
-            if (dispatchId != null) {
+            boolean fenced = dispatchId != null
+                    && stopWorker(request.projectRoot(), dispatchId, evidence);
+            if (!fenced) {
                 retainCoordinator = true;
                 evidence.put("coordinator_retained", true);
-                evidence.put("resolution", "worker-start did not prove a ready outcome; inspect `orca "
-                        + "orchestration worker-show --dispatch " + dispatchId + " --json` before recovery");
+                evidence.put("failure", "role_orca_lifecycle_unaccounted");
+                evidence.put("resolution", dispatchId == null
+                        ? "worker-start did not return a dispatch identity, so Warden cannot prove "
+                                + "that no worker remains active; inspect the retained coordinator"
+                        : "worker-start did not become ready and Orca did not confirm fencing the "
+                                + "dispatch; inspect `orca orchestration worker-show --dispatch "
+                                + dispatchId + " --json` before recovery");
+                return fail("role_orca_lifecycle_unaccounted", evidence,
+                        elapsed(deadline, profile), started.stdout());
             }
             Result quota = quotaFailure(profile, started.stdout(), started.stderr(),
                     elapsed(deadline, profile), evidence);
             if (quota != null) return quota;
-            evidence.put("failure", started.timedOut() ? "role_timeout" : "role_command_failed");
+            evidence.put("failure", "role_orca_start_failed");
             evidence.put("stderr_tail", tail(started.stderr(), 2000));
             evidence.put("stdout_tail", tail(started.stdout(), 2000));
-            return fail(started.timedOut() ? "role_timeout" : "role_command_failed",
-                    evidence, elapsed(deadline, profile), started.stdout());
+            return fail("role_orca_start_failed", evidence, elapsed(deadline, profile),
+                    started.stdout());
         }
 
         OrcaSettlement.Outcome settlement = waitForSettlement(request.projectRoot(), taskId, dispatchId,
@@ -233,8 +243,20 @@ public final class OrcaExecutor implements RoleExecutor {
             retainCoordinator = true;
             evidence.put("failure", "role_human_input_required");
             evidence.put("coordinator_retained", true);
-            evidence.put("resolution", "Answer Orca question " + settlement.messageId()
-                    + " in the Orca coordinator inbox; this worker is intentionally not released");
+            if (settlement.reason() != null && settlement.reason().startsWith("agent_wait_")) {
+                evidence.put("agent_wait", settlement.payload());
+                evidence.put("resolution", "agent_wait_proven".equals(settlement.reason())
+                        ? "The role wall-clock expired after Orca's latest exact observation "
+                                + "showed a human-input wait. Open the worker under NEEDS YOU in "
+                                + "Agent Dashboard; it is intentionally retained"
+                        : "Orca last proved a human-input wait but the latest worker observation "
+                                + "was unavailable. Inspect the retained worker in Agent Dashboard "
+                                + "before recovery");
+            } else {
+                evidence.put("resolution", "Answer Orca question " + settlement.messageId()
+                        + " in the Orca coordinator inbox. Warden intentionally retains the worker, "
+                        + "but resuming this dispatch in a new Warden process is not yet supported");
+            }
             return fail("role_human_input_required", evidence, elapsed(deadline, profile), "");
         }
 
@@ -254,13 +276,25 @@ public final class OrcaExecutor implements RoleExecutor {
         } else if (settlement.kind() == OrcaSettlement.Kind.ESCALATED
                 || settlement.kind() == OrcaSettlement.Kind.CHECKPOINT
                 || settlement.kind() == OrcaSettlement.Kind.UNKNOWN) {
+            lifecycleAccounted = dispatchId != null
+                    && stopWorker(request.projectRoot(), dispatchId, evidence);
+            if (!lifecycleAccounted) {
+                retainCoordinator = true;
+                evidence.put("coordinator_retained", true);
+            }
+        }
+        boolean deliveryAccounted = lifecycleAccounted
+                && acknowledge(request.projectRoot(), runId, coordinatorHandle,
+                        settlement.deliveryId(), evidence);
+        if (!deliveryAccounted) {
             retainCoordinator = true;
             evidence.put("coordinator_retained", true);
-        }
-        if (lifecycleAccounted) {
-            acknowledge(request.projectRoot(), runId, coordinatorHandle, settlement.deliveryId(), evidence);
+            if (lifecycleAccounted) {
+                evidence.put("resolution", "Orca will replay this unacknowledged FIFO delivery; "
+                        + "inspect the retained coordinator before another role is dispatched");
+            }
         } else {
-            evidence.put("delivery_ack_skipped", "worker release was not accounted for");
+            evidence.put("delivery_accounted", true);
         }
 
         OrcaClient.Rpc transcript = readTranscript(request.projectRoot(), dispatchId, remaining(deadline));
@@ -285,6 +319,14 @@ public final class OrcaExecutor implements RoleExecutor {
             }
         }
 
+        if (!lifecycleAccounted || !deliveryAccounted) {
+            evidence.put("failure", "role_orca_lifecycle_unaccounted");
+            evidence.putIfAbsent("resolution", "Orca did not account for the previous worker "
+                    + "lifecycle; no retry or later stage may share this worktree yet");
+            return fail("role_orca_lifecycle_unaccounted", evidence,
+                    elapsed(deadline, profile), raw);
+        }
+
         Duration duration = elapsed(deadline, profile);
         if (settlement.kind() == OrcaSettlement.Kind.ESCALATED
                 || settlement.kind() == OrcaSettlement.Kind.FAILED) {
@@ -296,7 +338,7 @@ public final class OrcaExecutor implements RoleExecutor {
         }
         if (settlement.kind() != OrcaSettlement.Kind.COMPLETED) {
             evidence.put("failure", remaining(deadline).isZero() || remaining(deadline).isNegative()
-                    ? "role_timeout" : "role_orca_unsettled");
+                    ? "role_orca_timeout" : "role_orca_unsettled");
             evidence.put("resolution", "Orca did not prove worker_done for this dispatch; terminal "
                     + "text is not treated as completion");
             return fail(String.valueOf(evidence.get("failure")), evidence, duration, raw);
@@ -350,20 +392,25 @@ public final class OrcaExecutor implements RoleExecutor {
             throws Exception {
         OrcaSettlement.Outcome last = new OrcaSettlement.Outcome(
                 OrcaSettlement.Kind.CHECKPOINT, taskId, dispatchId, null, Map.of(), "not_waited");
-        while (remaining(deadline).toMillis() > 0) {
-            Duration window = remaining(deadline).compareTo(CHECK_WINDOW) < 0 ? remaining(deadline) : CHECK_WINDOW;
+        OrcaSettlement.Outcome lastProvenAgentWait = null;
+        OrcaSettlement.Outcome latestAgentObservation = null;
+        while (positive(remaining(deadline))) {
+            Duration beforeCheck = remaining(deadline);
+            Duration window = beforeCheck.compareTo(CHECK_WINDOW) < 0 ? beforeCheck : CHECK_WINDOW;
             List<String> checkArgs = new ArrayList<>(List.of(
                     "orchestration", "check",
                     "--wait",
                     "--types", "worker_done,escalation,question",
-                    "--timeout-ms", String.valueOf(Math.max(1_000, window.toMillis()))));
+                    "--timeout-ms", String.valueOf(Math.max(1, window.toMillis()))));
             if (runId != null) {
                 checkArgs.add("--run");
                 checkArgs.add(runId);
             }
             checkArgs.add("--terminal");
             checkArgs.add(coordinatorHandle);
-            OrcaClient.Rpc checked = orca.invoke(root, window.plusSeconds(5), checkArgs);
+            Duration checkBudget = bounded(remaining(deadline), window.plusSeconds(5));
+            if (!positive(checkBudget)) break;
+            OrcaClient.Rpc checked = orca.invoke(root, checkBudget, checkArgs);
             last = OrcaSettlement.fromCheck(checked.envelope(), taskId, dispatchId);
             if (last.kind() == OrcaSettlement.Kind.COMPLETED
                     || last.kind() == OrcaSettlement.Kind.ESCALATED
@@ -371,7 +418,31 @@ public final class OrcaExecutor implements RoleExecutor {
                     || last.kind() == OrcaSettlement.Kind.FAILED) {
                 return last;
             }
-            OrcaClient.Rpc shown = orca.invoke(root, Duration.ofSeconds(15),
+            // Agent Dashboard can prove that the exact native agent session is parked on a
+            // prompt only a person can answer. That wait is healthy: keep this controller
+            // alive so answering it from Orca/mobile lets the same worker continue. Remember
+            // the last proven state only so a wall-clock expiry says "needs a person" rather
+            // than pretending the agent merely ran out of time. An absent observation never
+            // clears a prior wait; only Orca's explicit null does.
+            Duration observationBudget = bounded(remaining(deadline), Duration.ofSeconds(15));
+            if (dispatchId != null && positive(observationBudget)) {
+                OrcaClient.Rpc worker = orca.invoke(root, observationBudget,
+                        List.of("orchestration", "worker-show", "--dispatch", dispatchId));
+                OrcaSettlement.Outcome observed = OrcaSettlement.fromWorkerShow(worker.envelope());
+                latestAgentObservation = observed;
+                evidence.put("agent_wait_observation", observed.reason());
+                if (observed.kind() == OrcaSettlement.Kind.QUESTION) {
+                    lastProvenAgentWait = observed;
+                    evidence.put("agent_wait", observed.payload());
+                } else if (observed.kind() == OrcaSettlement.Kind.CHECKPOINT
+                        && "agent_wait_checked_clear".equals(observed.reason())) {
+                    lastProvenAgentWait = null;
+                    evidence.remove("agent_wait");
+                }
+            }
+            Duration showBudget = bounded(remaining(deadline), Duration.ofSeconds(15));
+            if (!positive(showBudget)) break;
+            OrcaClient.Rpc shown = orca.invoke(root, showBudget,
                     List.of("orchestration", "dispatch-show", "--task", taskId,
                             "--from", coordinatorHandle));
             OrcaSettlement.Outcome shownOutcome = OrcaSettlement.fromDispatchShow(shown.envelope());
@@ -383,7 +454,27 @@ public final class OrcaExecutor implements RoleExecutor {
             last = shownOutcome.kind() == OrcaSettlement.Kind.UNKNOWN ? last : shownOutcome;
         }
         evidence.put("wait_exhausted", true);
+        if (latestAgentObservation != null
+                && latestAgentObservation.kind() == OrcaSettlement.Kind.QUESTION) {
+            return latestAgentObservation;
+        }
+        if (lastProvenAgentWait != null && latestAgentObservation != null
+                && latestAgentObservation.kind() == OrcaSettlement.Kind.UNKNOWN) {
+            Map<String, Object> payload = new LinkedHashMap<>(lastProvenAgentWait.payload());
+            payload.put("latest_observation", latestAgentObservation.reason());
+            return new OrcaSettlement.Outcome(OrcaSettlement.Kind.QUESTION, taskId, dispatchId,
+                    "agent_wait", payload, "agent_wait_last_seen_unverifiable");
+        }
         return last;
+    }
+
+    private static boolean positive(Duration duration) {
+        return duration != null && !duration.isZero() && !duration.isNegative();
+    }
+
+    private static Duration bounded(Duration remaining, Duration cap) {
+        if (!positive(remaining)) return Duration.ZERO;
+        return remaining.compareTo(cap) < 0 ? remaining : cap;
     }
 
     private OrcaClient.Rpc readTranscript(Path root, String dispatchId, Duration timeout) {
@@ -435,9 +526,9 @@ public final class OrcaExecutor implements RoleExecutor {
         return spec.toString().replace('\r', ' ').replace('\n', ' ');
     }
 
-    private void acknowledge(Path root, String runId, String coordinatorHandle, String deliveryId,
-                             Map<String, Object> evidence) {
-        if (deliveryId == null) return;
+    private boolean acknowledge(Path root, String runId, String coordinatorHandle,
+                                String deliveryId, Map<String, Object> evidence) {
+        if (deliveryId == null) return true;
         try {
             List<String> args = new ArrayList<>(List.of(
                     "orchestration", "check", "--ack", deliveryId,
@@ -445,9 +536,25 @@ public final class OrcaExecutor implements RoleExecutor {
             if (runId != null) args.addAll(List.of("--run", runId));
             OrcaClient.Rpc acknowledged = orca.invoke(root, Duration.ofSeconds(20), args);
             evidence.put("delivery_ack_ok", acknowledged.ok());
+            return acknowledged.ok();
         } catch (Exception failure) {
             evidence.put("delivery_ack_ok", false);
             evidence.put("delivery_ack_error", String.valueOf(failure.getMessage()));
+            return false;
+        }
+    }
+
+    private boolean stopWorker(Path root, String dispatchId, Map<String, Object> evidence) {
+        try {
+            OrcaClient.Rpc stopped = orca.invoke(root, Duration.ofSeconds(30),
+                    List.of("orchestration", "worker-stop", "--dispatch", dispatchId));
+            evidence.put("worker_stop_ok", stopped.ok());
+            evidence.put("worker_stop", stopped.result());
+            return stopped.ok();
+        } catch (Exception failure) {
+            evidence.put("worker_stop_ok", false);
+            evidence.put("worker_stop_error", String.valueOf(failure.getMessage()));
+            return false;
         }
     }
 

@@ -32,6 +32,36 @@ public final class OrcaSettlementTest implements Suite {
         check.eq("worker_done settles the dispatch", OrcaSettlement.Kind.COMPLETED, completed.kind());
         check.eq("payload is retained", "ok", completed.payload().get("summary"));
 
+        Map<String, Object> liveStringPayload = Json.parseObject("""
+                {"ok":true,"result":{"delivery":{"id":"delivery_live","messages":[
+                  {"id":"message_live","type":"worker_done",
+                   "payload":"{\\\"taskId\\\":\\\"task_1\\\",\\\"dispatchId\\\":\\\"disp_1\\\",\\\"outcome\\\":\\\"succeeded\\\",\\\"warden_artifact\\\":{\\\"status\\\":\\\"completed\\\"}}"}]}}}
+                """);
+        OrcaSettlement.Outcome liveCompleted = OrcaSettlement.fromCheck(
+                liveStringPayload, "task_1", "disp_1");
+        check.eq("Orca 1.4 JSON-string payload settles the exact dispatch",
+                OrcaSettlement.Kind.COMPLETED, liveCompleted.kind());
+        check.eq("typed artifact survives Orca's JSON-string payload",
+                "completed", ((Map<?, ?>) liveCompleted.payload().get("warden_artifact")).get("status"));
+        check.eq("live delivery remains acknowledgeable", "delivery_live", liveCompleted.deliveryId());
+
+        Map<String, Object> wrongStringPayload = Json.parseObject("""
+                {"ok":true,"result":{"messages":[
+                  {"type":"worker_done",
+                   "payload":"{\\\"taskId\\\":\\\"task_other\\\",\\\"dispatchId\\\":\\\"disp_other\\\",\\\"outcome\\\":\\\"succeeded\\\"}"}]}}
+                """);
+        check.eq("a JSON-string payload for another dispatch cannot settle this run",
+                OrcaSettlement.Kind.CHECKPOINT,
+                OrcaSettlement.fromCheck(wrongStringPayload, "task_1", "disp_1").kind());
+
+        Map<String, Object> malformedStringPayload = Json.parseObject("""
+                {"ok":true,"result":{"messages":[
+                  {"type":"worker_done","payload":"not json"}]}}
+                """);
+        check.eq("a malformed string payload still fails closed",
+                OrcaSettlement.Kind.FAILED,
+                OrcaSettlement.fromCheck(malformedStringPayload, "task_1", "disp_1").kind());
+
         Map<String, Object> failedDone = Json.parseObject("""
                 {"ok":true,"result":{"delivery":{"id":"delivery_1","messages":[
                   {"id":"message_1","type":"worker_done","taskId":"task_1","dispatchId":"disp_1",
@@ -86,6 +116,71 @@ public final class OrcaSettlementTest implements Suite {
                 """);
         check.eq("worker question is surfaced rather than treated as completion", OrcaSettlement.Kind.QUESTION,
                 OrcaSettlement.fromCheck(question, "task_1", "disp_1").kind());
+
+        Map<String, Object> waiting = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_1","task_id":"task_1"},
+                "observation":{"status":"live","exactWorker":true,
+                "agentWait":{"source":"prompt-text","reason":"codex-interactive-prompt",
+                "since":1788450000000}}}}
+                """);
+        OrcaSettlement.Outcome agentWait = OrcaSettlement.fromWorkerShow(waiting);
+        check.eq("a proven native prompt is a live human-input wait", OrcaSettlement.Kind.QUESTION,
+                agentWait.kind());
+        check.eq("the worker observation retains its nested task", "task_1", agentWait.taskId());
+        check.eq("agent wait evidence is retained for the report", "codex-interactive-prompt",
+                agentWait.payload().get("reason"));
+        check.eq("and records when the wait began", 1788450000000L,
+                agentWait.payload().get("since"));
+
+        Map<String, Object> hookWait = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_hook"},
+                "observation":{"exactWorker":true,
+                "agentWait":{"source":"hook","since":1788450000001}}}}
+                """);
+        check.eq("a hook is valid evidence without inventing a reason",
+                OrcaSettlement.Kind.QUESTION,
+                OrcaSettlement.fromWorkerShow(hookWait).kind());
+
+        Map<String, Object> titleWait = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_title"},
+                "observation":{"exactWorker":true,"agentWait":{"source":"title"}}}}
+                """);
+        check.eq("a native title signal is also valid evidence", OrcaSettlement.Kind.QUESTION,
+                OrcaSettlement.fromWorkerShow(titleWait).kind());
+
+        Map<String, Object> observedClear = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_1"},
+                "observation":{"exactWorker":true,"agentWait":null}}}
+                """);
+        check.eq("an explicit null is proof that Orca checked and found no wait",
+                OrcaSettlement.Kind.CHECKPOINT,
+                OrcaSettlement.fromWorkerShow(observedClear).kind());
+
+        Map<String, Object> notObserved = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_1"},
+                "observation":{"status":"missing","exactWorker":false}}}
+                """);
+        check.eq("a missing agentWait field is unknown, never silently clear",
+                OrcaSettlement.Kind.UNKNOWN,
+                OrcaSettlement.fromWorkerShow(notObserved).kind());
+
+        Map<String, Object> contradictory = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_1"},
+                "observation":{"exactWorker":false,"agentWait":{"source":"title"}}}}
+                """);
+        check.eq("wait evidence for a non-exact worker is never attributed to this dispatch",
+                OrcaSettlement.Kind.UNKNOWN,
+                OrcaSettlement.fromWorkerShow(contradictory).kind());
+
+        Map<String, Object> malformed = Json.parseObject("""
+                {"ok":true,"result":{"dispatch":{"id":"disp_1"},
+                "observation":{"exactWorker":true,"agentWait":"waiting"}}}
+                """);
+        check.eq("a scalar wait shape fails closed", OrcaSettlement.Kind.UNKNOWN,
+                OrcaSettlement.fromWorkerShow(malformed).kind());
+
+        check.eq("a failed worker observation is unavailable", OrcaSettlement.Kind.UNKNOWN,
+                OrcaSettlement.fromWorkerShow(Json.parseObject("{\"ok\":false}")).kind());
 
         Map<String, Object> inFlight = Json.parseObject("{\"ok\":true,\"result\":{\"status\":\"dispatched\"}}");
         check.eq("dispatch-show in flight is a checkpoint",

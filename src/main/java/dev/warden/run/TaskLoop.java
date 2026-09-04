@@ -134,6 +134,10 @@ public final class TaskLoop {
         public boolean carriesRejection() {
             return rejectionNote != null && !rejectionNote.isBlank();
         }
+
+        public boolean continuesRun() {
+            return fromRunId != null && !fromRunId.isBlank();
+        }
     }
 
     /**
@@ -215,6 +219,8 @@ public final class TaskLoop {
         summary.put("review_required", reviewRequired);
         summary.put("visual_qa_required", task.visualQa().required());
         summary.put("visual_qa_role", visualRoleConfigured);
+        summary.put("baseline_required", !task.baselineCommands().isEmpty());
+        summary.put("baseline_commands", task.baselineCommands());
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
@@ -255,19 +261,91 @@ public final class TaskLoop {
             summary.put("would_stop", "visual_qa_contract_invalid");
         }
 
-        if (carried.carriesRejection()) {
+        if (carried.continuesRun()) {
             summary.put("continued_from", carried.fromRunId());
+        }
+        if (carried.carriesRejection()) {
             summary.put("carries_human_rejection", true);
         }
+        String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
                 ? reusableJudgements(root, carried.fromRunId(), contractHash,
-                        git.sourceFingerprint(diffBaseCommit), summary)
+                        candidateFingerprint, summary)
                 : Map.of();
         header(task, runId, workflow, dryRun);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
                     + "; the implementer is given its reason verbatim");
             progress.blank();
+        }
+        BaselineReceipt baselineReceipt = !dryRun && !task.baselineCommands().isEmpty()
+                && carried.continuesRun()
+                ? reusableBaseline(root, carried.fromRunId(), task.id(), contractHash,
+                        diffBaseCommit, candidateFingerprint, summary)
+                : null;
+        if (!task.baselineCommands().isEmpty()) {
+            if (dryRun) {
+                steps.add(Map.of("step", "baseline", "attempt", 0L, "dry_run", true));
+            } else if (baselineReceipt != null) {
+                summary.put("baseline_ok", true);
+                summary.put("baseline_code", "reused");
+                summary.put("baseline_reused_from", baselineReceipt.runId());
+                summary.put("baseline_receipt_run", baselineReceipt.runId());
+                summary.put("baseline_report", baselineReceipt.report().toString());
+                summary.put("baseline_report_sha256", baselineReceipt.sha256());
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("step", "baseline");
+                entry.put("attempt", 0L);
+                entry.put("ok", true);
+                entry.put("code", "reused");
+                entry.put("report", baselineReceipt.report().toString());
+                entry.put("reused", true);
+                entry.put("reused_from", baselineReceipt.runId());
+                steps.add(entry);
+                progress.line("base  reused the green project baseline from "
+                        + baselineReceipt.runId());
+                workspace.note("baseline · green on " + baselineReceipt.runId() + " · reused");
+                progress.blank();
+            } else {
+                progress.line("base  project tests before the first vendor: "
+                        + String.join(", ", task.baselineCommands()));
+                workspace.note("baseline · project tests · running");
+                long started = System.nanoTime();
+                GateRunner.Outcome baseline;
+                try (Heartbeat alive = Heartbeat.over("baseline gates", progress, workspace)) {
+                    baseline = gates.runBaseline(loaded, stepRunId(runId, "baseline", 0),
+                            configSnapshot, diffBaseCommit);
+                }
+                long millis = (System.nanoTime() - started) / 1_000_000L;
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("step", "baseline");
+                entry.put("attempt", 0L);
+                entry.put("ok", baseline.ok());
+                entry.put("code", baseline.code());
+                entry.put("report", baseline.report().toString());
+                steps.add(entry);
+                summary.put("baseline_ok", baseline.ok());
+                summary.put("baseline_code", baseline.code());
+                summary.put("baseline_report", baseline.report().toString());
+                summary.put("baseline_report_sha256",
+                        GitRepository.contentSha256(baseline.report()));
+                if (baseline.ok()) {
+                    summary.put("baseline_receipt_run", runId);
+                    progress.line("      ok    " + Progress.elapsed(millis));
+                    workspace.note("baseline · project tests · ok · " + Progress.elapsed(millis));
+                    progress.blank();
+                } else {
+                    progress.line("      FAILED  " + Progress.elapsed(millis) + "   "
+                            + baseline.code());
+                    workspace.note("baseline · project tests · failed " + baseline.code()
+                            + " · no vendor dispatched");
+                    summary.put("resolution", "Project checks failed before the first vendor "
+                            + "dispatch. Fix the pre-existing failure or deliberately change "
+                            + "the project baseline contract, then retry; no agent was asked "
+                            + "to repair an unknown earlier breakage.");
+                    return stop(ledger, summary, "baseline_failed", steps, 0, budget);
+                }
+            }
         }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
@@ -328,6 +406,9 @@ public final class TaskLoop {
         // gates passed" was a sentence that could describe a run in which review never ran.
         // What the human is being asked to accept is what actually executed.
         String verdict = "every stage that ran passed: " + String.join(", ", executedStages(steps));
+        if (summary.get("baseline_reused_from") != null) {
+            verdict += "; project baseline reused from " + summary.get("baseline_reused_from");
+        }
         // The person accepting this is entitled to know which of those verdicts were reached
         // in this run and which were carried over. They are about the same bytes — that is
         // what let them be carried — but "passed" and "passed, earlier, elsewhere" are
@@ -377,7 +458,14 @@ public final class TaskLoop {
             "role_local_endpoint_unreachable",
             "role_local_api_key_missing",
             "role_local_http_error",
-            "role_local_response_unreadable");
+            "role_local_response_unreadable",
+            "role_human_input_required");
+
+    /** True when another implementer call cannot safely repair the role runner itself. */
+    public static boolean roleFailureRequiresOperator(String code) {
+        return code != null && (ROLE_OPERATOR_MUST_RESOLVE.contains(code)
+                || code.startsWith("role_orca_"));
+    }
 
     /**
      * Raised by a stage that has run out of options. It carries the reason an operator greps
@@ -897,7 +985,7 @@ public final class TaskLoop {
                 return !OPERATOR_MUST_RESOLVE.contains(gate.code());
             }
             if (outcome instanceof RoleRunner.Outcome role) {
-                return !ROLE_OPERATOR_MUST_RESOLVE.contains(role.code());
+                return !roleFailureRequiresOperator(role.code());
             }
             return true;
         }
@@ -958,6 +1046,96 @@ public final class TaskLoop {
             if (cost instanceof Number number) spent += number.doubleValue();
             else unpriced++;
         }
+    }
+
+    /** A prior run's independently persisted proof that project checks started green. */
+    private record BaselineReceipt(String runId, Path report, String sha256) {}
+
+    /**
+     * Reuse a baseline only when this is demonstrably the same continuation.
+     *
+     * <p>Running the baseline again unconditionally would mislabel a partial change from the
+     * previous agent as a pre-existing project failure. Blind reuse is worse: a person could
+     * edit the tree between runs and make somebody else's new failure the next agent's
+     * problem. The prior decision's candidate fingerprint closes that gap. Any missing field
+     * or unreadable receipt declines reuse and executes the baseline now.</p>
+     */
+    private BaselineReceipt reusableBaseline(Path root, String priorRunId, String taskId,
+                                              String contractHash, String diffBaseCommit,
+                                              String currentFingerprint,
+                                              Map<String, Object> summary) {
+        try {
+            Path priorSummary = root.resolve(".warden/runs").resolve(priorRunId)
+                    .resolve("task-run.json");
+            if (!Files.isRegularFile(priorSummary)) {
+                return declineBaselineReuse(summary, "no summary for " + priorRunId);
+            }
+            Map<String, Object> prior = Json.parseObject(Files.readString(priorSummary));
+            if (!taskId.equals(prior.get("task_id"))) {
+                return declineBaselineReuse(summary, priorRunId + " belongs to another task");
+            }
+            if (!Boolean.TRUE.equals(prior.get("baseline_ok"))) {
+                return declineBaselineReuse(summary, priorRunId
+                        + " has no successful baseline receipt");
+            }
+            if (!contractHash.equals(prior.get("contract_sha256"))) {
+                return declineBaselineReuse(summary, "the contract changed since " + priorRunId);
+            }
+            if (!diffBaseCommit.equals(prior.get("diff_base_commit"))) {
+                return declineBaselineReuse(summary, "the immutable diff base changed since "
+                        + priorRunId);
+            }
+            HumanDecision decision = new ApprovalStore(root).read(priorRunId);
+            if (decision.candidateFingerprint() == null
+                    || !decision.candidateFingerprint().equals(currentFingerprint)) {
+                return declineBaselineReuse(summary, "the worktree changed since " + priorRunId);
+            }
+            Object reportText = prior.get("baseline_report");
+            if (!(reportText instanceof String text) || text.isBlank()) {
+                return declineBaselineReuse(summary, priorRunId
+                        + " names no baseline report");
+            }
+            Object receiptRunBody = prior.get("baseline_receipt_run");
+            String receiptRun = receiptRunBody instanceof String value && !value.isBlank()
+                    ? value : priorRunId;
+            Path report = Path.of(text);
+            if (!report.isAbsolute()) report = root.resolve(report);
+            report = report.toAbsolutePath().normalize();
+            Path evidenceRoot = root.resolve(".warden/runs").toAbsolutePath().normalize();
+            Path expectedReport = evidenceRoot.resolve(receiptRun + "--baseline-0")
+                    .resolve("baseline-gate.json").normalize();
+            if (!report.equals(expectedReport) || !Files.isRegularFile(report)) {
+                return declineBaselineReuse(summary, "the baseline report from " + priorRunId
+                        + " is missing or is not the named baseline receipt");
+            }
+            Object expectedHash = prior.get("baseline_report_sha256");
+            String actualHash = GitRepository.contentSha256(report);
+            if (!(expectedHash instanceof String hash) || hash.isBlank()
+                    || !hash.equals(actualHash)) {
+                return declineBaselineReuse(summary, "the baseline report checksum from "
+                        + receiptRun + " does not match");
+            }
+            Map<String, Object> receipt = Json.parseObject(Files.readString(report));
+            if (!"baseline".equals(receipt.get("phase"))
+                    || !Boolean.TRUE.equals(receipt.get("ok"))
+                    || !"passed".equals(receipt.get("code"))
+                    || !taskId.equals(receipt.get("task_id"))
+                    || !contractHash.equals(receipt.get("contract_sha256"))
+                    || !diffBaseCommit.equals(receipt.get("merge_base"))) {
+                return declineBaselineReuse(summary, "the baseline receipt from " + receiptRun
+                        + " does not prove this task, contract and diff base green");
+            }
+            return new BaselineReceipt(receiptRun, report, actualHash);
+        } catch (Exception unreadable) {
+            return declineBaselineReuse(summary, "the baseline receipt from " + priorRunId
+                    + " is not verifiable: " + unreadable.getClass().getSimpleName());
+        }
+    }
+
+    private BaselineReceipt declineBaselineReuse(Map<String, Object> summary, String why) {
+        summary.put("baseline_reuse_declined", why);
+        progress.line("base  not reusing an earlier baseline: " + why);
+        return null;
     }
 
     /**
@@ -1049,6 +1227,7 @@ public final class TaskLoop {
         progress.line("task  " + task.id() + "   risk=" + task.risk()
                 + "   scope=" + String.join(", ", task.scopePaths()));
         List<String> names = new ArrayList<>();
+        if (!task.baselineCommands().isEmpty()) names.add("baseline");
         for (Workflow.Stage stage : workflow.stages()) names.add(stage.name());
         progress.line("plan  " + String.join(" -> ", names));
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
@@ -1338,6 +1517,7 @@ public final class TaskLoop {
     private static List<String> executedStages(List<Map<String, Object>> steps) {
         List<String> labels = new ArrayList<>();
         for (Map<String, Object> step : steps) {
+            if (Boolean.TRUE.equals(step.get("reused"))) continue;
             String label = String.valueOf(step.get("step"));
             if (!labels.contains(label)) labels.add(label);
         }

@@ -47,6 +47,40 @@ public final class RuntimeTest implements Suite {
                     git.outsideScope(git.changedPaths(), List.of("sr")));
 
             ConfigLoader.Loaded loaded = new ConfigLoader().load(repository, "smoke");
+            GateRunner.Outcome baseline = new GateRunner(runner)
+                    .runBaseline(loaded, "test-baseline", null, null);
+            check.that("the pre-agent baseline runs through the real gate process", baseline.ok());
+            check.eq("baseline reports its distinct phase", "baseline", baseline.data().get("phase"));
+            check.eq("baseline runs only its project-health command", "echo baseline-ok",
+                    ((java.util.Map<?, ?>) ((java.util.List<?>) baseline.data().get("commands")).get(0))
+                            .get("command"));
+            check.eq("baseline does not run the task command", 1,
+                    ((java.util.List<?>) baseline.data().get("commands")).size());
+            check.eq("baseline evidence has its own report name", "baseline-gate.json",
+                    baseline.report().getFileName().toString());
+            check.contains("and its own append-only ledger event",
+                    Files.readString(repository.resolve(".warden/runs/test-baseline/evidence.jsonl")),
+                    "\"type\":\"baseline_gate\"");
+
+            Path projectContract = repository.resolve(".warden/project.yaml");
+            Path source = repository.resolve("src/value.txt");
+            String originalContract = Files.readString(projectContract);
+            String originalSource = Files.readString(source);
+            try {
+                Files.writeString(projectContract, originalContract.replace(
+                        "\"echo baseline-ok\"",
+                        "\"echo baseline-mutated >> src/value.txt\""));
+                GateRunner.Outcome mutatingBaseline = new GateRunner(runner).runBaseline(
+                        new ConfigLoader().load(repository, "smoke"),
+                        "test-mutating-baseline", null, null);
+                check.eq("a baseline command may not alter even in-scope project source",
+                        "baseline_mutated_source", mutatingBaseline.code());
+                check.that("the mutating baseline still leaves a failure report",
+                        Files.isRegularFile(mutatingBaseline.report()));
+            } finally {
+                Files.writeString(source, originalSource);
+                Files.writeString(projectContract, originalContract);
+            }
             GateRunner.Outcome passed = new GateRunner(runner).run(loaded, "test-pass");
             check.that("machine gate passes in-scope change", passed.ok());
             check.that("machine gate report written", Files.isRegularFile(passed.report()));
@@ -151,11 +185,13 @@ public final class RuntimeTest implements Suite {
                 project: fixture
                 base_ref: HEAD
                 checks:
+                  baseline: ["echo baseline-ok"]
                   fast: ["echo gate-ok"]
                 scopes:
                   code: ["src"]
                 defaults:
                   checks: fast
+                  baseline_checks: baseline
                   risk: medium
                   max_fix_attempts: 2
                   timeout_minutes: 1

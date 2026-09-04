@@ -65,6 +65,7 @@ public final class StubVendor {
                         + "\"status\":\"completed\",\"summary\":\"created\","
                         + "\"files_changed\":[\"src/result.txt\"]},"
                         + "\"total_cost_usd\":0.012,\"num_turns\":3,"
+                        + "\"usage\":{\"input_tokens\":7,\"output_tokens\":5,\"total_tokens\":12},"
                         + "\"modelUsage\":{\"stub-impl-model\":{}}}");
             }
             case "review" -> {

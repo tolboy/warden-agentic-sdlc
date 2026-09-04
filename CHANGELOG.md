@@ -11,6 +11,24 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- `defaults.baseline_checks` — an optional named check set run in the worktree before the
+  first vendor. Red is `baseline_failed` and zero vendor calls, so an agent is never asked to
+  repair a breakage it did not cause. The same commands become the floor of the later
+  acceptance gate (deduplicated, baseline first), so a narrower task check cannot hide a
+  regression of project health. A baseline command that mutates project source is
+  `baseline_mutated_source`. Existing contracts that omit the key keep their previous
+  behaviour; `warden init` writes it only when it detected a real build. Covered by the
+  suite. The layer cut this belongs to is [`docs/adr/0001-layer-split.md`](docs/adr/0001-layer-split.md).
+- Orca worker fencing on the role runner: an unready `worker-start` is `worker-stop`'d or
+  fails `role_orca_lifecycle_unaccounted`; an unacknowledged FIFO delivery is the same code;
+  a native agent parked on input is `role_human_input_required` and the worker is retained;
+  wall-clock expiry is `role_orca_timeout`, not Direct CLI's `role_timeout`. A live Claude
+  Opus 5 reviewer cycle on Orca 1.4.196 is recorded in `docs/SMOKE.md`: visible Agent Dashboard
+  activity, a real project gate, typed `worker_done`, FIFO acknowledgement, and worker release.
+- Orca 1.4 serializes a message's `--payload` as a JSON string in inbox/check receipts. The
+  settlement parser now normalizes that wire shape before checking task/dispatch provenance,
+  outcome, and `warden_artifact`; malformed payloads and payloads for another dispatch still
+  fail closed.
 - `runner: local` — the third runner, named in the spec since the beginning and until now
   answering `role_runner_unimplemented`. It POSTs an OpenAI-compatible chat completion to the
   profile's `endpoint`, reaching a model already serving on this machine (Ollama, LM Studio,
@@ -68,6 +86,11 @@ that exists in code but has never been run live says so.
 
 ### Changed
 
+- `warden ledger` counts each actual vendor dispatch. A `role_run` that failed over is two
+  attempts in `by_profile` / `by_vendor` / `by_model` / `by_outcome` and in cost/token/duration
+  totals, not one nested footnote on the survivor. Historical ledgers without `vendor_attempts`
+  stay one attempt per `role_run`. Failures gain a `baseline` bucket, separate from
+  `machine_gate`.
 - `verification.verified_on` now records that a profile's probe ran and passed, and `--verify`
   stamps it. It was documented as a human judgement that nothing enforced and nothing could;
   swapping the vendor behind a role is a config edit and one command.
@@ -112,7 +135,6 @@ Supersedes the list under 0.1.0, which stays as it was written:
 - Per-vendor tool allowlists are not implemented. A profile's args are whatever you wrote.
 - Visual QA has no pixel-diff or baseline comparison; the harness asserts, it does not compare
   images.
-- The Orca adapter's full live lifecycle as a role runner has not been proven end to end.
 - The local runner is implemented and tested, but has no dated row in `docs/SMOKE.md`. A small
   model reached this way is cheap enough to run on every change and should be read as a smoke
   test, not as the independent review: a 4B model will happily return an artifact whose fields

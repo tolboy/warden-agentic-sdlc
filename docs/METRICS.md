@@ -25,7 +25,7 @@ So each measured quantity is three fields, not one:
 
 | Field | Meaning |
 |---|---|
-| `known_count` | How many role runs actually reported this value |
+| `known_count` | How many vendor attempts actually reported this value |
 | `unknown_count` | How many did not |
 | `total` | The sum over the known ones, or `null` when `known_count` is 0 |
 
@@ -42,8 +42,9 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 
 | Field | Meaning |
 |---|---|
-| `total` | Role dispatches recorded across every run in this project |
+| `total` | Vendor attempts recorded across every run in this project; a failover adds another attempt |
 | `by_role` | Split by `implementer`, `reviewer`, `architect`, `visual_qa` |
+| `by_profile` | Split by the concrete configured profile used for each attempt |
 | `by_vendor` | Split by the vendor that answered, so independence is auditable after the fact |
 | `by_model` | Split by the model as the vendor reported it, not as the profile requested it |
 | `by_runner` | Split by `direct`, `orca` or `local` — which adapter dispatched the call |
@@ -51,6 +52,12 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 
 A dimension the evidence did not carry is counted under `<unknown>` rather than dropped, so
 the splits always sum to `total`.
+
+One `role_run` can contain several `vendor_attempts` when quota failover occurred. Those
+attempts, rather than only the final successful vendor, are the unit of every split and every
+telemetry count. Historical ledgers without `vendor_attempts` remain one attempt per
+`role_run`; older sparse attempt arrays inherit final-attempt fields from the enclosing event
+and keep unavailable fields for earlier attempts under `<unknown>`.
 
 ### `telemetry` — cost, tokens, wall clock
 
@@ -74,6 +81,7 @@ wrong silently.
 
 | Field | Meaning |
 |---|---|
+| `baseline` | A project-owned health check failed before any vendor was dispatched |
 | `machine_gate` | A declared check exited non-zero |
 | `visual_harness` | The browser harness asserted and the assertion failed |
 | `visual_role` | The role with eyes objected |
@@ -98,11 +106,11 @@ that fails the contract, once against a tree that passes — and prints this led
 
 ```json
 {"run_count":2,"passed":1,"failed":1,
- "metrics":{"role_runs":{"total":0,"by_role":{},"by_vendor":{},"by_model":{},
+ "metrics":{"role_runs":{"total":0,"by_role":{},"by_profile":{},"by_vendor":{},"by_model":{},
                          "by_runner":{},"by_outcome":{}},
             "telemetry":{"cost_usd":{"known_count":0,"unknown_count":0,"total":null}},
             "iterations":{"failovers":0,"fix_rounds":0,"fix_rounds_unknown_runs":0},
-            "failures":{"machine_gate":1,"visual_qa":0,"quota":0,"configuration":0},
+            "failures":{"baseline":0,"machine_gate":1,"visual_qa":0,"quota":0,"configuration":0},
             "human":{"decisions":0,"by_decision":{},"wait_events":0}}}
 ```
 

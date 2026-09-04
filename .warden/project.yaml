@@ -35,6 +35,7 @@ scopes:
 
 defaults:
   checks: fast
+  baseline_checks: fast
   risk: medium
   max_fix_attempts: 2
   timeout_minutes: 10

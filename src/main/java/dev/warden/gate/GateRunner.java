@@ -20,6 +20,11 @@ import java.util.Set;
 public final class GateRunner {
     private final ProcessRunner processes;
 
+    private record Kind(String phase, String reportName, String eventType) {}
+
+    private static final Kind ACCEPTANCE = new Kind("acceptance", "machine-gate", "machine_gate");
+    private static final Kind BASELINE = new Kind("baseline", "baseline-gate", "baseline_gate");
+
     public GateRunner(ProcessRunner processes) { this.processes = processes; }
 
     public record Outcome(boolean ok, String code, Path report, Map<String, Object> data) {}
@@ -35,6 +40,26 @@ public final class GateRunner {
      */
     public Outcome run(ConfigLoader.Loaded loaded, String runId, Map<String, String> pinnedConfig,
                        String pinnedMergeBase) throws IOException, InterruptedException {
+        return runCommands(loaded, runId, pinnedConfig, pinnedMergeBase,
+                loaded.resolved().acceptanceCommands(), ACCEPTANCE);
+    }
+
+    /**
+     * Establish project health before the first vendor is dispatched. The commands are the
+     * explicit project-owned baseline set; the ordinary machine gate runs them again because
+     * {@code ResolvedTask.acceptanceCommands()} contains their ordered union with task checks.
+     */
+    public Outcome runBaseline(ConfigLoader.Loaded loaded, String runId,
+                               Map<String, String> pinnedConfig, String pinnedMergeBase)
+            throws IOException, InterruptedException {
+        return runCommands(loaded, runId, pinnedConfig, pinnedMergeBase,
+                loaded.resolved().baselineCommands(), BASELINE);
+    }
+
+    private Outcome runCommands(ConfigLoader.Loaded loaded, String runId,
+                                Map<String, String> pinnedConfig, String pinnedMergeBase,
+                                List<String> commandsToRun, Kind kind)
+            throws IOException, InterruptedException {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);
@@ -46,7 +71,7 @@ public final class GateRunner {
             mergeBase = pinnedMergeBase != null ? pinnedMergeBase
                     : git.mergeBase(loaded.resolved().baseRef());
         } catch (Exception failure) {
-            return finish(ledger, false, "base_ref_unresolvable", base(loaded, contractHash, null,
+            return finish(ledger, kind, false, "base_ref_unresolvable", base(loaded, contractHash, null,
                     List.of(), List.of(), failure.getMessage()));
         }
         List<String> mutated = WardenTree.changedSince(loaded.root(), config);
@@ -55,40 +80,41 @@ public final class GateRunner {
                     List.copyOf(git.changedPaths(mergeBase)), List.of(),
                     "configuration changed after the run snapshot and before machine gates");
             report.put("configuration_changed", mutated);
-            return finish(ledger, false, "contract_mutated", report);
+            return finish(ledger, kind, false, "contract_mutated", report);
         }
 
         Set<String> initialPaths = git.changedPaths(mergeBase);
         List<String> initialViolations = git.outsideScope(WardenTree.sourcePaths(initialPaths),
                 loaded.resolved().scopePaths());
         if (!initialViolations.isEmpty()) {
-            return finish(ledger, false, "preflight_outside_scope", base(loaded, contractHash, mergeBase,
+            return finish(ledger, kind, false, "preflight_outside_scope", base(loaded, contractHash, mergeBase,
                     List.copyOf(initialPaths), initialViolations, null));
         }
+        String baselineSource = kind.equals(BASELINE) ? git.sourceFingerprint(mergeBase) : null;
 
         List<Map<String, Object>> commands = new ArrayList<>();
         long totalMillis = 0;
-        for (int index = 0; index < loaded.resolved().acceptanceCommands().size(); index++) {
-            String command = loaded.resolved().acceptanceCommands().get(index);
+        for (int index = 0; index < commandsToRun.size(); index++) {
+            String command = commandsToRun.get(index);
             List<String> beforeMutations = WardenTree.changedSince(loaded.root(), config);
             if (!beforeMutations.isEmpty()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(git.changedPaths(mergeBase)), List.of(),
                         "configuration changed before command " + index);
                 report.put("configuration_changed", beforeMutations);
-                return finish(ledger, false, "contract_mutated", report);
+                return finish(ledger, kind, false, "contract_mutated", report);
             }
             Set<String> beforePaths = git.changedPaths(mergeBase);
             List<String> beforeViolations = git.outsideScope(WardenTree.sourcePaths(beforePaths),
                     loaded.resolved().scopePaths());
             if (!beforeViolations.isEmpty()) {
-                return finish(ledger, false, "blast_radius_before_command", base(loaded, contractHash,
+                return finish(ledger, kind, false, "blast_radius_before_command", base(loaded, contractHash,
                         mergeBase, List.copyOf(beforePaths), beforeViolations, null));
             }
 
             Duration remaining = Duration.ofMinutes(loaded.resolved().timeoutMinutes()).minusMillis(totalMillis);
             if (remaining.isNegative() || remaining.isZero()) {
-                return finish(ledger, false, "gate_timeout", base(loaded, contractHash, mergeBase,
+                return finish(ledger, kind, false, "gate_timeout", base(loaded, contractHash, mergeBase,
                         List.copyOf(git.changedPaths(mergeBase)), List.of(), "shared task timeout exhausted"));
             }
             ProcessRunner.Result result = processes.run(shell(command), loaded.root(), remaining);
@@ -102,22 +128,35 @@ public final class GateRunner {
                         "configuration changed by command " + index);
                 report.put("configuration_changed", afterMutations);
                 report.put("commands", commands);
-                return finish(ledger, false, "contract_mutated", report);
+                return finish(ledger, kind, false, "contract_mutated", report);
             }
             Set<String> afterPaths = git.changedPaths(mergeBase);
             List<String> violations = git.outsideScope(WardenTree.sourcePaths(afterPaths),
                     loaded.resolved().scopePaths());
+            if (baselineSource != null) {
+                String afterSource = git.sourceFingerprint(mergeBase);
+                if (!baselineSource.equals(afterSource)) {
+                    Map<String, Object> report = base(loaded, contractHash, mergeBase,
+                            List.copyOf(afterPaths), violations,
+                            "a baseline command changed project source before vendor dispatch");
+                    report.put("commands", commands);
+                    report.put("source_fingerprint_before", baselineSource);
+                    report.put("source_fingerprint_after", afterSource);
+                    return finish(ledger, kind, false, "baseline_mutated_source", report);
+                }
+            }
             if (!violations.isEmpty()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(afterPaths), violations, null);
                 report.put("commands", commands);
-                return finish(ledger, false, "blast_radius_after_command", report);
+                return finish(ledger, kind, false, "blast_radius_after_command", report);
             }
             if (!result.ok()) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(afterPaths), List.of(), result.timedOut() ? "command timed out" : "command failed");
                 report.put("commands", commands);
-                return finish(ledger, false, result.timedOut() ? "command_timeout" : "command_failed", report);
+                return finish(ledger, kind, false,
+                        result.timedOut() ? "command_timeout" : "command_failed", report);
             }
         }
 
@@ -126,26 +165,29 @@ public final class GateRunner {
         report.put("commands", commands);
         report.put("worktree_fingerprint", git.fingerprint(mergeBase));
         report.put("does_not_cover", List.of("paths ignored by .gitignore"));
-        return finish(ledger, true, "passed", report);
+        return finish(ledger, kind, true, "passed", report);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             Map<String, Object> report = base(loaded, null, null, List.of(), List.of(),
                     "gate execution interrupted");
-            return finish(ledger, false, "gate_interrupted", report);
+            return finish(ledger, kind, false, "gate_interrupted", report);
         } catch (Exception failure) {
             Map<String, Object> report = base(loaded, null, null, List.of(), List.of(),
                     failure.getClass().getSimpleName() + ": " + failure.getMessage());
-            return finish(ledger, false, "gate_internal_error", report);
+            return finish(ledger, kind, false, "gate_internal_error", report);
         }
     }
 
-    private Outcome finish(EvidenceLedger ledger, boolean ok, String code, Map<String, Object> report)
+    private Outcome finish(EvidenceLedger ledger, Kind kind, boolean ok, String code,
+                           Map<String, Object> report)
             throws IOException {
+        report.put("phase", kind.phase());
         report.put("ok", ok);
         report.put("code", code);
         report.put("finished_at", Instant.now().toString());
-        Path path = ledger.writeReport("machine-gate", report);
-        ledger.append("machine_gate", Map.of("ok", ok, "code", code, "report", path.toString()));
+        Path path = ledger.writeReport(kind.reportName(), report);
+        ledger.append(kind.eventType(),
+                Map.of("ok", ok, "code", code, "report", path.toString()));
         return new Outcome(ok, code, path, report);
     }
 

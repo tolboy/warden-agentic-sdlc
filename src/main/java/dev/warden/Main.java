@@ -105,6 +105,7 @@ public final class Main {
         result.put("task_id", loaded.resolved().id());
         result.put("risk", loaded.resolved().risk());
         result.put("scope_paths", loaded.resolved().scopePaths());
+        result.put("baseline_commands", loaded.resolved().baselineCommands());
         result.put("acceptance_commands", loaded.resolved().acceptanceCommands());
         System.out.println(Json.write(result));
         return 0;
@@ -449,7 +450,7 @@ public final class Main {
                     + ": the recorded failover names no role and profile");
         }
         return new Carried(Map.of(String.valueOf(role), String.valueOf(profile)),
-                TaskLoop.Continuation.NONE);
+                new TaskLoop.Continuation(priorRunId, null, false));
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */

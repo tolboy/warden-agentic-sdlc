@@ -62,6 +62,7 @@ public final class RunReport {
         report.put("goal", goalOf(projectRoot, summary.get("task_id")));
         report.put("workflow", summary.get("workflow"));
         report.put("skipped_stages", summary.get("skipped_stages"));
+        report.put("baseline", baseline(summary));
 
         List<Map<String, Object>> stages = stages(runs, runId, summary);
         report.put("stages", stages);
@@ -111,6 +112,10 @@ public final class RunReport {
             if (Boolean.TRUE.equals(step.get("dry_run"))) stage.put("dry_run", true);
 
             Path detail = detailFile(runs, runId, label, attempt, visualRole);
+            if (detail == null && step.get("report") != null) {
+                Path referenced = Path.of(String.valueOf(step.get("report")));
+                if (Files.isRegularFile(referenced)) detail = referenced;
+            }
             Map<String, Object> body = detail == null ? Map.of() : readOptionalJson(detail);
             if (body == null) body = Map.of();
 
@@ -132,8 +137,14 @@ public final class RunReport {
                 stage.put("failed_over_from", step.get("failed_over_from"));
                 stage.put("artifact_path", step.getOrDefault("artifact_path", body.get("artifact_path")));
                 stage.put("rejected_profiles", step.get("rejected_profiles"));
-            } else if ("gates".equals(label)) {
+            } else if ("gates".equals(label) || "baseline".equals(label)) {
                 stage.put("kind", "machine_gates");
+                stage.put("phase", body.getOrDefault("phase",
+                        "baseline".equals(label) ? "baseline" : "acceptance"));
+                if (step.get("reused") != null) stage.put("reused", step.get("reused"));
+                if (step.get("reused_from") != null) {
+                    stage.put("reused_from", step.get("reused_from"));
+                }
                 stage.put("commands", body.get("commands"));
                 stage.put("changed_paths", body.get("changed_paths"));
                 stage.put("violations", body.get("violations"));
@@ -154,16 +165,31 @@ public final class RunReport {
                                    boolean visualRole) {
         String stageRunId = switch (label) {
             case "gates" -> runId + "--gates-" + attempt;
+            case "baseline" -> runId + "--baseline-" + attempt;
             case "visual_qa" -> runId + "--" + (visualRole ? "visual-role-" : "visual-qa-") + attempt;
             default -> runId + "--" + label + "-" + attempt;
         };
         String file = switch (label) {
             case "gates" -> "machine-gate.json";
+            case "baseline" -> "baseline-gate.json";
             case "visual_qa" -> visualRole ? "role-visual_qa.json" : "visual-qa.json";
             default -> "role-" + label + ".json";
         };
         Path candidate = runs.resolve(stageRunId).resolve(file);
         return Files.isRegularFile(candidate) ? candidate : null;
+    }
+
+    private static Map<String, Object> baseline(Map<String, Object> summary) {
+        Map<String, Object> baseline = new LinkedHashMap<>();
+        baseline.put("configured", summary.get("baseline_required"));
+        baseline.put("commands", summary.get("baseline_commands"));
+        baseline.put("passed", summary.get("baseline_ok"));
+        baseline.put("code", summary.get("baseline_code"));
+        baseline.put("report", summary.get("baseline_report"));
+        baseline.put("report_sha256", summary.get("baseline_report_sha256"));
+        baseline.put("reused_from", summary.get("baseline_reused_from"));
+        baseline.put("reuse_declined", summary.get("baseline_reuse_declined"));
+        return baseline;
     }
 
     @SuppressWarnings("unchecked")
@@ -251,10 +277,10 @@ public final class RunReport {
      * A role that failed over dispatched more than one vendor. Charging only the survivor
      * would under-report exactly the run most worth costing.
      *
-     * Each attempt records its own vendor and cost, but model and token usage are written
-     * once, on the role report, by the attempt that actually settled. Those are folded back
-     * into the matching attempt: leaving them out made a rollup that said `grok/&lt;unknown&gt;`
-     * and `0/0 tokens` next to a stage row that had both.
+     * New evidence records every dimension on every attempt. Historical sparse arrays wrote
+     * some settlement fields only on the enclosing role report; inherit those onto the final
+     * attempt only. Earlier attempts remain explicitly unknown rather than acquiring the
+     * successful vendor's telemetry.
      */
     private static List<Map<String, Object>> callsOf(Map<String, Object> stage) {
         Object attempts = stage.get("vendor_attempts");
@@ -262,16 +288,37 @@ public final class RunReport {
             List<Map<String, Object>> calls = new ArrayList<>();
             for (Object item : rows) {
                 if (!(item instanceof Map<?, ?> map)) continue;
-                Map<String, Object> call = new LinkedHashMap<>(cast(map));
-                if (call.get("profile") != null && call.get("profile").equals(stage.get("profile"))) {
-                    call.putIfAbsent("model", stage.get("model"));
-                    call.putIfAbsent("tokens", stage.get("tokens"));
+                calls.add(new LinkedHashMap<>(cast(map)));
+            }
+            for (int index = 0; index < calls.size(); index++) {
+                Map<String, Object> call = calls.get(index);
+                boolean finalAttempt = index == calls.size() - 1;
+                if (finalAttempt) {
+                    inherit(call, stage, "profile");
+                    inherit(call, stage, "vendor");
+                    inherit(call, stage, "runner");
+                    inherit(call, stage, "code");
+                    inherit(call, stage, "ok");
+                    inherit(call, stage, "cost_usd");
+                    inherit(call, stage, "duration_millis");
+                    inherit(call, stage, "tokens");
                 }
-                calls.add(call);
+                Object reported = first(call.get("model_reported"),
+                        finalAttempt ? stage.get("model_reported") : null);
+                Object model = first(reported, first(call.get("model"),
+                        finalAttempt ? stage.get("model") : null));
+                if (model != null) call.put("model", model);
             }
             if (!calls.isEmpty()) return calls;
         }
         return List.of(stage);
+    }
+
+    private static void inherit(Map<String, Object> target, Map<String, Object> source,
+                                String field) {
+        if (target.get(field) == null && source.get(field) != null) {
+            target.put(field, source.get(field));
+        }
     }
 
     /**
@@ -341,8 +388,10 @@ public final class RunReport {
         long failedGateRuns = 0;
         for (Map<String, Object> stage : stages) {
             if ("role".equals(stage.get("kind"))) {
-                roleRuns += callsOf(stage).size();
-                if (Boolean.FALSE.equals(stage.get("ok"))) failedRoleRuns++;
+                List<Map<String, Object>> calls = callsOf(stage);
+                roleRuns += calls.size();
+                failedRoleRuns += calls.stream()
+                        .filter(call -> Boolean.FALSE.equals(call.get("ok"))).count();
             } else {
                 gateRuns++;
                 if (Boolean.FALSE.equals(stage.get("ok"))) failedGateRuns++;

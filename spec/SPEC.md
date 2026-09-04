@@ -58,10 +58,18 @@ scopes:
 
 defaults:
   checks: full
+  baseline_checks: fast          # optional; omit to keep pre-agent behaviour unchanged
   risk: medium
   max_fix_attempts: 2
   timeout_minutes: 30
 ```
+
+`baseline_checks` names a set under `checks`. When present it is run in the worktree
+**before the first vendor**. A red baseline is `baseline_failed` and zero vendor calls —
+the agent is not asked to repair a breakage it did not cause. The same commands are the
+floor of the later acceptance gate (baseline first, duplicates dropped), so a narrower
+task check cannot hide a regression of project health. Existing projects that omit the
+key, and a greenfield `warden init`, keep the previous behaviour: no pre-agent suite.
 
 For a JVM project only the contents of `checks` differ:
 
@@ -350,12 +358,16 @@ rather than inferred from behaviour.
 ## 6. How Conductor and Orca fit in
 
 ```
-Orca        a worktree per task, plus a terminal. warden runs inside it.
-Conductor   script nodes calling warden, outer limits, and the human gate.
-warden      the loop, the gates, the roles, the evidence.
+Warden      domain workflow, gates, safety, evidence, metrics, decisions
+Orca        worktrees, agent hosting, dashboard/mobile, terminal and human interaction
+Conductor   optional external workflow adapter; not part of the primary path
 ```
 
-Neither Conductor nor Orca knows a vendor's name. A Conductor node looks like this:
+Neither Conductor nor Orca knows a vendor's name. Warden writes `decision.json`; Orca may
+show the wait; Conductor may wrap the same command with an outer timeout and an external
+gate. The cut is [`docs/adr/0001-layer-split.md`](../docs/adr/0001-layer-split.md).
+
+A Conductor node, when one is used, looks like this:
 
 ```yaml
   - name: task_loop
@@ -436,6 +448,9 @@ This is what the conformance suite checks. Every item is a defect that has alrea
 14. A prompt that will not reach the vendor intact is not sent. A multi-line argument through a
     Windows `.cmd` shim loses everything after the first newline, including the flags that
     follow; the launch is refused before the call rather than paid for.
+15. A declared `baseline_checks` set runs before the first vendor. Red is `baseline_failed`
+    and zero vendor calls. The model does not decide whether that gate, or any later
+    acceptance command, passed: exit code and timeout do.
 
 ---
 
@@ -447,3 +462,6 @@ This is what the conformance suite checks. Every item is a defect that has alrea
 - It stores no secrets: authentication stays with the vendor's CLI.
 - It does not claim to cover paths ignored by `.gitignore` — Git does not see them, so neither
   does the check. This is stated in every ledger rather than hidden in documentation.
+- It does not become a generic DAG engine, a distributed scheduler, a checkpoint framework,
+  or a web/mobile UI. Those jobs, if they exist, belong elsewhere — see
+  [`docs/adr/0001-layer-split.md`](../docs/adr/0001-layer-split.md).

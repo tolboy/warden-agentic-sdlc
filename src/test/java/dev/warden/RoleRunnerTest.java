@@ -96,6 +96,13 @@ public final class RoleRunnerTest implements Suite {
             check.eq("cost is captured without an experiment", 0.012, implReport.get("cost_usd"));
             check.eq("turns are captured", 3L, implReport.get("num_turns"));
             check.eq("the vendor's own model name is recorded", "stub-impl-model", implReport.get("model_reported"));
+            List<Map<String, Object>> implAttempts = objects(implReport.get("vendor_attempts"));
+            check.eq("attempt evidence keeps the vendor-reported model", "stub-impl-model",
+                    implAttempts.get(0).get("model"));
+            check.eq("attempt evidence keeps the runner", "direct",
+                    implAttempts.get(0).get("runner"));
+            check.eq("attempt evidence keeps reported tokens", 12L,
+                    ((Map<?, ?>) implAttempts.get(0).get("tokens")).get("total"));
             check.that("the prompt is hashed for the ledger", implReport.get("prompt_sha256") instanceof String);
             check.that("the artifact is hashed for the ledger", implReport.get("artifact_sha256") instanceof String);
             check.that("raw vendor output is kept beside the run, not under prompts/",
@@ -570,6 +577,11 @@ public final class RoleRunnerTest implements Suite {
     @SuppressWarnings("unchecked")
     private Map<String, Object> readJson(Path file) throws IOException {
         return (Map<String, Object>) Json.parse(Files.readString(file));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> objects(Object value) {
+        return (List<Map<String, Object>>) value;
     }
 
     private void deleteTree(Path root) throws IOException {
