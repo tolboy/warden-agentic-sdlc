@@ -231,18 +231,24 @@ public final class RunReport {
         return result;
     }
 
-    /** Role, name, focused — enough to read without opening the PNG. */
+    /**
+     * Role, name, box, focused, ignored. A blank name is kept: an interactive
+     * control with no accessible name is a finding, not noise. {@code ignored}
+     * is carried rather than dropped, so a row cannot look like an ordinary
+     * control the way it did when the flag was recorded and then discarded.
+     */
     private static List<Map<String, Object>> a11yNames(Object raw) {
         if (!(raw instanceof List<?> rows)) return List.of();
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object item : rows) {
             if (!(item instanceof Map<?, ?> node)) continue;
-            Object name = node.get("name");
-            if (!(name instanceof String text) || text.isBlank()) continue;
             Map<String, Object> one = new LinkedHashMap<>();
             one.put("role", node.get("role"));
-            one.put("name", text);
+            Object name = node.get("name");
+            one.put("name", name instanceof String text ? text : "");
             if (Boolean.TRUE.equals(node.get("focused"))) one.put("focused", true);
+            if (Boolean.TRUE.equals(node.get("ignored"))) one.put("ignored", true);
+            if (node.get("box") instanceof Map<?, ?>) one.put("box", node.get("box"));
             result.add(one);
             if (result.size() >= 24) break;
         }
@@ -534,6 +540,16 @@ public final class RunReport {
                         .append(Boolean.TRUE.equals(visual.get("passed")) ? "passed" : "failed")
                         .append("  ").append(list(visual.get("screenshots")).size())
                         .append(" screenshot(s)\n");
+                boolean sharedA11y = true;
+                String sharedLine = null;
+                for (Object item : list(visual.get("scenarios"))) {
+                    if (!(item instanceof Map<?, ?> row)) continue;
+                    String line = a11yLine(list(row.get("a11y")));
+                    if (sharedLine == null) sharedLine = line;
+                    else if (!sharedLine.equals(line)) sharedA11y = false;
+                }
+                if (sharedLine == null || sharedLine.isEmpty()) sharedA11y = false;
+
                 for (Object item : list(visual.get("scenarios"))) {
                     if (!(item instanceof Map<?, ?> row)) continue;
                     out.append("  ").append(Boolean.TRUE.equals(row.get("ok")) ? "ok  " : "FAIL")
@@ -546,19 +562,15 @@ public final class RunReport {
                         out.append("        after ").append(one.get("matcher"))
                                 .append("  ").append(one.get("screenshot_after")).append('\n');
                     }
-                    List<Object> names = list(row.get("a11y"));
-                    if (!names.isEmpty()) {
-                        out.append("        a11y  ");
-                        int shown = 0;
-                        for (Object node : names) {
-                            if (!(node instanceof Map<?, ?> one)) continue;
-                            if (shown > 0) out.append(" | ");
-                            out.append(one.get("role")).append(":").append(one.get("name"));
-                            shown++;
-                            if (shown >= 8) break;
+                    if (!sharedA11y) {
+                        String line = a11yLine(list(row.get("a11y")));
+                        if (!line.isEmpty()) {
+                            out.append("        a11y  ").append(line).append('\n');
                         }
-                        out.append('\n');
                     }
+                }
+                if (sharedA11y) {
+                    out.append("        a11y  ").append(sharedLine).append('\n');
                 }
                 for (Object item : list(visual.get("screenshots"))) {
                     if (item instanceof Map<?, ?> row) out.append("        ").append(row.get("path")).append('\n');
@@ -657,6 +669,35 @@ public final class RunReport {
 
     private static String clip(String value, int width) {
         return value.length() <= width ? value : value.substring(0, width - 1) + "…";
+    }
+
+    /**
+     * One human-readable a11y row. Ignored nodes are marked unreachable so they
+     * cannot be read as ordinary controls. A blank name is spelled out: that is
+     * the finding.
+     */
+    private static String a11yLine(List<Object> names) {
+        StringBuilder line = new StringBuilder();
+        int shown = 0;
+        for (Object node : names) {
+            if (!(node instanceof Map<?, ?> raw)) continue;
+            if (shown > 0) line.append(" | ");
+            line.append(a11yLabel(cast(raw)));
+            shown++;
+            if (shown >= 8) break;
+        }
+        return line.toString();
+    }
+
+    private static String a11yLabel(Map<String, Object> node) {
+        String role = text(node.get("role"));
+        Object name = node.get("name");
+        String label = name instanceof String named && !named.isBlank()
+                ? named : "(no accessible name)";
+        if (Boolean.TRUE.equals(node.get("ignored"))) {
+            return role + ":" + label + " [unreachable]";
+        }
+        return role + ":" + label;
     }
 
     private static List<Object> list(Object value) {

@@ -5,6 +5,8 @@
  * machine can actually settle. A pass without a screenshot is refused.
  *
  * Usage:
+ *   node visual-qa.mjs --validate-only --scenario "1280x720: testid=save visible"
+ *   node visual-qa.mjs --rank-a11y --tree ax.json --scenario "1280x720: testid=save visible"
  *   node visual-qa.mjs --url http://127.0.0.1:4173/ --out DIR \
  *     --scenario "700x400: text=Create visible" \
  *     --scenario "1280x720: css=.settings-panel visible" \
@@ -47,7 +49,7 @@
  * on the app it was written against is worse than one that admits its scope.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,10 +81,19 @@ const browserBin = opt("--browser");
  * reviewer have both been billed for work nobody could look at.
  */
 const validateOnly = args.includes("--validate-only");
+/**
+ * Rank an accessibility tree with no browser, the same shape as `--validate-only`.
+ * The snapshot is only observable with a live page, so ranking — which is what
+ * decides whether the control the scenario named is in the 60 nodes a human sees —
+ * has to be askable of the adapter on its own. `--tree` is the AX nodes (and any
+ * probe boxes) to rank.
+ */
+const rankOnly = args.includes("--rank-a11y");
+const offline = validateOnly || rankOnly;
 
 const scenarios = opts("--scenario");
 
-if (!validateOnly) {
+if (!offline) {
   if (!url || !outDir) {
     console.error("usage: visual-qa.mjs --url URL --out DIR --scenario 'WxH: text=Label visible'");
     process.exit(2);
@@ -92,10 +103,10 @@ if (!validateOnly) {
   }
 }
 
-const browser = validateOnly ? null : (browserBin || findBrowser());
-if (!validateOnly && !browser) fail("visual_qa_unavailable", "no Chrome/Edge executable found");
+const browser = offline ? null : (browserBin || findBrowser());
+if (!offline && !browser) fail("visual_qa_unavailable", "no Chrome/Edge executable found");
 
-if (!validateOnly) mkdirSync(outDir, { recursive: true });
+if (!offline) mkdirSync(outDir, { recursive: true });
 
 function fail(code, message, extra = {}) {
   const report = { ok: false, code, message, ...extra };
@@ -595,28 +606,269 @@ async function runWaitFor(cdp, step, outDir, label) {
   };
 }
 
-async function a11ySnapshot(cdp) {
+/**
+ * The snapshot stays bounded: the whole of it is written into the context the
+ * visual_qa role is given. Sixty nodes is enough for the control, its neighbours
+ * and a sample of the rest; two hundred of chrome is not.
+ *
+ * The cap is applied after ranking, not in document order. Tree order on a real
+ * page is the skip link, the banner and the navigation — never the button the
+ * scenario named.
+ */
+const A11Y_CAP = 60;
+const INTERACTIVE_ROLES = new Set(["button", "link", "textbox", "checkbox", "radio",
+  "combobox", "menuitem", "tab", "switch", "slider"]);
+
+function axString(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value.value != null) return String(value.value);
+  return "";
+}
+
+function axFlag(node, name) {
+  if (node == null) return false;
+  if (node[name] === true) return true;
+  const props = node.properties;
+  if (!Array.isArray(props)) return false;
+  const wanted = String(name).toLowerCase();
+  for (const prop of props) {
+    if (!prop || String(prop.name || "").toLowerCase() !== wanted) continue;
+    const v = prop.value;
+    if (v === true) return true;
+    if (v && typeof v === "object" && (v.value === true || v.value === "true")) return true;
+  }
+  return false;
+}
+
+function emptyBox() {
+  return { x: 0, y: 0, width: 0, height: 0 };
+}
+
+function normalizeBox(raw) {
+  if (!raw || typeof raw !== "object") return emptyBox();
+  const x = Number(raw.x);
+  const y = Number(raw.y);
+  const width = Number(raw.width);
+  const height = Number(raw.height);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    width: Number.isFinite(width) ? width : 0,
+    height: Number.isFinite(height) ? height : 0,
+  };
+}
+
+function boxFromQuad(quad) {
+  if (!Array.isArray(quad) || quad.length < 8) return emptyBox();
+  const xs = [Number(quad[0]), Number(quad[2]), Number(quad[4]), Number(quad[6])];
+  const ys = [Number(quad[1]), Number(quad[3]), Number(quad[5]), Number(quad[7])];
+  if (xs.some((n) => !Number.isFinite(n)) || ys.some((n) => !Number.isFinite(n))) return emptyBox();
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+function boxesOverlap(a, b) {
+  if (!a || !b) return false;
+  if (!(a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0)) return false;
+  return a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function normalizeAxNode(node, index) {
+  return {
+    role: axString(node?.role).trim(),
+    name: axString(node?.name).trim().slice(0, 80),
+    focused: axFlag(node, "focused"),
+    ignored: Boolean(node?.ignored),
+    box: normalizeBox(node?.box),
+    index,
+  };
+}
+
+function publishAxNode(record) {
+  return {
+    role: record.role,
+    name: record.name,
+    focused: record.focused,
+    ignored: record.ignored,
+    box: record.box,
+  };
+}
+
+/**
+ * What the scenario is about: the matchers it named, and the box `probe` already
+ * measured for each step that hit. Ranking uses these so a control two hundred
+ * nodes down the AX tree still lands in the snapshot, and lands first.
+ */
+function targetsFrom(steps, probes) {
+  const targets = [];
+  for (const step of steps || []) {
+    if (!step || step.kind === "wait") continue;
+    const kind = step.kind === "wait-for" ? step.matcherKind : step.kind;
+    const value = step.value;
+    if (!kind || value == null || String(value).trim() === "") continue;
+    targets.push({
+      kind,
+      value: String(value),
+      text: kind === "text" ? String(value) : "",
+      box: null,
+    });
+  }
+  for (const probe of probes || []) {
+    if (!probe) continue;
+    const kind = probe.kind || probe.matcherKind;
+    if (!kind || kind === "wait") continue;
+    const found = probe.found && typeof probe.found === "object" ? probe.found : null;
+    const box = found ? normalizeBox(found) : normalizeBox(probe.box);
+    const text = found && found.text != null ? String(found.text).trim()
+      : (probe.text != null ? String(probe.text).trim() : "");
+    targets.push({
+      kind,
+      value: probe.value != null ? String(probe.value) : "",
+      text,
+      box: box.width > 0 && box.height > 0 ? box : null,
+    });
+  }
+  return targets;
+}
+
+function nodeHitsTarget(record, target) {
+  const hit = { box: false, name: false, role: false };
+  if (!target) return hit;
+  if (target.box && boxesOverlap(record.box, target.box)) hit.box = true;
+  if (target.kind === "role"
+      && record.role.toLowerCase() === String(target.value || "").toLowerCase()) {
+    hit.role = true;
+  }
+  const needle = String(target.text || "").trim().toLowerCase();
+  if (needle && record.name.toLowerCase().includes(needle)) hit.name = true;
+  return hit;
+}
+
+/**
+ * Rank, then cap. Pure: `--rank-a11y` calls this with a fixture tree and no CDP.
+ *
+ * Order: nodes the scenario named (box, name, or role), then interactive nodes
+ * whether or not they have a name, then whatever else is named. Ignored nodes
+ * stay only when they are the thing the scenario named — an aria-hidden control
+ * is a finding, a hidden skip link is not. An unnamed non-interactive node is
+ * dropped. Every kept node carries a box, even if it is empty.
+ */
+function rankA11yNodes(nodes, targets, cap = A11Y_CAP) {
+  if (!Array.isArray(nodes)) return [];
+  const scored = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const record = normalizeAxNode(nodes[i], i);
+    if (!record.role) continue;
+    let hitsBox = false;
+    let hitsName = false;
+    let hitsRole = false;
+    for (const target of targets || []) {
+      const hit = nodeHitsTarget(record, target);
+      hitsBox = hitsBox || hit.box;
+      hitsName = hitsName || hit.name;
+      hitsRole = hitsRole || hit.role;
+    }
+    const targeted = hitsBox || hitsName || hitsRole;
+    if (record.ignored && !targeted) continue;
+    const interactive = INTERACTIVE_ROLES.has(record.role.toLowerCase());
+    if (!targeted && !interactive && !record.name) continue;
+    let rank;
+    if (hitsBox) rank = 0;
+    else if (hitsName || hitsRole) rank = 1;
+    else if (interactive) rank = 2;
+    else rank = 3;
+    scored.push({ record, rank, index: i });
+  }
+  scored.sort((a, b) => a.rank - b.rank || a.index - b.index);
+  return scored.slice(0, cap).map((row) => publishAxNode(row.record));
+}
+
+async function attachBoxes(cdp, nodes) {
+  const out = new Array(nodes.length);
+  const batch = 25;
+  for (let start = 0; start < nodes.length; start += batch) {
+    const slice = nodes.slice(start, start + batch);
+    const boxes = await Promise.all(slice.map(async (node) => {
+      if (node?.box && typeof node.box === "object") return normalizeBox(node.box);
+      const id = node?.backendDOMNodeId;
+      if (id == null || id === 0) return emptyBox();
+      try {
+        const result = await cdp.send("DOM.getContentQuads", { backendNodeId: id });
+        return boxFromQuad(result?.quads?.[0]);
+      } catch {
+        return emptyBox();
+      }
+    }));
+    for (let i = 0; i < slice.length; i++) {
+      const node = slice[i] || {};
+      out[start + i] = {
+        role: node.role,
+        name: node.name,
+        focused: node.focused,
+        ignored: node.ignored,
+        properties: node.properties,
+        box: boxes[i],
+      };
+    }
+  }
+  return out;
+}
+
+async function a11ySnapshot(cdp, steps, probes) {
   await cdp.send("Accessibility.enable").catch(() => {});
+  await cdp.send("DOM.enable").catch(() => {});
+  await cdp.send("DOM.getDocument", { depth: 0 }).catch(() => {});
   const tree = await cdp.send("Accessibility.getFullAXTree").catch(() => null);
   const nodes = tree?.nodes;
   if (!Array.isArray(nodes)) return [];
-  const interactive = new Set(["button", "link", "textbox", "checkbox", "radio",
-    "combobox", "menuitem", "tab", "switch", "slider"]);
-  const out = [];
-  for (const node of nodes) {
-    const role = node.role?.value != null ? String(node.role.value) : "";
-    const name = node.name?.value != null ? String(node.name.value).trim().slice(0, 80) : "";
-    if (!role) continue;
-    if (!name && !interactive.has(role.toLowerCase())) continue;
-    out.push({
-      role,
-      name,
-      focused: Boolean(node.focused),
-      ignored: Boolean(node.ignored),
-    });
-    if (out.length >= 60) break;
+  const withBoxes = await attachBoxes(cdp, nodes);
+  return rankA11yNodes(withBoxes, targetsFrom(steps, probes));
+}
+
+function rankA11yOffline() {
+  const treePath = opt("--tree");
+  if (!treePath) {
+    console.log(JSON.stringify({
+      ok: false,
+      code: "a11y_rank_invalid",
+      message: "--rank-a11y needs --tree FILE (the AX nodes to rank, no browser)",
+    }));
+    process.exit(2);
   }
-  return out;
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(treePath, "utf8"));
+  } catch (error) {
+    console.log(JSON.stringify({
+      ok: false,
+      code: "a11y_rank_invalid",
+      message: String(error?.message || error),
+    }));
+    process.exit(2);
+  }
+  const loaded = Array.isArray(raw)
+    ? { nodes: raw, probes: [] }
+    : {
+      nodes: Array.isArray(raw?.nodes) ? raw.nodes : [],
+      probes: Array.isArray(raw?.probes) ? raw.probes : [],
+    };
+  let steps = [];
+  try {
+    steps = scenarios.map(parseScenario).flatMap((s) => s.steps || []);
+  } catch (error) {
+    console.log(JSON.stringify({
+      ok: false,
+      code: "a11y_rank_invalid",
+      message: String(error?.message || error),
+    }));
+    process.exit(2);
+  }
+  const a11y = rankA11yNodes(loaded.nodes, targetsFrom(steps, loaded.probes));
+  console.log(JSON.stringify({ ok: true, code: "a11y_ranked", a11y, cap: A11Y_CAP }));
+  process.exit(0);
 }
 
 async function runStep(cdp, step, outDir, label) {
@@ -708,12 +960,17 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
   const viewportHonoured = drift <= 20;
 
   const steps = [];
+  const probes = [];
   let page = null;
   if (viewportHonoured) {
     for (const [position, step] of scenario.steps.entries()) {
       const { result, info } = await runStep(cdp, { ...step, index: position + 1 }, outDir, label);
       page = page || info;
       steps.push(result);
+      if (info && step.kind !== "wait") {
+        const kind = step.kind === "wait-for" ? step.matcherKind : step.kind;
+        probes.push({ kind, value: step.value, found: info.found || null });
+      }
       if (!result.ok) break; // a later step's meaning depends on the earlier one holding
     }
   }
@@ -751,7 +1008,7 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
     console_errors: consoleErrors,
     ignored_console_errors: cdp.foreignErrors,
     console_checked: requireQuietConsole,
-    a11y: await a11ySnapshot(cdp),
+    a11y: await a11ySnapshot(cdp, scenario.steps, probes),
     page: page ? { title: page.title, innerWidth: page.innerWidth, innerHeight: page.innerHeight, orientation: page.orientation } : null,
     why,
   };
@@ -857,6 +1114,8 @@ async function main() {
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Log.enable").catch(() => {});
+    await cdp.send("Accessibility.enable").catch(() => {});
+    await cdp.send("DOM.enable").catch(() => {});
     const results = [];
     for (const scenario of parsed) {
       results.push(await runScenario(cdp, scenario, outDir, url));
@@ -894,5 +1153,7 @@ if (validateOnly) {
     : { ok: true, code: "scenarios_valid", scenarios: scenarios.length }));
   process.exit(problem ? 2 : 0);
 }
+
+if (rankOnly) rankA11yOffline();
 
 await main();
