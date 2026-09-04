@@ -386,7 +386,7 @@ visual_qa:
   start: "npm run preview -- --host 127.0.0.1 --port 4173"
   url: "http://127.0.0.1:4173/"
   scenarios:
-    - "1280x720: text=Save visible"
+    - "1280x720: testid=save-button visible"
     - "1280x720: testid=save-button click -> css=.panel.open visible"
     - "700x400: css=#wide-only hidden"
     - "700x400: no-console-errors"
@@ -395,6 +395,12 @@ visual_qa:
 Матчеры: `text=` (по видимому тексту), `css=`, `testid=`, `role=`. Утверждения: `visible`,
 `hidden`, `click`. Голый `click` проверяет, что нажатие вообще что-то меняет в DOM; всё
 более конкретное пишется после `->`, а не угадывается.
+
+Каждый сценарий, который смотрит на элемент, обязан назвать его через `testid=`, `role=`
+или `css=`: сценарий на одном `text=` отклоняется на preflight, до того как оплачен первый
+вендор. Надпись на контроле — это ровно та его часть, которую следующая задача вправе
+поменять, и проверка, красная из-за переименования, красна не по делу. Шаг `text=` рядом с
+привязанным по-прежнему допустим, а сценарию из одного `no-console-errors` локатор не нужен.
 
 Живой прогон на фикстуре:
 
@@ -466,7 +472,7 @@ asked for 700  →  viewport_effective: {"width": 980}  →  viewport_honoured: 
 ```yaml
   scenarios:
     # Warden does not invent visual assertions. These two hold for any page:
-    #   - "1280x720: text=Settings visible"
+    #   - "1280x720: testid=settings visible"
     - "1280x720: no-console-errors"
     - "700x400: no-console-errors"
 ```

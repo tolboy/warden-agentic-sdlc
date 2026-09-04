@@ -139,6 +139,16 @@ public final class ConfigTest implements Suite {
                 List.of("1280x720: no-console-errors"), byPixels.visualQa().scenarios());
         check.eq("and the task carries no command it would have had to invent",
                 List.of(), byPixels.acceptanceCommands());
+        // How a scenario names its control is the adapter's grammar and is checked at
+        // preflight, not here: `warden land` re-reads the task file, so refusing at parse time
+        // would strand a run a person had already accepted. See VisualQaTest.
+        TaskSpec.ResolvedTask byCopy = TaskSpec.parse(freshTask + """
+                visual_qa:
+                  required: true
+                  scenarios: ["1280x720: text=Save visible"]
+                """, "task.yaml").resolve(noCommands, "task.yaml");
+        check.eq("the parser carries a scenario it is not the judge of",
+                List.of("1280x720: text=Save visible"), byCopy.visualQa().scenarios());
         check.rejects("unsafe base_ref refused", "not a safe git revision name",
                 () -> ProjectConfig.parse(PROJECT.replace("origin/main", "origin/../main"), "project.yaml"));
         check.rejects("wrong version refused", "version must be 1",

@@ -234,6 +234,8 @@ public final class VisualQaRunner {
             if (scenario == null) continue;
             var held = WAIT_STEP.matcher(scenario);
             while (held.find()) declared += Double.parseDouble(held.group(1));
+            var until = WAIT_FOR_STEP.matcher(scenario);
+            while (until.find()) declared += WAIT_FOR_SECONDS;
         }
         long waited = Math.min(Math.round(Math.ceil(declared)), MAX_DECLARED_WAIT_SECONDS);
         return Duration.ofMinutes(2).plusSeconds(waited);
@@ -242,6 +244,10 @@ public final class VisualQaRunner {
     /** Deliberately loose: over-counting a `wait` inside a label only buys time. */
     private static final java.util.regex.Pattern WAIT_STEP =
             java.util.regex.Pattern.compile("(?i)\\bwait\\s*=?\\s*(\\d+(?:\\.\\d+)?)\\s*s?\\b");
+    /** Matches the adapter's 15 s poll; over-counting only buys time. */
+    private static final java.util.regex.Pattern WAIT_FOR_STEP =
+            java.util.regex.Pattern.compile("(?i)\\bwait-for\\b");
+    private static final long WAIT_FOR_SECONDS = 15;
     private static final long MAX_DECLARED_WAIT_SECONDS = 15 * 60;
 
     private static boolean hasScreenshot(Map<String, Object> body) {

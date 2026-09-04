@@ -10,7 +10,9 @@
  *     --scenario "1280x720: css=.settings-panel visible" \
  *     --scenario "1280x720: testid=save click -> css=.saved visible" \
  *     --scenario "1280x720: css=canvas click@0.5,0.86 -> text=Placed visible" \
- *     --scenario "1280x720: testid=stage click -> wait 30 -> css=.fire visible" \n *     --scenario "1280x720: no-console-errors"
+ *     --scenario "1280x720: testid=stage click -> wait 30 -> css=.fire visible" \
+ *     --scenario "1280x720: testid=stage click -> wait-for=css=.hearth" \
+ *     --scenario "1280x720: no-console-errors"
  *
  * Scenario grammar
  *   WxH: <matcher> <assertion> [-> <matcher> <assertion>]
@@ -28,6 +30,12 @@
  *              blind to any UI that runs on its own clock — an animation, a
  *              staged scene, a countdown. A wait cannot fail and cannot be a
  *              scenario's only step: it produces evidence, it does not assert.
+ *   wait-for=MATCHER
+ *              poll until that matcher is visible, up to 15 s, then photograph.
+ *              Unlike wait N it can fail: the control never appeared. A typed
+ *              matcher is required (css= / testid= / role= / text=). A trailing
+ *              `visible` is allowed and dropped, being what a wait-for already
+ *              means; `hidden` and `click` are refused rather than swallowed.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -120,8 +128,21 @@ const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
  */
 const WAIT_STEP = /^wait\s*=?\s*(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?$|^wait\s*=?\s*(\d+(?:\.\d+)?)$/i;
 const WAIT_MAX_SECONDS = 120;
+/** Poll until a matcher is visible. Not a sleep: this one can fail. */
+const WAIT_FOR_STEP = /^wait-for\s*=?\s*(.+)$/i;
+const WAIT_FOR_SECONDS = 15;
 const NO_CONSOLE_ERRORS = /^no[-_ ]?console[-_ ]?errors$/i;
 const NO_CONSOLE_ERRORS_ANYWHERE = /\bno[-_ ]?console[-_ ]?errors\b/i;
+
+/**
+ * The matchers that survive a rename, and so can carry a required contract.
+ *
+ * `text=` reads the copy on the control, which is the one part of a control that a later
+ * task is free to change: a contract written that way goes red for a reason that has
+ * nothing to do with the task under test, and an implementer is then paid to chase it.
+ */
+const STRONG_MATCHERS = new Set(["testid", "role", "css"]);
+const locatorKind = (step) => (step.kind === "wait-for" ? step.matcherKind : step.kind);
 
 /**
  * Splits "css=.panel > .row visible" into a matcher and an assertion. The
@@ -145,6 +166,41 @@ function parseStep(raw, fallbackAssertion = "visible") {
       throw new Error(`scenario "${text}": wait takes 0 to ${WAIT_MAX_SECONDS} seconds, got ${seconds}`);
     }
     return { kind: "wait", value: String(seconds), assertion: "wait", seconds, at: null, raw: text };
+  }
+  const until = text.match(WAIT_FOR_STEP);
+  if (until) {
+    let body = String(until[1] || "").trim();
+    // Everywhere else in this grammar the last word is the assertion, so an operator writes
+    // `wait-for=css=.hearth visible` without thinking about it — and this module's own usage
+    // block documented exactly that. Left inside the value it becomes the selector
+    // ".hearth visible", a descendant of a <visible> element, which nothing on any page
+    // matches: the step then spends its whole poll failing to find a control that is right
+    // there, and reports the control as missing. Read the word the same way here.
+    const tail = body.split(/\s+/);
+    const last = tail.length > 1 ? tail[tail.length - 1].toLowerCase() : "";
+    if (ASSERTIONS.has(last)) {
+      if (last !== "visible") {
+        throw new Error(`scenario "${text}": wait-for polls until something appears, so it `
+          + `cannot end in "${last}". Wait for the element, then say what to do with it in `
+          + `its own step: "wait-for=css=.panel -> css=.panel ${last}".`);
+      }
+      tail.pop();
+      body = tail.join(" ");
+    }
+    const typed = body.match(/^(text|css|testid|role)\s*=\s*(.+)$/i);
+    if (!typed) {
+      throw new Error(`scenario "${text}": wait-for needs a typed matcher `
+        + `(wait-for=css=.ready, wait-for=testid=hearth), not "${body}"`);
+    }
+    return {
+      kind: "wait-for",
+      matcherKind: typed[1].toLowerCase(),
+      value: typed[2].trim(),
+      assertion: "wait-for",
+      seconds: WAIT_FOR_SECONDS,
+      at: null,
+      raw: text,
+    };
   }
   const words = text.split(/\s+/);
   let assertion = fallbackAssertion;
@@ -188,7 +244,9 @@ function parseScenario(raw) {
     return { raw, width, height, mobile, consoleOnly: true, steps: [] };
   }
 
-  // Tolerate the older free-form wording: "Create visible", "Create click".
+  // Tolerate the older free-form wording: "Create visible", "Create click". It parses as a
+  // `text=` matcher, so a required contract written this way is refused by contractProblem
+  // for naming its control by copy — this only keeps an old scenario readable, not runnable.
   const arrow = rest.split(/\s*->\s*/);
   const steps = [];
   const first = parseStep(arrow[0]);
@@ -511,8 +569,59 @@ async function runWait(cdp, step, outDir, label) {
   };
 }
 
+async function runWaitFor(cdp, step, outDir, label) {
+  const matcher = { kind: step.matcherKind, value: step.value };
+  const deadline = Date.now() + Math.round(step.seconds * 1000);
+  let info = await probe(cdp, matcher);
+  while (!isVisible(info.found) && Date.now() < deadline) {
+    await sleep(200);
+    info = await probe(cdp, matcher);
+  }
+  const visible = isVisible(info.found);
+  return {
+    result: {
+      matcher: `wait-for ${step.matcherKind}=${step.value}`,
+      assertion: "wait-for",
+      waited_seconds: step.seconds,
+      visible,
+      element: info.found,
+      screenshot_after: await shoot(cdp, outDir, `${label}-after-wait-for-${step.index}`),
+      ok: visible,
+      why: visible ? null : describeMiss(
+        { kind: step.matcherKind, value: step.value }, info)
+        + ` after waiting ${step.seconds}s`,
+    },
+    info,
+  };
+}
+
+async function a11ySnapshot(cdp) {
+  await cdp.send("Accessibility.enable").catch(() => {});
+  const tree = await cdp.send("Accessibility.getFullAXTree").catch(() => null);
+  const nodes = tree?.nodes;
+  if (!Array.isArray(nodes)) return [];
+  const interactive = new Set(["button", "link", "textbox", "checkbox", "radio",
+    "combobox", "menuitem", "tab", "switch", "slider"]);
+  const out = [];
+  for (const node of nodes) {
+    const role = node.role?.value != null ? String(node.role.value) : "";
+    const name = node.name?.value != null ? String(node.name.value).trim().slice(0, 80) : "";
+    if (!role) continue;
+    if (!name && !interactive.has(role.toLowerCase())) continue;
+    out.push({
+      role,
+      name,
+      focused: Boolean(node.focused),
+      ignored: Boolean(node.ignored),
+    });
+    if (out.length >= 60) break;
+  }
+  return out;
+}
+
 async function runStep(cdp, step, outDir, label) {
   if (step.kind === "wait") return await runWait(cdp, step, outDir, label);
+  if (step.kind === "wait-for") return await runWaitFor(cdp, step, outDir, label);
   const info = await probe(cdp, { kind: step.kind, value: step.value });
   const found = info.found;
   const visible = isVisible(found);
@@ -642,6 +751,7 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
     console_errors: consoleErrors,
     ignored_console_errors: cdp.foreignErrors,
     console_checked: requireQuietConsole,
+    a11y: await a11ySnapshot(cdp),
     page: page ? { title: page.title, innerWidth: page.innerWidth, innerHeight: page.innerHeight, orientation: page.orientation } : null,
     why,
   };
@@ -684,6 +794,20 @@ function contractProblem(list) {
     return `scenario "${onlyWaiting.raw}" only waits. A wait produces a screenshot; it does not `
       + `assert anything, so a scenario made of waits passes without testing the page. `
       + `Say what should be true once the wait is over: "... -> css=SELECTOR visible".`;
+  }
+  // Asked per scenario, not per contract. A contract whose first line carries a `testid=`
+  // says nothing about the fragility of its second, and the interesting case is exactly the
+  // mixed one: the strong scenarios make the file look rigorous while the weak neighbour is
+  // the one that will go red after somebody renames a label.
+  const byCopy = parsed.find((s) => s.steps.some((step) => step.kind !== "wait")
+    && !s.steps.some((step) => STRONG_MATCHERS.has(locatorKind(step))));
+  if (byCopy) {
+    return `scenario "${byCopy.raw}" names what it looks at only by the copy on it. `
+      + `The words on a control are the part of it a later task is free to change, so this `
+      + `check will go red for a reason that has nothing to do with the task. Put `
+      + `data-testid on the control and say "testid=save-button", or name it with "role=" `
+      + `or "css=". A scenario that is only "no-console-errors" needs no locator, and a `
+      + `"text=" step is fine alongside one that is anchored.`;
   }
   return null;
 }

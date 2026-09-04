@@ -222,18 +222,51 @@ public final class TaskDraft {
         // inside `visual_qa.scenarios`, and a text block's incidental-whitespace stripping
         // silently flattened them to column zero, producing YAML the linter rejected.
         String indent = "    ";
-        if (label == null) {
-            return indent + "# Warden does not invent visual assertions. These two hold for any page:\n"
+        String handle = label == null ? null : testIdHandle(label);
+        if (handle == null) {
+            String named = "";
+            if (label != null) {
+                // The goal did name a control, and saying nothing about it would read as if it
+                // had not. What cannot be done is guess the attribute: `slug` answers
+                // `task-345e4ebd` for «Сохранить», which is a fine file name and a nonsense
+                // test id, and a drafted contract asserting it is red by construction while
+                // telling nobody what to build.
+                named = indent + "# The goal names " + label.replaceAll("\\s+", " ")
+                        + ", but a data-testid is written in latin and Warden will not\n"
+                        + indent + "# invent one. Put one on that control and say so here, for example:\n"
+                        + indent + "#   - \"1280x720: testid=save visible\"\n";
+            }
+            return named
+                    + indent + "# Warden does not invent visual assertions. These two hold for any page:\n"
                     + indent + "# it renders at both viewports and logs no errors, and each one writes a\n"
                     + indent + "# screenshot for the visual_qa role to look at. Replace them with what\n"
                     + indent + "# this task actually promises, for example:\n"
-                    + indent + "#   - \"1280x720: text=Settings visible\"\n"
+                    + indent + "#   - \"1280x720: testid=settings visible\"\n"
                     + indent + "#   - \"1280x720: css=.settings-panel visible\"\n"
                     + indent + "#   - \"700x400: testid=save click -> css=.saved visible\"\n"
                     + indent + "- \"1280x720: no-console-errors\"\n"
                     + indent + "- \"700x400: no-console-errors\"";
         }
-        return indent + "- \"1280x720: text=" + label + " visible\"\n"
-                + indent + "- \"700x400: text=" + label + " visible\"";
+        return indent + "# Put data-testid=\"" + handle + "\" on that control: the words written on a\n"
+                + indent + "# control are the part of it a later task is free to change.\n"
+                + indent + "- \"1280x720: testid=" + handle + " visible\"\n"
+                + indent + "- \"700x400: testid=" + handle + " visible\"";
+    }
+
+    /**
+     * A {@code data-testid} an implementer can actually be asked to write, or null.
+     *
+     * {@link #slug} exists to name a file and so never fails: for a label with no latin in it
+     * at all it answers {@code task-} plus a hash, which is a stable file name and a test id
+     * nobody would ever put in the markup.
+     */
+    private static String testIdHandle(String label) {
+        boolean latin = false;
+        for (char c : label.toCharArray()) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { latin = true; break; }
+        }
+        if (!latin) return null;
+        String handle = slug(label);
+        return handle.isEmpty() ? null : handle;
     }
 }

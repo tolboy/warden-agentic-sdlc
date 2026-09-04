@@ -206,7 +206,45 @@ public final class RunReport {
             one.put("ok", scenario.get("ok"));
             one.put("why", scenario.get("why"));
             one.put("screenshot", scenario.get("screenshot"));
+            one.put("steps", stepEvidence(scenario.get("steps")));
+            one.put("a11y", a11yNames(scenario.get("a11y")));
             result.add(one);
+        }
+        return result;
+    }
+
+    private static List<Map<String, Object>> stepEvidence(Object raw) {
+        if (!(raw instanceof List<?> rows)) return List.of();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> step)) continue;
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("matcher", step.get("matcher"));
+            one.put("assertion", step.get("assertion"));
+            one.put("ok", step.get("ok"));
+            if (step.get("screenshot_after") != null) {
+                one.put("screenshot_after", step.get("screenshot_after"));
+            }
+            if (step.get("why") != null) one.put("why", step.get("why"));
+            result.add(one);
+        }
+        return result;
+    }
+
+    /** Role, name, focused — enough to read without opening the PNG. */
+    private static List<Map<String, Object>> a11yNames(Object raw) {
+        if (!(raw instanceof List<?> rows)) return List.of();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> node)) continue;
+            Object name = node.get("name");
+            if (!(name instanceof String text) || text.isBlank()) continue;
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("role", node.get("role"));
+            one.put("name", text);
+            if (Boolean.TRUE.equals(node.get("focused"))) one.put("focused", true);
+            result.add(one);
+            if (result.size() >= 24) break;
         }
         return result;
     }
@@ -502,6 +540,25 @@ public final class RunReport {
                             .append("  ").append(row.get("scenario"));
                     if (row.get("why") != null) out.append("  — ").append(row.get("why"));
                     out.append('\n');
+                    for (Object step : list(row.get("steps"))) {
+                        if (!(step instanceof Map<?, ?> one)) continue;
+                        if (one.get("screenshot_after") == null) continue;
+                        out.append("        after ").append(one.get("matcher"))
+                                .append("  ").append(one.get("screenshot_after")).append('\n');
+                    }
+                    List<Object> names = list(row.get("a11y"));
+                    if (!names.isEmpty()) {
+                        out.append("        a11y  ");
+                        int shown = 0;
+                        for (Object node : names) {
+                            if (!(node instanceof Map<?, ?> one)) continue;
+                            if (shown > 0) out.append(" | ");
+                            out.append(one.get("role")).append(":").append(one.get("name"));
+                            shown++;
+                            if (shown >= 8) break;
+                        }
+                        out.append('\n');
+                    }
                 }
                 for (Object item : list(visual.get("screenshots"))) {
                     if (item instanceof Map<?, ?> row) out.append("        ").append(row.get("path")).append('\n');

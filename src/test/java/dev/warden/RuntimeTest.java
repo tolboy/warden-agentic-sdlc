@@ -219,7 +219,7 @@ public final class RuntimeTest implements Suite {
                 scope: code
                 visual_qa:
                   required: true
-                  scenarios: ["main-menu"]
+                  scenarios: ["1280x720: testid=main-menu visible"]
                 """);
         command(root, "git", "init", "-b", "main");
         command(root, "git", "add", ".");

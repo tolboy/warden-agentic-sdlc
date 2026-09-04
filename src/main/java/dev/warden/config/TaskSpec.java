@@ -79,6 +79,13 @@ public record TaskSpec(
         if (visualQa.required() && visualQa.scenarios().isEmpty()) {
             root.collector().add("visual_qa.scenarios must not be empty when visual QA is required");
         }
+        // Whether a scenario names its control in a way that survives a rename is a question
+        // about the scenario grammar, and the grammar lives in the adapter: VisualQaRunner asks
+        // it with `--validate-only` at preflight, before any vendor is paid. A copy of the rule
+        // here would be a second grammar written in regexes, and this is the parser every
+        // command goes through — `warden land` re-reads the task file, so a rule enforced here
+        // would make a run that a person already accepted unlandable until its contract was
+        // edited after the fact.
 
         Values budgetNode = root.optMap("budgets").rejectUnknownKeys(BUDGET_KEYS);
         Budget budget = new Budget(

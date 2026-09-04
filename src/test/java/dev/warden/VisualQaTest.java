@@ -36,7 +36,7 @@ public final class VisualQaTest implements Suite {
                     scope: code
                     visual_qa:
                       required: true
-                      scenarios: ["700x400:Create visible"]
+                      scenarios: ["700x400: testid=create visible"]
                     """);
             Files.writeString(project.resolve("src/app.txt"), "x\n");
             git(project);
@@ -94,6 +94,70 @@ public final class VisualQaTest implements Suite {
         check.that("a scenario that only waits is caught before a vendor is paid", problem != null);
         check.contains("and the message says what to write instead", String.valueOf(problem),
                 "only waits");
+
+        Files.writeString(project.resolve(".warden/tasks/until.yaml"), """
+                version: 1
+                id: until
+                goal: Fix the Create button
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios: ["1280x720: testid=stage click -> wait-for=css=.hearth"]
+                """);
+        check.eq("wait-for is a sayable scenario", null,
+                new VisualQaRunner(new ProcessRunner(), adapter)
+                        .contractProblem(new ConfigLoader().load(project, "until")));
+
+        // The rest of the grammar reads the last word as the assertion, so this is what an
+        // operator writes — and what this module's own usage block used to document. Kept
+        // inside the value it is the selector ".hearth visible", which no page matches: the
+        // step would poll for its full 15 s and then report a control that is on the screen
+        // as missing.
+        check.eq("a wait-for that spells out `visible` means the same thing", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "spelled",
+                                "1280x720: testid=stage click -> wait-for=css=.hearth visible")));
+        String wrongWord = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "clicky", "1280x720: wait-for=css=.hearth click"));
+        check.contains("but a wait-for cannot end in an assertion it does not make",
+                String.valueOf(wrongWord), "cannot end in");
+
+        String weak = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "copy", "1280x720: text=Save visible"));
+        check.contains("a scenario that names its control only by copy is caught at preflight",
+                String.valueOf(weak), "only by the copy on it");
+
+        // The mixed contract is the whole point of asking per scenario: one anchored line
+        // used to vouch for every other line in the file.
+        check.contains("and one anchored scenario does not vouch for its neighbour",
+                String.valueOf(new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "mixed", "1280x720: css=.panel visible",
+                                "1280x720: text=Save visible"))),
+                "text=Save visible");
+        check.eq("a text= step alongside an anchored one is still fine", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "chained",
+                                "1280x720: testid=save click -> text=Saved visible")));
+        check.eq("and a console-only contract needs no locator at all", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "quiet", "1280x720: no-console-errors")));
+    }
+
+    /** A task whose only interesting part is its scenarios. */
+    private static ConfigLoader.Loaded taskWith(Path project, String id, String... scenarios)
+            throws Exception {
+        StringBuilder yaml = new StringBuilder("""
+                version: 1
+                id: %s
+                goal: Fix the Create button
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios:
+                """.formatted(id));
+        for (String scenario : scenarios) yaml.append("    - \"").append(scenario).append("\"\n");
+        Files.writeString(project.resolve(".warden/tasks/" + id + ".yaml"), yaml.toString());
+        return new ConfigLoader().load(project, id);
     }
 
     private static boolean nodeAvailable() {
@@ -180,6 +244,9 @@ public final class VisualQaTest implements Suite {
                 VisualQaRunner.adapterBudget(java.util.List.of(
                         "1280x720: testid=stage click -> wait 30 -> css=.fire visible",
                         "700x400: testid=stage click -> wait 45s -> css=.fire visible")).toSeconds());
+        check.eq("wait-for adds its poll ceiling", 120L + 15,
+                VisualQaRunner.adapterBudget(java.util.List.of(
+                        "1280x720: testid=stage click -> wait-for=css=.hearth")).toSeconds());
         check.eq("and are bounded, so a contract cannot ask for forever", 120L + 15 * 60,
                 VisualQaRunner.adapterBudget(java.util.Collections.nCopies(400,
                         "1280x720: testid=stage click -> wait 100 -> css=.fire visible")).toSeconds());
@@ -226,7 +293,7 @@ public final class VisualQaTest implements Suite {
                           required: true
                           start: "echo this project would start its own server"
                           url: "http://127.0.0.1:%d/"
-                          scenarios: ["1280x720: text=Save visible"]
+                          scenarios: ["1280x720: testid=save visible"]
                         """.formatted(port));
                 ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "occupied");
                 VisualQaRunner.Outcome occupied = new VisualQaRunner(new ProcessRunner())

@@ -1165,7 +1165,7 @@ public final class TaskLoopTest implements Suite {
                   required: true
                   url: "http://127.0.0.1:65535/"
                   scenarios:
-                    - "1280x720: text=Save visible"
+                    - "1280x720: testid=save visible"
                 """ : "";
         Files.writeString(project.resolve(".warden/tasks/hello.yaml"), """
                 version: 1

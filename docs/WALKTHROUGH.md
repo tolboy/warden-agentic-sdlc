@@ -394,7 +394,7 @@ visual_qa:
   start: "npm run preview -- --host 127.0.0.1 --port 4173"
   url: "http://127.0.0.1:4173/"
   scenarios:
-    - "1280x720: text=Save visible"
+    - "1280x720: testid=save-button visible"
     - "1280x720: testid=save-button click -> css=.panel.open visible"
     - "700x400: css=#wide-only hidden"
     - "700x400: no-console-errors"
@@ -403,6 +403,12 @@ visual_qa:
 Matchers: `text=` (by visible text), `css=`, `testid=`, `role=`. Assertions: `visible`,
 `hidden`, `click`. A bare `click` checks that pressing changes anything in the DOM at all;
 anything more specific is written after `->` rather than guessed.
+
+Every scenario that looks at an element has to name one with `testid=`, `role=` or `css=`;
+preflight refuses one that goes by `text=` alone, before a vendor is paid. The copy on a
+control is the part a later task is free to change, and a check that fails over a rename
+fails for a reason that has nothing to do with the task. A `text=` step is still fine
+alongside an anchored one, and a scenario that is only `no-console-errors` needs no locator.
 
 A live run against the fixture:
 
@@ -476,7 +482,7 @@ goal names no control, what gets written is what is true of any page:
 ```yaml
   scenarios:
     # Warden does not invent visual assertions. These two hold for any page:
-    #   - "1280x720: text=Settings visible"
+    #   - "1280x720: testid=settings visible"
     - "1280x720: no-console-errors"
     - "700x400: no-console-errors"
 ```

@@ -34,8 +34,30 @@ that exists in code but has never been run live says so.
   recording the message id, so answering it and running the role again finishes on the same
   worker. Proven live end to end, including the reviewer quoting the answer it was given.
 
+- A visual scenario can wait for something instead of waiting a number. `wait-for=css=.hearth`
+  polls for up to 15 seconds and, unlike `wait 30`, can fail: the control never appeared. The
+  declared ceiling is added to the adapter's timeout the same way `wait` is, so an honest
+  contract is not reported as `visual_qa_unavailable`.
+- Every scenario now writes a compact accessibility snapshot (role, name, focused) next to its
+  screenshots, and `warden report` shows the frame taken after each step together with those
+  names. A human at the gate sees click then result, not only the last PNG.
+- A required visual contract must name what it looks at with `testid=`, `role=` or `css=`, and
+  is refused at preflight when a scenario goes by `text=` alone, before a vendor is paid. The
+  copy on a control is the part a later task is free to change. A `text=` step alongside an
+  anchored one is still fine, and a scenario that is only `no-console-errors` needs no locator.
+  Asked per scenario: one anchored line never vouched for its neighbour.
+
 ### Fixed
 
+- `wait-for=css=.hearth visible` read the trailing assertion as part of the selector, looked
+  for a `<visible>` element inside `.hearth`, and then reported a control that was on the
+  screen as missing after a full poll. The last word is now read as the assertion it is,
+  as everywhere else in the grammar; `hidden` and `click` are refused rather than swallowed.
+- A drafted contract no longer invents a `data-testid` from a control whose name has no latin
+  in it. The slug function names files and so never fails, answering `task-` plus a hash, which
+  made a draft that was red by construction and told nobody what to build. Such a goal now gets
+  the honest fallback plus a comment naming the control; a latin one gets the attribute to
+  write spelled out.
 - A timeout no longer reports an unaccounted lifecycle over a worker that is provably gone.
   Orca answers `dispatch_inactive` when asked to stop something already stopped, so a refused
   fence is now verified with `worker-show`: a settled or unknown dispatch is fenced, and only a

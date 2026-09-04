@@ -182,7 +182,19 @@ public final class DoCommandTest implements Suite {
 
         new TaskDraft().write(drafts, "named", "Add a Settings button to the header", "code", "low");
         String named = Files.readString(drafts.resolve(".warden/tasks/named.yaml"));
-        check.contains("a named control becomes a real assertion", named, "text=Settings visible");
+        check.contains("a named control becomes a real assertion", named, "testid=settings visible");
+        check.contains("and the draft says who has to write that attribute", named,
+                "data-testid=\"settings\"");
+
+        // `slug` never fails, because it names files: for «Сохранить» it answers `task-` plus
+        // a hash. Written into a contract that is `testid=task-345e4ebd`, an assertion no
+        // markup will ever satisfy and no implementer can read.
+        new TaskDraft().write(drafts, "quoted-ru", "Добавить кнопку «Сохранить» на панель", "code", "low");
+        String quotedRu = Files.readString(drafts.resolve(".warden/tasks/quoted-ru.yaml"));
+        check.that("a control Warden cannot spell is not invented as a testid",
+                !quotedRu.contains("testid=task-"));
+        check.contains("the draft still says the goal named one", quotedRu, "Сохранить");
+        check.contains("and falls back to what holds for any page", quotedRu, "no-console-errors");
 
         new TaskDraft().write(drafts, "unnamed", "Fix the layout on the settings screen", "code", "low");
         String unnamed = Files.readString(drafts.resolve(".warden/tasks/unnamed.yaml"));

@@ -120,7 +120,7 @@ visual_qa:
   required: true
   url: "http://127.0.0.1:4173/"
   scenarios:
-    - "1280x720: text=Save visible"
+    - "1280x720: testid=save-button visible"
     - "1280x720: testid=save-button click -> css=.panel.open visible"
     - "700x400: css=#wide-only hidden"
     - "1280x720: testid=stage-chapter click -> wait 32 -> css=.hearth visible"
