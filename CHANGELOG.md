@@ -38,9 +38,14 @@ that exists in code but has never been run live says so.
   polls for up to 15 seconds and, unlike `wait 30`, can fail: the control never appeared. The
   declared ceiling is added to the adapter's timeout the same way `wait` is, so an honest
   contract is not reported as `visual_qa_unavailable`.
-- Every scenario now writes a compact accessibility snapshot (role, name, focused) next to its
-  screenshots, and `warden report` shows the frame taken after each step together with those
-  names. A human at the gate sees click then result, not only the last PNG.
+- Every scenario now writes a compact accessibility snapshot (role, name, bounding box,
+  focused, ignored) next to its screenshots, ranked so the control the scenario named is
+  first rather than lost under the page chrome, and `warden report` shows the frame taken
+  after each step together with those names. A human at the gate sees click then result,
+  not only the last PNG. An interactive node with no accessible name is kept and labelled;
+  an ignored node is marked unreachable instead of looking like an ordinary control; a
+  shared a11y line is printed once for the run, not under every scenario. Ranking is
+  `--rank-a11y`, the same browserless shape as `--validate-only`.
 - A required visual contract must name what it looks at with `testid=`, `role=` or `css=`, and
   is refused at preflight when a scenario goes by `text=` alone, before a vendor is paid. The
   copy on a control is the part a later task is free to change. A `text=` step alongside an
@@ -48,6 +53,12 @@ that exists in code but has never been run live says so.
   Asked per scenario: one anchored line never vouched for its neighbour.
 
 ### Fixed
+
+- The accessibility snapshot no longer stops at the first 60 nodes in document order, which
+  on a real page is the skip link and the banner and never the control the scenario named.
+  Ranking puts that control first, keeps unnamed interactive nodes, marks ignored nodes as
+  unreachable, and `warden report` prints a shared a11y line once instead of under every
+  scenario.
 
 - `wait-for=css=.hearth visible` read the trailing assertion as part of the selector, looked
   for a `<visible>` element inside `.hearth`, and then reported a control that was on the

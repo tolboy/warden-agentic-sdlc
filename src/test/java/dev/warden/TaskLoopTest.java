@@ -189,6 +189,7 @@ public final class TaskLoopTest implements Suite {
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
+            a11yReportChecks(check, sandbox);
 
             // Whatever happens, the loop only ever hands off to a human.
             for (TaskLoop.Outcome outcome : List.of(ok, fixed, gaveUp, afterReview, stillBlocked,
@@ -606,6 +607,116 @@ public final class TaskLoopTest implements Suite {
                 !Files.exists(noBrowser.resolve(".warden/runs/v3/context/fix-1-visual.md")));
 
         visualRoleChecks(check, sandbox, home);
+    }
+
+    /**
+     * What a human reads of the accessibility snapshot. The adapter ranking is
+     * {@link VisualQaTest}; this is the join: unnamed interactive nodes stay
+     * visible, ignored nodes are not printed as ordinary controls, and five
+     * scenarios that share a list do not print it five times.
+     */
+    @SuppressWarnings("unchecked")
+    private void a11yReportChecks(Check check, Path sandbox) throws Exception {
+        Path project = sandbox.resolve("a11y-report");
+        Files.createDirectories(project.resolve(".warden/runs/ay1"));
+        Path visualDir = project.resolve(".warden/runs/ay1--visual-qa-0");
+        Files.createDirectories(visualDir);
+
+        Map<String, Object> box = new java.util.LinkedHashMap<>();
+        box.put("x", 10);
+        box.put("y", 20);
+        box.put("width", 80);
+        box.put("height", 24);
+        List<Map<String, Object>> same = List.of(
+                axReport("link", "Home", false, box),
+                axReport("link", "Docs", false, box),
+                axReport("button", "Ghost", true, box),
+                axReport("button", "", false, box),
+                axReport("button", "Save", false, box));
+        List<Map<String, Object>> scenarios = List.of(
+                visualScenario("1280x720: testid=save visible", same),
+                visualScenario("700x400: testid=save visible", same),
+                visualScenario("1280x720: testid=menu visible", same),
+                visualScenario("1024x768: css=.panel visible", same),
+                visualScenario("1280x720: no-console-errors", same));
+        Map<String, Object> adapter = new java.util.LinkedHashMap<>();
+        adapter.put("ok", true);
+        adapter.put("code", "passed");
+        adapter.put("scenarios", scenarios);
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("ok", true);
+        body.put("code", "passed");
+        body.put("adapter", adapter);
+        Files.writeString(visualDir.resolve("visual-qa.json"), Json.writePretty(body));
+
+        Map<String, Object> step = new java.util.LinkedHashMap<>();
+        step.put("step", "visual_qa");
+        step.put("attempt", 0L);
+        step.put("ok", true);
+        step.put("code", "passed");
+        Map<String, Object> summary = new java.util.LinkedHashMap<>();
+        summary.put("task_id", "hello");
+        summary.put("ok", true);
+        summary.put("reason", "human_gate");
+        summary.put("next_action", "human_gate");
+        summary.put("steps", List.of(step));
+        Files.writeString(project.resolve(".warden/runs/ay1/task-run.json"),
+                Json.writePretty(summary));
+
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(project, "ay1");
+        Map<String, Object> visual = (Map<String, Object>) report.get("visual");
+        List<Map<String, Object>> joined = (List<Map<String, Object>>) visual.get("scenarios");
+        check.eq("five scenarios are joined", 5, joined.size());
+        boolean unnamed = false;
+        boolean ignored = false;
+        boolean boxed = true;
+        for (Map<String, Object> scenario : joined) {
+            List<Map<String, Object>> a11y = (List<Map<String, Object>>) scenario.get("a11y");
+            for (Map<String, Object> node : a11y) {
+                if (!(node.get("box") instanceof Map<?, ?>)) boxed = false;
+                if ("button".equals(node.get("role")) && "".equals(node.get("name"))
+                        && !Boolean.TRUE.equals(node.get("ignored"))) {
+                    unnamed = true;
+                }
+                if (Boolean.TRUE.equals(node.get("ignored"))) ignored = true;
+            }
+        }
+        check.that("every summarised node carries a bounding box", boxed);
+        check.that("an unnamed interactive node is kept in the report", unnamed);
+        check.that("ignored is carried through, not dropped", ignored);
+
+        String rendered = dev.warden.ledger.RunReport.render(report);
+        check.contains("an interactive node with no accessible name is identifiable",
+                rendered, "(no accessible name)");
+        check.contains("an ignored node is marked unreachable",
+                rendered, "button:Ghost [unreachable]");
+        check.that("and is not printed as an ordinary control",
+                !rendered.contains("button:Ghost |") && !rendered.contains("button:Ghost\n"));
+        int a11yLines = 0;
+        for (int from = 0; (from = rendered.indexOf("        a11y  ", from)) >= 0;
+             from += "        a11y  ".length()) {
+            a11yLines++;
+        }
+        check.eq("identical a11y is printed once for the run, not under every scenario",
+                1, a11yLines);
+    }
+
+    private static Map<String, Object> axReport(String role, String name, boolean ignored,
+                                                Map<String, Object> box) {
+        Map<String, Object> node = new java.util.LinkedHashMap<>();
+        node.put("role", role);
+        node.put("name", name);
+        node.put("ignored", ignored);
+        node.put("box", box);
+        return node;
+    }
+
+    private static Map<String, Object> visualScenario(String raw, List<Map<String, Object>> a11y) {
+        Map<String, Object> scenario = new java.util.LinkedHashMap<>();
+        scenario.put("raw", raw);
+        scenario.put("ok", true);
+        scenario.put("a11y", a11y);
+        return scenario;
     }
 
     /**

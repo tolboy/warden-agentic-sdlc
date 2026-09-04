@@ -369,6 +369,12 @@ public final class UserSetup {
             absence of console errors. Those facts are in the report below. **Do not re-litigate
             them.** If the harness says a control is visible, it measured it.
 
+            Each scenario's `a11y` list is ranked so the control it named is first, and each
+            node carries a bounding box. Use those boxes to judge clipping and overlap; do
+            not guess those from pixels when the snapshot has the numbers. A node with
+            `ignored: true` is unreachable by assistive technology. A control whose `name`
+            is empty has no accessible name — that is a finding.
+
             ```json
             {{context}}
             ```

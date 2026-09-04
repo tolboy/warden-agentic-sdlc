@@ -2,12 +2,18 @@ package dev.warden;
 
 import dev.warden.config.ConfigLoader;
 import dev.warden.gate.VisualQaRunner;
+import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public final class VisualQaTest implements Suite {
     @Override public String name() { return "visual qa"; }
@@ -50,6 +56,7 @@ public final class VisualQaTest implements Suite {
             upgradeHostileServerChecks(check);
             occupiedPortChecks(check, project);
             contractPreflightChecks(check, project);
+            a11yRankingChecks(check, sandbox);
         } finally {
             deleteTree(sandbox);
         }
@@ -141,6 +148,126 @@ public final class VisualQaTest implements Suite {
         check.eq("and a console-only contract needs no locator at all", null,
                 new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
                         taskWith(project, "quiet", "1280x720: no-console-errors")));
+    }
+
+    /**
+     * Ranking the accessibility snapshot, asked the same way as `--validate-only`:
+     * node, no browser, no output directory. Document order on a real page is the skip
+     * link and the banner; the property to hold is that two hundred nodes of chrome
+     * above the control still leave the control in the snapshot, and early.
+     */
+    @SuppressWarnings("unchecked")
+    private void a11yRankingChecks(Check check, Path sandbox) throws Exception {
+        Path adapter = Path.of("scripts", "visual-qa.mjs").toAbsolutePath();
+        if (!Files.isRegularFile(adapter) || !nodeAvailable()) return;
+
+        List<Object> nodes = new ArrayList<>();
+        nodes.add(axNode("button", "Ghost", true, box(0, 0, 40, 12)));
+        for (int i = 0; i < 200; i++) {
+            nodes.add(axNode("heading", "Chrome " + i, false, box(0, i, 40, 12)));
+        }
+        nodes.add(axNode("button", "", false, box(400, 10, 80, 24)));
+        Map<String, Object> saveBox = box(10, 400, 80, 32);
+        nodes.add(axNode("button", "Save", false, saveBox));
+
+        Map<String, Object> tree = new LinkedHashMap<>();
+        tree.put("nodes", nodes);
+        tree.put("probes", List.of(Map.of(
+                "kind", "testid",
+                "value", "save",
+                "found", Map.of("x", 10, "y", 400, "width", 80, "height", 32, "text", "Save"))));
+        Path treeFile = sandbox.resolve("a11y-tree.json");
+        Files.writeString(treeFile, Json.write(tree));
+
+        ProcessRunner.Result ranked = new ProcessRunner().run(
+                List.of(nodeExecutable(), adapter.toString(),
+                        "--rank-a11y",
+                        "--scenario", "1280x720: testid=save visible",
+                        "--tree", treeFile.toAbsolutePath().toString()),
+                sandbox, Duration.ofSeconds(20));
+        check.that("ranking answers without a browser", ranked.ok());
+        Map<String, Object> body = Json.findLastObject(ranked.stdout());
+        check.eq("and names itself as a ranking, not a contract check", "a11y_ranked",
+                body == null ? null : body.get("code"));
+        List<Map<String, Object>> a11y = listOfMaps(body == null ? null : body.get("a11y"));
+        check.that("the snapshot stays bounded", a11y.size() <= 60);
+        check.that("and is not empty", !a11y.isEmpty());
+        check.eq("the control the scenario named is first, not lost under 200 chrome nodes",
+                "Save", a11y.isEmpty() ? null : a11y.get(0).get("name"));
+        check.eq("and it is a button", "button", a11y.isEmpty() ? null : a11y.get(0).get("role"));
+
+        boolean unnamed = false;
+        boolean ghost = false;
+        boolean boxed = true;
+        for (Map<String, Object> node : a11y) {
+            if (!(node.get("box") instanceof Map<?, ?> box)
+                    || !box.containsKey("x") || !box.containsKey("y")
+                    || !box.containsKey("width") || !box.containsKey("height")) {
+                boxed = false;
+            }
+            if ("button".equals(node.get("role")) && "".equals(node.get("name"))
+                    && !Boolean.TRUE.equals(node.get("ignored"))) {
+                unnamed = true;
+            }
+            if ("Ghost".equals(node.get("name"))) ghost = true;
+        }
+        check.that("every node in the snapshot carries a bounding box", boxed);
+        check.that("an interactive node with no accessible name is kept", unnamed);
+        check.that("an ignored node the scenario did not name is dropped", !ghost);
+
+        Map<String, Object> ignoredSave = new LinkedHashMap<>();
+        ignoredSave.put("nodes", List.of(axNode("button", "Save", true, saveBox)));
+        ignoredSave.put("probes", List.of(Map.of(
+                "kind", "testid", "value", "save",
+                "found", Map.of("x", 10, "y", 400, "width", 80, "height", 32, "text", "Save"))));
+        Path ignoredFile = sandbox.resolve("a11y-ignored.json");
+        Files.writeString(ignoredFile, Json.write(ignoredSave));
+        ProcessRunner.Result ignoredRank = new ProcessRunner().run(
+                List.of(nodeExecutable(), adapter.toString(),
+                        "--rank-a11y",
+                        "--scenario", "1280x720: testid=save visible",
+                        "--tree", ignoredFile.toAbsolutePath().toString()),
+                sandbox, Duration.ofSeconds(20));
+        Map<String, Object> ignoredBody = Json.findLastObject(ignoredRank.stdout());
+        List<Map<String, Object>> ignoredA11y = listOfMaps(
+                ignoredBody == null ? null : ignoredBody.get("a11y"));
+        check.that("an ignored control the scenario named is kept as a finding",
+                !ignoredA11y.isEmpty() && "Save".equals(ignoredA11y.get(0).get("name")));
+        check.eq("and the ignored flag is still on it", Boolean.TRUE,
+                ignoredA11y.isEmpty() ? null : ignoredA11y.get(0).get("ignored"));
+    }
+
+    private static Map<String, Object> axNode(String role, String name, boolean ignored,
+                                              Map<String, Object> box) {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("role", Map.of("value", role));
+        node.put("name", Map.of("value", name));
+        node.put("ignored", ignored);
+        node.put("box", box);
+        return node;
+    }
+
+    private static Map<String, Object> box(int x, int y, int width, int height) {
+        Map<String, Object> box = new LinkedHashMap<>();
+        box.put("x", x);
+        box.put("y", y);
+        box.put("width", width);
+        box.put("height", height);
+        return box;
+    }
+
+    private static String nodeExecutable() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win") ? "node.exe" : "node";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> listOfMaps(Object raw) {
+        if (!(raw instanceof List<?> rows)) return List.of();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object item : rows) {
+            if (item instanceof Map<?, ?> map) out.add((Map<String, Object>) map);
+        }
+        return out;
     }
 
     /** A task whose only interesting part is its scenarios. */
