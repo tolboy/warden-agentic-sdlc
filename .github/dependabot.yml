@@ -1,0 +1,18 @@
+# Warden has no runtime or build dependencies, so there is exactly one ecosystem here to
+# watch: the actions CI itself runs on. That is not a technicality — a workflow pinned to a
+# deprecated runtime is how a project with zero dependencies still wakes up one morning
+# unable to build. The current tree already warns on every run that `actions/checkout` and
+# `actions/setup-java` are held to a Node version GitHub has deprecated.
+#
+# Monthly, because there is nothing here that moves faster than that and a weekly pull
+# request nobody reads is worse than none.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - "ci"

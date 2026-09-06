@@ -1,0 +1,69 @@
+name: Something behaved differently from what it said
+description: A failure, a wrong outcome code, or evidence that does not match what happened.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Warden's failure modes are its interface: every failure resolves to exactly one named
+        outcome. So the most useful bug report names **what it said** and **what was true**.
+
+        If a vendor was involved, the run directory under `.warden/runs/<run-id>/` already holds
+        most of this. Please read it before pasting — it contains the prompt that was sent and
+        the vendor's raw output, and both can carry things you did not mean to publish.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: The outcome you thought this would produce, and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: >-
+        The outcome code and message, verbatim. `warden report <run-id> --text` is usually the
+        clearest single thing to paste.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to get there
+      description: >-
+        The command you ran and enough of the contract to see why. A `.warden/task/<id>.yaml`
+        with the goal removed is fine — the shape usually matters more than the wording.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `warden --version`, or the commit you built.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: warden doctor
+      description: >-
+        Optional, and the fastest way to rule out the environment. It reports the JVM, the
+        profiles that load, argument encoding and live Orca readiness.
+      render: json
+
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Before you post
+      options:
+        - label: >-
+            I have checked that nothing pasted here carries an API key, a token, a private
+            path, or the contents of a repository I cannot share.
+          required: true

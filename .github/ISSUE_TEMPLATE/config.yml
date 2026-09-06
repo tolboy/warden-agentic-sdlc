@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+contact_links:
+  - name: A question about how it works
+    url: https://github.com/tolboy/warden-agentic-sdlc/discussions
+    about: >-
+      Ask in Discussions rather than opening an issue. "Why does it refuse this" and "how would
+      I wire up my vendor" are questions, and the answers are useful to more people there.
+  - name: Something that looks like a security problem
+    url: https://github.com/tolboy/warden-agentic-sdlc/blob/main/SECURITY.md
+    about: >-
+      Do not open a public issue. SECURITY.md says how to report it privately, and what this
+      tool does and does not claim to defend against.

@@ -1,0 +1,53 @@
+name: A change to what the tool does
+description: A new capability, a different default, or an invariant you think is wrong.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things are declined before they are written, and it is cheaper to know now:
+
+        - **A dependency.** There is no build system, no test framework, no JSON library and no
+          YAML library, and that is a product claim rather than a preference. See
+          [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md).
+        - **A failure that can pass.** Where a check cannot run, the answer is "refused", never
+          "passed". A proposal that widens what counts as success needs to say what a person
+          loses when it is wrong.
+
+        Everything else is open, including the invariants in section 8 of
+        [`spec/SPEC.md`](../blob/main/spec/SPEC.md) — each one is a defect somebody already hit,
+        so arguing against one means explaining why that defect no longer applies.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What you were trying to do, and where the tool got in the way. Not the solution yet —
+        the situation. A concrete run beats a hypothetical.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would change
+      description: The behaviour, not the implementation, unless the implementation is the point.
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: >-
+        What gets worse, who could be surprised by it, and what stops working. A proposal with
+        an honest cost is much easier to say yes to than one that claims none.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered instead
+      description: Including "configure it in policy.yaml" and why that was not enough.
