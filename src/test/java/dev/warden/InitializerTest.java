@@ -31,6 +31,41 @@ public final class InitializerTest implements Suite {
                     java.util.List.of("npm run test", "npm run build"),
                     loaded.resolved().baselineCommands());
             check.that("generated task is fail-closed for landing", !loaded.resolved().authority().land());
+
+            // The commented `land:` example is the only instruction an operator has for the
+            // one step that reaches their forge, and it shipped wrapped across two lines.
+            // Warden's YAML is a strict subset in which a flow sequence does not continue
+            // over a newline, so uncommenting it verbatim answered `unexpected end of flow
+            // collection` — from the parser that wrote the example. Anything a template
+            // offers must parse when it is used exactly as offered.
+            String written = Files.readString(result.projectFile());
+            java.util.List<String> lines = written.lines().toList();
+            int start = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                if (lines.get(i).strip().equals("# land:")) { start = i; break; }
+            }
+            check.that("the land example is offered at all", start >= 0);
+            StringBuilder block = new StringBuilder();
+            for (int i = start; i < lines.size(); i++) {
+                String line = lines.get(i).strip();
+                if (!line.startsWith("#")) break;
+                String bare = line.substring(1);
+                if (bare.startsWith(" ")) bare = bare.substring(1);
+                // Drop the trailing prose comments the operator would not uncomment.
+                if (bare.isBlank() || bare.startsWith("GitLab:")) break;
+                block.append(bare).append('\n');
+            }
+            String uncommented = written.lines()
+                    .takeWhile(line -> !line.strip().startsWith("# How an accepted"))
+                    .collect(java.util.stream.Collectors.joining("\n")) + "\n" + block;
+            check.contains("the land example is offered", uncommented, "pull_request:");
+            dev.warden.config.ProjectConfig landing =
+                    dev.warden.config.ProjectConfig.parse(uncommented, "project.yaml");
+            check.eq("and uncommenting it verbatim produces a contract Warden can read",
+                    java.util.List.of("gh", "pr", "create", "--base", "{{base}}", "--head",
+                            "{{branch}}", "--title", "{{title}}", "--body-file", "{{body_file}}"),
+                    landing.land().pullRequest());
+
             check.rejects("init refuses overwrite", "never overwrites", () ->
                     new ProjectInitializer().initialize(root, "origin/main"));
         } finally {

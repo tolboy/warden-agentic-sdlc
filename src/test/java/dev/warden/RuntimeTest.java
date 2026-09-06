@@ -137,6 +137,27 @@ public final class RuntimeTest implements Suite {
             Files.delete(repository.resolve(".warden/operator-note.txt"));
             Files.writeString(repository.resolve("src/value.txt"), "changed\n");
 
+            // The same question for a *tracked* file under `.warden`, which is the case that
+            // actually broke. The check above passed for the wrong reason: an untracked file
+            // never appears in `git diff --raw` at all, so filtering the path list was enough
+            // for it. A tracked one does appear, the raw shape was not filtered, and so adding
+            // the `land:` block that `warden land` itself asks for when it has nowhere to push
+            // made that same command refuse the accepted run as `candidate_changed`.
+            Files.writeString(repository.resolve(".warden/land-note.txt"), "committed config\n");
+            command(repository, "git", "add", "--", ".warden/land-note.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid",
+                    "commit", "-m", "a tracked file under .warden");
+            String beforeTracked = git.sourceFingerprint(base);
+            String beforeTrackedAll = git.fingerprint(base);
+            Files.writeString(repository.resolve(".warden/land-note.txt"),
+                    "land:\n  remote: origin\n  base: main\n");
+            check.eq("editing a tracked file under .warden leaves the candidate fingerprint alone",
+                    beforeTracked, git.sourceFingerprint(base));
+            check.that("while the read-only fingerprint still sees that edit",
+                    !beforeTrackedAll.equals(git.fingerprint(base)));
+            Files.writeString(repository.resolve(".warden/land-note.txt"), "committed config\n");
+
             // Committing the accepted change must not invalidate the acceptance. The candidate
             // is the content, not where it is sitting: measured on run torch-2, where
             // `warden land --commit` made the commit and `warden land --push` then refused it

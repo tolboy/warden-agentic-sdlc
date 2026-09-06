@@ -193,11 +193,15 @@ public final class ProjectInitializer {
             # The command is argv, not a shell line, so a title containing a quote stays one
             # argument. Placeholders: {{remote}} {{branch}} {{base}} {{title}} {{body_file}}.
             #
+            # The argv list must be one line. Warden's YAML is a strict subset and a flow
+            # sequence does not continue across a newline — this example was written wrapped
+            # and, uncommented exactly as it stood, produced `unexpected end of flow
+            # collection` from the parser that shipped it.
+            #
             # land:
             #   remote: origin        # optional; inferred when the repo has exactly one
             #   base: main            # optional; asked of the remote when absent
-            #   pull_request: ["gh", "pr", "create", "--base", "{{base}}", "--head",
-            #                  "{{branch}}", "--title", "{{title}}", "--body-file", "{{body_file}}"]
+            #   pull_request: ["gh", "pr", "create", "--base", "{{base}}", "--head", "{{branch}}", "--title", "{{title}}", "--body-file", "{{body_file}}"]
             #
             # GitLab: ["glab", "mr", "create", ...]   Gitea: ["tea", "pr", "create", ...]
             """;

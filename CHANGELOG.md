@@ -13,8 +13,10 @@ that exists in code but has never been run live says so.
 
 The release where the loop was run against a repository that is not a web application, in a
 language the heuristics were not written for, with a different vendor on each of two review
-stages. Nothing about that is exotic, and it found eight things the tool reported inaccurately —
-including two that cost money quietly and one that destroyed evidence. They are under **Fixed**.
+stages, and then accepted and landed. Nothing about that is exotic, and it found eleven things
+the tool reported inaccurately — including two that cost money quietly, one that destroyed
+evidence, and two that stood between an accepted run and the pull request it was for. They are
+under **Fixed**.
 
 ### Added
 
@@ -61,9 +63,10 @@ including two that cost money quietly and one that destroyed evidence. They are 
 
 ### Fixed
 
-Eight defects found by running a live loop on a documentation repository, where the goal was
+Eleven defects found by running a live loop on a documentation repository, where the goal was
 Russian prose, the acceptance command was a Python script, and both review stages were filled
-by different vendors. Every one of them is a thing the tool said that was not true.
+by different vendors — then by accepting the result and landing it as a pull request. Every one
+of them is a thing the tool said that was not true.
 
 - **Two stages of one role no longer overwrite each other's evidence.** `review` and
   `review-second` are the same role at the same attempt, so both resolved to
@@ -112,6 +115,18 @@ by different vendors. Every one of them is a thing the tool said that was not tr
   during a preview, so a chain with two review stages showed the same profile on both — the one
   arrangement that cannot happen. The preview exists to show who will be dispatched before
   anyone is paid, and the pair of independent readers is the part most worth seeing.
+- **A `.warden` edit no longer invalidates an accepted candidate.** The fingerprint split
+  that answers "is this what the human said yes to" filtered Warden's own tree out of the
+  path list and not out of the raw-diff shape it hashes first, so a *tracked* file under
+  `.warden` still moved it. The case that broke: `warden land` refuses to open a request
+  until `project.yaml` declares a `land:` block, and adding that block made the same command
+  refuse the run as `candidate_changed`. Untracked files never reach `git diff --raw`, which
+  is why the existing test passed and the bug survived.
+- **The commented `land:` example parses.** It shipped wrapped across two lines, and Warden's
+  YAML is a strict subset in which a flow sequence does not continue over a newline —
+  uncommenting it exactly as offered answered `unexpected end of flow collection`, from the
+  parser that wrote it. The only instruction an operator has for the one step that reaches
+  their forge was one they could not follow.
 - **A failed profile probe says what to actually do.** A model the installed CLI was too old
   for came back under "fix the profile's args or authentication" with the vendor's own sentence
   — "requires a newer version of Codex" — buried in the stdout tail. Neither the args nor the

@@ -86,7 +86,7 @@ public final class GitRepository {
         MessageDigest digest = sha256();
         // Raw metadata catches deletion, rename and mode/status changes. File bytes catch
         // edits to already-dirty and binary files without decoding a binary patch as text.
-        digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout())
+        digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout(), sourceOnly)
                 .getBytes(StandardCharsets.UTF_8));
         Set<String> paths = changedPaths(mergeBase);
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
@@ -122,8 +122,24 @@ public final class GitRepository {
      * never depended on the blob ids at all.
      */
     static String shapeOf(String raw) {
+        return shapeOf(raw, false);
+    }
+
+    /**
+     * @param sourceOnly drop records whose every path is Warden's own. The filter below the
+     *                   raw shape already did this to the content half of the fingerprint,
+     *                   and leaving the shape unfiltered meant `.warden` still moved it: a
+     *                   `land:` block added to `project.yaml` — the very edit the landing step
+     *                   asks for when it has nowhere to push — made `warden land` refuse the
+     *                   run as `candidate_changed`. That is the same failure the fingerprint
+     *                   split was written to end, firing again through the one input the split
+     *                   did not reach.
+     */
+    static String shapeOf(String raw, boolean sourceOnly) {
         StringBuilder shape = new StringBuilder();
-        for (String record : raw.split("\0", -1)) {
+        String[] records = raw.split("\0", -1);
+        for (int index = 0; index < records.length; index++) {
+            String record = records[index];
             if (record.isEmpty()) continue;
             if (record.charAt(0) != ':') {
                 shape.append(record).append('\0');
@@ -135,10 +151,30 @@ public final class GitRepository {
                 shape.append(record).append('\0');
                 continue;
             }
+            String status = fields[fields.length - 1];
+            // A rename or a copy carries two paths; everything else carries one.
+            int pathCount = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+            List<String> paths = new ArrayList<>();
+            for (int offset = 1; offset <= pathCount && index + offset < records.length; offset++) {
+                paths.add(records[index + offset]);
+            }
+            // A rename out of `.warden` into the source tree is a source change; only a record
+            // that touches nothing but Warden's own tree is dropped.
+            if (sourceOnly && !paths.isEmpty()
+                    && paths.stream().allMatch(GitRepository::isWardenPath)) {
+                index += paths.size();
+                continue;
+            }
             shape.append(':').append(fields[0]).append(' ').append(fields[1]).append(' ')
-                    .append(fields[fields.length - 1]).append('\0');
+                    .append(status).append('\0');
         }
         return shape.toString();
+    }
+
+    private static boolean isWardenPath(String path) {
+        String normalized = normalize(path);
+        return normalized.equals(dev.warden.config.WardenTree.DIRECTORY)
+                || normalized.startsWith(dev.warden.config.WardenTree.DIRECTORY + "/");
     }
 
     public List<String> outsideScope(Set<String> paths, List<String> scopes) {
