@@ -290,6 +290,17 @@ set, and it had already found two genuine defects by then. There is now a distin
 `role_turns_exhausted` code that names what to raise. No failover is attempted — another vendor
 would meet the same ceiling on the same diff.
 
+**And that code did not fire for a year of runs.** Written from the paragraph above, it was
+placed on the path a vendor takes when it exits 0 without an artifact — and the two vendors
+measured hitting a ceiling both exit 1. Grok prints `Error: max turns reached`, `claude -p`
+reports `error_max_turns`, and both were classified as `role_command_failed`, the same code as
+a broken flag. It took a run whose implementer and whose reviewer each died this way, in one
+afternoon, to notice: the entry above described behaviour the code did not have. Since 0.2.0
+the classification is made on both failure paths, the run's own reason is
+`turn_ceiling_reached`, and `--continue` keeps the stages that had already passed — before
+that, a reviewer running out of turns cost the implementer and the machine gates a second
+time. A documented path nobody exercises is a claim, not a feature.
+
 ### The refusal the system had to not swallow
 
 An implementation passed both acceptance commands and Codex returned `status: blocked`:
