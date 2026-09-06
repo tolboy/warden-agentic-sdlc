@@ -117,6 +117,15 @@ public final class StubVendor {
                 System.err.println("ERROR transport: worker quit with fatal: Transport channel closed");
                 System.exit(1);
             }
+            // Both live specimens of a spent turn ceiling: a message on stderr, a cost in the
+            // envelope on stdout, and exit 1. Grok prints `Error: max turns reached`; claude -p
+            // prints `"subtype":"error_max_turns"`. Both charged for the call.
+            case "turn-ceiling" -> {
+                System.out.println("{\"type\":\"result\",\"subtype\":\"error_max_turns\","
+                        + "\"is_error\":true,\"num_turns\":40,\"total_cost_usd\":1.33483082}");
+                System.err.println("Error: max turns reached");
+                System.exit(1);
+            }
             case "stdin" -> {
                 // Answers only if the prompt reached it through standard input, so a profile
                 // that claims stdin delivery and does not get it fails loudly.

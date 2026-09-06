@@ -188,6 +188,7 @@ public final class TaskLoopTest implements Suite {
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
+            pairedReviewChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
             a11yReportChecks(check, sandbox);
 
@@ -543,6 +544,92 @@ public final class TaskLoopTest implements Suite {
         check.eq("in the order it was declared",
                 List.of("reviewer", "implementer", "gates"),
                 steps(reordered).stream().map(step -> step.get("step")).toList());
+    }
+
+    /**
+     * Two stages, one role: two independent readers of the same diff.
+     *
+     * This is what `rotate` is for, and both halves of it were broken in a way only a live
+     * run showed. The pairing came from a counter shared by every run in the project, so a
+     * run that died before its reviewer shifted it and the operator got their two profiles in
+     * the wrong order. And both stages resolved to the same evidence directory, so the second
+     * reviewer's prompt, raw output and artifact overwrote the first's — leaving the ledger's
+     * entry for the first pointing at the second's files, which is worse than losing them.
+     */
+    private void pairedReviewChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path paired = newProject(sandbox, "workflow-paired", "medium");
+        writeProfiles(home, sandbox, "workflow-paired", 1, 99);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("workflow-paired-review2.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop }
+                """);
+
+        // A counter left over from earlier runs is exactly the state that used to invert the
+        // pairing. It must now change nothing at all.
+        Files.createDirectories(paired.resolve(".warden/runs"));
+        Files.writeString(paired.resolve(".warden/runs/rotation.json"),
+                "{\"reviewer\": 7}\n");
+
+        // The preview exists to show who will be dispatched before anyone is paid, and the
+        // pairing of two independent readers is the thing most worth seeing there. While the
+        // index came from a counter that a dry run deliberately did not advance, the preview
+        // named the same profile on both stages — the one arrangement that cannot happen.
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(paired, "hello"), UserConfig.load(home), "paired-dry", true);
+        check.eq("a dry run previews the real pairing, not one profile twice",
+                List.of("loop-review", "loop-review-2"), steps(preview).stream()
+                        .filter(step -> "reviewer".equals(step.get("step")))
+                        .map(step -> String.valueOf(step.get("profile"))).toList());
+        check.that("and it still dispatches nobody",
+                !Files.exists(paired.resolve(".warden/runs/paired-dry--review-0/raw")));
+
+        TaskLoop.Outcome run = loop(paired, home, "paired");
+        List<String> reviewers = steps(run).stream()
+                .filter(step -> "reviewer".equals(step.get("step")))
+                .map(step -> String.valueOf(step.get("profile"))).toList();
+        check.eq("each review stage gets a different profile, in the order policy lists them",
+                List.of("loop-review", "loop-review-2"), reviewers);
+        check.eq("and the stage that dispatched each one is recorded",
+                List.of("review", "review-second"), steps(run).stream()
+                        .filter(step -> "reviewer".equals(step.get("step")))
+                        .map(step -> step.get("stage")).toList());
+
+        check.that("the first reviewer's artifact survives the second",
+                Files.isRegularFile(paired.resolve(".warden/runs/paired--review-0/artifacts/reviewer.json")));
+        check.that("and the second writes its own, beside it",
+                Files.isRegularFile(paired.resolve(
+                        ".warden/runs/paired--review-second-0/artifacts/reviewer.json")));
+        check.that("each keeps the prompt it was actually sent",
+                Files.isRegularFile(paired.resolve(".warden/runs/paired--review-0/prompts/reviewer.md"))
+                        && Files.isRegularFile(paired.resolve(
+                                ".warden/runs/paired--review-second-0/prompts/reviewer.md")));
+        check.eq("and the evidence file names the profile that wrote it", "loop-review-2",
+                readJson(paired.resolve(".warden/runs/paired--review-second-0/role-reviewer.json"))
+                        .get("profile"));
+
+        // The report is where the misattribution showed: a row for one vendor carrying the
+        // other's model, duration and token counts, because both rows read one file.
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(paired, "paired");
+        List<Map<String, Object>> roleStages = ((List<Map<String, Object>>) report.get("stages")).stream()
+                .filter(stage -> "reviewer".equals(stage.get("role"))).toList();
+        check.eq("the report joins each review row to its own evidence",
+                List.of("loop-review", "loop-review-2"),
+                roleStages.stream().map(stage -> stage.get("profile")).toList());
+        check.eq("including the vendor each row actually ran",
+                List.of("reviewvendor", "secondvendor"),
+                roleStages.stream().map(stage -> stage.get("vendor")).toList());
     }
 
     /** A policy whose roles are the usual stand-ins but whose chain is written out. */
@@ -950,6 +1037,35 @@ public final class TaskLoopTest implements Suite {
                 moved.summaryReport().get("reused_judgements") == null);
         check.contains("and says why", String.valueOf(moved.summaryReport().get("reuse_declined")),
                 "judged a different candidate");
+
+        // The same argument, for the failure that turned out to be far more common than a
+        // missing browser. A reviewer stopped by its own `--max-turns` said nothing about the
+        // work: the fix is a number in a profile, and the diff waiting for the next run is one
+        // no vendor has objected to. Measured live, twice in one afternoon — and because the
+        // run-level reason was the flat `reviewer_failed`, the retry paid for an implementer
+        // and a machine gate that had both already passed on this exact tree.
+        Path ceiling = newProject(sandbox, "ceiling-retry", "medium");
+        writeProfiles(home, sandbox, "ceiling-retry", 1, 1);
+        writeProfile(home, "loop-ceiling", "reviewer", "ceilingvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "turn-ceiling", sandbox.resolve("ceiling-retry-review.count"), 1);
+        policy(home, "loop-ceiling", "loop-impl");
+        TaskLoop.Outcome hitCeiling = loop(ceiling, home, "tc1");
+        check.eq("a reviewer stopped at its ceiling names the ceiling, not the reviewer",
+                "turn_ceiling_reached", hitCeiling.reason());
+
+        dev.warden.approval.ApprovalStore ceilingDecisions =
+                new dev.warden.approval.ApprovalStore(ceiling);
+        ceilingDecisions.resolve("tc1", ceilingDecisions.read("tc1").updatedAt().toString(),
+                "retry", "operator", "raised --max-turns");
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome afterRaise = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(ceiling, "hello"), UserConfig.load(home), "tc2",
+                        false, Map.of(), new TaskLoop.Continuation("tc1", null, true));
+        check.that("the retry reaches the human gate", afterRaise.ok());
+        check.eq("keeping the implementer that had already passed on this tree",
+                Map.of("from", "tc1", "roles", List.of("implementer")),
+                afterRaise.summaryReport().get("reused_judgements"));
     }
 
     /**

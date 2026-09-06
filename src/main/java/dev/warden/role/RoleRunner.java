@@ -165,6 +165,19 @@ public final class RoleRunner {
     }
 
     /**
+     * @param stagePosition where the dispatching stage sits among the stages sharing this
+     *                      role. It, and not a running total of dispatches, is what decides
+     *                      which profile a {@code rotate} role gets — see
+     *                      {@link #rotationFor}.
+     */
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
+                       String implementerVendor, Path contextFile, boolean dryRun,
+                       int stagePosition) throws Exception {
+        return run(loaded, user, role, runId, implementerVendor, contextFile, List.of(), dryRun,
+                stagePosition);
+    }
+
+    /**
      * @param attachments files the role must look at rather than read about — screenshots,
      *                    today. Their paths always reach the prompt as {{screenshots}}; a
      *                    profile that declares {@code attachments.flag} also gets them on the
@@ -173,6 +186,16 @@ public final class RoleRunner {
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
                        String implementerVendor, Path contextFile, List<Path> attachments,
                        boolean dryRun) throws Exception {
+        return run(loaded, user, role, runId, implementerVendor, contextFile, attachments, dryRun,
+                UNSTAGED);
+    }
+
+    /** A dispatch that came from no workflow stage: `warden role`, and the visual role. */
+    public static final int UNSTAGED = -1;
+
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
+                       String implementerVendor, Path contextFile, List<Path> attachments,
+                       boolean dryRun, int stagePosition) throws Exception {
         if (user.policy() == null) {
             throw new IllegalStateException("no policy at " + user.home().resolve("policy.yaml")
                     + " — run `warden setup` to create a starter configuration");
@@ -189,9 +212,7 @@ public final class RoleRunner {
         TaskSpec.ResolvedTask task = loaded.resolved();
         String mergeBase = pinnedDiffBase != null ? pinnedDiffBase : git.mergeBase(task.baseRef());
 
-        // Rotation spreads load across profiles; it advances once per role invocation, not
-        // once per failover attempt, or a single spent vendor would skew every later run.
-        long rotation = nextRotation(root, role, dryRun);
+        long rotation = rotationFor(root, role, stagePosition, dryRun);
 
         // Taken before the first vendor runs so that, if a writing role is cut off mid-edit,
         // the successor can be told the tree is not the one the task described.
@@ -580,6 +601,7 @@ public final class RoleRunner {
         values.put("base_ref", task.baseRef());
         values.put("diff_base_commit", mergeBase);
         values.put("scope_paths", String.join(", ", task.scopePaths()));
+        values.put("changed_files", changedFileList(loaded.root(), mergeBase));
         values.put("acceptance_commands", bullets(task.acceptanceCommands()));
         values.put("visual_scenarios", bullets(task.visualQa().scenarios()));
         values.put("authority", "workspace_write=" + task.authority().workspaceWrite()
@@ -596,6 +618,31 @@ public final class RoleRunner {
         values.put("screenshots", attachmentList(attachments));
         values.put("vision_note", visionNote(profile, attachments));
         return values;
+    }
+
+    /**
+     * The paths a reviewer has to look at, listed rather than described.
+     *
+     * The prompt used to name `git diff` and `git ls-files` as the way to find them, and for
+     * a profile whose tool grant is Read/Grep/Glob that instruction is an invitation to spend
+     * turns on refusals. Measured: an Opus review spent 16 of its 74 tool calls on shell
+     * calls it was never allowed to make — every one of them doing exactly what this prompt
+     * told it to — and then died at its turn ceiling. A list of paths costs nothing to render
+     * and is usable by any profile, with or without a shell.
+     */
+    private String changedFileList(Path root, String mergeBase) {
+        try {
+            List<String> paths = new ArrayList<>(
+                    new GitRepository(root, processes).changedPaths(mergeBase));
+            paths.removeIf(path -> path.equals(dev.warden.config.WardenTree.DIRECTORY)
+                    || path.startsWith(dev.warden.config.WardenTree.DIRECTORY + "/"));
+            if (paths.isEmpty()) return "- (nothing changed since the diff base)";
+            return bullets(paths.stream().map(path -> "`" + path + "`").toList());
+        } catch (Exception unreadable) {
+            // A prompt is not the place to fail a run. The reviewer still has the diff base
+            // commit and its own tools; it simply does not get the shortcut.
+            return "- (Warden could not list them: " + unreadable.getMessage() + ")";
+        }
     }
 
     /**
@@ -715,6 +762,26 @@ public final class RoleRunner {
         } catch (Exception failure) {
             return false;
         }
+    }
+
+    /**
+     * Which position in the role's profile list this dispatch takes.
+     *
+     * A role dispatched by several workflow stages takes its position from the stage, and
+     * nothing is persisted. This is what makes "Opus reads first, GPT reads last" a property
+     * of `policy.yaml` that holds on every run. The counter it replaces advanced once per
+     * dispatch and was shared by every run in the project, so a run that died before its
+     * reviewer, a fix round, or a `warden role` invocation all shifted the pairing: measured
+     * live, two failed runs left the third run's first review with the profile the operator
+     * had put second, and the order only righted itself by accident after a fix round.
+     *
+     * A role with a single stage keeps the persisted counter, because for that shape rotation
+     * across runs is the whole feature: two implementers alternating run to run.
+     */
+    private long rotationFor(Path root, String role, int stagePosition, boolean dryRun)
+            throws Exception {
+        if (stagePosition >= 0) return stagePosition;
+        return nextRotation(root, role, dryRun);
     }
 
     /** Rotation state lives with the project's run evidence, so it is local and disposable. */

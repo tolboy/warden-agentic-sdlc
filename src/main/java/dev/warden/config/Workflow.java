@@ -295,6 +295,52 @@ public record Workflow(List<Stage> stages) {
         stages = List.copyOf(stages);
     }
 
+    /**
+     * A stage name is operator-chosen text; a directory name is not. Shared with the report
+     * reader, which has to find the directory the loop wrote without re-deriving the rule.
+     */
+    public static String slug(String name) {
+        String cleaned = name == null ? "" : name.trim().toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9._-]+", "-").replaceAll("^-+|-+$", "");
+        return cleaned.isEmpty() ? "stage" : cleaned;
+    }
+
+    /**
+     * The stages that dispatch {@code role}, in declaration order.
+     *
+     * Two questions need this. Where a role's evidence is written: a role dispatched by more
+     * than one stage cannot name its run directory after the role alone, or the later stage
+     * overwrites the earlier one's prompt, raw output and artifact. And which profile a
+     * {@code rotate} role gets: the position of the stage in this list is what makes the
+     * pairing of two independent reviewers a property of the workflow rather than of how
+     * many times anything happened to be dispatched before.
+     */
+    public List<Stage> stagesFor(String role) {
+        return stages.stream()
+                .filter(stage -> stage.kind() == Kind.ROLE && stage.role().equals(role))
+                .toList();
+    }
+
+    /**
+     * Where {@code stage} sits among the stages sharing its role, or -1 when it is the only
+     * stage that dispatches that role.
+     *
+     * The -1 matters as much as the position. A role with one stage keeps rotating across
+     * runs from persisted state, which is what `rotate` is for when two implementers should
+     * alternate. A role with several stages must instead be spread over those stages, every
+     * run, or the pairing an operator wrote down is at the mercy of how many dispatches
+     * happened to precede it.
+     */
+    public int rotationPositionOf(Stage stage) {
+        if (stage.kind() != Kind.ROLE) return -1;
+        List<Stage> sharing = stagesFor(stage.role());
+        if (sharing.size() < 2) return -1;
+        for (int position = 0; position < sharing.size(); position++) {
+            if (sharing.get(position).name().equals(stage.name())) return position;
+        }
+        return 0;
+    }
+
     /** Every stage before {@code index} that asked to be re-run after a fix round. */
     public List<Stage> recheckBefore(int index) {
         List<Stage> earlier = new ArrayList<>();

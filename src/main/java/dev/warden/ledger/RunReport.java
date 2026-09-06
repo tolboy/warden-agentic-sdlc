@@ -1,6 +1,7 @@
 package dev.warden.ledger;
 
 import dev.warden.config.WardenTree;
+import dev.warden.config.Workflow;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
@@ -111,7 +112,7 @@ public final class RunReport {
             stage.put("code", step.get("code"));
             if (Boolean.TRUE.equals(step.get("dry_run"))) stage.put("dry_run", true);
 
-            Path detail = detailFile(runs, runId, label, attempt, visualRole);
+            Path detail = detailFile(runs, runId, label, text(step.get("stage")), attempt, visualRole);
             if (detail == null && step.get("report") != null) {
                 Path referenced = Path.of(String.valueOf(step.get("report")));
                 if (Files.isRegularFile(referenced)) detail = referenced;
@@ -161,22 +162,37 @@ public final class RunReport {
         return stages;
     }
 
-    private static Path detailFile(Path runs, String runId, String label, long attempt,
-                                   boolean visualRole) {
-        String stageRunId = switch (label) {
-            case "gates" -> runId + "--gates-" + attempt;
-            case "baseline" -> runId + "--baseline-" + attempt;
-            case "visual_qa" -> runId + "--" + (visualRole ? "visual-role-" : "visual-qa-") + attempt;
-            default -> runId + "--" + label + "-" + attempt;
-        };
+    /**
+     * @param stageName the workflow stage that produced this step, when the summary recorded
+     *                  one. Tried first, because a role dispatched by two stages writes its
+     *                  evidence under the stage rather than the role — otherwise the second
+     *                  stage's file is what a reader of the first stage's row gets, and the
+     *                  report then prints one vendor's row with another vendor's model,
+     *                  duration and token counts.
+     */
+    private static Path detailFile(Path runs, String runId, String label, String stageName,
+                                   long attempt, boolean visualRole) {
         String file = switch (label) {
             case "gates" -> "machine-gate.json";
             case "baseline" -> "baseline-gate.json";
             case "visual_qa" -> visualRole ? "role-visual_qa.json" : "visual-qa.json";
             default -> "role-" + label + ".json";
         };
-        Path candidate = runs.resolve(stageRunId).resolve(file);
-        return Files.isRegularFile(candidate) ? candidate : null;
+        List<String> directories = new ArrayList<>();
+        if (stageName != null && !stageName.isBlank()) {
+            directories.add(runId + "--" + Workflow.slug(stageName) + "-" + attempt);
+        }
+        directories.add(switch (label) {
+            case "gates" -> runId + "--gates-" + attempt;
+            case "baseline" -> runId + "--baseline-" + attempt;
+            case "visual_qa" -> runId + "--" + (visualRole ? "visual-role-" : "visual-qa-") + attempt;
+            default -> runId + "--" + label + "-" + attempt;
+        });
+        for (String directory : directories) {
+            Path candidate = runs.resolve(directory).resolve(file);
+            if (Files.isRegularFile(candidate)) return candidate;
+        }
+        return null;
     }
 
     private static Map<String, Object> baseline(Map<String, Object> summary) {

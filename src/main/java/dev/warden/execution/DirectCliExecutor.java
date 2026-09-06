@@ -170,9 +170,28 @@ public final class DirectCliExecutor implements RoleExecutor {
             evidence.put("failure", "role_timeout");
             return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
+
+        // Telemetry is read before the verdict, not after it, and this order is the whole
+        // point. A call that failed still spent money, and it reports what it spent in the
+        // same envelope key it uses when it succeeds: a grok run killed by its own turn
+        // ceiling printed `"total_cost_usd": 1.33` and was recorded as costing nothing, and
+        // an Opus review that did the same hid $4.88. The budget ceiling then measures only
+        // the calls that worked, which is the opposite of what a ceiling is for — the run
+        // most worth costing is the one that failed.
+        Map<String, Object> envelope = Json.findLastObject(process.stdout());
+        if (envelope != null) collectTelemetry(envelope, evidence);
+        noteModelMismatch(profile, evidence);
+
         if (process.exitCode() != 0) {
             Result quota = quotaFailure(request, process, duration, evidence);
             if (quota != null) return quota;
+            // A non-zero exit is how both measured vendors report a spent turn ceiling:
+            // grok writes `Error: max turns reached` to stderr and exits 1, and claude -p
+            // exits 1 with subtype `error_max_turns`. Until this check moved here it was
+            // only reachable on the exit-0 path, so the code that exists to name the one
+            // knob worth turning was never the code a real ceiling reached.
+            Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+            if (ceiling != null) return ceiling;
             evidence.put("failure", "role_command_failed");
             // Both streams: the Codex usage-limit message arrives on stdout while stderr
             // carries unrelated transport noise, so quoting stderr alone hid the cause.
@@ -181,9 +200,6 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_command_failed", duration, process.stdout(), null, evidence);
         }
 
-        Map<String, Object> envelope = Json.findLastObject(process.stdout());
-        if (envelope != null) collectTelemetry(envelope, evidence);
-        noteModelMismatch(profile, evidence);
         // Codex --json is JSONL: the last object is usually turn.completed (usage), while
         // the model's answer is an earlier item.completed / agent_message. Prefer that
         // message when it is itself JSON; otherwise unwrap the last envelope as before.
@@ -199,16 +215,8 @@ public final class DirectCliExecutor implements RoleExecutor {
             // mid-thought by a ceiling the operator set. `role_command_failed` sends someone
             // to read a transcript looking for a defect that is not in it — the same reason
             // a spent subscription is classified apart from an ordinary failure.
-            if (turnsExhausted(process.stdout(), process.stderr())) {
-                evidence.put("failure", "role_turns_exhausted");
-                evidence.put("stderr_tail", tail(process.stderr(), 500));
-                evidence.put("resolution", "the vendor stopped at its turn ceiling before "
-                        + "emitting an artifact. Raise --max-turns (or the vendor's equivalent) "
-                        + "on profile '" + profile.name() + "', or narrow the task: this diff "
-                        + "needed more steps to read than the profile allows.");
-                return new Result(false, "role_turns_exhausted", duration, process.stdout(),
-                        null, evidence);
-            }
+            Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+            if (ceiling != null) return ceiling;
             evidence.put("failure", "role_artifact_unparseable");
             evidence.put("stdout_tail", tail(process.stdout(), 2000));
             return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
@@ -255,6 +263,27 @@ public final class DirectCliExecutor implements RoleExecutor {
      * artifact" would swallow real crashes too. Kept narrow on purpose — a phrase this
      * specific is not going to appear in an ordinary failure.
      */
+    /**
+     * The one failure whose fix is a number in a profile, reported as such.
+     *
+     * Called from both failure paths, because a turn ceiling is not one shape of transcript.
+     * Grok exits 1 with `Error: max turns reached` on stderr; `claude -p` exits 1 with
+     * `"subtype":"error_max_turns"` in its JSON; a vendor that exits 0 and simply stops
+     * short leaves no artifact to parse. All three mean the same thing and take the same
+     * one-line remedy, so all three must reach the same code.
+     */
+    private static Result turnCeilingFailure(Profile profile, ProcessRunner.Result process,
+                                             Duration duration, Map<String, Object> evidence) {
+        if (!turnsExhausted(process.stdout(), process.stderr())) return null;
+        evidence.put("failure", "role_turns_exhausted");
+        evidence.put("stderr_tail", tail(process.stderr(), 500));
+        evidence.put("resolution", "the vendor stopped at its turn ceiling before "
+                + "emitting an artifact. Raise --max-turns (or the vendor's equivalent) "
+                + "on profile '" + profile.name() + "', or narrow the task: this diff "
+                + "needed more steps to read than the profile allows.");
+        return new Result(false, "role_turns_exhausted", duration, process.stdout(), null, evidence);
+    }
+
     public static boolean turnsExhausted(String stdout, String stderr) {
         String haystack = ((stderr == null ? "" : stderr) + "\n"
                 + (stdout == null ? "" : stdout.length() > 4000
@@ -262,7 +291,9 @@ public final class DirectCliExecutor implements RoleExecutor {
                 .toLowerCase();
         return haystack.contains("max turns reached")
                 || haystack.contains("maximum number of turns")
-                || haystack.contains("max_turns exceeded");
+                || haystack.contains("max_turns exceeded")
+                // claude -p names it in the envelope rather than in prose.
+                || haystack.contains("error_max_turns");
     }
 
     /** A syntactically valid artifact may still be an honest refusal, not a completed role. */

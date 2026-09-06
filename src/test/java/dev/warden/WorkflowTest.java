@@ -163,6 +163,37 @@ public final class WorkflowTest implements Suite {
         check.eq("and its own findings reason", "visual_findings_remain",
                 bound.workflow().stages().get(1).findingsReason());
 
+        // Two stages, one role: the shape `rotate` exists for, and the shape that used to be
+        // at the mercy of a counter shared by every run in the project. A run that died before
+        // its reviewer, a fix round, or a bare `warden role` all advanced it, so the operator
+        // who wrote "the deep reader goes first" got whichever profile the arithmetic landed
+        // on. Measured live: two failed runs left the third run's first review with the
+        // profile that policy.yaml puts second.
+        Policy paired = Policy.parse(ROLES + """
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop }
+                """, "policy.yaml");
+        List<Workflow.Stage> reviewStages = paired.workflow().stagesFor("reviewer");
+        check.eq("both stages of a role are found, in declaration order", 2, reviewStages.size());
+        check.eq("the first review takes the first profile", 0,
+                paired.workflow().rotationPositionOf(reviewStages.get(0)));
+        check.eq("and the last review takes the second, on every run", 1,
+                paired.workflow().rotationPositionOf(reviewStages.get(1)));
+        check.eq("a role with one stage keeps rotating across runs from persisted state", -1,
+                paired.workflow().rotationPositionOf(paired.workflow().stagesFor("implementer").get(0)));
+        check.eq("and so does every role in the built-in chain, which pairs nothing", -1,
+                Workflow.builtIn().rotationPositionOf(Workflow.builtIn().stagesFor("reviewer").get(0)));
+
+        // Evidence directories are derived from the same names, so an operator-chosen stage
+        // name has to survive being one.
+        check.eq("a stage name becomes a directory-safe slug", "review-second",
+                Workflow.slug("Review Second"));
+        check.eq("and a name made entirely of punctuation still names something", "stage",
+                Workflow.slug("///"));
+
         // The shipped policy template must actually be one this parser accepts. A commented
         // example that does not parse is worse than none: it is discovered by an operator.
         Policy shipped = Policy.parse(dev.warden.config.UserSetup.policyTemplate(), "policy.yaml");

@@ -9,6 +9,13 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-06
+
+The release where the loop was run against a repository that is not a web application, in a
+language the heuristics were not written for, with a different vendor on each of two review
+stages. Nothing about that is exotic, and it found eight things the tool reported inaccurately —
+including two that cost money quietly and one that destroyed evidence. They are under **Fixed**.
+
 ### Added
 
 - A Warden process killed while an Orca worker is running can be started again. The Run, task,
@@ -53,6 +60,63 @@ that exists in code but has never been run live says so.
   Asked per scenario: one anchored line never vouched for its neighbour.
 
 ### Fixed
+
+Eight defects found by running a live loop on a documentation repository, where the goal was
+Russian prose, the acceptance command was a Python script, and both review stages were filled
+by different vendors. Every one of them is a thing the tool said that was not true.
+
+- **Two stages of one role no longer overwrite each other's evidence.** `review` and
+  `review-second` are the same role at the same attempt, so both resolved to
+  `<run-id>--reviewer-<attempt>/` and the reviewer that finished second replaced the first's
+  prompt, raw output and artifact. The ledger kept both entries — it is append-only — and the
+  surviving entry for the first reviewer then pointed at the second's files, so following it
+  read as if it were that vendor's work. `warden report` printed the consequence: one row
+  carrying another vendor's model, duration and token counts. A role dispatched by more than
+  one stage now writes under the stage name, and the report joins each row to the evidence its
+  own stage wrote.
+- **A `rotate` role paired across two stages is no longer reordered by a failure.** The profile
+  came from a counter shared by every run in the project and advanced once per dispatch, so a
+  run that died before its reviewer, a fix round, or a bare `warden role` all shifted it:
+  measured live, two failed runs left the third run's first review with the profile the
+  operator had put second. A role with several stages now takes its position from the workflow,
+  so the first review stage always gets the first profile. A role with one stage still rotates
+  across runs, which is what that shape wanted.
+- **A vendor call that failed is costed.** Telemetry was read from the envelope only after a
+  valid artifact, so a grok implementer killed by its own turn ceiling reported
+  `total_cost_usd: 1.33` and was recorded as free, and an Opus review that did the same hid
+  $4.88. Warden told the operator "$0.2804 charged" for a run that spent $5.16. Cost, turns and
+  tokens are now read before the outcome is judged.
+- **A spent turn ceiling is named as one on every failure path.** The classifier existed but
+  sat only on the exit-0 branch, and both measured vendors exit non-zero — grok prints
+  `Error: max turns reached`, `claude -p` reports `error_max_turns`. The failure arrived as a
+  flat `role_command_failed`, the same code as a broken flag, so the single knob worth turning
+  was named nowhere.
+- **A turn ceiling no longer throws away the stages that passed.** The run's reason is
+  `turn_ceiling_reached`, which `--continue` treats as a failure that was never about the work:
+  a run whose implementer and machine gates had both passed used to pay for both again because
+  its reviewer ran out of turns.
+- **The reviewer prompt no longer tells a model to run commands its profile forbids.** The
+  template named `git diff` and `git ls-files` as the way to see the diff; a read-only profile
+  granted Read/Grep/Glob can run neither, and one measured review spent 16 of its 74 tool calls
+  being refused for doing as it was told, then hit its ceiling. The changed paths are now
+  resolved by Warden and rendered into the prompt as `{{changed_files}}`, the git commands are
+  offered only to a profile that has a shell, and the read-only rule says outright that having
+  no shell is normal for this role.
+- **A project that serves nothing gets no browser contract.** `warden do --draft-only` on a
+  repository with no HTML, no server and a Python checker wrote `visual_qa: required: true`
+  with two scenarios, because the UI markers match substrings and a Russian goal containing
+  «формулировку» and «экрана» reads as a screen. The operator had to delete the block by hand
+  in the one command whose purpose is to save them that. Words in a goal can suggest a screen;
+  only the project can confirm there is one, and the draft now says why it declined.
+- **`--dry-run` previews the real pairing.** The rotation counter was deliberately not advanced
+  during a preview, so a chain with two review stages showed the same profile on both — the one
+  arrangement that cannot happen. The preview exists to show who will be dispatched before
+  anyone is paid, and the pair of independent readers is the part most worth seeing.
+- **A failed profile probe says what to actually do.** A model the installed CLI was too old
+  for came back under "fix the profile's args or authentication" with the vendor's own sentence
+  — "requires a newer version of Codex" — buried in the stdout tail. Neither the args nor the
+  credentials needed touching. Refused models, refused credentials and a probe killed by its
+  wall clock are now told apart.
 
 - The accessibility snapshot no longer stops at the first 60 nodes in document order, which
   on a real page is the skip link and the banner and never the control the scenario named.
@@ -325,5 +389,6 @@ These are named rather than hidden, and the code refuses rather than pretending:
   images.
 - The Orca adapter's full live lifecycle as a role runner has not been proven end to end.
 
-[Unreleased]: https://github.com/tolboy/warden-agentic-sdlc/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tolboy/warden-agentic-sdlc/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tolboy/warden-agentic-sdlc/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tolboy/warden-agentic-sdlc/releases/tag/v0.1.0

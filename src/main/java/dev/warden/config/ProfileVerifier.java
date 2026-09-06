@@ -119,6 +119,39 @@ public final class ProfileVerifier {
     }
 
     /** The report both paths print, so the evidence looks the same whether or not it stamped. */
+    /**
+     * What to go and do about a probe that failed.
+     *
+     * The generic answer — "fix the profile's args or authentication" — is wrong often enough
+     * to be worth a look at what the vendor said. Measured: a profile naming a model the
+     * installed CLI was too old for came back with the vendor's own sentence, "requires a
+     * newer version of Codex", buried in a 2000-character stdout tail, under advice to change
+     * flags that were already correct. Neither the args nor the credentials needed touching;
+     * the CLI needed upgrading, and the vendor had said so.
+     */
+    public static String nextStep(Probe probe) {
+        String said = ((probe.stdoutTail() == null ? "" : probe.stdoutTail()) + "\n"
+                + (probe.stderrTail() == null ? "" : probe.stderrTail()))
+                .toLowerCase(java.util.Locale.ROOT);
+        if (probe.timedOut()) {
+            return "the probe hit its wall clock. Raise limits.wall_clock_minutes, or ask the "
+                    + "probe for less; nothing was stamped";
+        }
+        if (said.contains("requires a newer version") || said.contains("upgrade to the latest")
+                || said.contains("update your cli") || said.contains("unsupported model")) {
+            return "the vendor refused the request itself, not the profile: it says the CLI is "
+                    + "too old or the model unknown. Upgrade the vendor CLI, or name a model "
+                    + "this one supports; the profile's args and credentials are not the "
+                    + "problem. Nothing was stamped";
+        }
+        if (said.contains("not logged in") || said.contains("unauthorized")
+                || said.contains("authentication") || said.contains("invalid api key")) {
+            return "the vendor refused the credentials. Sign the CLI in and run this again; "
+                    + "nothing was stamped";
+        }
+        return "fix the profile's args or authentication and run this again; nothing was stamped";
+    }
+
     public static Map<String, Object> report(Profile profile, Probe probe) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("profile", profile.name());

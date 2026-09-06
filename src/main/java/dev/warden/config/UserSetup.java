@@ -475,8 +475,15 @@ public final class UserSetup {
 
             Diff to review
             : everything changed between commit `{{diff_base_commit}}` and the current working
-              tree, including untracked files. Use `git diff {{diff_base_commit}}` and
-              `git ls-files --others --exclude-standard`.
+              tree, including untracked files. These are the paths, already resolved:
+
+            {{changed_files}}
+
+            Open them with whatever file-reading tool you have. If — and only if — you are also
+            allowed to run commands, `git diff {{diff_base_commit}}` and
+            `git ls-files --others --exclude-standard` show the same set as a patch. Do not
+            spend turns discovering which tools you have: a refused call costs a turn and tells
+            you nothing about the work. Read the files above and review what is in them.
 
             Declared scope
             : {{scope_paths}}
@@ -501,7 +508,9 @@ public final class UserSetup {
             1. **You are read-only.** Do not create, modify or delete any file, and run no command
                that changes state. This is verified after you exit by comparing a content
                fingerprint of the worktree: if anything changed, your review is discarded whatever
-               it says.
+               it says. Your profile may also grant you no way to run commands at all — that is
+               normal for this role and is not something to work around. Judge the acceptance
+               commands by reading them and the code they cover, not by running them.
             2. **Emit your answer as JSON on stdout**, matching the schema below. Do not write it
                to a file.
             3. **Report, do not repair.**

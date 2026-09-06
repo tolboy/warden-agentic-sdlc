@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDate;
+import java.util.List;
 
 /**
  * Verifying a vendor profile.
@@ -37,6 +38,27 @@ public final class ProfileVerifierTest implements Suite {
         try {
             Files.createDirectories(home.resolve("profiles"));
             ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner());
+
+            // What an operator is told to go and do. The generic line sent one to check args
+            // and credentials that were both already right: the vendor had refused the model
+            // because the installed CLI was too old, and had said so in its own words.
+            check.contains("a vendor that refuses the model names the CLI, not the profile",
+                    ProfileVerifier.nextStep(new ProfileVerifier.Probe(false, "codex exec", 1,
+                            false, "The 'gpt-6-astra' model requires a newer version of Codex.",
+                            "", home, List.of())),
+                    "Upgrade the vendor CLI");
+            check.contains("and a refused credential is named as one",
+                    ProfileVerifier.nextStep(new ProfileVerifier.Probe(false, "codex exec", 1,
+                            false, "", "error: not logged in", home, List.of())),
+                    "Sign the CLI in");
+            check.contains("a probe killed by the wall clock names the wall clock",
+                    ProfileVerifier.nextStep(new ProfileVerifier.Probe(false, "codex exec", 1,
+                            true, "", "", home, List.of())),
+                    "wall_clock_minutes");
+            check.contains("and anything else keeps the answer that was always there",
+                    ProfileVerifier.nextStep(new ProfileVerifier.Probe(false, "codex exec", 1,
+                            false, "boom", "", home, List.of())),
+                    "fix the profile's args");
 
             // --- a probe that works: reported, transcript kept, nothing stamped -------
             Path good = write(home, "good", succeeds(), null);

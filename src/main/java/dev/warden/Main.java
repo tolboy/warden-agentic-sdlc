@@ -40,7 +40,7 @@ import java.util.UUID;
  */
 public final class Main {
 
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.2.0";
     public static void main(String[] args) {
         useUtf8ForOutput();
         if (args.length == 0 || args[0].equals("--help") || args[0].equals("-h")) {
@@ -253,8 +253,7 @@ public final class Main {
         if (!probe.ok()) {
             result.put("ok", false);
             result.put("code", "probe_failed");
-            result.put("next", "fix the profile's args or authentication and run this again; "
-                    + "nothing was stamped");
+            result.put("next", ProfileVerifier.nextStep(probe));
             System.out.println(Json.write(result));
             return 1;
         }

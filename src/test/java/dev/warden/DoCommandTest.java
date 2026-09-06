@@ -179,6 +179,11 @@ public final class DoCommandTest implements Suite {
     private void visualDraftChecks(Check check, Path sandbox) throws Exception {
         Path drafts = sandbox.resolve("drafts");
         Files.createDirectories(drafts.resolve(".warden/tasks"));
+        // These checks are about what a browser contract says, so the fixture has to be a
+        // project a browser could open. Without this the drafter now — correctly — declines
+        // to write scenarios at all: see the `no-web` sandbox further down.
+        Files.writeString(drafts.resolve("package.json"),
+                "{\"scripts\": {\"dev\": \"vite\", \"build\": \"vite build\"}}\n");
 
         new TaskDraft().write(drafts, "named", "Add a Settings button to the header", "code", "low");
         String named = Files.readString(drafts.resolve(".warden/tasks/named.yaml"));
@@ -232,8 +237,25 @@ public final class DoCommandTest implements Suite {
                 Do not edit src\\lib\\landscape.ts.""";
         new TaskDraft().write(drafts, "fromfile", fromFile, "code", "low");
 
-        check.that("no package.json means no npm preview command",
+        check.that("a project with only a dev script is never handed npm run preview",
                 !unnamed.contains("npm run preview"));
+
+        // Measured on a repository of prep material: no HTML, no server, a python checker for
+        // its acceptance command — and the drafter wrote `visual_qa: required: true` with two
+        // browser scenarios, because the Russian goal contained «формулировку» and «экрана»
+        // and the UI markers match substrings. The operator had to delete the block by hand,
+        // in the one command whose whole purpose is to save them that. Words in a goal can
+        // suggest a screen; only the project can confirm there is one.
+        Path noWeb = sandbox.resolve("no-web");
+        Files.createDirectories(noWeb.resolve(".warden/tasks"));
+        new TaskDraft().write(noWeb, "prose",
+                "Свери формулировку каждого тезиса и с первого экрана тоже", "code", "low");
+        String prose = Files.readString(noWeb.resolve(".warden/tasks/prose.yaml"));
+        check.contains("a project that serves nothing gets no browser contract",
+                prose, "required: false");
+        check.that("and no scenario is invented for it", !prose.contains("no-console-errors"));
+        check.contains("but the draft says why, so the operator can turn it on",
+                prose, "serves no preview Warden can detect");
 
         // The drafter used to write `npm run preview` for any package.json at all, while the
         // browser stage's own fallback already knew to look for the script and to fall back to

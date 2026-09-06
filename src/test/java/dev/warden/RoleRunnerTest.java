@@ -87,6 +87,19 @@ public final class RoleRunnerTest implements Suite {
             check.contains("prompt carries the declared scope", prompt, "src");
             check.that("prompt has no unresolved placeholders", !prompt.contains("{{"));
 
+            // The reviewer template used to name `git diff` and `git ls-files` as the way to
+            // see what changed. A profile whose tool grant is Read/Grep/Glob cannot run
+            // either, and one measured Opus review spent 16 of its 74 tool calls being
+            // refused for doing exactly as it was told, then died at its turn ceiling. The
+            // paths are resolved by Warden, which can always run git, and rendered into the
+            // prompt where any profile can use them.
+            check.that("the reviewer is handed the changed paths rather than a command to find them",
+                    prompt.contains("These are the paths, already resolved"));
+            check.contains("and the git commands are offered only to a profile that has a shell",
+                    prompt, "If — and only if — you are also");
+            check.contains("with the read-only rule saying that no shell at all is normal here",
+                    prompt, "no way to run commands at all");
+
             // --- implementer writes, reviewer stays read-only --------------------------
             RoleRunner.Outcome implemented = runRole(project, home, "implementer", "live", null, null, false);
             check.that("implementer run succeeds", implemented.ok());
@@ -191,6 +204,7 @@ public final class RoleRunnerTest implements Suite {
 
             modelPlaceholderChecks(check);
             quotaFailoverChecks(check, project, home);
+            turnCeilingChecks(check, project, home);
             promptDeliveryChecks(check, project, home);
         } finally {
             deleteTree(sandbox);
@@ -491,6 +505,45 @@ public final class RoleRunnerTest implements Suite {
      * The role executor passes arguments as an argv array, so no shell quoting is involved
      * and the same profile text works on both platforms.
      */
+    /**
+     * A vendor stopped by its own turn ceiling, which is neither a verdict on the work nor a
+     * spent subscription — and which cost money on the way to saying nothing.
+     *
+     * Both halves were measured on live runs and both were wrong. The failure arrived as a
+     * bare `role_command_failed`, the same code as a broken flag, so the one knob worth
+     * turning was named nowhere; the classifier that exists for exactly this was only
+     * reachable on the exit-0 path, and both vendors that hit a ceiling exit 1. And the
+     * envelope's `total_cost_usd` was read only after a valid artifact, so $1.33 of grok and
+     * $4.88 of Opus were recorded as costing nothing at all — a ceiling that measures only
+     * the calls that worked is not a ceiling.
+     */
+    private void turnCeilingChecks(Check check, Path project, Path home) throws Exception {
+        writeProfile(home, "stub-ceiling", "reviewer", "ceilingvendor",
+                "turn-ceiling", true, "reviewer",
+                "role, task_id, status, verdict, summary, findings");
+        writePolicy(home, "stub-ceiling", "stub-impl");
+
+        RoleRunner.Outcome stopped = runRole(project, home, "reviewer", "ceiling", null, null, false);
+        check.that("a role stopped at its turn ceiling fails", !stopped.ok());
+        check.eq("named as a ceiling, not as an ordinary command failure",
+                "role_turns_exhausted", stopped.code());
+        check.contains("and the report names the knob that would move it",
+                String.valueOf(stopped.details().get("resolution")), "--max-turns");
+        check.contains("saying which profile carries it",
+                String.valueOf(stopped.details().get("resolution")), "stub-ceiling");
+        check.eq("the cost the vendor reported is recorded even though the call failed",
+                1.33483082, stopped.details().get("cost_usd"));
+
+        Map<String, Object> report = readJson(project.resolve(".warden/runs/ceiling/role-reviewer.json"));
+        check.eq("and it reaches the run's own evidence file", 1.33483082, report.get("cost_usd"));
+        check.eq("with the turn count the vendor volunteered", 40L, report.get("num_turns"));
+
+        // Not quota: a different vendor would meet the same ceiling on the same diff, so
+        // failing over would buy an identical failure at twice the price.
+        check.that("no failover is attempted for a ceiling",
+                report.get("failed_over_from") == null);
+    }
+
     private void writeProfile(Path home, String name, String role, String vendor, String stubMode,
                               boolean readOnly, String promptAndSchema, String requiredFields)
             throws IOException {

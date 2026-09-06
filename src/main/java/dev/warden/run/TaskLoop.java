@@ -177,7 +177,13 @@ public final class TaskLoop {
             // fingerprint and declines reuse on its own. It is listed anyway for the case
             // where the fix is in the harness rather than the contract — which is how this
             // code came to exist.
-            "visual_qa_contract_invalid");
+            "visual_qa_contract_invalid",
+            // A vendor that stopped at its own `--max-turns` said nothing about the work. It
+            // is the operator's ceiling, the fix is a number in a profile, and the next run
+            // re-reads a diff no vendor has objected to. Measured: a run whose implementer
+            // and machine gates had both passed lost both because its reviewer ran out of
+            // turns, and the retry paid for the implementer again to reach the same tree.
+            "turn_ceiling_reached");
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
@@ -924,9 +930,9 @@ public final class TaskLoop {
                 outcome = runVisualRole(loaded, user, roles, runId, attempt, avoid,
                         harness.get(stage.sees()), dryRun, steps, budget);
             } else {
-                outcome = roles.run(loaded, user, role, stepRunId(runId, role, attempt),
-                        avoid, rejectionContextFor(role), dryRun);
-                record(steps, budget, role, attempt, outcome);
+                outcome = roles.run(loaded, user, role, stageRunId(runId, workflow, stage, attempt),
+                        avoid, rejectionContextFor(role), dryRun, workflow.rotationPositionOf(stage));
+                record(steps, budget, role, attempt, outcome, stage.name());
             }
             if (dryRun || outcome == null) return outcome;
             vendors.putIfAbsent(role, outcome.vendor());
@@ -1321,8 +1327,20 @@ public final class TaskLoop {
 
     private void record(List<Map<String, Object>> steps, Budget budget, String role, int attempt,
                         RoleRunner.Outcome step) {
+        record(steps, budget, role, attempt, step, null);
+    }
+
+    /**
+     * @param stage the workflow stage that dispatched this role, when there was one. It is
+     *              recorded so a reader of the summary can tell two stages of the same role
+     *              apart — and so `warden report` looks for the evidence where the stage
+     *              actually wrote it rather than where the role alone would suggest.
+     */
+    private void record(List<Map<String, Object>> steps, Budget budget, String role, int attempt,
+                        RoleRunner.Outcome step, String stage) {
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("step", role);
+        if (stage != null) entry.put("stage", stage);
         entry.put("attempt", (long) attempt);
         entry.put("ok", step.ok());
         entry.put("code", step.code());
@@ -1366,6 +1384,10 @@ public final class TaskLoop {
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
         }
+        // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
+        // opposite of that, and the difference decides both what an operator goes and reads
+        // and whether the stages that already passed survive the retry.
+        if ("role_turns_exhausted".equals(step.code())) return "turn_ceiling_reached";
         return genericReason;
     }
 
@@ -1626,6 +1648,27 @@ public final class TaskLoop {
 
     private static String stepRunId(String runId, String role, int attempt) {
         return runId + "--" + role + "-" + attempt;
+    }
+
+    /**
+     * Where one stage's evidence goes.
+     *
+     * Named after the role while a role has one stage, and after the stage as soon as it has
+     * more than one. The second half is not a preference. `review` and `review-second` are
+     * the same role at the same attempt, so both resolved to `<run>--reviewer-1` and the one
+     * that finished second overwrote the first's prompt, raw output and artifact. Measured on
+     * a live run: an Opus review that passed left nothing on disk but a ledger line, and that
+     * line's `artifact_path` then pointed at the other vendor's file — worse than losing the
+     * evidence, because following the pointer reads as if it were Opus's.
+     *
+     * A role with a single stage keeps the old path, so nothing an operator has already
+     * collected changes name.
+     */
+    private static String stageRunId(String runId, Workflow workflow, Workflow.Stage stage,
+                                     int attempt) {
+        if (stage.kind() != Workflow.Kind.ROLE) return stepRunId(runId, stage.label(), attempt);
+        boolean shared = workflow.stagesFor(stage.role()).size() > 1;
+        return stepRunId(runId, shared ? Workflow.slug(stage.name()) : stage.label(), attempt);
     }
 
     private Path writeContext(EvidenceLedger ledger, int attempt, String kind, String body)

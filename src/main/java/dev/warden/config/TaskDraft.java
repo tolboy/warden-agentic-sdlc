@@ -65,7 +65,16 @@ public final class TaskDraft {
             return new Written(file, id, true);
         }
         Files.createDirectories(file.getParent());
-        boolean visual = requireVisual || looksLikeUi(goal);
+        // Words in the goal may suggest a screen; only the project can confirm there is one.
+        // `looksLikeUi` matches substrings, and on a Russian goal that is generous to a fault
+        // — "формулировку" contains "форм", "первый экран" contains "экран". Measured on a
+        // repository of prep material with no HTML, no server and a python checker: the
+        // drafter wrote `visual_qa: required: true` with two browser scenarios, which the
+        // operator then had to delete by hand. A project with nothing to serve has nothing to
+        // photograph, whatever the goal says. `requireVisual` still overrides, because a
+        // greenfield project's scenarios are its only executable definition of done.
+        boolean servesSomething = PreviewServer.detect(projectRoot) != null;
+        boolean visual = requireVisual || (looksLikeUi(goal) && servesSomething);
         String label = controlLabel(goal);
         String yaml;
         if (visual) {
@@ -103,7 +112,13 @@ public final class TaskDraft {
                     visual_qa:
                       required: false
                       scenarios: []
-                    """.formatted(id, quote(goal.strip()), risk, scope);
+                    %s""".formatted(id, quote(goal.strip()), risk, scope,
+                    looksLikeUi(goal) && !servesSomething
+                            ? "  # The goal reads as if it were about a screen, but this project\n"
+                            + "  # serves no preview Warden can detect, so there is nothing to\n"
+                            + "  # photograph. Add `visual_qa.preview.start` and `url` here if it\n"
+                            + "  # does serve one, then set required: true.\n"
+                            : "");
         }
         Files.writeString(file, yaml, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
         return new Written(file, id, false);

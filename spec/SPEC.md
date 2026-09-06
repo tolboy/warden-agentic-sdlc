@@ -33,6 +33,15 @@ you.
 
 Connecting a new project = describing its check commands. That is all.
 
+**One stage, one evidence directory.** Under `runs/`, each stage of a run writes to
+`<run-id>--<name>-<attempt>/` and never edits another's. `<name>` is the role while a role has
+one stage in the workflow, and the stage's own name as soon as it has more than one — so
+`review` and `review-second`, which are the same role at the same attempt, are
+`<run-id>--review-0/` and `<run-id>--review-second-0/`. Before that rule the second reviewer
+overwrote the first's prompt, raw output and artifact, and the ledger entry for the first then
+pointed at the second's files: not merely lost evidence, but a pointer that reads as if it were
+the other vendor's. Two independent readers only mean something while both verdicts survive.
+
 ---
 
 ## 2. Project files
@@ -237,6 +246,19 @@ The `visual_qa` role runs only if it is declared here **and** the task asks for
 floor, not a layer on top. The role adds what a machine cannot measure and costs a vendor call
 — so the operator enables it, rather than the loop deciding for them.
 
+**`strategy: rotate` means two different things, decided by the workflow rather than by a
+counter.** A role dispatched by exactly one stage rotates *across runs*: the position advances
+each time the role is invoked, so two implementers take turns run to run. A role dispatched by
+**several** stages — `review` and `review-second` below are the shape this exists for — is
+spread across those stages instead, in the order `profiles:` lists them, on every run. The
+first review stage always gets the first profile.
+
+That second rule is not a refinement. The position used to come from a counter shared by every
+run in the project, which meant a run that died before reaching its reviewer, a fix round, or a
+bare `warden role` all shifted the pairing: an operator who wrote "the deep reader goes first"
+got whichever profile the arithmetic landed on. Rotation state for a paired role is now derived
+from `policy.yaml` and nothing else, so a failure cannot reorder it.
+
 `require_independent_vendor` is a hard constraint, not a preference: a reviewer may not share a
 vendor with the implementer. If there is no independent vendor the resolver **fails** rather
 than quietly handing the code to its own author for review. This is the only defensible
@@ -427,7 +449,14 @@ Available in any role prompt template:
 {{context}} {{context_path}}          — the machine refusal or findings on a work return
 {{screenshots}}                       — absolute screenshot paths; for visual_qa
 {{visual_scenarios}}                  — what the harness was told to check
+{{changed_files}}                     — the paths changed since the diff base, resolved
 ```
+
+`{{changed_files}}` exists because a prompt must not depend on tools the profile may not have.
+The reviewer template used to name `git diff` and `git ls-files` as the way to find the diff,
+and a read-only profile whose tool grant is Read/Grep/Glob cannot run either: one measured
+review spent 16 of its 74 tool calls being refused for following that instruction, and then hit
+its turn ceiling. Warden can always run git; the model may not be able to.
 
 Additionally available in a profile's arguments: `{{prompt}}`, `{{prompt_file}}`,
 `{{schema_json}}`, `{{repo_root}}`, `{{run_id}}`, `{{task_id}}` and `{{model}}`.
