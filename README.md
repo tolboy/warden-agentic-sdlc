@@ -366,7 +366,17 @@ from an ordinary error and can hand the role to another vendor, but **asks first
 # ~/.warden/policy.yaml
 failover:
   on_quota_exhausted: confirm   # confirm (default) | auto | stop
+
+budget:
+  repair_reserve: full          # full (default) | partial
 ```
+
+`repair_reserve` decides how much of the remaining chain a fix round has to be affordable
+before it may start. `full` reserves the fix, every judgement it invalidates and every stage
+still owed, so a run either completes or does not begin the attempt. `partial` reserves the fix
+plus whatever will read its result, allowing paid progress this run cannot finish — a review
+that then passes is a verdict a continuation reuses for nothing. Either way the arithmetic is
+in `budget_plan` before the first vendor is dispatched, and `--dry-run` prints it.
 
 Why not `auto`: swapping vendors changes the author of the work, and on a small roster it can
 cost the run its independent reviewer — two vendors minus one spent subscription is one

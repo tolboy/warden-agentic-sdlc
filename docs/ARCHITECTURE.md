@@ -73,6 +73,123 @@ The exclusion list for quota lives in memory for the lifetime of one process, de
 Persisting it would leave a vendor disabled after its quota window rolled over, and that kind
 of stale state is only ever discovered when it is already wrong.
 
+## What a repair is allowed to commit the run to
+
+A repair round is not one vendor call. It is the fix, the judgements the fix invalidates, and
+the stages still owed after it — and the chain, its conditions and which stages cost a vendor
+call are all known before the first dispatch. So the arithmetic happens before the reservation
+rather than being discovered by paying for it.
+
+How much of it has to be affordable is `budget.repair_reserve`, and it is a policy choice
+rather than a judgement made in code, because the two answers trade against each other rather
+than one dominating:
+
+| Mode | Reserves | The case for it |
+|---|---|---|
+| `full` (default) | the repair, every judgement it invalidates, and every stage still owed | Does not begin a repair unless the remaining calls can fund completion with no further failures. A repair may regress, and the operator may choose not to continue at all |
+| `partial` | the repair, plus reaching whichever stage will read its result | Allows a reviewed intermediate result when the operator values progress before funding the full chain. A valid verdict may be reused on continuation; improvement and eventual completion are not guaranteed |
+
+Neither mode is silent. Both publish `budget_plan` before the first dispatch, with the
+clean-pass cost and every repair branch costed under both floors, and `--dry-run` prints it.
+`reachable_under_cap` describes funding the whole repair branch; the separate
+`repair_allowed_under_cap` describes permission under the selected reserve mode. The
+calls already spent reaching the branch are counted once, without counting its suffix twice.
+
+The `partial` floor is deliberately not the bare cost of the repair. A machine gate failing
+before the first review costs exactly one call to repair — the gate re-runs for free and no
+judgement has been given yet to re-establish — so reserving that would let a run pay an
+implementer and stop with a changed tree nothing ever looked at.
+
+| Outcome | When |
+|---|---|
+| `budget_insufficient_to_finish` | The remaining calls do not meet the mode's floor. The summary's `budget_reserve` names the mode, all three numbers, and what was left |
+| proceed, with `budget_reserve.will_finish: false` | `partial` only: enough to repair and be judged, not enough to reach the end. Narrated at the time, not discovered in the summary |
+| `independent_review_unavailable` | No profile can fill a role a later stage needs, or none that differs from the vendor which wrote the code. Independence is what runs out first: two vendors minus one spent subscription is one vendor. Reported as a fact about the roster, because `reviewer_failed` sends an operator to read a transcript with no defect in it |
+
+`budget_exhausted` still means what it always did: a call was refused at a ceiling. Which
+ceiling is now carried as `budget_limit_hit` rather than spelled into a sentence, because the
+two are fixed by different edits and the run used to advise raising `max_role_runs` to somebody
+whose `max_cost_usd` had run out. The money ceiling's advice also repeats what `unpriced_calls`
+means: it measures only the calls whose vendor reported a price.
+
+A budget stop leaves earlier verdicts standing, on the same terms as `turn_ceiling_reached` —
+the source fingerprint, the acceptance surface and the judging contract all have to match.
+
+## What a carried verdict has to prove
+
+Reusing a verdict across runs rests on two claims, and until recently only one was checked.
+
+**That the bytes have not moved.** The source fingerprint answers it for the code. For the
+terms, the acceptance surface is a second hash beside `contract_sha256`. The whole-tree hash
+answers "did anything move", which is the right question while a run is in flight; between
+runs it is the wrong one, because a run stopped by its ceiling can only continue if the
+ceiling goes up, and the ceiling lives in the same file as the goal. Refusing on the
+whole-file hash would make the act of continuing the reason to discard what continuing was
+meant to save. `acceptance_sha256` therefore hashes the goal, scope, commands, authority and
+browser contract, and not `budgets`, `max_fix_attempts` or `timeout_minutes`. Every other file
+under `.warden` still enters by its full content, a carried verdict names the budget change
+that was forgiven, and rewriting an acceptance command to make a run go green still moves it.
+
+**That the same judge, under the same rules, would be asked again.** Neither hash can answer
+this: both cover the *project's* `.warden`, while the roster, the independence requirement,
+the prompt, the schema and the workflow all live in the operator's own home. So an operator
+could swap the reviewer roster for a different vendor with different rules, continue the run,
+and have the new reviewer's stage satisfied by the old reviewer's verdict — the stage name
+matched, and a stage name is a label. Each role dispatch therefore records a `role_contract`
+on its step row: role, roster, strategy, independence, profile, vendor, model, effort,
+`read_only`, the prompt template and schema digests, and the stage's own routing. A resume
+rebuilds it from the current configuration and declines any stage whose terms moved, naming
+which one in `reuse_declined_by_stage`. The comparison is against the stage as the workflow
+declares it *now*, not against the role the old row happened to name: a stage reassigned from
+`reviewer` to `architect` under a stable name is a different job, and its verdict does not
+carry — the recorded profile cannot even fill the new role.
+
+Declines are per stage, never global: a changed reviewer says nothing about whether the
+implementer's own stage still stands. A summary that predates the contract declines
+conservatively, because "no evidence" and "no change" are not the same answer.
+
+**That the verdict is about the candidate it is being spent on, at the moment it is spent.**
+The run-level fingerprint proves the prior run's *final* tree matches; it does not prove an
+individual stage judged that final tree, nor that the tree has not moved since the resume's
+pool was built. Two ways it can drift: a stage that passed an earlier revision inside a run a
+later repair changed (its verdict was never about the final tree), and an ordinary implementer
+re-dispatch during the resume itself (which moves the tree out from under a later review). So
+every role dispatch stamps its step row with the fingerprint of the tree it judged, and a
+carried verdict is checked twice — once when the pool is built, and again at the moment it is
+consumed, against the tree as it then stands. A prior run that already retired a verdict
+(`stages_judging_an_earlier_candidate`) has it declined outright, and a fix-round dispatch is
+never an independent reuse candidate: it is an intermediate step in some stage's repair, not a
+stage verdict of its own.
+
+Reuse is also a verdict, not an absence of one. A carried judgement restores its coverage
+marked `source: reused` with the run it came from and the fingerprint it originally judged —
+without that, a run whose every stage was carried reported `candidate_review_passed: false`
+about a candidate a reviewer had passed. And `reused_judgements` names what was actually
+consumed, recorded as each verdict is spent rather than when the pool is built, because a
+verdict that looked reusable at the start can be invalidated before its turn.
+
+## What the summary says, as three answers rather than one
+
+`ok: false` used to mean, indiscriminately, that the investigation found nothing, that a
+reviewer rejected the candidate, and that the chain ran out of room. Measured: a live run made
+three reviews, the last of them a clean pass, left a good candidate in the worktree, and
+reported `budget_exhausted` and nothing else.
+
+- `candidate_review_passed` — did the judging stages that ran pass it, with no blocking finding
+  left open. Never true by default: a chain whose reviews were all skipped or never reached has
+  not passed review, it has not had one.
+- `workflow_incomplete` and `pending_stages` — did the declared chain finish, and which stages
+  it still owes. Three states, not one: `did_not_pass` has evidence to read,
+  `not_reached` has a ceiling to raise, and `judged_an_earlier_candidate` holds a verdict about
+  a tree a later repair replaced. A fix round drops every judging stage from
+  `completed_stages`, and only passing again earns the place back — otherwise a reviewer that
+  passed, was rechecked after a browser repair and came back with a P1 stayed listed as a
+  stage that had passed.
+- `safe_next_step` — the one command that moves the run forward without paying twice.
+
+Neither of the first two implies the other, and a run can legitimately be a pass on one and a
+no on the other.
+
 ## What Orca shows during a run
 
 Warden calls Orca; Orca never calls Warden. Everything below is something Warden asks for,
