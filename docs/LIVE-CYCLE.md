@@ -425,7 +425,87 @@ a green review.
 
 ---
 
-## 8. What this file still does not claim
+## 8. A budget stop, resumed: what a carried verdict is worth
+
+Run date: 2026-09-07. A deliberately small task on a throwaway project, chosen so the P0
+budget and resume machinery could be exercised against real vendors without a long
+investigation attached to it. Roster as declared: `grok-implement` (grok-4.6, xhigh),
+`claude-review` (opus, max), `codex-review-astra` (gpt-6-astra, medium), the workflow being
+implement → gates → review → review-second → browser → look.
+
+**The plan, printed before the first vendor.** `budgets.max_role_runs: 2` against a chain
+whose clean pass needs three calls:
+
+```text
+bound 2 vendor call(s), $8.0000 ceiling, fix rounds <= 1
+cost  3 vendor call(s) if nothing has to be repaired: implement, review, review-second
+      WARNING: the cap of 2 cannot reach the end of this chain even with no repairs;
+      the run will stop with stages outstanding
+```
+
+**Run `live-2`: the shape the adaptive plan was written about.**
+
+```text
+ok  1m15s   tokens 5775/731    cost $0.0104            grok-implement
+ok  1.5s                                               machine gates
+ok  3m18s   tokens 24/12182    cost $1.0758  pass      claude-review (opus/max)
+done  budget_exhausted   2 vendor call(s), $1.0863 charged
+      the candidate passed every review that ran
+      the workflow did not finish; outstanding: review-second (not_reached)
+```
+
+The summary separates the three answers that used to be one word: `candidate_review_passed:
+true` with zero open blockers, `workflow_incomplete: true`, `budget_limit_hit: max_role_runs`.
+Both step rows carry a `role_contract` and the `candidate_fingerprint` of the tree they judged.
+
+**Run `live-3`: raising only the ceiling keeps both verdicts.** `max_role_runs` 2 → 4, nothing
+else touched, decision recorded as `retry`:
+
+```text
+note  the contract changed since live-2, but only its budget: what the work is judged by is
+      byte-identical, so the verdicts already reached still stand
+[1/6] implement       reused from live-2: grok-implement already passed this exact tree
+[3/6] review          reused from live-2: claude-review already passed this exact tree
+[4/6] review-second   codex-review-astra  codex/gpt-6-astra effort=medium  dispatching
+```
+
+`reused_judgements` names the two stages actually consumed, and `contract_change_budget_only`
+records `prior_max_role_runs: 2, now_max_role_runs: 4` beside the unchanged acceptance hash.
+Neither reviewer stood in for the other: `review` and `review-second` dispatched their own
+vendors, at their own stages, on the same candidate fingerprint.
+
+**The two reviewers disagreed, which is what two of them are for.** Opus passed the candidate
+twice. Astra failed it twice, with a P1 that was not about the file at all — the file was
+byte-exact — but about the acceptance command being a substring match that would also pass
+`prefix hello from warden suffix` plus extra lines. That is a real defect in the task contract
+written for this smoke, found by the second reader and by nothing else.
+
+**What the run also measured, and what it costs.** The repair round produced no candidate
+delta: every step row, before and after the fix, carries the same fingerprint
+`d256f6e2f0b9…`. The implementer was paid $0.031 to change nothing, and the recheck then paid
+$1.46 for Opus to reach the same pass and Astra to reach the same fail. The loop has no notion
+that a repair which moved no bytes cannot move a verdict, so it spent a full round discovering
+it. That is the concrete case for the progress detector in P3 of
+[`ADAPTIVE-WORKFLOW-PLAN.md`](ADAPTIVE-WORKFLOW-PLAN.md) — *repeat of the same confirmed
+blockers with no change in the evidence, and absence of candidate delta* — and it is measured
+rather than argued.
+
+Totals across both runs: five vendor calls, $1.4898 charged, `unpriced_calls: 2` and
+`cost_ceiling_binding: false`, because codex reported no price. Nothing was landed.
+
+## 8b. Second reviewers see Warden's own bookkeeping
+
+Astra's P2 on the same run objected that the delta included `.warden/tasks/greeting.yaml` and
+untracked files under `.warden/runs/`. Both observations are true, and neither is the
+implementer's to fix: the first is the ceiling the operator deliberately raised to continue the
+run, and the second is the evidence Warden is writing while it runs.
+
+The prompt's `{{changed_files}}` already filters `.warden`, so this is not that list. A
+reviewer with its own `git diff` grant finds them anyway and has not been told that the
+directory is the controller's bookkeeping rather than part of the candidate. Recorded here as
+an observation about how the candidate is presented to a reviewer, not fixed in this pass.
+
+## 9. What this file still does not claim
 
 * This run did not exercise the Orca adapter (`runner: orca`) as a **role runner**: Orca
   created worktrees here through the separate `OrcaIsolation` path. A later live smoke with
@@ -435,3 +515,11 @@ a green review.
   tested is the same workflow launched directly from Conductor's own CLI.
 * Failover confirmed by a human decision (`--continue`) is covered by tests but has not been
   run against a genuinely exhausted quota: on the second attempt all three quotas were open.
+* The 2026-09-07 budget-and-resume smoke in section 8 ran every role through `runner: direct`.
+  It therefore proves the role contract, the candidate fingerprint and the reuse rules live,
+  and proves nothing about Orca **launch receipts** — `launch.status`, requested versus
+  effective effort — which still rest on the 2026-09-04 smoke in [`SMOKE.md`](SMOKE.md) and on
+  the suite. The two `orca-*` reviewer profiles remain unverified and outside the roster.
+* No live run has yet exercised a repair that genuinely changes the candidate. Section 8's
+  repair moved no bytes, which is why it demonstrates the missing progress detector rather
+  than the repair path working.
