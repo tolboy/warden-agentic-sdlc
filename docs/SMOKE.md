@@ -412,3 +412,53 @@ desktop, and no phone was involved. A `switch`/`abort` failover gate was never p
 only `accept`/`reject` and `retry`/`abort`. Fault injection on acknowledgement and release is
 still code and unit tests only. The Orca runner reports no cost, so its calls land in
 `unpriced_calls`.
+
+### Proven 2026-09-07 — Orca launch receipt carries the requested effort
+
+The 2026-09-04 rows above proved an Orca-hosted reviewer starts, settles on `worker_done`, is
+acknowledged and released. They did not prove what it was *started as*: the launch receipt is
+newer than those runs. This row is that check, run through `warden role` so exactly one worker
+is paid for.
+
+Config home is the temporary `%LOCALAPPDATA%\Temp\warden-orca-e2e-home`; the operator's
+`~/.warden` was not touched. The fixture's `orca-claude-review` had to be corrected first: its
+2026-09-03 form declared `prompt_delivery: stdin`, which `runner: orca` now refuses because
+Orca does not forward stdin, so the profile no longer loaded at all. Delivery was set to
+`workspace_file` and `effort: max` added so the receipt would have something to verify; the
+original is kept beside it as `.before-launch-receipt`.
+
+Dry run first, spending nothing, showing what would be asked for:
+
+```text
+command_preview: orca orchestration worker-start --task <id> --worktree <cwd>
+                 --agent claude --model opus --effort max
+```
+
+Live, run `orca-receipt-1` on Orca 1.4.197, `orca_run_id run_d4bddc24757d`:
+
+```json
+"launch": {
+  "requested":      {"agent": "claude", "model": "opus", "effort": "max"},
+  "orca_requested": {"agent": "claude", "model": "opus", "effort": "max"},
+  "effective":      {"agent": "claude", "model": "opus", "effort": "max"},
+  "status": "matched",
+  "effort_source": "warden_profile",
+  "source": "orca_launch_receipt",
+  "provider_execution_verified": false
+}
+```
+
+**Proved by this run.** The effort Warden asks for reaches Orca and comes back in both halves
+of the receipt, so `effort_source: warden_profile` is a fact and not a hope — an Orca-hosted
+Opus no longer runs at Orca's default while a profile claims otherwise. The worker started
+ready, settled `worker_done_succeeded`, and was released with its transcript archived
+(`processAction: closed_agent_terminal`). `read_only_check` matched on a worktree content
+fingerprint taken since role start, so read-only is enforced by measurement rather than by the
+profile's own declaration. The typed reviewer artifact came back `verdict: pass`, 8 minutes,
+and the worktree was unchanged.
+
+**Still not proven by it.** `provider_execution_verified` stays `false` on purpose: a launch
+receipt confirms the options a worker was started with, not which model the provider actually
+ran. The Orca runner reported no cost, so the call lands in `unpriced_calls` and no money
+ceiling measured it. A mismatching receipt has never been seen live — `launch_model_mismatch`
+and `launch_receipt_missing` remain suite-only.
