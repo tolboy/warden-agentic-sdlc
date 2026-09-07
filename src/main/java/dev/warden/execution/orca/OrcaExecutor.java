@@ -59,6 +59,11 @@ public final class OrcaExecutor implements RoleExecutor {
         this.orca = new OrcaClient(processes);
     }
 
+    public OrcaExecutor(OrcaClient orca, GitRepository git) {
+        this.git = git;
+        this.orca = orca;
+    }
+
     @Override
     public Result execute(Request request) throws Exception {
         Profile profile = request.profile();
@@ -68,6 +73,8 @@ public final class OrcaExecutor implements RoleExecutor {
         evidence.put("profile", profile.name());
         evidence.put("vendor", profile.vendor());
         evidence.put("model", profile.model());
+        evidence.put("effort_requested", profile.effort());
+        evidence.put("launch_contract", OrcaLaunch.contract(profile));
         evidence.put("read_only", profile.readOnly());
         evidence.put("agent", profile.command());
 
@@ -104,6 +111,13 @@ public final class OrcaExecutor implements RoleExecutor {
             evidence.put("failure", "role_orca_unavailable");
             evidence.put("resolution", "Orca is running but orchestration.contract.v1 is not advertised");
             return fail("role_orca_unavailable", evidence, Duration.ZERO, "");
+        }
+        if ((profile.model() != null || profile.effort() != null)
+                && !Boolean.TRUE.equals(status.get("worker_launch_preferences"))) {
+            evidence.put("failure", "role_orca_launch_unsupported");
+            evidence.put("resolution", "Orca does not advertise orchestration.worker-launch-preferences.v1; "
+                    + "update the runtime. Warden will not drop model or effort overrides");
+            return fail("role_orca_launch_unsupported", evidence, Duration.ZERO, "");
         }
 
         OrcaClient.Rpc current = orca.invoke(request.projectRoot(), Duration.ofSeconds(15),
@@ -158,6 +172,25 @@ public final class OrcaExecutor implements RoleExecutor {
         }
         boolean resuming = prior != null && prior.active();
         evidence.put("resumed", resuming);
+        if (resuming) {
+            if (!OrcaLaunch.contract(profile).equals(prior.launchContract())) {
+                evidence.put("failure", "role_orca_launch_contract_changed");
+                evidence.put("recorded_launch_contract", prior.launchContract());
+                evidence.put("resolution", "The existing worker's launch contract differs or predates contract recording. "
+                        + "Restore its original profile or inspect and fence that dispatch before a fresh run");
+                return fail("role_orca_launch_contract_changed", evidence, Duration.ZERO, "");
+            }
+            OrcaClient.Rpc launchProbe = orca.invoke(request.projectRoot(), PROBE_TIMEOUT,
+                    List.of("orchestration", "worker-show", "--dispatch", prior.dispatchId()));
+            OrcaLaunch.Verification verified = OrcaLaunch.verify(profile, launchProbe.envelope());
+            evidence.put("launch", verified.evidence());
+            if (!launchProbe.ok() || !prior.dispatchId().equals(OrcaSettlement.dispatchId(launchProbe.envelope()))
+                    || !prior.taskId().equals(OrcaSettlement.taskId(launchProbe.envelope())) || !verified.ok()) {
+                evidence.put("failure", "role_orca_launch_unverified");
+                evidence.put("resolution", "Cannot verify the existing dispatch launch options; retained without starting another worker");
+                return fail("role_orca_launch_unverified", evidence, Duration.ZERO, "");
+            }
+        }
         if (resuming && profile.readOnly() && prior.readOnlyFingerprint() != null) {
             // Measure the read-only promise from where the worker started, not from where this
             // process happened to attach. A file written before the restart is still a violation.
@@ -281,7 +314,8 @@ public final class OrcaExecutor implements RoleExecutor {
             List<String> taskArgs = new ArrayList<>(List.of("orchestration", "task-create",
                     "--spec", taskSpec,
                     "--task-title", workerRowTitle(request, profile),
-                    "--display-name", title(request.role() + " / " + profile.vendor()),
+                    "--display-name", title(request.role() + " / " + profile.name() + " / "
+                            + profile.model() + " / " + (profile.effort() == null ? "effort inherited" : profile.effort())),
                     "--run", runId,
                     "--from", coordinatorHandle));
             OrcaClient.Rpc task = orca.invoke(request.projectRoot(), Duration.ofSeconds(20), taskArgs);
@@ -295,15 +329,12 @@ public final class OrcaExecutor implements RoleExecutor {
                 return fail("role_command_failed", evidence, elapsed(deadline, profile), task.stdout());
             }
             evidence.put("orca_task_id", taskId);
+            dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
 
             List<String> startArgs = new ArrayList<>(List.of("orchestration", "worker-start",
                     "--task", taskId,
-                    "--worktree", selectorArgument(selector),
-                    "--agent", profile.command()));
-            if (profile.model() != null && !profile.model().isBlank()) {
-                startArgs.add("--model");
-                startArgs.add(profile.model());
-            }
+                    "--worktree", selectorArgument(selector)));
+            startArgs.addAll(OrcaLaunch.arguments(profile));
             startArgs.add("--run");
             startArgs.add(runId);
             startArgs.add("--from");
@@ -332,7 +363,8 @@ public final class OrcaExecutor implements RoleExecutor {
                 recordWorker(lifecycle, new OrcaLifecycle.Worker(workerKey, request.role(), taskId,
                         dispatchId, coordinatorHandle, selector, worktreeId, profile.command(),
                         profile.model(), fingerprintBefore, OrcaLifecycle.State.ACTIVE, null, null,
-                        now, now), evidence);
+                        now, now, OrcaLaunch.contract(profile), Map.of()), evidence);
+                dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
             }
             if (!started.ok() || !OrcaSettlement.startReady(started.envelope())) {
                 boolean fenced = dispatchId != null
@@ -361,6 +393,37 @@ public final class OrcaExecutor implements RoleExecutor {
                 return fail("role_orca_start_failed", evidence, elapsed(deadline, profile),
                         started.stdout());
             }
+            // Inspect the durable options on the exact dispatch, even if worker-start also
+            // included a receipt. This is the same contract a resumed controller will read.
+            OrcaClient.Rpc launchReceipt = dispatchId == null ? started : orca.invoke(
+                    request.projectRoot(), PROBE_TIMEOUT,
+                    List.of("orchestration", "worker-show", "--dispatch", dispatchId));
+            OrcaLaunch.Verification verified = OrcaLaunch.verify(profile, launchReceipt.envelope());
+            evidence.put("launch", verified.evidence());
+            boolean identityMatches = taskId.equals(OrcaSettlement.taskId(launchReceipt.envelope()))
+                    && dispatchId != null && dispatchId.equals(OrcaSettlement.dispatchId(launchReceipt.envelope()));
+            if (!launchReceipt.ok() || !identityMatches || !verified.ok()) {
+                boolean fenced = dispatchId != null && stopWorker(request.projectRoot(), dispatchId, evidence);
+                if (fenced) markWorker(lifecycle, workerKey, OrcaLifecycle.State.STOPPED, "launch_unverified", evidence);
+                else retainCoordinator = true;
+                String code = fenced ? "role_orca_launch_unverified" : "role_orca_lifecycle_unaccounted";
+                evidence.put("failure", code);
+                evidence.put("resolution", "Orca did not confirm the exact requested launch options. "
+                        + "Inspect launch evidence and the dispatch; no result from it is accepted");
+                return fail(code, evidence, elapsed(deadline, profile), launchReceipt.stdout());
+            }
+            try {
+                lifecycle.mutate(OrcaLifecycle.of(snapshot -> snapshot.worker(workerKey)
+                        .map(worker -> snapshot.withWorker(worker.withLaunch(
+                                OrcaLaunch.contract(profile), verified.evidence())))
+                        .orElseThrow(() -> new IllegalStateException("started worker is missing from the lifecycle record"))));
+            } catch (IOException cannotPersist) {
+                retainCoordinator = true;
+                evidence.put("failure", "role_orca_lifecycle_unaccounted");
+                evidence.put("resolution", "Launch verified but its durable record could not be written: " + cannotPersist.getMessage());
+                return fail("role_orca_lifecycle_unaccounted", evidence, elapsed(deadline, profile), started.stdout());
+            }
+            dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
             nameWorkerRow(request.projectRoot(), dispatchId, request, profile, evidence);
         }
 
@@ -531,6 +594,15 @@ public final class OrcaExecutor implements RoleExecutor {
         DirectCliExecutor.collectTelemetry(artifact, evidence);
         evidence.put("verdict", artifact.get("verdict"));
         return new Result(true, "ok", duration, raw, artifact, evidence);
+        } catch (Exception uncertain) {
+            // A transport or persistence exception after dispatch is not proof the worker
+            // exited. Keep its coordinator reachable instead of closing its mailbox.
+            retainCoordinator = true;
+            evidence.put("failure", "role_orca_lifecycle_unaccounted");
+            evidence.put("coordinator_retained", true);
+            evidence.put("resolution", "Orca lifecycle operation failed; inspect the recorded dispatch before retry: "
+                    + uncertain.getMessage());
+            return fail("role_orca_lifecycle_unaccounted", evidence, elapsed(deadline, profile), "");
         } finally {
             if (!retainCoordinator) closeCoordinator(request.projectRoot(), coordinatorHandle, evidence);
         }
@@ -792,6 +864,10 @@ public final class OrcaExecutor implements RoleExecutor {
                 .append(". Read and follow UTF-8 prompt file ").append(prompt)
                 .append(" in this worktree. Send worker_done exactly once with explicit outcome; ")
                 .append("put the exact JSON artifact required by that prompt in payload key warden_artifact.");
+        if (request.profile().readOnly()) {
+            spec.append(" This role is read-only: do not edit, create or delete project files. "
+                    + "Warden rejects results if the worktree content fingerprint changes.");
+        }
         if (request.attachments() != null && !request.attachments().isEmpty()) {
             spec.append(" Image evidence paths are listed in the prompt; open every one with the agent's image tool.");
         }

@@ -15,6 +15,7 @@ import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
+import dev.warden.role.RoleContract;
 import dev.warden.role.RoleRunner;
 
 import java.nio.charset.StandardCharsets;
@@ -183,7 +184,15 @@ public final class TaskLoop {
             // re-reads a diff no vendor has objected to. Measured: a run whose implementer
             // and machine gates had both passed lost both because its reviewer ran out of
             // turns, and the retry paid for the implementer again to reach the same tree.
-            "turn_ceiling_reached");
+            "turn_ceiling_reached",
+            // Running out of room is a fact about the allowance, not about the diff. A review
+            // that read this exact tree and passed it read the same bytes it would read again,
+            // and the only thing that changed between the runs is a number the operator chose.
+            // Nothing here is believed on that basis alone: the source fingerprint and the
+            // acceptance surface are still checked, so an implementer that got halfway through
+            // a repair before the budget refused it has moved the tree and declines reuse.
+            "budget_exhausted",
+            "budget_insufficient_to_finish");
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
@@ -232,6 +241,10 @@ public final class TaskLoop {
         // Opt-in, and only meaningful for a task that asked for visual QA at all.
         boolean visualRoleConfigured = user.policy() != null
                 && user.policy().roles().containsKey("visual_qa");
+        // Built here, from the same predicate the engine routes by, and consulted before the
+        // first dispatch as well as before every repair.
+        CallPlan callPlan = new CallPlan(workflow,
+                stage -> skipReason(stage, user, task, reviewByRisk) != null);
 
         List<Map<String, Object>> steps = new ArrayList<>();
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -239,6 +252,11 @@ public final class TaskLoop {
         summary.put("task_id", task.id());
         summary.put("diff_base_commit", diffBaseCommit);
         summary.put("contract_sha256", contractHash);
+        // The narrower hash a later run compares against when deciding whether a verdict it
+        // already paid for still describes this tree. See TaskSpec.ResolvedTask.
+        summary.put("acceptance_sha256", WardenTree.acceptanceDigest(configSnapshot,
+                root.relativize(loaded.taskFile()).toString().replace('\\', '/'),
+                task.acceptanceFingerprint()));
         summary.put("risk", task.risk());
         summary.put("dry_run", dryRun);
         summary.put("max_fix_attempts", task.maxFixAttempts());
@@ -253,6 +271,21 @@ public final class TaskLoop {
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
+        summary.put("budget_plan", callPlan.toMap(task.budget().maxRoleRuns(),
+                user.policy() == null ? "full" : user.policy().repairReserve()));
+        // Which stages this task excludes, decided before the walk rather than during it.
+        //
+        // `skipped_stages` is a record of what the engine reached and passed over, so a run
+        // that stops early records none of the exclusions after the stop — and every one of
+        // them then reads as a stage that never got its turn. On a medium-risk task with no
+        // visual contract that turned two stages nobody ever intended to run into two
+        // outstanding obligations in the final report.
+        List<Map<String, Object>> inapplicable = new ArrayList<>();
+        for (Workflow.Stage stage : workflow.stages()) {
+            String why = skipReason(stage, user, task, reviewByRisk);
+            if (why != null) inapplicable.add(Map.of("stage", stage.name(), "reason", why));
+        }
+        summary.put("inapplicable_stages", inapplicable);
         summary.put("steps", steps);
 
         // Asked before the first dispatch, not after it. A worktree that was already dirty
@@ -296,11 +329,13 @@ public final class TaskLoop {
             summary.put("carries_human_rejection", true);
         }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
+        summary.put("candidate_fingerprint", candidateFingerprint);
         Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
                 ? reusableJudgements(root, carried.fromRunId(), contractHash,
-                        candidateFingerprint, summary)
+                        String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
+                        workflow, user, summary)
                 : Map.of();
-        header(task, runId, workflow, dryRun);
+        header(task, runId, workflow, dryRun, callPlan);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
                     + "; the implementer is given its reason verbatim");
@@ -377,13 +412,14 @@ public final class TaskLoop {
         }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
-                progress, carried, reusable);
+                progress, carried, reusable, callPlan);
         try {
             engine.run();
         } catch (StopException stopped) {
             return stop(ledger, summary, stopped.reason(), steps, engine.attempt(), budget);
         } catch (Budget.ExceededException exceeded) {
             summary.put("budget_stop", exceeded.getMessage());
+            summary.put("budget_limit_hit", exceeded.limit());
             return stop(ledger, summary, "budget_exhausted", steps, engine.attempt(), budget);
         } catch (Exception unexpected) {
             summary.put("unexpected_error", Map.of(
@@ -408,6 +444,9 @@ public final class TaskLoop {
         // not be allowed to mean "every stage passed something, at some point".
         List<String> stale = staleJudgements(steps);
         if (!stale.isEmpty()) summary.put("stale_judgements", stale);
+        // A preview completes nothing, so it has no completion to describe. Reporting every
+        // stage as outstanding would be true and useless, and would read as a warning.
+        if (!dryRun) describeCompletion(summary);
         summary.put("ok", true);
         if (dryRun) {
             // A preview has not produced a candidate a human can accept. Persisting a real
@@ -419,6 +458,23 @@ public final class TaskLoop {
             ledger.append("task_dry_run", summary);
             progress.blank();
             progress.line("done  dry_run   nothing was dispatched and nothing was spent");
+            // The preview's whole job is to answer "will this work" before it costs anything,
+            // and the cheapest way for it to be wrong is arithmetic. A cap that cannot reach
+            // the end of the declared chain is knowable here, for free, and used to be
+            // discovered an hour and several vendor calls later.
+            long cap = task.budget().maxRoleRuns();
+            progress.line("      requested cap " + (cap > 0 ? cap + " vendor call(s)" : "none")
+                    + "; a clean pass needs " + callPlan.minimumToFinish()
+                    + " (" + String.join(", ", callPlan.payingStages()) + ")");
+            if (cap > 0 && cap < callPlan.minimumToFinish()) {
+                progress.line("      that cap cannot finish this chain even with no repairs");
+            }
+            for (Map<String, Object> branch : recoveryBranches(summary)) {
+                progress.line("      if " + branch.get("stage") + " sends the work back: "
+                        + branch.get("calls_to_repair_and_finish") + " call(s) to repair and "
+                        + "finish — " + (Boolean.TRUE.equals(branch.get("reachable_under_cap"))
+                            ? "affordable" : "NOT affordable under this cap"));
+            }
             if (summary.get("would_stop") != null) {
                 progress.line("      a real run would stop here: " + summary.get("would_stop"));
                 progress.line("      " + summary.get("resolution"));
@@ -442,13 +498,30 @@ public final class TaskLoop {
         // what let them be carried — but "passed" and "passed, earlier, elsewhere" are
         // different sentences and the gate should not blur them.
         if (summary.get("reused_judgements") instanceof Map<?, ?> reused) {
-            verdict += ". " + reused.get("roles") + " were not re-run: they passed this exact "
+            verdict += ". " + reused.get("stages") + " were not re-run: they passed this exact "
                     + "tree on run " + reused.get("from") + " and neither the source nor the "
                     + "contract has changed since";
+            if (summary.get("contract_change_budget_only") instanceof Map<?, ?> budgetOnly) {
+                verdict += " — except its call ceiling, raised from "
+                        + budgetOnly.get("prior_max_role_runs") + " to "
+                        + budgetOnly.get("now_max_role_runs") + ", which is not part of what "
+                        + "the work is judged by";
+            }
         }
         if (!stale.isEmpty()) {
             verdict += ". WARNING: " + String.join(", ", stale) + " last judged an earlier tree; "
                     + "code changed after that and was not judged again";
+        }
+        // A chain can reach the human gate with stages still owed — a conditional stage that
+        // ran out of room, say. The person being asked to accept is entitled to that sentence
+        // rather than to a list of what happened to pass.
+        if (summary.get("pending_stages") instanceof List<?> owed && !owed.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (Object row : owed) {
+                if (row instanceof Map<?, ?> stage) names.add(String.valueOf(stage.get("stage")));
+            }
+            verdict += ". The declared workflow did not finish: " + String.join(", ", names)
+                    + " never completed";
         }
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
                 verdict, file, git.sourceFingerprint(diffBaseCommit));
@@ -461,6 +534,38 @@ public final class TaskLoop {
         ledger.append("task_run", summary);
         footer(runId, "ready_for_human", "human_gate", budget, summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
+    }
+
+    /**
+     * Why a stage will not run at all, or null when it will.
+     *
+     * Static, and asked in two places on purpose. The loop asks it to decide what to execute;
+     * {@link CallPlan} asks it to decide what to count. A budget plan built from a different
+     * notion of which stages run than the loop uses would reserve calls for a reviewer that
+     * risk had already excluded, or fail to reserve one that risk had brought back.
+     */
+    private static String skipReason(Workflow.Stage stage, UserConfig user,
+                                     TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+        if (stage.kind() == Workflow.Kind.ROLE) {
+            boolean configured = user.policy() != null
+                    && user.policy().roles().containsKey(stage.role());
+            if (!configured) return "role_not_configured";
+        }
+        for (String condition : stage.when()) {
+            if (!holds(condition, task, reviewByRisk)) return "condition_not_met:" + condition;
+        }
+        return null;
+    }
+
+    private static boolean holds(String condition, TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+        return switch (condition) {
+            case "review_required" -> reviewByRisk;
+            case "visual_qa_required" -> task.visualQa().required();
+            case "risk_low" -> "low".equals(task.risk());
+            case "risk_medium" -> "medium".equals(task.risk());
+            case "risk_high" -> "high".equals(task.risk());
+            default -> true;
+        };
     }
 
     /**
@@ -537,6 +642,7 @@ public final class TaskLoop {
         private final Progress progress;
         private final Continuation carried;
         private final Map<String, Map<String, Object>> reusable;
+        private final CallPlan callPlan;
         private boolean rejectionDelivered;
 
         /** The vendor that filled each role, so a later role can be required to differ. */
@@ -544,6 +650,33 @@ public final class TaskLoop {
         /** The pixels each harness stage produced, for the role stage that looks at them. */
         private final Map<String, VisualQaRunner.Outcome> harness = new LinkedHashMap<>();
         private final List<Map<String, Object>> skipped = new ArrayList<>();
+        /**
+         * Stages that finished, by name.
+         *
+         * "Every stage that ran passed" was a sentence assembled from the step rows, and step
+         * rows are labelled by role: two review stages wrote the same label, and a chain that
+         * reached only the first of them read afterwards as if review were done. Names are
+         * unique in a workflow, so this is the one identity that cannot collapse.
+         */
+        private final java.util.Set<String> completed = new java.util.LinkedHashSet<>();
+        /**
+         * Judging stages that had passed and whose candidate a later repair then changed.
+         *
+         * Kept apart from "never ran": both are outstanding, and they send a reader to
+         * different places. One has a verdict on disk about a tree that no longer exists.
+         */
+        private final java.util.Set<String> staleAfterFix = new java.util.LinkedHashSet<>();
+        /**
+         * Stages whose earlier verdict this run actually consumed, in the order it did.
+         *
+         * Recorded here rather than at pool build, because a stage that looked reusable when
+         * the pool was assembled can be invalidated before its turn — an ordinary implementer
+         * dispatch earlier in this same resume moves the tree out from under a later review.
+         * `reused_judgements` names what was consumed, so it is written as consumption happens.
+         */
+        private final java.util.Set<String> reusedStages = new java.util.LinkedHashSet<>();
+        /** Per judging stage: whether it ran, whether it passed, and what it still objects to. */
+        private final Map<String, Map<String, Object>> coverage = new LinkedHashMap<>();
         private int attempt;
         /** The beat wrapping the dispatch that is running now; {@link Heartbeat#none()} otherwise. */
         private Heartbeat heartbeat = Heartbeat.none();
@@ -562,7 +695,8 @@ public final class TaskLoop {
                String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
                Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk,
                Progress progress, Continuation carried,
-               Map<String, Map<String, Object>> reusable) {
+               Map<String, Map<String, Object>> reusable, CallPlan callPlan) {
+            this.callPlan = callPlan;
             this.loaded = loaded;
             this.user = user;
             this.roles = roles;
@@ -611,7 +745,7 @@ public final class TaskLoop {
             if (dryRun) return;
             // A role whose verdict was carried over from an earlier run on this exact tree
             // dispatched nobody, so there is no outcome to route and nothing new to object.
-            if (outcome == null) return;
+            if (outcome == null) { finished(stage); return; }
 
             while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(outcome)
                     && attempt < task.maxFixAttempts()) {
@@ -619,7 +753,10 @@ public final class TaskLoop {
                 outcome = execute(stage);
             }
             if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
-            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) return;
+            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) {
+                finished(stage);
+                return;
+            }
 
             // A role that succeeded can still object. Findings are the reason to run a second
             // vendor at all, so they route like any other failing check instead of being
@@ -634,6 +771,42 @@ public final class TaskLoop {
                 blocking = recordFindings(stage, reviewed);
             }
             if (blocking > 0) throw new StopException(stage.findingsReason());
+            finished(stage);
+        }
+
+        /** A stage that reached the end of its own routing with nothing left outstanding. */
+        private void finished(Workflow.Stage stage) {
+            completed.add(stage.name());
+            staleAfterFix.remove(stage.name());
+            summary.put("completed_stages", List.copyOf(completed));
+            summary.put("stages_judging_an_earlier_candidate", List.copyOf(staleAfterFix));
+        }
+
+        /**
+         * A repair is about to change the candidate, so every verdict about the old one stops
+         * counting as finished business.
+         *
+         * Marking them complete through a fix round was wrong in the direction that matters.
+         * A reviewer that passed, was re-dispatched after a browser repair and came back with
+         * a P1 correctly stopped the run — and the stage it had just failed was still listed
+         * in `completed_stages`, absent from `pending_stages`, and therefore reported as a
+         * stage that had passed. Reproduced on run `rk1`.
+         *
+         * The rechecked stages earn their place back by passing again. The ones the workflow
+         * did not ask to recheck stay here, which is the honest answer: they judged a tree
+         * that no longer exists, and `stale_judgements` has always said so separately without
+         * anything acting on it.
+         */
+        private void candidateAboutToChange() {
+            for (Workflow.Stage stage : workflow.stages()) {
+                if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) continue;
+                if (!completed.remove(stage.name())) continue;
+                staleAfterFix.add(stage.name());
+                coverage.remove(stage.name());
+            }
+            summary.put("completed_stages", List.copyOf(completed));
+            summary.put("stages_judging_an_earlier_candidate", List.copyOf(staleAfterFix));
+            summary.put("review_coverage", List.copyOf(coverage.values()));
         }
 
         /**
@@ -642,7 +815,15 @@ public final class TaskLoop {
          * complained by breaking one that had already passed.
          */
         private void fixRound(Workflow.Stage stage, int index, String context) throws Exception {
+            // Both halves of what a repair commits to, asked in cost order: the calls it needs
+            // are arithmetic, the readers it needs cost a probe apiece.
+            requireReserve(stage, index);
+            requireJudgesRemain(stage, index);
             attempt++;
+            // Before the dispatch, not after it. A fix that fails part way through has still
+            // touched the tree, and the verdicts about the tree it started from are no more
+            // current than if it had succeeded.
+            candidateAboutToChange();
             progress.line("      -> fix round " + attempt + " of " + task.maxFixAttempts()
                     + ": " + stage.name() + " sends the work back to " + stage.fixWith());
             workspace.note(fixNote(stage, null, null));
@@ -657,23 +838,177 @@ public final class TaskLoop {
             try (Heartbeat alive = beating(role)) {
                 heartbeat = alive;
                 heartbeatNote = (profile, vendor) -> fixNote(stage, profile, vendor);
-                fix = roles.run(loaded, user, role,
+                fix = roles.atStage(stage.name() + "/fix").run(loaded, user, role,
                         stepRunId(runId, role, attempt), null, file, false);
             } finally {
                 heartbeat = Heartbeat.none();
                 heartbeatNote = null;
             }
             record(steps, budget, role, attempt, fix);
+            // Same stamp as an ordinary dispatch: the tree this repair produced is the tree a
+            // later resume must match before it may reuse this implementer's work.
+            stampFingerprint();
             vendors.putIfAbsent(role, fix.vendor());
             if (!fix.ok()) throw new StopException(reasonFor(fix, "fix_attempt_failed"));
             requireUnchangedContract();
             for (Workflow.Stage earlier : workflow.recheckBefore(index)) {
                 if (skipReason(earlier) != null) continue;
                 Object rechecked = execute(earlier);
-                if (!failed(rechecked)) continue;
-                throw new StopException(earlier.kind() == Workflow.Kind.MACHINE_GATES
-                        ? "gates_not_satisfied_after_fix" : terminalReason(earlier, rechecked));
+                if (failed(rechecked)) {
+                    throw new StopException(earlier.kind() == Workflow.Kind.MACHINE_GATES
+                            ? "gates_not_satisfied_after_fix" : terminalReason(earlier, rechecked));
+                }
+                // A recheck asks whether the fix broke a verdict that had already been given,
+                // and until now it only ever heard the half of that answer a process exit code
+                // can carry. A reviewer that read the new diff, objected to it in a P1 and
+                // returned cleanly was recorded as a passing recheck — the run paid for the
+                // objection and then discarded it, and the human gate went on to say every
+                // stage that ran had passed. Findings are the whole reason this stage is
+                // re-dispatched; not reading them made the recheck a paid formality.
+                if (earlier.kind() == Workflow.Kind.ROLE && earlier.onFindings() != null
+                        && rechecked instanceof RoleRunner.Outcome verdict
+                        && recordFindings(earlier, verdict) > 0) {
+                    // Deliberately a stop rather than another repair. This objection was found
+                    // from inside a repair round already under way for a different stage, and
+                    // repairing from inside a repair is how a bounded loop stops being one.
+                    // The findings are on disk and the stop names them.
+                    progress.line("      the fix broke a verdict " + earlier.name()
+                            + " had already given; stopping rather than repairing recursively");
+                    throw new StopException(earlier.findingsReason());
+                }
+                // It has re-established itself against the changed candidate, so it earns back
+                // the completion the fix took away. Without this, a recheck that passed left
+                // its stage listed as outstanding for the rest of the run — the mirror of the
+                // bug that let a failed recheck stay listed as passed.
+                finished(earlier);
             }
+        }
+
+        /**
+         * Refuse a repair the remaining allowance cannot pay for, on the terms the policy set.
+         *
+         * The budget already refused a call it could not afford. That check fires one call too
+         * late to be useful: it stops the repair the run cannot pay for, having already spent
+         * the allowance on repairs whose consequences it then could not judge. Measured on a
+         * live run — six calls bought an implementer, two repairs and three reviews, and the
+         * two stages that would have finished the workflow were never reached.
+         *
+         * How much has to fit is `budget.repair_reserve`, and the default is `full`: the
+         * repair, every judgement it invalidates, and every stage still owed. A run either
+         * completes or does not start the attempt.
+         *
+         * `partial` is the opt-in, and it is a real trade rather than a strictly better one.
+         * In its favour: the unspent calls are not saved by declining to spend them, since
+         * only raising the ceiling unlocks the rest of the chain, and a review that then
+         * passes is a verdict a continuation reuses for nothing. Against it: a repair can
+         * introduce a regression rather than remove one, and a person may decide not to
+         * continue the task at all, in which case the money bought nothing. That judgement is
+         * the operator's, so it is declared rather than inferred here.
+         */
+        private void requireReserve(Workflow.Stage stage, int index) {
+            String mode = user.policy() == null ? "full" : user.policy().repairReserve();
+            int required = callPlan.requiredFor(index, mode);
+            int toFinish = callPlan.reserveForRepair(index);
+            int remaining = budget.remaining();
+            Map<String, Object> reserve = new LinkedHashMap<>();
+            reserve.put("at_stage", stage.name());
+            reserve.put("repair_reserve", mode);
+            reserve.put("calls_required_here", (long) required);
+            reserve.put("calls_needed_to_repair", (long) callPlan.repairCost(index));
+            reserve.put("calls_needed_to_repair_and_be_judged",
+                    (long) callPlan.repairAndJudgeCost(index));
+            reserve.put("calls_needed_to_repair_and_finish", (long) toFinish);
+            reserve.put("calls_remaining", (long) remaining);
+            reserve.put("calls_after_this_stage", (long) callPlan.callsAfter(index));
+            reserve.put("cap", budget.maxRuns());
+            if (remaining >= required) {
+                // Allowed, but not silently. Under `partial` this is the case where the run
+                // knows now that it will stop short, and saying so at the start beats
+                // discovering it in the summary.
+                if (remaining < toFinish) {
+                    reserve.put("will_finish", false);
+                    summary.put("budget_reserve", reserve);
+                    progress.line("      repair_reserve=" + mode + ": the remaining " + remaining
+                            + " call(s) cover this repair and a judgement of it, but not the "
+                            + callPlan.callsAfter(index) + " stage(s) after it; this run will "
+                            + "stop with the chain unfinished");
+                }
+                return;
+            }
+            reserve.put("will_finish", false);
+            summary.put("budget_reserve", reserve);
+            summary.put("resolution", "The remaining " + remaining + " vendor call(s) do not "
+                    + "meet the repair reserve this policy requires (" + mode + ", needing "
+                    + required + "). Raise budgets.max_role_runs to at least "
+                    + (budget.runs() + toFinish) + " and continue this run — the verdicts "
+                    + "already reached on this tree are kept, because a change to the call "
+                    + "ceiling is not a change to what the work is judged by."
+                    + ("full".equals(mode)
+                        ? " Or set budget.repair_reserve: partial in policy.yaml to allow paid "
+                          + "progress that this run cannot finish."
+                        : ""));
+            progress.line("      repair_reserve=" + mode + ": the remaining " + remaining
+                    + " call(s) do not meet the reserve of " + required + " this repair needs");
+            throw new StopException("budget_insufficient_to_finish");
+        }
+
+        /**
+         * Refuse a repair that nothing left on the roster could judge.
+         *
+         * The money is only half of what a repair commits the run to; the other half is a
+         * reader for what it produces. Both used to be discovered late and in the wrong order:
+         * the repair ran, moved the tree, and the review stage after it then failed to resolve
+         * because the one remaining vendor was the one that had just written the code. The
+         * run ended with an unjudged candidate and had paid for the privilege.
+         *
+         * Independence is the constraint that actually runs out. A two-vendor roster minus one
+         * spent subscription is one vendor, and a reviewer required to differ from the
+         * implementer has nobody — which is a fact about the roster, not about the diff, and
+         * says so in its own stop reason.
+         */
+        private void requireJudgesRemain(Workflow.Stage stage, int index) {
+            String writer = vendors.get("implementer");
+            List<Workflow.Stage> needed = new ArrayList<>();
+            for (Workflow.Stage earlier : workflow.recheckBefore(index)) {
+                if (earlier.kind() == Workflow.Kind.ROLE && skipReason(earlier) == null) {
+                    needed.add(earlier);
+                }
+            }
+            if (stage.kind() == Workflow.Kind.ROLE) needed.add(stage);
+            for (int position = index + 1; position < workflow.stages().size(); position++) {
+                Workflow.Stage later = workflow.stages().get(position);
+                if (later.kind() == Workflow.Kind.ROLE && skipReason(later) == null) needed.add(later);
+            }
+            // The repair itself first: a fix role nobody can fill makes the rest moot.
+            if (!roles.canFill(user, stage.fixWith(), null, RoleRunner.UNSTAGED)) {
+                throw unfillable(stage.fixWith(), stage.name(), "the repair itself", null);
+            }
+            for (Workflow.Stage judge : needed) {
+                String avoid = "implementer".equals(judge.role()) ? null : writer;
+                if (roles.canFill(user, judge.role(), avoid, workflow.rotationPositionOf(judge))) {
+                    continue;
+                }
+                throw unfillable(judge.role(), stage.name(), judge.name(), avoid);
+            }
+        }
+
+        private StopException unfillable(String role, String at, String forStage, String avoid) {
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("role", role);
+            gap.put("needed_for", forStage);
+            gap.put("blocked_at", at);
+            gap.put("must_differ_from_vendor", avoid);
+            gap.put("exhausted_profiles", List.copyOf(roles.exhaustedProfiles()));
+            summary.put("unavailable_role", gap);
+            summary.put("resolution", "Repairing here would produce a candidate that '" + forStage
+                    + "' could not then judge: no profile can fill role '" + role + "'"
+                    + (avoid == null ? "" : " that differs from the vendor which wrote this code ("
+                        + avoid + ")")
+                    + ". Add a profile from another vendor, or wait for the quota window named "
+                    + "in the vendor message, then continue this run.");
+            progress.line("      nothing left can fill " + role + " for " + forStage
+                    + "; stopping before the repair rather than after it");
+            return new StopException("independent_review_unavailable");
         }
 
         private Object execute(Workflow.Stage stage) throws Exception {
@@ -693,9 +1028,23 @@ public final class TaskLoop {
                 heartbeatNote = null;
             }
             long millis = (System.nanoTime() - started) / 1_000_000L;
+            stamp(stage);
             narrate(outcome, millis);
             post(stage, outcome, millis);
             return outcome;
+        }
+
+        /**
+         * The stage name on the row the dispatch just wrote, when the writer did not know it.
+         *
+         * Role dispatches carry it already. Machine gates and the browser harness are labelled
+         * by what they are, so a chain running two of either produced rows nobody could tell
+         * apart — and "which stages has this run still not finished" is a question asked of
+         * exactly these rows.
+         */
+        private void stamp(Workflow.Stage stage) {
+            if (steps.isEmpty()) return;
+            steps.get(steps.size() - 1).putIfAbsent("stage", stage.name());
         }
 
         /**
@@ -908,17 +1257,52 @@ public final class TaskLoop {
         }
 
         private RoleRunner.Outcome runRole(Workflow.Stage stage) throws Exception {
+            roles.atStage(stage.name());
             String role = stage.role();
-            Map<String, Object> standing = attempt == 0 ? reusable.remove(role) : null;
+            // By stage first. The role name is accepted only as the legacy spelling of a
+            // stage, and only when this workflow gives that role exactly one — otherwise the
+            // first review stage would be free to spend the verdict the second one earned.
+            Map<String, Object> standing = null;
+            if (attempt == 0) {
+                standing = reusable.remove(stage.name());
+                if (standing == null && workflow.stagesFor(role).size() == 1) {
+                    standing = reusable.remove(role);
+                }
+            }
+            // Currency is checked here, against the tree as it stands at this moment, not only
+            // when the pool was built. A stage earlier in this same resume can have dispatched
+            // for real and moved the tree — an implementer whose contract changed, say — and a
+            // verdict about the tree before that dispatch is not a verdict about this
+            // candidate. The pool build proved the prior run's final tree; only this proves the
+            // tree the verdict will actually be spent on.
             if (standing != null) {
-                // Not a shortcut and not a cache: the fingerprint check that let this entry
-                // through says these are the same bytes the earlier vendor read. A fix round
-                // makes it stale immediately, which is why this only applies at attempt 0.
+                Object judged = standing.get("candidate_fingerprint");
+                String now = currentFingerprint();
+                if (!(judged instanceof String stamped) || now == null || !stamped.equals(now)) {
+                    reuseDeclinedAtConsumption(stage,
+                            judged instanceof String was ? was : null, now);
+                    standing = null;
+                }
+            }
+            if (standing != null) {
+                // Not a shortcut and not a cache: the fingerprint check just above says these
+                // are the same bytes the earlier vendor read, as the tree stands right now. A
+                // fix round moves the tree and a re-dispatched earlier stage can too, which is
+                // why the check is here and not only at attempt 0's pool build.
                 Map<String, Object> entry = new LinkedHashMap<>(standing);
                 entry.put("reused_from", carried.fromRunId());
                 entry.put("attempt", (long) attempt);
                 steps.add(entry);
                 vendors.putIfAbsent(role, String.valueOf(standing.get("vendor")));
+                reusedStages.add(stage.name());
+                summary.put("reused_judgements", Map.of("from", carried.fromRunId(),
+                        "stages", List.copyOf(reusedStages)));
+                // The verdict itself, not just the row. Without this a run whose every stage
+                // was carried over reported `candidate_review_passed: false` and no coverage
+                // at all — so `warden report --text` told the operator the candidate had not
+                // passed review, about a candidate a reviewer had passed and whose reuse the
+                // fingerprint had just been checked to justify. Reproduced on run `ru2`.
+                carryCoverage(stage, standing);
                 progress.line("      reused from " + carried.fromRunId() + ": "
                         + standing.get("profile") + " already passed this exact tree");
                 return null;
@@ -933,46 +1317,153 @@ public final class TaskLoop {
                 outcome = roles.run(loaded, user, role, stageRunId(runId, workflow, stage, attempt),
                         avoid, rejectionContextFor(role), dryRun, workflow.rotationPositionOf(stage));
                 record(steps, budget, role, attempt, outcome, stage.name());
+                // The role runner knows the profile and the roster; only the loop knows how
+                // the stage that dispatched it routes. Both halves belong to the same claim
+                // about the terms this verdict was reached under.
+                stampRouting(stage);
             }
             if (dryRun || outcome == null) return outcome;
             vendors.putIfAbsent(role, outcome.vendor());
+            // The tree this role just judged, on the row itself, so a later run can prove the
+            // verdict is about the candidate it is being spent on rather than about whatever
+            // this run's final tree happened to be. Stamped for every role: an implementer's
+            // fingerprint is the tree after it wrote, a reviewer's is the tree it read.
+            stampFingerprint();
             // A read-only role that edited the contract has already invalidated the very
             // thing it is about to be believed for.
             requireUnchangedContract();
             return outcome;
         }
 
+        /** Record, on the last step row, the fingerprint of the tree the role just judged. */
+        private void stampFingerprint() {
+            if (steps.isEmpty()) return;
+            steps.get(steps.size() - 1).put("candidate_fingerprint", currentFingerprint());
+        }
+
         private void requireUnchangedContract() {
             if (!contractMatches(loaded, contractSnapshot)) throw new StopException("contract_mutated");
         }
 
-        /** Why this stage is not running at all, or null when it is. */
-        private String skipReason(Workflow.Stage stage) {
-            if (stage.kind() == Workflow.Kind.ROLE) {
-                boolean configured = user.policy() != null
-                        && user.policy().roles().containsKey(stage.role());
-                if (!configured) return "role_not_configured";
-            }
-            for (String condition : stage.when()) {
-                if (!holds(condition)) return "condition_not_met:" + condition;
-            }
-            return null;
+        /** Fold this stage's routing into the contract the row already carries. */
+        @SuppressWarnings("unchecked")
+        private void stampRouting(Workflow.Stage stage) {
+            if (steps.isEmpty()) return;
+            Map<String, Object> row = steps.get(steps.size() - 1);
+            if (!(row.get("role_contract") instanceof Map<?, ?> recorded)) return;
+            Map<String, Object> contract = new LinkedHashMap<>((Map<String, Object>) recorded);
+            contract.putAll(RoleContract.routingOf(stage));
+            row.put("role_contract", contract);
         }
 
-        private boolean holds(String condition) {
-            return switch (condition) {
-                case "review_required" -> reviewByRisk;
-                case "visual_qa_required" -> task.visualQa().required();
-                case "risk_low" -> "low".equals(task.risk());
-                case "risk_medium" -> "medium".equals(task.risk());
-                case "risk_high" -> "high".equals(task.risk());
-                default -> true;
-            };
+        /**
+         * A verdict carried from an earlier run, restored as the judgement it was.
+         *
+         * Marked `reused` and not `executed`, and carrying the run it came from. Those are
+         * different claims about the same conclusion, and a card or a report that showed a
+         * carried verdict as a fresh dispatch would be inventing a vendor call that never
+         * happened — the opposite mistake to the one this method fixes.
+         */
+        private void carryCoverage(Workflow.Stage stage, Map<String, Object> standing) {
+            if (stage.onFindings() == null) return;
+            Object blocking = standing.get("blocking_findings");
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.name());
+            row.put("role", stage.role());
+            row.put("source", "reused");
+            row.put("reused_from", carried.fromRunId());
+            row.put("ok", true);
+            // Zero by construction: a row with blocking findings was excluded from reuse
+            // before it got here. Copied rather than assumed, so the number in the report is
+            // the number the earlier run actually recorded.
+            row.put("blocking_findings", blocking instanceof Number number ? number.longValue() : 0L);
+            row.put("profile", standing.get("profile"));
+            row.put("vendor", standing.get("vendor"));
+            // The fingerprint the earlier verdict actually judged, preserved — not overwritten
+            // with this run's. It is equal to this run's tree by the time we are here, because
+            // consumption declined reuse otherwise, but the coverage records what the reviewer
+            // saw, and stamping the current run's fingerprint would only be right by accident.
+            row.put("candidate_fingerprint", standing.get("candidate_fingerprint"));
+            coverage.put(stage.name(), row);
+            summary.put("review_coverage", List.copyOf(coverage.values()));
+        }
+
+        /**
+         * A reusable verdict abandoned at the moment it would have been spent, because the tree
+         * moved since it was reached. It falls through to a real dispatch; recording why keeps
+         * a resume that quietly re-ran a stage from looking like one that skipped it.
+         */
+        private void reuseDeclinedAtConsumption(Workflow.Stage stage, String judged, String now) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.name());
+            row.put("judged_fingerprint", judged);
+            row.put("current_fingerprint", now);
+            row.put("reason", judged == null
+                    ? "the carried verdict recorded no candidate fingerprint"
+                    : "the tree changed after the pool was built, so this verdict is about "
+                            + "another candidate");
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> declines = summary.get("reuse_declined_at_consumption")
+                    instanceof List<?> existing
+                    ? new ArrayList<>((List<Map<String, Object>>) (List<?>) existing)
+                    : new ArrayList<>();
+            declines.add(row);
+            summary.put("reuse_declined_at_consumption", declines);
+            progress.line("note  the verdict carried for stage '" + stage.name() + "' judged a "
+                    + "tree this resume has since changed; re-running it rather than believing it");
+        }
+
+        /** The source tree as it stands now, or null when git cannot be asked. */
+        private String currentFingerprint() {
+            try {
+                return new GitRepository(loaded.root(), processes).sourceFingerprint(diffBaseCommit);
+            } catch (Exception unreadable) {
+                // A run is not failed over a label. The verdict is still recorded; what it
+                // loses is the ability to prove afterwards which tree it was about.
+                return null;
+            }
+        }
+
+        /** Why this stage is not running at all, or null when it is. */
+        private String skipReason(Workflow.Stage stage) {
+            return TaskLoop.skipReason(stage, user, task, reviewByRisk);
         }
 
         private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
             long blocking = blockingFindings(loaded.root(), outcome);
+            // Kept: an operator's greps, the report reader and the reuse rules for a
+            // single-stage role all read this. It is keyed by role, so a chain with two review
+            // stages has always had the second silently overwrite the first.
             summary.put(findingsKey(stage), blocking);
+            // The same number, under the one identity that is unique in a workflow. Without it
+            // "did review-second object" is a question the summary cannot answer, and a resume
+            // deciding which verdict it may keep is answering it from the wrong stage.
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.name());
+            row.put("role", stage.role());
+            row.put("source", "executed");
+            row.put("ok", outcome.ok());
+            row.put("blocking_findings", blocking);
+            row.put("profile", outcome.profile());
+            row.put("vendor", outcome.vendor());
+            // Which tree this verdict is about. A judgement without one is a claim that
+            // cannot be checked against the candidate a person is later asked to accept.
+            row.put("candidate_fingerprint", currentFingerprint());
+            coverage.put(stage.name(), row);
+            // It has now judged the candidate as it currently stands, whatever it concluded.
+            // Leaving it marked as judging an earlier tree would report a stage that ran and
+            // objected as one that never looked, which sends a reader past the finding.
+            staleAfterFix.remove(stage.name());
+            summary.put("stages_judging_an_earlier_candidate", List.copyOf(staleAfterFix));
+            summary.put("review_coverage", List.copyOf(coverage.values()));
+            // And on the step row itself, which is what a later run reads back when it asks
+            // whether this exact judgement can stand without being paid for twice.
+            for (int index = steps.size() - 1; index >= 0; index--) {
+                Map<String, Object> step = steps.get(index);
+                if (!stage.name().equals(step.get("stage"))) continue;
+                step.put("blocking_findings", blocking);
+                break;
+            }
             if (blocking > 0) {
                 // A role that passed its own run and still objects is the whole reason a
                 // second vendor is paid, so it says so out loud rather than only in a file.
@@ -1034,8 +1525,25 @@ public final class TaskLoop {
     }
 
     private static final class Budget {
+        /**
+         * Which of the two ceilings refused the call, carried rather than only spelled into a
+         * message.
+         *
+         * They are hit for different reasons and fixed in different places, and the run used
+         * to tell an operator whose money ceiling was reached to raise the call ceiling — a
+         * next step that would not have unblocked anything. Parsing the sentence back out to
+         * work out which limit it was is the kind of thing that is right until somebody
+         * rewords it.
+         */
         static final class ExceededException extends RuntimeException {
-            ExceededException(String message) { super(message); }
+            private final String limit;
+
+            ExceededException(String limit, String message) {
+                super(message);
+                this.limit = limit;
+            }
+
+            String limit() { return limit; }
         }
 
         private final long maxRuns;
@@ -1059,12 +1567,30 @@ public final class TaskLoop {
         int runs() { return runs; }
         double spent() { return spent; }
 
+        /**
+         * Vendor calls the ceiling still allows, or {@link Integer#MAX_VALUE} when the task
+         * declared none.
+         *
+         * A reservation is taken at {@link #requireRoleRun} and never given back, including
+         * for a dispatch that failed or whose outcome is unknown. That is the conservative
+         * direction: a call whose receipt never arrived may still have been served and billed,
+         * and treating it as free would let a restart pay for it twice.
+         */
+        int remaining() {
+            if (maxRuns <= 0) return Integer.MAX_VALUE;
+            return (int) Math.max(0, maxRuns - runs);
+        }
+
+        long maxRuns() { return maxRuns; }
+
         void requireRoleRun() {
             if (maxRuns > 0 && runs >= maxRuns) {
-                throw new ExceededException("max_role_runs of " + maxRuns + " reached");
+                throw new ExceededException("max_role_runs",
+                        "max_role_runs of " + maxRuns + " reached");
             }
             if (maxCost > 0 && spent >= maxCost) {
-                throw new ExceededException("max_cost_usd of " + maxCost + " reached, spent " + spent);
+                throw new ExceededException("max_cost_usd",
+                        "max_cost_usd of " + maxCost + " reached, spent " + spent);
             }
             runs++;
         }
@@ -1170,21 +1696,30 @@ public final class TaskLoop {
     /**
      * Role verdicts from an earlier run that are still true of this tree.
      *
-     * A verdict is about a tree, not about a run. If the source fingerprint and the whole
-     * `.warden` contract are byte-for-byte what they were when that role passed, then paying
-     * a second vendor to reach the same conclusion about the same bytes buys nothing.
+     * A verdict is about a tree judged under terms, not about a run. Paying a second vendor
+     * to reach the same conclusion about the same bytes under the same rules buys nothing;
+     * accepting a verdict when either half has moved reports a review that never happened.
      *
-     * Every condition here is a way to say no, and any doubt at all returns an empty map and
-     * runs the full chain:
+     * Every condition here is a way to say no, and any doubt at all declines:
      *
      *  - the earlier run must have stopped for something that was never about the work;
-     *  - the contract must be identical, or the role was judged against different terms;
+     *  - the contract must be identical, or the acceptance surface must be, which forgives a
+     *    raised call ceiling and nothing else;
      *  - the source must be identical, or it judged a different candidate;
-     *  - the role's own last attempt must have passed and filed no blocking findings, because
-     *    a pass with a P1 is not a pass, it is a fix round that had not happened yet.
+     *  - the stage's own last attempt must have passed and filed no blocking findings, because
+     *    a pass with a P1 is not a pass, it is a fix round that had not happened yet;
+     *  - the stage's judging contract must be unchanged — see {@link RoleContract}.
+     *
+     * The first two are checked for the whole run and decline everything. The last two are
+     * checked per stage, because a swapped reviewer says nothing about the implementer.
+     *
+     * The project baseline receipt is deliberately stricter and still requires a byte-exact
+     * contract: re-running it costs time and no vendor call, so there is nothing to save by
+     * forgiving anything there.
      */
     private Map<String, Map<String, Object>> reusableJudgements(
-            Path root, String priorRunId, String contractHash, String fingerprint,
+            Path root, String priorRunId, String contractHash, String acceptanceHash,
+            String fingerprint, Workflow workflow, UserConfig user,
             Map<String, Object> summary) throws Exception {
         Path priorSummary = root.resolve(".warden/runs").resolve(priorRunId).resolve("task-run.json");
         if (!Files.isRegularFile(priorSummary)) return declineReuse(summary, "no summary for " + priorRunId);
@@ -1196,8 +1731,34 @@ public final class TaskLoop {
                     + "the work leaves an earlier judgement standing");
         }
         if (!contractHash.equals(prior.get("contract_sha256"))) {
-            return declineReuse(summary, "the contract changed since " + priorRunId
-                    + ", so its roles were judged against different terms");
+            // The contract moved. That is usually the end of it — but there is exactly one
+            // way it moves that no reviewer would care about, and it is the way an operator is
+            // forced to move it in order to continue at all. A run stopped by its call ceiling
+            // can only go on if the ceiling goes up, and the ceiling lives in the same file as
+            // the goal. Refusing on the whole-file hash would mean the act of continuing was
+            // itself the reason to throw away what the continuation was meant to save.
+            Object priorAcceptance = prior.get("acceptance_sha256");
+            if (!(priorAcceptance instanceof String recorded) || !recorded.equals(acceptanceHash)) {
+                return declineReuse(summary, "the contract changed since " + priorRunId
+                        + (priorAcceptance == null
+                            ? ", and that run predates the acceptance hash, so there is no way "
+                              + "to show the change was only to its budget"
+                            : ", and the change reaches what the work is judged by")
+                        + ", so its roles were judged against different terms");
+            }
+            Map<String, Object> allowed = new LinkedHashMap<>();
+            allowed.put("from_run", priorRunId);
+            allowed.put("prior_max_role_runs", prior.get("budget_max_role_runs"));
+            allowed.put("now_max_role_runs", summary.get("budget_max_role_runs"));
+            allowed.put("prior_max_cost_usd", prior.get("budget_max_cost_usd"));
+            allowed.put("now_max_cost_usd", summary.get("budget_max_cost_usd"));
+            allowed.put("acceptance_sha256", acceptanceHash);
+            // Recorded, not merely permitted. Whoever accepts this candidate is told that a
+            // verdict was carried across an edited contract, and exactly which numbers moved.
+            summary.put("contract_change_budget_only", allowed);
+            progress.line("note  the contract changed since " + priorRunId + ", but only its "
+                    + "budget: what the work is judged by is byte-identical, so the verdicts "
+                    + "already reached still stand");
         }
         String priorFingerprint;
         try {
@@ -1213,30 +1774,155 @@ public final class TaskLoop {
             return declineReuse(summary, "the worktree changed since " + priorRunId
                     + ", so its roles judged a different candidate");
         }
+        // Keyed by stage, because a verdict belongs to a stage and not to a role.
+        //
+        // It used to be keyed by the step label, which is the role name. A chain that reviews
+        // twice writes `reviewer` on both rows, so the second overwrote the first and the
+        // survivor was then handed to whichever review stage asked first. The failure is
+        // silent and in the worst direction: `review-second` exists precisely to be a second
+        // pair of eyes, and a run could satisfy it with the first pair's verdict and report
+        // two independent reviews. Legacy summaries carry no stage on their rows; those are
+        // admitted only for a role the current workflow dispatches exactly once, where the
+        // role name is an unambiguous name for the stage.
         Map<String, Map<String, Object>> reusable = new LinkedHashMap<>();
+        Map<String, String> keyToRole = new LinkedHashMap<>();
         Object steps = prior.get("steps");
+        // A summary this code wrote carries a `stage` on every stage row. When it does, only
+        // stage rows are reuse candidates; a role row with no stage is a fix-round dispatch, an
+        // intermediate step in some other stage's repair rather than a stage verdict of its
+        // own, and reusing it keyed by its role would let an implementer's mid-repair state
+        // stand in for a stage that never independently passed. The role-name fallback is kept
+        // only for a legacy summary, which predates stage keying and has no stage on any row.
+        boolean stageKeyed = false;
+        if (steps instanceof List<?> scan) {
+            for (Object item : scan) {
+                if (item instanceof Map<?, ?> row && row.get("profile") != null
+                        && row.get("stage") != null) {
+                    stageKeyed = true;
+                    break;
+                }
+            }
+        }
         if (steps instanceof List<?> rows) {
             for (Object item : rows) {
                 if (!(item instanceof Map<?, ?> row)) continue;
-                String label = String.valueOf(row.get("step"));
                 if (row.get("profile") == null) continue;
-                if (!Boolean.TRUE.equals(row.get("ok"))) { reusable.remove(label); continue; }
+                String role = String.valueOf(row.get("step"));
+                String key;
+                if (row.get("stage") != null) {
+                    key = String.valueOf(row.get("stage"));
+                } else if (!stageKeyed && workflow.stagesFor(role).size() == 1) {
+                    key = role;
+                } else {
+                    continue;
+                }
+                if (!Boolean.TRUE.equals(row.get("ok"))) { reusable.remove(key); continue; }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> entry = (Map<String, Object>) row;
-                reusable.put(label, entry);
+                reusable.put(key, entry);
+                keyToRole.put(key, role);
             }
         }
-        for (String role : List.copyOf(reusable.keySet())) {
-            Object blocking = prior.get("reviewer".equals(role) ? "blocking_findings"
-                    : "visual_qa".equals(role) ? "visual_blocking_findings"
-                    : role + "_blocking_findings");
-            if (blocking instanceof Number number && number.longValue() > 0) reusable.remove(role);
+        // A pass carrying a P1 is not a pass; it is a fix round that had not happened yet. The
+        // count is read from the row when the row has one, because the summary's own
+        // `blocking_findings` is keyed by role and so cannot answer for a chain that reviews
+        // more than once.
+        for (String key : List.copyOf(reusable.keySet())) {
+            Map<String, Object> row = reusable.get(key);
+            Object blocking = row.get("blocking_findings");
+            if (blocking == null) {
+                String role = keyToRole.get(key);
+                blocking = prior.get("reviewer".equals(role) ? "blocking_findings"
+                        : "visual_qa".equals(role) ? "visual_blocking_findings"
+                        : role + "_blocking_findings");
+            }
+            if (blocking instanceof Number number && number.longValue() > 0) reusable.remove(key);
         }
-        if (!reusable.isEmpty()) {
-            summary.put("reused_judgements", Map.of("from", priorRunId,
-                    "roles", List.copyOf(reusable.keySet())));
+        Map<String, String> declined = new LinkedHashMap<>();
+        // The prior run may already have marked a verdict stale — a review that passed and was
+        // then overtaken by a repair the workflow did not recheck. Its step row is still
+        // `ok=true`, so nothing above drops it, but the run that produced it recorded that it
+        // no longer described the candidate. Believing it now would resurrect exactly the
+        // judgement that run had already retired.
+        java.util.Set<String> priorStale = new java.util.LinkedHashSet<>();
+        if (prior.get("stages_judging_an_earlier_candidate") instanceof List<?> staleRows) {
+            for (Object staleRow : staleRows) priorStale.add(String.valueOf(staleRow));
         }
+        for (String key : List.copyOf(reusable.keySet())) {
+            if (priorStale.contains(key)) {
+                reusable.remove(key);
+                declined.put(key, "that run had already retired this verdict: a later repair "
+                        + "changed the candidate and the stage was not rechecked");
+            }
+        }
+        // The bytes each verdict actually judged, per stage, not the run as a whole. The
+        // run-level fingerprint above proves the prior run's *final* tree matches; it cannot
+        // prove that an individual stage judged that final tree, because a stage may have
+        // passed an earlier revision inside a run that later changed the tree. So a stage whose
+        // recorded candidate does not match the tree we are resuming on is dropped here, before
+        // it can be listed as reusable at all.
+        for (String key : List.copyOf(reusable.keySet())) {
+            Object judged = reusable.get(key).get("candidate_fingerprint");
+            if (!(judged instanceof String stamped) || stamped.isBlank()) {
+                reusable.remove(key);
+                declined.put(key, "its evidence records no candidate fingerprint, so there is "
+                        + "no way to show it judged the tree being resumed");
+            } else if (!stamped.equals(fingerprint)) {
+                reusable.remove(key);
+                declined.put(key, "it judged a different revision inside " + priorRunId
+                        + " than the tree being resumed");
+            }
+        }
+        // Whether the same judge, under the same rules, would be asked again.
+        //
+        // The hashes above prove the bytes have not moved. They cannot prove this: they cover
+        // the project's `.warden`, and who may fill a role, whether it must differ from the
+        // implementer, its prompt and its schema all live in the operator's own home. Without
+        // this an operator could swap the reviewer roster to another vendor, continue, and
+        // have the new reviewer's stage satisfied by the old reviewer's verdict.
+        //
+        // Declined per stage, never globally. A changed reviewer says nothing about whether
+        // the implementer's own stage still stands, and invalidating it too would charge for a
+        // dispatch nothing had called into question.
+        for (String key : List.copyOf(reusable.keySet())) {
+            String difference = RoleContract.differenceFrom(
+                    reusable.get(key).get("role_contract"),
+                    currentStageFor(workflow, key, keyToRole.get(key)), user);
+            if (difference == null) continue;
+            reusable.remove(key);
+            declined.put(key, difference);
+        }
+        if (!declined.isEmpty()) {
+            summary.put("reuse_declined_by_stage", declined);
+            for (Map.Entry<String, String> entry : declined.entrySet()) {
+                progress.line("note  not reusing the verdict for stage '" + entry.getKey()
+                        + "': " + entry.getValue());
+            }
+        }
+        // `reused_judgements` is not set here. What is carried over is decided at the moment
+        // each verdict is consumed, because a stage that looks reusable now can be invalidated
+        // before its turn by an ordinary dispatch earlier in this same resume. The engine
+        // records the stages it actually reused as it consumes them.
         return reusable;
+    }
+
+    /**
+     * The stage a reusable verdict would be reused for, in the workflow as it stands now, or
+     * null when this workflow no longer has such a stage.
+     *
+     * The key is a stage name for anything this code wrote, and a role name only for a
+     * summary old enough to predate stage-keyed rows — which is admitted at all only when the
+     * role has exactly one stage, so the lookup is unambiguous either way. The whole stage is
+     * returned, not just its routing, because its current role is the thing the recorded
+     * contract has to match: a stage that kept its name but changed its role is a different
+     * job, and returning only routing hid exactly that change.
+     */
+    private static Workflow.Stage currentStageFor(Workflow workflow, String key, String role) {
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.name().equals(key)) return stage;
+        }
+        List<Workflow.Stage> sharing = workflow.stagesFor(role);
+        return sharing.size() == 1 ? sharing.get(0) : null;
     }
 
     private Map<String, Map<String, Object>> declineReuse(Map<String, Object> summary, String why) {
@@ -1250,7 +1936,8 @@ public final class TaskLoop {
     }
 
     /** What is about to happen, before the first vendor is paid to do any of it. */
-    private void header(TaskSpec.ResolvedTask task, String runId, Workflow workflow, boolean dryRun) {
+    private void header(TaskSpec.ResolvedTask task, String runId, Workflow workflow, boolean dryRun,
+                        CallPlan plan) {
         progress.blank();
         progress.line("run   " + runId + (dryRun ? "   (dry run: nothing is dispatched)" : ""));
         progress.line("task  " + task.id() + "   risk=" + task.risk()
@@ -1262,6 +1949,21 @@ public final class TaskLoop {
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
                 + Progress.money(task.budget().maxCostUsd()) + " ceiling, fix rounds <= "
                 + task.maxFixAttempts());
+        // The arithmetic, before anything is spent rather than after. An operator who is going
+        // to be told at the end that the chain never finished is entitled to be told at the
+        // start that it could not have.
+        long cap = task.budget().maxRoleRuns();
+        int minimum = plan.minimumToFinish();
+        progress.line("cost  " + minimum + " vendor call(s) if nothing has to be repaired: "
+                + String.join(", ", plan.payingStages()));
+        if (cap > 0 && cap < minimum) {
+            progress.line("      WARNING: the cap of " + cap + " cannot reach the end of this "
+                    + "chain even with no repairs; the run will stop with stages outstanding");
+        } else if (cap > 0) {
+            progress.line("      the cap of " + cap + " leaves " + (cap - minimum)
+                    + " call(s) for repairs; each repair round costs its fix plus every "
+                    + "judgement it invalidates");
+        }
         progress.blank();
         if (!dryRun) {
             workspace.state(Workspace.State.RUNNING);
@@ -1284,6 +1986,25 @@ public final class TaskLoop {
             progress.line("      the candidate is ready and nothing has been landed");
         } else if ("human_escalation".equals(nextAction)) {
             progress.line("      stopped for a person; nothing has been landed");
+        }
+        // Said separately, because they are separate facts and a run can be a yes on one and
+        // a no on the other. A stop that buried a clean review under one word is the reason
+        // this exists: the reviewer's verdict was the most expensive thing the run produced.
+        if (Boolean.TRUE.equals(summary.get("candidate_review_passed"))) {
+            progress.line("      the candidate passed every review that ran");
+        }
+        if (summary.get("pending_stages") instanceof List<?> pending && !pending.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (Object row : pending) {
+                if (row instanceof Map<?, ?> stage) {
+                    names.add(stage.get("stage") + " (" + stage.get("reason") + ")");
+                }
+            }
+            progress.line("      the workflow did not finish; outstanding: "
+                    + String.join(", ", names));
+        }
+        if (summary.get("safe_next_step") instanceof String step) {
+            progress.line("      next: " + step);
         }
         progress.line("      warden report " + runId + " --text");
         Object options = summary.get("decision_options");
@@ -1361,6 +2082,11 @@ public final class TaskLoop {
             }
             if (step.details().get("failover_pending") != null) {
                 entry.put("failover_pending", step.details().get("failover_pending"));
+            }
+            // Carried onto the row rather than left in the role report, because the row is
+            // what a continuation reads when deciding whether this verdict may stand.
+            if (step.details().get("role_contract") != null) {
+                entry.put("role_contract", step.details().get("role_contract"));
             }
             entry.put("cost_usd", step.details().get("cost_usd"));
             entry.put("attempts_cost_usd", step.details().get("attempts_cost_usd"));
@@ -1517,6 +2243,11 @@ public final class TaskLoop {
         summary.put("unpriced_calls", (long) budget.unpriced());
         summary.put("cost_ceiling_binding", budget.unpriced() == 0);
         summary.put("steps", steps);
+        // A stop is where the three questions are most often confused, so it is where they are
+        // most worth separating: a candidate that passed review can sit inside a run that
+        // stopped, and saying only that the run stopped throws that away.
+        describeCompletion(summary);
+        summary.put("safe_next_step", safeNextStep(reason, summary));
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
         Object base = summary.get("diff_base_commit");
@@ -1546,6 +2277,143 @@ public final class TaskLoop {
         ledger.append("task_run", summary);
         footer(runIdentity, reason, "human_escalation", budget, summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
+    }
+
+    /**
+     * Three different questions the summary used to answer with one word.
+     *
+     * `ok: false` meant, indiscriminately, that the investigation found nothing, that the
+     * candidate was rejected by a reviewer, and that the chain ran out of room before it could
+     * finish — and an operator reading it could not tell which. Measured on a live run: three
+     * reviews, the last of them a clean pass with no blocking finding, a good candidate in the
+     * worktree, and a summary that said `budget_exhausted` and nothing else. The work was
+     * sound and the report gave nobody a reason to believe it.
+     *
+     * So they are separated. Whether the candidate has been judged and survived is
+     * `candidate_review_passed`. Whether the declared chain got to the end is
+     * `workflow_incomplete` plus the stages it still owes. Neither implies the other, and a
+     * run can legitimately be a pass on the first and a no on the second.
+     */
+    @SuppressWarnings("unchecked")
+    private static void describeCompletion(Map<String, Object> summary) {
+        List<String> declared = new ArrayList<>();
+        if (summary.get("workflow") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> stage && stage.get("stage") != null) {
+                    declared.add(String.valueOf(stage.get("stage")));
+                }
+            }
+        }
+        java.util.Set<String> completed = new java.util.LinkedHashSet<>();
+        if (summary.get("completed_stages") instanceof List<?> rows) {
+            for (Object row : rows) completed.add(String.valueOf(row));
+        }
+        java.util.Set<String> skipped = new java.util.LinkedHashSet<>();
+        for (String key : List.of("skipped_stages", "inapplicable_stages")) {
+            if (!(summary.get(key) instanceof List<?> rows)) continue;
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> entry) skipped.add(String.valueOf(entry.get("stage")));
+            }
+        }
+        java.util.Set<String> attempted = new java.util.LinkedHashSet<>();
+        if (summary.get("steps") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> step && step.get("stage") != null) {
+                    attempted.add(String.valueOf(step.get("stage")));
+                }
+            }
+        }
+        java.util.Set<String> stale = new java.util.LinkedHashSet<>();
+        if (summary.get("stages_judging_an_earlier_candidate") instanceof List<?> rows) {
+            for (Object row : rows) stale.add(String.valueOf(row));
+        }
+        List<Map<String, Object>> pending = new ArrayList<>();
+        for (String stage : declared) {
+            if (completed.contains(stage) || skipped.contains(stage)) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage);
+            // Three outstanding states, not one. A stage that passed and was then overtaken by
+            // a repair has a verdict on disk about a tree that no longer exists; a stage that
+            // ran and objected has evidence to read; a stage that never got a turn has a
+            // ceiling to raise. Collapsing them sends an operator to the wrong one of three.
+            row.put("reason", stale.contains(stage) ? "judged_an_earlier_candidate"
+                    : attempted.contains(stage) ? "did_not_pass" : "not_reached");
+            pending.add(row);
+        }
+        summary.put("pending_stages", pending);
+        summary.put("workflow_incomplete", !pending.isEmpty());
+
+        long blockers = 0;
+        boolean anyJudged = false;
+        boolean allClean = true;
+        if (summary.get("review_coverage") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (!(row instanceof Map<?, ?> entry)) continue;
+                anyJudged = true;
+                long found = entry.get("blocking_findings") instanceof Number number
+                        ? number.longValue() : 0;
+                blockers += found;
+                if (found > 0 || !Boolean.TRUE.equals(entry.get("ok"))) allClean = false;
+            }
+        }
+        summary.put("open_blocking_findings", blockers);
+        // Never true by default. A chain whose judging stages were all skipped or never
+        // reached has not passed review; it has not had one.
+        summary.put("candidate_review_passed", anyJudged && allClean);
+    }
+
+    /**
+     * The one command that moves this run forward without losing what it has.
+     *
+     * A stop reason is a diagnosis, not an instruction, and the gap between them is where
+     * runs get re-run from scratch. Each branch here names the change and then the
+     * continuation that keeps the verdicts already paid for.
+     */
+    private static String safeNextStep(String reason, Map<String, Object> summary) {
+        String runId = String.valueOf(summary.get("run_id"));
+        String taskId = String.valueOf(summary.get("task_id"));
+        String carryOn = "warden approve " + runId + " --decision retry --note \"<why>\""
+                + "  then  warden run " + taskId + " --continue " + runId;
+        return switch (reason) {
+            // Two ceilings, two different edits. Telling somebody whose money ran out to
+            // raise the call limit names a number that was never binding, and the run would
+            // stop in exactly the same place.
+            case "budget_insufficient_to_finish", "budget_exhausted" -> {
+                String kept = ". Neither ceiling is part of what the work is judged by, so the "
+                        + "verdicts this run already reached on this tree are kept rather than "
+                        + "paid for a second time.";
+                if ("max_cost_usd".equals(summary.get("budget_limit_hit"))) {
+                    yield "raise budgets.max_cost_usd in .warden/tasks/" + taskId + ".yaml — "
+                            + summary.get("budget_stop") + " — then: " + carryOn
+                            + ". Raising max_role_runs would not change where this run stopped. "
+                            + "Note that the ceiling only measures calls whose vendor reported "
+                            + "a price: " + summary.get("unpriced_calls") + " of this run's "
+                            + "calls reported none and were not counted against it" + kept;
+                }
+                Object reserve = summary.get("budget_reserve");
+                long floor = reserve instanceof Map<?, ?> map
+                        && map.get("calls_needed_to_repair_and_finish") instanceof Number needed
+                        && summary.get("role_runs") instanceof Number spent
+                        ? spent.longValue() + needed.longValue()
+                        : 0;
+                yield "raise budgets.max_role_runs in .warden/tasks/" + taskId + ".yaml"
+                        + (floor > 0 ? " to at least " + floor : "") + ", then: " + carryOn + kept;
+            }
+            case "quota_exhausted" -> "wait for the quota window named in the vendor message, "
+                    + "or add a profile from another vendor, then: " + carryOn;
+            case "failover_requires_confirmation" -> "warden approve " + runId
+                    + " --decision switch  then  warden run " + taskId + " --continue " + runId;
+            case "baseline_failed" -> "the project's own checks were already failing before any "
+                    + "vendor ran. Fix that breakage, or change the baseline contract "
+                    + "deliberately, then start a new run.";
+            case "preflight_outside_scope" -> "revert, commit, or bring into scope the paths "
+                    + "named in preexisting_violations, then start a new run.";
+            case "contract_mutated" -> "a file under .warden changed while the run was in "
+                    + "flight, so nothing this run produced can be trusted against the terms it "
+                    + "started with. Restore the contract and start a new run.";
+            default -> "read `warden report " + runId + " --text`, then either address what it "
+                    + "names and start a new run, or " + carryOn;
+        };
     }
 
     /**
@@ -1601,6 +2469,18 @@ public final class TaskLoop {
                 + " (" + pending.get("from_vendor") + ") reported a spent subscription. "
                 + "Switch to " + pending.get("to_profile") + " (" + pending.get("to_vendor")
                 + ")? " + pending.get("independence_after_switch");
+    }
+
+    /** The repair branches the plan costed, for a preview that has to print them. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> recoveryBranches(Map<String, Object> summary) {
+        if (!(summary.get("budget_plan") instanceof Map<?, ?> plan)) return List.of();
+        if (!(plan.get("recovery_branches") instanceof List<?> rows)) return List.of();
+        List<Map<String, Object>> branches = new ArrayList<>();
+        for (Object row : rows) {
+            if (row instanceof Map<?, ?> branch) branches.add((Map<String, Object>) branch);
+        }
+        return branches;
     }
 
     /** One field of the gate this run published, or null if it published none. */

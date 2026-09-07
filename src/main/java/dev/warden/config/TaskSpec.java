@@ -215,5 +215,43 @@ public record TaskSpec(
             VisualQa visualQa,
             Budget budget,
             long maxFixAttempts,
-            long timeoutMinutes) {}
+            long timeoutMinutes) {
+
+        /**
+         * A hash of what this task is judged by, with the bounds on how long it may take
+         * left out.
+         *
+         * The whole-tree contract hash answers "did anything at all move", which is the right
+         * question while a run is in flight — a vendor may not rewrite its own terms. It is
+         * the wrong question between runs. A run stopped by its call ceiling can only be
+         * continued by raising that ceiling, and raising it edits the task file, which moves
+         * the tree hash, which throws away the review verdicts the stop was supposed to
+         * preserve. The operator then pays a second reviewer to reach the same conclusion
+         * about bytes nobody touched.
+         *
+         * So the goal, the scope, the commands, the authority and the browser contract are
+         * hashed here, and `budgets`, `max_fix_attempts` and `timeout_minutes` are not. Those
+         * four say how much may be spent reaching a verdict; they say nothing about what the
+         * verdict is about. Rewriting an acceptance command to make a run go green still
+         * moves this hash, which is the case the invariant exists for.
+         */
+        public String acceptanceFingerprint() {
+            java.util.Map<String, String> fields = new java.util.TreeMap<>();
+            fields.put("id", id);
+            fields.put("goal", goal);
+            fields.put("non_goals", String.join(" ", nonGoals));
+            fields.put("risk", risk);
+            fields.put("base_ref", baseRef);
+            fields.put("scope_paths", String.join(" ", scopePaths));
+            fields.put("baseline_commands", String.join(" ", baselineCommands));
+            fields.put("acceptance_commands", String.join(" ", acceptanceCommands));
+            fields.put("authority", authority.workspaceWrite() + "/" + authority.network()
+                    + "/" + authority.land());
+            fields.put("visual_required", String.valueOf(visualQa.required()));
+            fields.put("visual_url", String.valueOf(visualQa.url()));
+            fields.put("visual_start", String.valueOf(visualQa.start()));
+            fields.put("visual_scenarios", String.join(" ", visualQa.scenarios()));
+            return WardenTree.digest(fields);
+        }
+    }
 }

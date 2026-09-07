@@ -63,6 +63,7 @@ public final class Main {
                 case "run" -> runLoop(args);
                 case "do" -> doIntent(args);
                 case "doctor" -> doctor();
+                case "dashboard" -> dashboard(args);
                 case "ledger" -> ledger();
                 case "report" -> report(args);
                 case "status" -> status(args);
@@ -110,6 +111,25 @@ public final class Main {
         result.put("baseline_commands", loaded.resolved().baselineCommands());
         result.put("acceptance_commands", loaded.resolved().acceptanceCommands());
         System.out.println(Json.write(result));
+        return 0;
+    }
+
+    private static int dashboard(String[] args) throws Exception {
+        Path project = Path.of(option(args, "--project", ".")).toAbsolutePath().normalize();
+        int port = Integer.parseInt(option(args, "--port", "0"));
+        if (port < 0 || port > 65535) throw new IllegalArgumentException("dashboard port must be 0..65535");
+        try (var dashboard = new dev.warden.dashboard.Dashboard(project, port)) {
+            dashboard.start();
+            System.out.println(Json.write(Map.of("ok", true, "url", dashboard.url(),
+                    "project", project.toString(), "read_only", true)));
+            if (hasFlag(args, "--open-orca")) {
+                var opened = new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
+                        List.of("tab", "create", "--worktree", "path:" + project, "--url", dashboard.url()));
+                if (!opened.ok()) System.err.println("Dashboard is available at " + dashboard.url()
+                        + "; Orca did not open the tab: " + opened.stderr());
+            }
+            new java.util.concurrent.CountDownLatch(1).await();
+        }
         return 0;
     }
 
@@ -181,6 +201,8 @@ public final class Main {
             row.put("profile", profile.name());
             row.put("role", profile.role());
             row.put("vendor", profile.vendor());
+            row.put("model", profile.model());
+            row.put("effort", profile.effort());
             // Null for `runner: local`, which starts no process. The endpoint is what an
             // operator would have looked at the command for, so it is listed beside it.
             row.put("command", profile.command());
@@ -866,6 +888,9 @@ public final class Main {
 
                   warden setup                 create a starter ~/.warden (never overwrites)
                   warden doctor                verify Java, vendor profiles and live Orca readiness
+                  warden dashboard [--project DIR] [--port N] [--open-orca]
+                                               serve a local read-only role/settings view;
+                                               stays running until Ctrl+C, launches no agents
                   warden profiles              which profiles load, which are eligible, and why not
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and

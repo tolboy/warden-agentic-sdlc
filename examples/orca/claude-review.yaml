@@ -1,0 +1,23 @@
+version: 1
+profile: orca-claude-review
+role: reviewer
+vendor: claude
+command: claude
+model: opus
+effort: max
+runner: orca
+prompt_delivery: workspace_file
+read_only: true
+limits:
+  wall_clock_minutes: 60
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+notes: "Opt-in Orca profile, not equivalent to a direct --allowedTools profile. Read-only uses Warden's content check, not a provider sandbox. Keep restricted direct profiles in policy until launch/tool parity is proven."
+verification:
+  what_to_check:
+    - "launch.requested and launch.effective both contain model opus and effort max"
+    - "worker_done contains the typed reviewer artifact; delivery is acknowledged and worker released"
+    - "worktree content fingerprint stays unchanged"
+    - "read-only is checked by Warden; provider tool grants are inherited, not copied from direct"

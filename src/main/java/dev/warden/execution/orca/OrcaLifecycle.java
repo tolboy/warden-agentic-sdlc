@@ -75,7 +75,19 @@ public final class OrcaLifecycle {
                          String coordinatorHandle, String worktreeSelector, String worktreeId,
                          String agent, String model, String readOnlyFingerprint,
                          State state, String awaiting, String awaitingMessage,
-                         Instant createdAt, Instant updatedAt) {
+                         Instant createdAt, Instant updatedAt,
+                         Map<String, Object> launchContract, Map<String, Object> launchEvidence) {
+
+        /** Older records remain inspectable; they cannot prove a new launch contract on resume. */
+        public Worker(String key, String role, String taskId, String dispatchId,
+                      String coordinatorHandle, String worktreeSelector, String worktreeId,
+                      String agent, String model, String readOnlyFingerprint,
+                      State state, String awaiting, String awaitingMessage,
+                      Instant createdAt, Instant updatedAt) {
+            this(key, role, taskId, dispatchId, coordinatorHandle, worktreeSelector, worktreeId,
+                    agent, model, readOnlyFingerprint, state, awaiting, awaitingMessage,
+                    createdAt, updatedAt, Map.of(), Map.of());
+        }
 
         public Map<String, Object> toMap() {
             Map<String, Object> value = new LinkedHashMap<>();
@@ -88,6 +100,8 @@ public final class OrcaLifecycle {
             value.put("worktree_id", worktreeId);
             value.put("agent", agent);
             value.put("model", model);
+            value.put("launch_contract", launchContract);
+            value.put("launch", launchEvidence);
             value.put("read_only_fingerprint", readOnlyFingerprint);
             value.put("state", state.jsonValue());
             value.put("awaiting", awaiting);
@@ -113,7 +127,8 @@ public final class OrcaLifecycle {
                     optional(value, "awaiting"),
                     optional(value, "awaiting_message"),
                     instant(value, "created_at"),
-                    instant(value, "updated_at"));
+                    instant(value, "updated_at"),
+                    optionalMap(value, "launch_contract"), optionalMap(value, "launch"));
         }
 
         public boolean active() { return state == State.ACTIVE; }
@@ -125,13 +140,26 @@ public final class OrcaLifecycle {
         public Worker at(State next, String waiting, String message, Instant now) {
             return new Worker(key, role, taskId, dispatchId, coordinatorHandle, worktreeSelector,
                     worktreeId, agent, model, readOnlyFingerprint, next, waiting, message,
-                    createdAt, now);
+                    createdAt, now, launchContract, launchEvidence);
         }
 
         public Worker withCoordinator(String handle, Instant now) {
             return new Worker(key, role, taskId, dispatchId, handle, worktreeSelector,
                     worktreeId, agent, model, readOnlyFingerprint, state, awaiting, awaitingMessage,
-                    createdAt, now);
+                    createdAt, now, launchContract, launchEvidence);
+        }
+
+        public Worker withLaunch(Map<String, Object> contract, Map<String, Object> evidence) {
+            return new Worker(key, role, taskId, dispatchId, coordinatorHandle, worktreeSelector,
+                    worktreeId, agent, model, readOnlyFingerprint, state, awaiting, awaitingMessage,
+                    createdAt, updatedAt, contract, evidence);
+        }
+
+        private static Map<String, Object> optionalMap(Map<String, Object> value, String key) throws IOException {
+            Object raw = value.get(key);
+            if (raw == null) return Map.of();
+            if (!(raw instanceof Map<?, ?> map)) throw malformed(key + " must be an object");
+            return cast(map);
         }
     }
 

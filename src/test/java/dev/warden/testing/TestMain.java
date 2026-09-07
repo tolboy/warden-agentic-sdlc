@@ -26,6 +26,8 @@ public final class TestMain {
                 new dev.warden.DoCommandTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),
+                new dev.warden.LaunchSettingsTest(),
+                new dev.warden.DashboardTest(),
                 new dev.warden.OrcaSettlementTest(),
                 new dev.warden.OrcaLifecycleTest(),
                 new dev.warden.OrcaRecoveryTest(),
@@ -38,7 +40,13 @@ public final class TestMain {
         );
 
         Check check = new Check();
+        for (String requested : args) {
+            if (suites.stream().noneMatch(suite -> suite.name().equals(requested))) {
+                throw new IllegalArgumentException("Unknown suite: " + requested);
+            }
+        }
         for (Suite suite : suites) {
+            if (args.length > 0 && java.util.Arrays.stream(args).noneMatch(suite.name()::equals)) continue;
             check.beginSuite(suite.name());
             try {
                 suite.run(check);

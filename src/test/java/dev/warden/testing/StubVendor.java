@@ -52,7 +52,31 @@ public final class StubVendor {
         return seen >= Integer.parseInt(threshold);
     }
 
+    /**
+     * The inverse of {@link #succeedsNow}: clean for the first `threshold - 1` calls, then
+     * objecting from there on.
+     *
+     * A reviewer that only ever warms up cannot model the case that matters most for a
+     * recheck. What a recheck is for is a fix that repaired one stage and broke a verdict
+     * another stage had already given, and that reviewer passes first and objects second.
+     */
+    private static boolean withinFirst(String[] args) throws Exception {
+        String counterPath = flag(args, "--counter");
+        String threshold = flag(args, "--threshold");
+        if (counterPath == null || threshold == null) return true;
+        Path counter = Path.of(counterPath);
+        int seen = Files.isRegularFile(counter)
+                ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+        seen++;
+        Files.writeString(counter, String.valueOf(seen), StandardCharsets.UTF_8);
+        return seen < Integer.parseInt(threshold);
+    }
+
     public static void main(String[] args) throws Exception {
+        if (flag(args, "--expected-effort") != null
+                && !flag(args, "--expected-effort").equals(flag(args, "--actual-effort"))) {
+            throw new IllegalArgumentException("effort was not delivered intact");
+        }
         String mode = args.length > 0 ? args[0] : "review";
         switch (mode) {
             case "impl" -> {
@@ -68,10 +92,44 @@ public final class StubVendor {
                         + "\"usage\":{\"input_tokens\":7,\"output_tokens\":5,\"total_tokens\":12},"
                         + "\"modelUsage\":{\"stub-impl-model\":{}}}");
             }
-            case "review" -> {
+            // An implementer that produces a distinct tree on every dispatch: it writes the
+            // result the gate looks for, and a `src/rev.txt` carrying the call count, so two
+            // dispatches leave two different source fingerprints. It models a resume whose
+            // re-dispatched implementer moves the tree out from under a carried review.
+            case "impl-grows" -> {
+                Path src = Path.of("src");
+                Files.createDirectories(src);
+                Files.writeString(src.resolve("result.txt"), "ok", StandardCharsets.UTF_8);
+                String revision = "1";
+                String counterPath = flag(args, "--counter");
+                if (counterPath != null) {
+                    Path counter = Path.of(counterPath);
+                    int seen = Files.isRegularFile(counter)
+                            ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+                    seen++;
+                    Files.writeString(counter, String.valueOf(seen), StandardCharsets.UTF_8);
+                    revision = String.valueOf(seen);
+                }
+                Files.writeString(src.resolve("rev.txt"), revision, StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"revision " + revision + "\","
+                        + "\"files_changed\":[\"src/result.txt\",\"src/rev.txt\"]}}");
+            }
+            // A passing verdict with no `role` field, so the executor fills in whichever role
+            // dispatched it. Lets one stub stand in for a reviewer or an architect stage
+            // without pretending to be a role it is not.
+            case "verdict-pass" -> System.out.println(
+                    "{\"structuredOutput\":{\"task_id\":\"hello\",\"status\":\"completed\","
+                    + "\"verdict\":\"pass\",\"summary\":\"looked and approved\",\"findings\":[]},"
+                    + "\"total_cost_usd\":0.002}");
+            // Same envelope, opposite arc: passes the diff it is first shown and objects to
+            // what a later fix round did to it. It exists so a recheck can be tested against
+            // a reviewer that both ran successfully and returned a P1 — the exact pair the
+            // recheck used to collapse into "it exited zero, carry on".
+            case "review", "review-regresses" -> {
                 // Answer buried in a text envelope, the shape Grok produces when its
                 // structured-output channel does not engage.
-                boolean passes = succeedsNow(args);
+                boolean passes = mode.equals("review") ? succeedsNow(args) : withinFirst(args);
                 String findings = passes ? "[]"
                         : "[{\\\"severity\\\":\\\"P1\\\",\\\"path\\\":\\\"src/result.txt\\\","
                         + "\\\"message\\\":\\\"not good enough\\\","
@@ -85,6 +143,20 @@ public final class StubVendor {
                         + (passes ? "pass" : "fail") + "\\\","
                         + "\\\"summary\\\":\\\"review\\\",\\\"findings\\\":" + findings + "}\","
                         + "\"total_cost_usd\":0.004,\"num_turns\":2,\"stopReason\":\"end_turn\"}");
+            }
+            // Passes the first reading, then falls over. The other way a recheck can come
+            // back: not an objection to the work, but a role that did not complete at all.
+            // Both have to stop the run, and neither may leave the stage it happened in
+            // listed as one that passed.
+            case "review-then-fails" -> {
+                if (withinFirst(args)) {
+                    System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\","
+                            + "\"task_id\":\"hello\",\"status\":\"completed\",\"verdict\":\"pass\","
+                            + "\"summary\":\"review\",\"findings\":[]},\"total_cost_usd\":0.004}");
+                } else {
+                    System.err.println("Error: the reviewer crashed");
+                    System.exit(4);
+                }
             }
             case "sneaky" -> {
                 Path target = Path.of("src", "result.txt");

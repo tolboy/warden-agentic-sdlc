@@ -28,6 +28,7 @@ public final class WorkflowTest implements Suite {
             """;
 
     @Override public void run(Check check) {
+        repairPreviewChecks(check);
         Policy silent = Policy.parse(ROLES, "policy.yaml");
         check.that("a policy that declares no workflow is not treated as declaring one",
                 !silent.workflowDeclared());
@@ -200,5 +201,31 @@ public final class WorkflowTest implements Suite {
         check.that("the policy `warden setup` writes declares a workflow", shipped.workflowDeclared());
         check.eq("and it is exactly the built-in chain, written out",
                 Workflow.builtIn().toList(), shipped.workflow().toList());
+    }
+    private void repairPreviewChecks(Check check) {
+        var plan = new dev.warden.run.CallPlan(Workflow.builtIn(), stage -> false);
+        // implement, review(fail), repair, review(pass), visual QA: five paid calls.
+        check.eq("a five-call cap can finish one review repair and visual QA", true,
+                branch(plan, 5, "full", "review").get("reachable_under_cap"));
+        check.eq("four calls cannot finish that same branch", false,
+                branch(plan, 4, "full", "review").get("reachable_under_cap"));
+        check.eq("full mode refuses the four-call repair branch", false,
+                branch(plan, 4, "full", "review").get("repair_allowed_under_cap"));
+        check.eq("partial mode can fund repair and review with four calls", true,
+                branch(plan, 4, "partial", "review").get("repair_allowed_under_cap"));
+        check.eq("partial permission does not claim the entire branch can finish", false,
+                branch(plan, 4, "partial", "review").get("reachable_under_cap"));
+        // implement, failing free gate, repair, first review: three paid calls.
+        check.eq("partial gate repair includes reaching the first reviewer", true,
+                branch(plan, 3, "partial", "gates").get("repair_allowed_under_cap"));
+        check.eq("two calls cannot fund a gate repair and its first review", false,
+                branch(plan, 2, "partial", "gates").get("repair_allowed_under_cap"));
+    }
+
+    private static java.util.Map<?, ?> branch(dev.warden.run.CallPlan plan, long cap,
+                                              String mode, String name) {
+        return ((List<?>) plan.toMap(cap, mode).get("recovery_branches")).stream()
+                .map(value -> (java.util.Map<?, ?>) value)
+                .filter(value -> name.equals(value.get("stage"))).findFirst().orElseThrow();
     }
 }

@@ -24,6 +24,7 @@ public record Profile(
         String role,
         String vendor,
         String model,
+        String effort,
         String command,
         List<String> args,
         boolean readOnly,
@@ -44,7 +45,7 @@ public record Profile(
         boolean verified) {
 
     private static final Set<String> TOP_LEVEL = Set.of(
-            "version", "profile", "role", "vendor", "model", "command", "args", "read_only",
+            "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
             "verification", "notes");
@@ -67,7 +68,7 @@ public record Profile(
      * its first newline and silently discards every argument after it, so an inline prompt
      * reaches an npm-installed vendor as one line with the flags stripped off.
      */
-    public static final Set<String> PROMPT_DELIVERY = Set.of("argv", "stdin");
+    public static final Set<String> PROMPT_DELIVERY = Set.of("argv", "stdin", "workspace_file");
 
     /**
      * How the role is launched. {@code direct} is a vendor CLI in this process. {@code orca}
@@ -113,6 +114,27 @@ public record Profile(
                 : root.requireString("command");
         List<String> args = root.optStringList("args", List.of());
         String model = root.optString("model", null);
+        String effort = root.optString("effort", null);
+        if (effort != null) {
+            if (!effort.matches("[a-z][a-z0-9_-]*")) {
+                root.collector().add("effort must be a provider effort level, not a command or blank value");
+            }
+            if ("local".equals(runner)) {
+                root.collector().add("runner: local does not support effort; it cannot silently drop it");
+            }
+            if ("orca".equals(runner) && (model == null || model.isBlank())) {
+                root.collector().add("runner: orca effort requires an explicit model");
+            }
+            if ("direct".equals(runner) && args.stream().noneMatch(a -> a.contains("{{effort}}"))) {
+                root.collector().add("runner: direct effort requires {{effort}} in args; replace the literal effort value");
+            }
+        } else if (args.stream().anyMatch(a -> a.contains("{{effort}}"))) {
+            root.collector().add("{{effort}} in args requires effort");
+        }
+        if ("orca".equals(runner) && !args.isEmpty()) {
+            root.collector().add("runner: orca cannot forward args (including tool grants, sandbox and turn limits); "
+                    + "keep runner: direct for those constraints instead of dropping them");
+        }
 
         // Default true: a role is read-only unless it explicitly says otherwise, so a typo
         // in this key cannot silently grant write access.
@@ -134,7 +156,14 @@ public record Profile(
         Values quota = root.optMap("quota").rejectUnknownKeys(QUOTA);
         List<String> quotaSignatures = quota.optStringList("signatures", List.of());
 
-        String promptDelivery = root.requireEnum("prompt_delivery", PROMPT_DELIVERY, "argv");
+        String promptDelivery = root.requireEnum("prompt_delivery", PROMPT_DELIVERY,
+                "orca".equals(runner) ? "workspace_file" : "argv");
+        if ("workspace_file".equals(promptDelivery) && !"orca".equals(runner)) {
+            root.collector().add("prompt_delivery: workspace_file requires runner: orca");
+        }
+        if ("orca".equals(runner) && !"workspace_file".equals(promptDelivery)) {
+            root.collector().add("runner: orca requires prompt_delivery: workspace_file; stdin/argv are not forwarded");
+        }
 
         // How a file the role must LOOK at reaches the vendor. Screenshots are the case that
         // forced this: a visual reviewer that only receives paths is reading a filename, not
@@ -210,7 +239,7 @@ public record Profile(
         List<String> whatToCheck = verification.optStringList("what_to_check", List.of());
 
         root.throwIfAny();
-        return new Profile(name, role, vendor, model, command, args, readOnly, wallClock,
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClock,
                 promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
                 probe, whatToCheck, verified);

@@ -74,6 +74,10 @@ public final class RoleRunnerTest implements Suite {
             writeProfile(home, "stub-impl", "implementer", "stubvendor",
                     "impl", false, "implementer",
                     "role, task_id, status, summary, files_changed");
+            Path effortProfile = home.resolve("profiles/stub-review.yaml");
+            Files.writeString(effortProfile, Files.readString(effortProfile)
+                    .replace("read_only: true", "read_only: true\neffort: max")
+                    .replace("\"{{prompt_file}}\"]", "\"{{prompt_file}}\", \"--expected-effort\", \"max\", \"--actual-effort\", \"{{effort}}\"]"));
 
             RoleRunner.Outcome dry = runRole(project, home, "reviewer", "dry", null, null, true);
             check.that("dry run resolves a profile", dry.ok());

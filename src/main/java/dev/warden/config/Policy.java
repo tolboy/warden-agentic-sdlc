@@ -23,7 +23,8 @@ import java.util.Set;
  * wrote the code and can leave one vendor reviewing its own work.
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
-                     Workflow workflow, boolean workflowDeclared, String failoverMode) {
+                     Workflow workflow, boolean workflowDeclared, String failoverMode,
+                     String repairReserve) {
 
     public record RoleSpec(String role, List<String> profiles, String strategy,
                            boolean requireIndependentVendor) {}
@@ -31,8 +32,25 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     public static final Set<String> STRATEGIES = Set.of("rotate", "first");
 
     private static final Set<String> TOP_LEVEL =
-            Set.of("version", "roles", "review", "workflow", "failover");
+            Set.of("version", "roles", "review", "workflow", "failover", "budget");
     private static final Set<String> FAILOVER_KEYS = Set.of("on_quota_exhausted", "note");
+    private static final Set<String> BUDGET_KEYS = Set.of("repair_reserve", "note");
+
+    /**
+     * How much of the remaining chain a repair round has to be able to pay for before it is
+     * allowed to start.
+     *
+     * `full` reserves the repair and every stage still owed, so a run either finishes or does
+     * not begin the attempt. `partial` reserves the repair and at least one stage that will
+     * judge what it produces, and lets the run make paid progress it cannot complete —
+     * finishing a review whose verdict a continuation reuses for nothing, at the price of
+     * possibly buying a regression instead.
+     *
+     * `full` is the default because the trade is the operator's to make and the conservative
+     * side of it is the one that cannot spend money on an outcome nobody asked for. Neither
+     * mode is silent: both record the arithmetic in `budget_plan` before the first dispatch.
+     */
+    public static final Set<String> REPAIR_RESERVES = Set.of("full", "partial");
 
     /**
      * What happens when the vendor filling a role reports a spent subscription and another
@@ -84,12 +102,15 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         Values failover = root.optMap("failover").rejectUnknownKeys(FAILOVER_KEYS);
         String failoverMode = failover.requireEnum("on_quota_exhausted", FAILOVER_MODES, "confirm");
 
+        Values budget = root.optMap("budget").rejectUnknownKeys(BUDGET_KEYS);
+        String repairReserve = budget.requireEnum("repair_reserve", REPAIR_RESERVES, "full");
+
         boolean workflowDeclared = root.has("workflow");
         Workflow workflow = workflowDeclared ? Workflow.parse(root, "workflow") : Workflow.builtIn();
 
         root.throwIfAny();
         return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
-                failoverMode);
+                failoverMode, repairReserve);
     }
 
     public boolean reviewRequired(String risk) {

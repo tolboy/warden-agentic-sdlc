@@ -96,6 +96,28 @@ public final class WardenTree {
     }
 
     /**
+     * The same snapshot with one file's bytes replaced by a hash of only the part of it a
+     * verdict depends on.
+     *
+     * Used for exactly one decision: whether a role's judgement from an earlier run still
+     * describes this tree. {@link #digest} stays the answer to "has anything moved" and is
+     * what a live run is fenced by; this is the answer to "has anything a reviewer read
+     * moved", which is a narrower question and the only one worth asking after the run has
+     * already stopped. The narrowing is confined to the selected task file — every other file
+     * under `.warden` still enters by its full content, so a rewritten policy or a deleted
+     * scenario declines reuse exactly as before.
+     *
+     * @param taskFile         the selected task contract, relative to the project root
+     * @param acceptanceOfTask {@link TaskSpec.ResolvedTask#acceptanceFingerprint()} for it
+     */
+    public static String acceptanceDigest(Map<String, String> snapshot, String taskFile,
+                                          String acceptanceOfTask) {
+        Map<String, String> surface = new TreeMap<>(snapshot);
+        if (taskFile != null) surface.put(taskFile, acceptanceOfTask);
+        return digest(surface);
+    }
+
+    /**
      * Paths a task's blast radius is measured over: the project's source, with Warden's own
      * configuration removed. Sound only because a change to any of it has already failed the
      * run by this point.

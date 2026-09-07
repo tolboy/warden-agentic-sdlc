@@ -63,6 +63,25 @@ public final class RunReport {
         report.put("goal", goalOf(projectRoot, summary.get("task_id")));
         report.put("workflow", summary.get("workflow"));
         report.put("skipped_stages", summary.get("skipped_stages"));
+        // Whether the candidate was judged, whether the chain finished, and what to do next
+        // are three answers, and the joined report used to carry only `reason` for all of
+        // them. They are copied rather than recomputed: the loop is the only thing that knows
+        // which stage completed, and a reader that re-derived it could disagree with the run.
+        report.put("candidate_review_passed", summary.get("candidate_review_passed"));
+        report.put("workflow_incomplete", summary.get("workflow_incomplete"));
+        report.put("pending_stages", summary.get("pending_stages"));
+        report.put("open_blocking_findings", summary.get("open_blocking_findings"));
+        report.put("review_coverage", summary.get("review_coverage"));
+        report.put("budget_plan", summary.get("budget_plan"));
+        report.put("budget_reserve", summary.get("budget_reserve"));
+        report.put("budget_limit_hit", summary.get("budget_limit_hit"));
+        report.put("safe_next_step", summary.get("safe_next_step"));
+        // What a continuation refused to carry over, and why. A run that paid for a stage it
+        // could have inherited should be able to say which term moved.
+        report.put("reused_judgements", summary.get("reused_judgements"));
+        report.put("reuse_declined", summary.get("reuse_declined"));
+        report.put("reuse_declined_by_stage", summary.get("reuse_declined_by_stage"));
+        report.put("contract_change_budget_only", summary.get("contract_change_budget_only"));
         report.put("baseline", baseline(summary));
 
         List<Map<String, Object>> stages = stages(runs, runId, summary);
@@ -484,7 +503,36 @@ public final class RunReport {
         if (goal != null) out.append("goal     ").append(goal).append('\n');
         out.append("outcome  ").append(Boolean.TRUE.equals(report.get("ok")) ? "ok" : "STOPPED")
                 .append("  ").append(report.get("reason"))
-                .append("  next=").append(report.get("next_action")).append('\n');
+                .append("  next=").append(report.get("next_action"));
+        // `budget_exhausted` covers two ceilings that are raised in different places, so the
+        // reason alone sends half the readers to the wrong line of the task file.
+        if (report.get("budget_limit_hit") != null) {
+            out.append("  limit=").append(report.get("budget_limit_hit"));
+        }
+        out.append('\n');
+        // Printed next to the outcome and not buried below the tables, because the whole point
+        // of separating them is that a reader who stops at the outcome line gets it wrong.
+        if (report.get("candidate_review_passed") != null) {
+            out.append("review   ").append(Boolean.TRUE.equals(report.get("candidate_review_passed"))
+                            ? "the candidate passed every review that ran"
+                            : "the candidate has not passed review")
+                    .append("  open blockers=").append(text(report.get("open_blocking_findings")))
+                    .append('\n');
+        }
+        List<Object> pending = list(report.get("pending_stages"));
+        if (!pending.isEmpty()) {
+            List<String> owed = new java.util.ArrayList<>();
+            for (Object item : pending) {
+                if (item instanceof Map<?, ?> row) {
+                    owed.add(row.get("stage") + " (" + row.get("reason") + ")");
+                }
+            }
+            out.append("owed     the workflow did not finish: ")
+                    .append(String.join(", ", owed)).append('\n');
+        }
+        if (report.get("safe_next_step") instanceof String step) {
+            out.append("do next  ").append(step).append('\n');
+        }
 
         Object decision = report.get("decision");
         if (decision instanceof Map<?, ?> map) {

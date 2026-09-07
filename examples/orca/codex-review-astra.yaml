@@ -1,0 +1,23 @@
+version: 1
+profile: orca-codex-review-astra
+role: reviewer
+vendor: codex
+command: codex
+model: gpt-6-astra
+effort: medium
+runner: orca
+prompt_delivery: workspace_file
+read_only: true
+limits:
+  wall_clock_minutes: 60
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+notes: "Opt-in Orca profile. This does not claim the -s read-only sandbox of codex-review-astra. Do not substitute it when that sandbox is required; worker-start cannot forward it."
+verification:
+  what_to_check:
+    - "launch.requested and launch.effective both contain model gpt-6-astra and effort medium"
+    - "worker_done contains the typed reviewer artifact; delivery is acknowledged and worker released"
+    - "worktree content fingerprint stays unchanged"
+    - "the runtime launch receipt is not a provider inference confirmation"

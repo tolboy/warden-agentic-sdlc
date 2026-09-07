@@ -98,6 +98,9 @@ public final class RoleRunner {
     private final Map<String, String> authorizedFailover;
     private final dev.warden.run.Progress progress;
     private Occupied occupied = NOBODY;
+    private String stageName;
+
+    public RoleRunner atStage(String name) { stageName = name; return this; }
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
@@ -158,6 +161,31 @@ public final class RoleRunner {
 
     /** Profiles this runner has seen run out, in the order they did. */
     public Set<String> exhaustedProfiles() { return Set.copyOf(exhausted); }
+
+    /**
+     * Whether anybody could still fill this role, asked without dispatching or rotating.
+     *
+     * A bounded loop decides to spend on a repair before it discovers whether the repaired
+     * work can be judged, and those are the wrong way round when the roster has thinned. Two
+     * vendors and one spent subscription leaves one vendor, and a reviewer required to differ
+     * from the implementer then has nobody left — which used to be found at the review stage,
+     * after the repair had been paid for and had already moved the tree.
+     *
+     * Resolution is deliberately not cached: a probe answers whether the executable is there,
+     * the exhausted set is this runner's own, and both can be true now and false in a minute.
+     *
+     * @param avoidVendor the vendor a role must differ from, or null when it need not
+     */
+    public boolean canFill(UserConfig user, String role, String avoidVendor, long rotation) {
+        if (user.policy() == null || !user.policy().roles().containsKey(role)) return false;
+        try {
+            new RoleResolver().resolve(role, user.policy(), user.profiles(), avoidVendor,
+                    Math.max(0, rotation), this::available, exhausted);
+            return true;
+        } catch (RuntimeException nobody) {
+            return false;
+        }
+    }
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
                        String implementerVendor, Path contextFile, boolean dryRun) throws Exception {
@@ -281,11 +309,18 @@ public final class RoleRunner {
             report.put("profile", profile.name());
             report.put("vendor", profile.vendor());
             report.put("model", profile.model());
+            report.put("effort_requested", profile.effort());
+            report.put("workflow_run_id", workflowRunId == null ? runId : workflowRunId);
+            report.put("stage", stageName == null ? role : stageName);
             report.put("read_only", profile.readOnly());
             report.put("runner", profile.runner());
             report.put("rotation_counter", rotation);
             report.put("strategy", spec.strategy());
             report.put("independence_required", spec.requireIndependentVendor());
+            // The terms this dispatch ran under, so a later run can show they still hold
+            // before believing its verdict. See RoleContract.
+            report.put("role_contract", RoleContract.of(stageName == null ? role : stageName,
+                    role, spec, profile, user));
             report.put("avoided_vendor", implementerVendor);
             if (backfilled) report.put("prompt_backfilled", List.of("visual_scenarios"));
             report.put("rejected_profiles", resolution.rejected());
@@ -295,6 +330,12 @@ public final class RoleRunner {
             report.put("wall_clock_minutes", profile.wallClockMinutes());
             if ("local".equals(profile.runner())) {
                 report.put("dispatch_preview", dispatchPreview(profile));
+            } else if ("orca".equals(profile.runner())) {
+                List<String> preview = new ArrayList<>(List.of("orca", "orchestration", "worker-start",
+                        "--task", "<orca-task-id>", "--worktree", "<current-worktree>"));
+                preview.addAll(dev.warden.execution.orca.OrcaLaunch.arguments(profile));
+                report.put("command_preview", preview);
+                report.put("launch_contract", dev.warden.execution.orca.OrcaLaunch.contract(profile));
             } else {
                 report.put("command_preview", commandPreview(profile));
             }
@@ -323,6 +364,8 @@ public final class RoleRunner {
             if (dryRun) {
                 report.put("dry_run", true);
                 report.put("ok", true);
+                report.put("view_state", "dry_run");
+                dev.warden.dashboard.RoleView.update(ledger.runDirectory(), evidenceName, report);
                 Path path = ledger.writeReport("role-" + role + "-dryrun", report);
                 ledger.append("role_dry_run", Map.of("role", role, "profile", profile.name(),
                         "vendor", profile.vendor()));
@@ -332,12 +375,18 @@ public final class RoleRunner {
 
             // Budget is checked here — after the routing decision, before anything is spent.
             gate.requireDispatch();
+            report.put("view_state", "running");
+            report.put("controller_pid", ProcessHandle.current().pid());
+            report.put("controller_started_at", ProcessHandle.current().info().startInstant()
+                    .map(java.time.Instant::toString).orElse(null));
+            dev.warden.dashboard.RoleView.update(ledger.runDirectory(), evidenceName, report);
 
             // Said before the call, not after it: this is the line an operator reads while a
             // vendor is busy for ten minutes, and "which model is working right now" is the
             // question the silence was hiding.
             progress.line("      " + profile.name() + "  " + profile.vendor()
                     + (profile.model() == null ? "" : "/" + profile.model())
+                    + (profile.effort() == null ? "" : " effort=" + profile.effort())
                     + (attempt > 1 ? "  (vendor attempt " + attempt + ")" : "")
                     + "  dispatching, up to " + profile.wallClockMinutes() + " min");
 
@@ -353,6 +402,9 @@ public final class RoleRunner {
             report.put("code", result.code());
             report.put("duration_millis", result.duration().toMillis());
             report.putAll(result.evidence());
+            report.put("view_state", result.ok() ? "completed"
+                    : "role_human_input_required".equals(result.code()) ? "needs_you" : "failed");
+            dev.warden.dashboard.RoleView.update(ledger.runDirectory(), evidenceName, report);
             if (inheritsUnfinishedWork) {
                 report.put("inherited_unfinished_work", true);
             }
@@ -518,6 +570,8 @@ public final class RoleRunner {
         entry.put("profile", profile.name());
         entry.put("vendor", profile.vendor());
         entry.put("runner", profile.runner());
+        entry.put("effort_requested", profile.effort());
+        if (result.evidence().containsKey("launch")) entry.put("launch", result.evidence().get("launch"));
         Object reportedModel = result.evidence().get("model_reported");
         Object model = reportedModel != null ? reportedModel
                 : result.evidence().getOrDefault("model", profile.model());
@@ -715,7 +769,8 @@ public final class RoleRunner {
 
     private static List<String> commandPreview(Profile profile) {
         return java.util.stream.Stream.concat(java.util.stream.Stream.of(profile.command()),
-                profile.args().stream()).toList();
+                profile.args().stream().map(arg -> arg.replace("{{effort}}", profile.effort() == null ? "" : profile.effort())
+                        .replace("{{model}}", profile.model() == null ? "" : profile.model()))).toList();
     }
 
     /**

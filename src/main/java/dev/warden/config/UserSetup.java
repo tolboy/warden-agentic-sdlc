@@ -106,6 +106,24 @@ public final class UserSetup {
             failover:
               on_quota_exhausted: confirm
 
+            # How much of the remaining chain a repair round has to be affordable before it is
+            # allowed to start.
+            #
+            #   full     (default) the repair, every judgement it invalidates, and every stage
+            #            still owed. The run either finishes or does not begin the attempt.
+            #   partial  the repair plus whatever will read its result. Allows paid progress
+            #            this run cannot finish: a review that then passes is a verdict a
+            #            continuation reuses for nothing.
+            #
+            # `full` is the default because `partial` is a real trade rather than a strictly
+            # better one. In its favour, declining to spend does not save the calls — only
+            # raising the ceiling unlocks the rest of the chain. Against it, a repair can
+            # introduce a regression rather than remove one, and a person may decide not to
+            # continue the task at all. Either way the arithmetic is in `budget_plan` before
+            # the first vendor is dispatched, and `--dry-run` prints it.
+            budget:
+              repair_reserve: full
+
             # The order those roles run in, and what has to be true for each to run at all.
             # This block is optional; deleting it restores exactly the chain written below.
             # Reorder, drop or repeat stages here — nothing else has to change.
@@ -166,6 +184,7 @@ public final class UserSetup {
             profile: grok-review
             role: reviewer
             vendor: grok
+            effort: high
             # A label unless the args below pass it on. Warden makes the value available as
             # {{model}}; each vendor spells its own flag, so the profile writes the flag out.
             # When the vendor reports a different model, the run report says so.
@@ -190,7 +209,7 @@ public final class UserSetup {
               - "json"
               - "--always-approve"
               - "--reasoning-effort"
-              - "high"
+              - "{{effort}}"
               - "--max-turns"
               - "12"
               - "--disable-web-search"

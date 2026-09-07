@@ -116,14 +116,71 @@ public final class TaskLoopTest implements Suite {
             check.that("no reviewer step was recorded",
                     steps(lowRisk).stream().noneMatch(step -> "reviewer".equals(step.get("step"))));
 
-            // The budget is enforced before dispatch, not discovered by paying for it.
+            // The budget is enforced before dispatch, not discovered by paying for it — and,
+            // since the chain and its conditions are both known in advance, before a repair
+            // whose consequences the run could not afford to judge. One call bought the
+            // implementer; the gate then failed, and repairing would need a fix and a review
+            // nobody could pay for. The old behaviour dispatched into that and reported
+            // `budget_exhausted`, which reads as "we tried" rather than "this was arithmetic".
             Path broke = newProject(sandbox, "broke", "medium", 1);
             writeProfiles(home, sandbox, "broke", 99, 1);
             TaskLoop.Outcome exhausted = loop(broke, home, "r7");
-            check.that("an exhausted budget stops the run", !exhausted.ok());
-            check.eq("with the reason named", "budget_exhausted", exhausted.reason());
-            check.contains("and says which limit was hit",
-                    String.valueOf(exhausted.summaryReport().get("budget_stop")), "max_role_runs");
+            check.that("an allowance that cannot finish stops the run", !exhausted.ok());
+            check.eq("before the repair rather than during it",
+                    "budget_insufficient_to_finish", exhausted.reason());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> reserve =
+                    (Map<String, Object>) exhausted.summaryReport().get("budget_reserve");
+            check.eq("naming the stage that wanted to send work back", "gates",
+                    reserve.get("at_stage"));
+            // The refusal is on the narrower number: one call for the fix, which nothing could
+            // then read. Finishing would have wanted two, the second for the review.
+            check.eq("what the repair alone would have cost", 1L,
+                    reserve.get("calls_needed_to_repair"));
+            check.eq("and what finishing from there would have cost", 2L,
+                    reserve.get("calls_needed_to_repair_and_finish"));
+            check.eq("against what was actually left", 0L, reserve.get("calls_remaining"));
+            check.contains("the operator is told the number to raise the cap to",
+                    String.valueOf(exhausted.summaryReport().get("safe_next_step")),
+                    "max_role_runs");
+            // The arithmetic was available before anything was spent, and saying so afterwards
+            // is not the same as saying it in time.
+            @SuppressWarnings("unchecked")
+            Map<String, Object> plan =
+                    (Map<String, Object>) exhausted.summaryReport().get("budget_plan");
+            check.eq("the plan was costed before the first dispatch", 2L,
+                    plan.get("minimum_success_calls"));
+            check.eq("and said outright that the cap could not reach the end",
+                    Boolean.FALSE, plan.get("sufficient_for_success"));
+            check.eq("the implementer that did pass is not buried by the stop", Boolean.TRUE,
+                    exhausted.summaryReport().get("workflow_incomplete"));
+            check.eq("and the stages nobody reached are named",
+                    List.of(Map.of("stage", "gates", "reason", "did_not_pass"),
+                            Map.of("stage", "review", "reason", "not_reached")),
+                    exhausted.summaryReport().get("pending_stages"));
+
+            // The other ceiling. It is hit for a different reason and fixed in a different
+            // place, and the run used to tell whoever ran out of money to raise the call
+            // limit — a next step that would not have moved the run one call further.
+            Path pricey = newProject(sandbox, "money-ceiling", "medium", 20, "0.005");
+            writeProfiles(home, sandbox, "money-ceiling", 1, 1);
+            TaskLoop.Outcome overspent = loop(pricey, home, "mc1");
+            check.that("a spent money ceiling stops the run", !overspent.ok());
+            check.eq("under the same reason as the call ceiling", "budget_exhausted",
+                    overspent.reason());
+            check.eq("but the summary says which of the two it was", "max_cost_usd",
+                    overspent.summaryReport().get("budget_limit_hit"));
+            String moneyStep = String.valueOf(overspent.summaryReport().get("safe_next_step"));
+            check.contains("and the next step names the limit that actually bound",
+                    moneyStep, "max_cost_usd");
+            check.that("rather than the one that did not",
+                    !moneyStep.contains("raise budgets.max_role_runs"));
+            check.contains("with the caveat that the ceiling only measures priced calls",
+                    moneyStep, "reported none and were not counted against it");
+            check.contains("and the rendered report separates the two ceilings on its own line",
+                    dev.warden.ledger.RunReport.render(
+                            new dev.warden.ledger.RunReport().of(pricey, "mc1")),
+                    "limit=max_cost_usd");
 
             // A spent subscription is routed around, and the extra dispatch is charged. A
             // failover that the budget did not see would let one task pay for three.
@@ -184,6 +241,12 @@ public final class TaskLoopTest implements Suite {
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
+            recheckFindingsChecks(check, sandbox, home);
+            stagedResumeChecks(check, sandbox, home);
+            independenceChecks(check, sandbox, home);
+            judgingContractChecks(check, sandbox, home);
+            resumeCurrencyChecks(check, sandbox, home);
+            liveRunShapeChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
@@ -662,6 +725,15 @@ public final class TaskLoopTest implements Suite {
                         new ConfigLoader().load(recovering, "hello"), UserConfig.load(home), "v1", false);
         check.that("a visual failure that gets fixed still ends green", recovered.ok());
         check.eq("and it cost exactly one fix round", 1L, recovered.summaryReport().get("attempts_used"));
+        // The fix moved the candidate, which took the review's completion away; the recheck
+        // that followed re-established it and has to give it back. Getting only half of that
+        // right leaves a run that finished cleanly reporting an outstanding review.
+        check.eq("a review re-established by its recheck is complete again", Boolean.FALSE,
+                recovered.summaryReport().get("workflow_incomplete"));
+        check.eq("and the candidate is reported as having passed review", Boolean.TRUE,
+                recovered.summaryReport().get("candidate_review_passed"));
+        check.that("the review stage is listed among those that completed",
+                listOf(recovered.summaryReport().get("completed_stages")).contains("review"));
         String visualContext = Files.readString(
                 recovering.resolve(".warden/runs/v1/context/fix-1-visual.md"));
         check.contains("the implementer is handed the failing scenario",
@@ -1022,8 +1094,8 @@ public final class TaskLoopTest implements Suite {
         check.that("a carried-over verdict still has a running card", !carried.isEmpty());
         check.that("and names no vendor, because nobody was dispatched",
                 carried.stream().noneMatch(note -> note.contains("(")));
-        check.eq("recording where they came from", Map.of("from", "ru1",
-                        "roles", List.of("implementer", "reviewer")),
+        check.eq("recording which stages they came from, not which roles", Map.of("from", "ru1",
+                        "stages", List.of("implement", "review")),
                 resumed.summaryReport().get("reused_judgements"));
         check.that("and charging nothing for them", (Long) resumed.summaryReport().get("role_runs") == 0L);
 
@@ -1063,9 +1135,796 @@ public final class TaskLoopTest implements Suite {
                 .run(new ConfigLoader().load(ceiling, "hello"), UserConfig.load(home), "tc2",
                         false, Map.of(), new TaskLoop.Continuation("tc1", null, true));
         check.that("the retry reaches the human gate", afterRaise.ok());
-        check.eq("keeping the implementer that had already passed on this tree",
-                Map.of("from", "tc1", "roles", List.of("implementer")),
+        check.eq("keeping the implement stage that had already passed on this tree",
+                Map.of("from", "tc1", "stages", List.of("implement")),
                 afterRaise.summaryReport().get("reused_judgements"));
+    }
+
+    /**
+     * A recheck that reads the verdict, not just the exit code.
+     *
+     * Declaring `recheck_after_fix` on a review stage buys a second reading of the diff after
+     * a later stage sends the work back — the case where a browser fix rewrites code an
+     * independent reviewer has already passed. The re-dispatch happened and was paid for; what
+     * did not happen was reading what came back. A reviewer that ran cleanly and returned a
+     * blocking finding was recorded as a passing recheck, the loop carried on, and the human
+     * gate went on to say every stage that ran had passed. The most expensive thing the run
+     * produced was the objection, and it was the one thing thrown away.
+     */
+    @SuppressWarnings("unchecked")
+    private void recheckFindingsChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path regressed = newProject(sandbox, "recheck-regression", "medium", 20, true);
+        Path implCounter = sandbox.resolve("recheck-regression-impl.count");
+        Path reviewCounter = sandbox.resolve("recheck-regression-review.count");
+        Files.deleteIfExists(implCounter);
+        Files.deleteIfExists(reviewCounter);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", implCounter, 1);
+        // Passes the diff it is first shown; objects to what the browser fix round does to it.
+        writeProfile(home, "loop-regress", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-regresses", reviewCounter, 2);
+        policy(home, "loop-regress", "loop-impl");
+
+        List<String> printed = new java.util.ArrayList<>();
+        int[] visualCalls = {0};
+        TaskLoop.Outcome caught = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(++visualCalls[0] > 1))
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(regressed, "hello"), UserConfig.load(home),
+                        "rk1", false);
+
+        check.that("a fix that breaks an earlier verdict never reaches the human gate",
+                !caught.ok());
+        check.eq("and the stop names the objection, not the stage that sent the work back",
+                "blocking_findings_remain", caught.reason());
+        check.that("the reviewer really was re-dispatched rather than assumed",
+                Integer.parseInt(Files.readString(reviewCounter).strip()) == 2);
+        check.contains("and the narration says what happened in those words",
+                String.join("\n", printed), "broke a verdict");
+
+        List<Map<String, Object>> coverage =
+                (List<Map<String, Object>>) caught.summaryReport().get("review_coverage");
+        check.eq("the finding is recorded against the stage that made it", "review",
+                coverage.get(0).get("stage"));
+        check.eq("with the count that blocked acceptance", 1L,
+                coverage.get(0).get("blocking_findings"));
+        check.eq("so the candidate is not reported as having passed review", Boolean.FALSE,
+                caught.summaryReport().get("candidate_review_passed"));
+
+        // The stage that just failed must not still be listed as one that passed. A fix moves
+        // the candidate, so every verdict about the old one stops counting as finished
+        // business, and only passing again earns the place back.
+        check.that("the review that objected is no longer a completed stage",
+                !listOf(caught.summaryReport().get("completed_stages")).contains("review"));
+        check.eq("and both unfinished stages are named, with what happened to each",
+                List.of(Map.of("stage", "review", "reason", "did_not_pass"),
+                        Map.of("stage", "browser", "reason", "did_not_pass")),
+                caught.summaryReport().get("pending_stages"));
+
+        // The other half of the same rule: a judging stage the workflow does not recheck is
+        // left holding a verdict about a tree that no longer exists, and that is a third
+        // state rather than either of the two above.
+        Path unrechecked = newProject(sandbox, "recheck-not-declared", "medium", 20, true);
+        Files.deleteIfExists(sandbox.resolve("recheck-not-declared-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("recheck-not-declared-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("recheck-not-declared-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("recheck-not-declared-review.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: false }
+                    - { stage: browser, run: visual_harness, when: [visual_qa_required], on_fail: fix, recheck_after_fix: true }
+                """);
+        int[] shots = {0};
+        TaskLoop.Outcome overtaken = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(++shots[0] > 1))
+                .run(new ConfigLoader().load(unrechecked, "hello"), UserConfig.load(home),
+                        "rk2", false);
+        check.that("the run still reaches the human gate", overtaken.ok());
+        check.eq("but the review that was overtaken by the fix is not counted as complete",
+                List.of(Map.of("stage", "review", "reason", "judged_an_earlier_candidate")),
+                overtaken.summaryReport().get("pending_stages"));
+        check.eq("and the candidate is not claimed to have passed review", Boolean.FALSE,
+                overtaken.summaryReport().get("candidate_review_passed"));
+        check.contains("the person at the gate is told before being asked to accept",
+                String.valueOf(overtaken.summaryReport().get("decision_reason")),
+                "did not finish");
+
+        // The third way a recheck can come back: the role did not complete at all. Not an
+        // objection to the work, and it must not leave the stage marked as one that passed
+        // either.
+        Path crashed = newProject(sandbox, "recheck-crashes", "medium", 20, true);
+        Files.deleteIfExists(sandbox.resolve("recheck-crashes-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("recheck-crashes-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("recheck-crashes-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-then-fails", sandbox.resolve("recheck-crashes-review.count"), 2);
+        policy(home, "loop-review", "loop-impl");
+        int[] looks = {0};
+        TaskLoop.Outcome broke = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(++looks[0] > 1))
+                .run(new ConfigLoader().load(crashed, "hello"), UserConfig.load(home),
+                        "rk3", false);
+        check.that("a recheck that cannot complete stops the run", !broke.ok());
+        check.eq("named after the role, not after the stage that sent work back",
+                "reviewer_failed", broke.reason());
+        check.that("and the stage it happened in is not counted as passed",
+                !listOf(broke.summaryReport().get("completed_stages")).contains("review"));
+        check.eq("the candidate is not claimed to have passed review", Boolean.FALSE,
+                broke.summaryReport().get("candidate_review_passed"));
+    }
+
+    /**
+     * Continuing a run that ran out of room, without paying twice and without letting one
+     * reviewer's verdict stand in for another's.
+     *
+     * Two things had to be true at once and were not. A stop for a spent call ceiling says
+     * nothing about the diff, so the verdicts already reached on it should survive — but the
+     * only way to continue is to raise the ceiling, and the ceiling lives in the task file,
+     * whose hash is what proves the verdicts still apply. And a chain that reviews twice wrote
+     * both verdicts under the role's name, so the survivor could be handed to whichever review
+     * stage asked first: a run could satisfy `review-second` with `review`'s reading and report
+     * two independent reviews of the same diff.
+     */
+    @SuppressWarnings("unchecked")
+    private void stagedResumeChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path paired = newProject(sandbox, "resume-paired", "medium", 2);
+        writeProfiles(home, sandbox, "resume-paired", 1, 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("resume-paired-review2.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                """);
+
+        TaskLoop.Outcome ranOut = loop(paired, home, "sr1");
+        check.that("two calls cannot reach a chain that reviews twice", !ranOut.ok());
+        check.eq("and the run says which ceiling it hit", "budget_exhausted", ranOut.reason());
+        Map<String, Object> plan = (Map<String, Object>) ranOut.summaryReport().get("budget_plan");
+        check.eq("the shortfall was arithmetic available before the first dispatch", 3L,
+                plan.get("minimum_success_calls"));
+        check.eq("and the plan said so rather than discovering it", Boolean.FALSE,
+                plan.get("sufficient_for_success"));
+
+        // The three questions, separated. This is the live run's exact shape: a good candidate
+        // that passed the review it could afford, inside a workflow that did not finish.
+        check.eq("the review that did run is not buried by the stop", Boolean.TRUE,
+                ranOut.summaryReport().get("candidate_review_passed"));
+        check.eq("while the chain is honestly reported as incomplete", Boolean.TRUE,
+                ranOut.summaryReport().get("workflow_incomplete"));
+        check.eq("naming the stage that never got a turn",
+                List.of(Map.of("stage", "review-second", "reason", "not_reached")),
+                ranOut.summaryReport().get("pending_stages"));
+
+        // The only edit that makes continuing possible, and the one edit no reviewer's verdict
+        // depends on. Every other byte of the contract is identical.
+        Files.writeString(paired.resolve(".warden/tasks/hello.yaml"), """
+                version: 1
+                id: hello
+                goal: Create src/result.txt
+                risk: medium
+                scope: app
+                authority:
+                  workspace_write: true
+                budgets:
+                  max_role_runs: 6
+                  max_cost_usd: 10.0
+                max_fix_attempts: 2
+                """);
+        TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(paired, "hello"), UserConfig.load(home), "sr2", false,
+                Map.of(), new TaskLoop.Continuation("sr1", null, true));
+        check.that("raising only the call ceiling lets the run continue", resumed.ok());
+        check.eq("the verdicts already paid for are kept, named by stage",
+                List.of("implement", "review"),
+                ((Map<String, Object>) resumed.summaryReport().get("reused_judgements")).get("stages"));
+        Map<String, Object> budgetOnly =
+                (Map<String, Object>) resumed.summaryReport().get("contract_change_budget_only");
+        check.eq("and the edited contract is recorded, not glossed over", 2L,
+                budgetOnly.get("prior_max_role_runs"));
+        check.eq("with the number it became", 6L, budgetOnly.get("now_max_role_runs"));
+
+        Map<String, Object> second = steps(resumed).stream()
+                .filter(step -> "review-second".equals(step.get("stage"))).findFirst().orElseThrow();
+        check.that("the second review is not satisfied by the first one's verdict",
+                second.get("reused_from") == null);
+        check.eq("it is a genuinely different reader", "loop-review-2", second.get("profile"));
+        check.eq("and only that one stage was paid for", 1L,
+                resumed.summaryReport().get("role_runs"));
+        check.eq("leaving nothing outstanding", Boolean.FALSE,
+                resumed.summaryReport().get("workflow_incomplete"));
+
+        // The same continuation after a real change to what the work is judged by must not
+        // borrow anything. Otherwise "budget-only" would be a hole rather than a distinction.
+        Path moved = newProject(sandbox, "resume-acceptance-moved", "medium", 1);
+        writeProfiles(home, sandbox, "resume-acceptance-moved", 1, 1);
+        TaskLoop.Outcome firstPass = loop(moved, home, "am1");
+        check.eq("one call buys an implementer and no reviewer", "budget_exhausted",
+                firstPass.reason());
+        // Raising the ceiling and moving the goal, in one edit. The first half would have been
+        // forgiven on its own; the second half is the whole reason forgiveness is bounded.
+        Files.writeString(moved.resolve(".warden/tasks/hello.yaml"), """
+                version: 1
+                id: hello
+                goal: Create src/result.txt and also src/second.txt
+                risk: medium
+                scope: app
+                authority:
+                  workspace_write: true
+                budgets:
+                  max_role_runs: 6
+                  max_cost_usd: 10.0
+                max_fix_attempts: 2
+                """);
+        TaskLoop.Outcome afterGoalChange = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(moved, "hello"), UserConfig.load(home), "am2", false,
+                Map.of(), new TaskLoop.Continuation("am1", null, true));
+        check.that("a changed goal carries no earlier verdict",
+                afterGoalChange.summaryReport().get("reused_judgements") == null);
+        check.contains("and says the change reached what the work is judged by",
+                String.valueOf(afterGoalChange.summaryReport().get("reuse_declined")),
+                "reaches what the work is judged by");
+    }
+
+    /**
+     * A repair is a promise that somebody will read what it produces, and the roster is where
+     * that promise is kept or broken.
+     *
+     * The order used to be wrong: repair, move the tree, then discover at the review stage
+     * that the only vendor able to fill it is the one that just wrote the code. The run ended
+     * holding an unjudged candidate, having paid for the repair that made it unjudgeable, and
+     * reported the whole thing as a failed reviewer — which sends an operator to read a
+     * transcript when the actual problem is a roster with one vendor on it.
+     */
+    @SuppressWarnings("unchecked")
+    private void independenceChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path thin = newProject(sandbox, "roster-too-thin");
+        Path implCounter = sandbox.resolve("roster-too-thin-impl.count");
+        Files.deleteIfExists(implCounter);
+        // Leaves the gate red on its first call, so a repair is genuinely asked for.
+        writeProfile(home, "loop-impl", "implementer", "onevendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", implCounter, 2);
+        // The whole roster: one vendor, wearing both hats.
+        writeProfile(home, "loop-review", "reviewer", "onevendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("roster-too-thin-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner())
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu1", false);
+
+        check.that("a repair no later stage could judge is refused", !refused.ok());
+        check.eq("and the stop is about the roster, not about the reviewer",
+                "independent_review_unavailable", refused.reason());
+        check.eq("nothing was spent on the repair", 1L, refused.summaryReport().get("role_runs"));
+        check.eq("and no fix round was counted", 0L, refused.summaryReport().get("attempts_used"));
+        Map<String, Object> gap =
+                (Map<String, Object>) refused.summaryReport().get("unavailable_role");
+        check.eq("the role nobody can fill is named", "reviewer", gap.get("role"));
+        check.eq("as is the stage that needed it", "review", gap.get("needed_for"));
+        check.eq("and the vendor it would have had to differ from", "onevendor",
+                gap.get("must_differ_from_vendor"));
+        check.contains("the operator is told to widen the roster, not to read a transcript",
+                String.valueOf(refused.summaryReport().get("resolution")),
+                "Add a profile from another vendor");
+        check.contains("and the terminal says it stopped before the repair",
+                String.join("\n", printed), "stopping before the repair rather than after it");
+    }
+
+    /**
+     * The live run, scripted.
+     *
+     * A six-call ceiling, a chain that reviews twice and then looks at the page, and a
+     * reviewer that objects, objects, and passes. That is what happened: implement, review,
+     * fix, review, fix, review — six calls, a good candidate, one clean verdict, and three
+     * stages the run never reached. It was reported as `budget_exhausted` and nothing else,
+     * and an operator reading that had no way to tell it apart from a run that produced
+     * nothing.
+     *
+     * Every claim here is one the summary could not previously make: that the shortfall was
+     * arithmetic available before the first dispatch, that the review which passed is not
+     * buried by the stop, and that the stages still owed are named rather than left to be
+     * worked out from what happens to be absent.
+     */
+    @SuppressWarnings("unchecked")
+    private void liveRunShapeChecks(Check check, Path sandbox, Path home) throws Exception {
+        // The default reserve first. Six calls cannot finish this chain, so the second repair
+        // is never started and four calls are kept rather than spent on progress the run
+        // could not conclude.
+        Path guarded = newProject(sandbox, "live-shape-full", "medium", 6, true);
+        liveShapeProfiles(home, sandbox, "live-shape-full");
+        liveShapePolicy(home, "full");
+        TaskLoop.Outcome heldBack = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(true))
+                .run(new ConfigLoader().load(guarded, "hello"), UserConfig.load(home), "lf1", false);
+        check.eq("the shipped default will not start a repair it cannot finish",
+                "budget_insufficient_to_finish", heldBack.reason());
+        check.eq("so two of the six calls are still unspent", 4L,
+                heldBack.summaryReport().get("role_runs"));
+        Map<String, Object> held = (Map<String, Object>) heldBack.summaryReport().get("budget_reserve");
+        check.eq("and the reserve that refused it is the full one", "full",
+                held.get("repair_reserve"));
+        // The refusal lands on the second repair, at the review stage: one call for the fix,
+        // one to re-read it, one for the review nobody has run yet.
+        check.eq("naming what finishing would have needed", 3L,
+                held.get("calls_needed_to_repair_and_finish"));
+        check.contains("the operator is told the setting that would allow partial progress",
+                String.valueOf(heldBack.summaryReport().get("resolution")),
+                "budget.repair_reserve: partial");
+
+        // The same fixture with the trade taken deliberately, which is the live run's arc:
+        // implement, review, fix, review, fix, review — six calls, one clean verdict, and
+        // three stages nobody reached.
+        Path replay = newProject(sandbox, "live-shape", "medium", 6, true);
+        liveShapeProfiles(home, sandbox, "live-shape");
+        liveShapePolicy(home, "partial");
+
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome replayed = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(true))
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(replay, "hello"), UserConfig.load(home), "lr1", false);
+
+        check.that("six calls do not finish this chain", !replayed.ok());
+        check.eq("and the ceiling is what stopped it", "budget_exhausted", replayed.reason());
+        check.eq("naming which of the two ceilings", "max_role_runs",
+                replayed.summaryReport().get("budget_limit_hit"));
+        check.eq("every one of the six was used", 6L, replayed.summaryReport().get("role_runs"));
+        check.eq("across two repair rounds", 2L, replayed.summaryReport().get("attempts_used"));
+
+        // Before anything was dispatched.
+        Map<String, Object> plan = (Map<String, Object>) replayed.summaryReport().get("budget_plan");
+        check.eq("the clean-pass cost was known up front", 3L, plan.get("minimum_success_calls"));
+        check.eq("and the mode that would be applied to a repair", "partial",
+                plan.get("repair_reserve"));
+        // Every stage that can send work back: the gate, both reviews, and the browser.
+        check.eq("and every repair branch was costed with it", 4,
+                listOf(plan.get("recovery_branches")).size());
+        // A machine gate failing before any review costs one call to repair, and nothing would
+        // read the result. Partial mode has to reach the first judging stage, not stop at the
+        // arithmetic floor of the repair itself.
+        Map<String, Object> gateBranch = (Map<String, Object>) listOf(plan.get("recovery_branches"))
+                .stream().filter(row -> "gates".equals(((Map<String, Object>) row).get("stage")))
+                .findFirst().orElseThrow();
+        check.eq("a gate repair costs one call on its own", 1L,
+                gateBranch.get("calls_needed_to_repair"));
+        check.eq("but partial mode requires the review that would read it", 2L,
+                gateBranch.get("calls_required_here"));
+        check.contains("the terminal said so before the first vendor ran",
+                String.join("\n", printed), "vendor call(s) if nothing has to be repaired");
+        check.contains("and warned when the second repair could not reach the end",
+                String.join("\n", printed), "this run will stop with the chain unfinished");
+
+        // The three questions, answered separately.
+        check.eq("the review that finally passed is not buried by the stop", Boolean.TRUE,
+                replayed.summaryReport().get("candidate_review_passed"));
+        check.eq("with no blocking finding left open", 0L,
+                replayed.summaryReport().get("open_blocking_findings"));
+        check.eq("while the chain is reported incomplete", Boolean.TRUE,
+                replayed.summaryReport().get("workflow_incomplete"));
+        check.eq("naming the stages that never got a turn",
+                List.of("review-second", "browser"),
+                listOf(replayed.summaryReport().get("pending_stages")).stream()
+                        .map(row -> ((Map<String, Object>) row).get("stage")).toList());
+        check.contains("and handing over the command that continues without paying twice",
+                String.valueOf(replayed.summaryReport().get("safe_next_step")),
+                "--continue lr1");
+
+        // The same three answers where an operator actually reads them. A separation that
+        // lives only in JSON is one nobody reading `warden report` benefits from.
+        String rendered = dev.warden.ledger.RunReport.render(
+                new dev.warden.ledger.RunReport().of(replay, "lr1"));
+        check.contains("the rendered report keeps the review apart from the stop", rendered,
+                "the candidate passed every review that ran");
+        check.contains("names what the chain still owes", rendered, "review-second (not_reached)");
+        check.contains("and prints the command that continues it", rendered, "do next");
+
+        // The same chain with room to work, back on the default reserve: nothing about the
+        // full mode prevents a run whose ceiling actually fits.
+        Path funded = newProject(sandbox, "live-shape-funded", "medium", 12, true);
+        liveShapeProfiles(home, sandbox, "live-shape-funded");
+        liveShapePolicy(home, "full");
+        TaskLoop.Outcome complete = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(true))
+                .run(new ConfigLoader().load(funded, "hello"), UserConfig.load(home), "lr2", false);
+        check.that("a cap that fits the chain reaches the human gate", complete.ok());
+        check.eq("with nothing outstanding", Boolean.FALSE,
+                complete.summaryReport().get("workflow_incomplete"));
+        check.eq("the second reader really did read", "loop-review-2",
+                steps(complete).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .findFirst().orElseThrow().get("profile"));
+        check.that("and the browser stage ran",
+                listOf(complete.summaryReport().get("completed_stages")).contains("browser"));
+    }
+
+    /**
+     * A carried verdict has to answer two questions, and only ever answered one.
+     *
+     * That the bytes have not moved is what the source fingerprint and the `.warden` hashes
+     * are for. That the same judge, under the same rules, would be asked again was checked by
+     * nothing — and could not have been, because both hashes cover the *project's* `.warden`
+     * while the roster, the independence requirement, the prompt and the schema all live in
+     * the operator's own home. Reproduced on stubs: swap the reviewer roster for a different
+     * vendor with a reviewer set to object, continue the run, and it reaches the human gate
+     * with `role_runs: 0` and the new mandatory reviewer never called.
+     *
+     * Each case below changes exactly one term and expects the review verdict to be declined
+     * and the implementer's, which nothing called into question, to be kept.
+     */
+    @SuppressWarnings("unchecked")
+    private void judgingContractChecks(Check check, Path sandbox, Path home) throws Exception {
+        // A run that stops on something that was never about the work, leaving both verdicts
+        // standing and reusable. Every case then continues from it.
+        Path base = newProject(sandbox, "judging-contract", "medium", 20, true);
+        writeProfiles(home, sandbox, "judging-contract", 1, 1);
+        TaskLoop.Outcome stopped = new TaskLoop(new ProcessRunner(), (l, r) ->
+                new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
+                        Map.of("message", "no browser"))).run(
+                new ConfigLoader().load(base, "hello"), UserConfig.load(home), "jc1", false);
+        check.eq("the run stops on the environment, not the work",
+                "visual_qa_unavailable", stopped.reason());
+
+        // The control: nothing changed, so both verdicts are kept and nothing is dispatched.
+        TaskLoop.Outcome unchanged = continueFrom(base, home, "jc1", "jc-control");
+        check.eq("an unchanged contract keeps both verdicts",
+                List.of("implement", "review"), reusedStages(unchanged));
+        check.eq("and pays for nothing", 0L, unchanged.summaryReport().get("role_runs"));
+
+        // A carried verdict is still a verdict. The reuse branch used to add the step row and
+        // return, restoring no coverage — so a run whose every stage was carried reported
+        // `candidate_review_passed: false`, and `warden report --text` told the operator the
+        // candidate had not passed review about a candidate a reviewer had passed.
+        check.eq("a fully reused run still reports the review that passed", Boolean.TRUE,
+                unchanged.summaryReport().get("candidate_review_passed"));
+        check.eq("with nothing outstanding", Boolean.FALSE,
+                unchanged.summaryReport().get("workflow_incomplete"));
+        Map<String, Object> carriedCoverage =
+                (Map<String, Object>) listOf(unchanged.summaryReport().get("review_coverage"))
+                        .stream().filter(row -> "review".equals(((Map<String, Object>) row).get("stage")))
+                        .findFirst().orElseThrow();
+        check.eq("marked as carried rather than as a fresh dispatch", "reused",
+                carriedCoverage.get("source"));
+        check.eq("naming the run it came from", "jc1", carriedCoverage.get("reused_from"));
+        check.eq("and the profile that reached it", "loop-review", carriedCoverage.get("profile"));
+        check.eq("about the candidate the reuse was checked against",
+                unchanged.summaryReport().get("candidate_fingerprint"),
+                carriedCoverage.get("candidate_fingerprint"));
+        check.contains("and the rendered report says so too",
+                dev.warden.ledger.RunReport.render(
+                        new dev.warden.ledger.RunReport().of(base, "jc-control")),
+                "the candidate passed every review that ran");
+
+        // 1. The roster is swapped for a different vendor. This is the reproduction.
+        writeProfile(home, "audit-review", "reviewer", "auditvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("judging-contract-audit.count"), 99);
+        policy(home, "audit-review", "loop-impl");
+        TaskLoop.Outcome swapped = continueFrom(base, home, "jc1", "jc-roster");
+        check.eq("a swapped reviewer roster does not inherit the old reviewer's verdict",
+                List.of("implement"), reusedStages(swapped));
+        check.contains("and says which term moved",
+                declinedReason(swapped, "review"), "roster changed");
+        check.that("so the new reviewer actually ran", steps(swapped).stream()
+                .anyMatch(step -> "audit-review".equals(step.get("profile"))));
+        check.eq("and its objection stands rather than being skipped past",
+                "blocking_findings_remain", swapped.reason());
+
+        // 2. Independence alone. Same profile, same prompt, one flag.
+        writeProfiles(home, sandbox, "judging-contract", 1, 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: false }
+                review: { required_for_risk: [medium, high] }
+                """);
+        TaskLoop.Outcome independence = continueFrom(base, home, "jc1", "jc-independence");
+        check.eq("dropping the independence requirement is a change of terms",
+                List.of("implement"), reusedStages(independence));
+        check.contains("named as such", declinedReason(independence, "review"),
+                "require_independent_vendor changed");
+
+        // 3. The prompt the reviewer was given.
+        writeProfiles(home, sandbox, "judging-contract", 1, 1);
+        Path template = home.resolve("prompts/reviewer.md");
+        String templateBefore = Files.readString(template);
+        Files.writeString(template, templateBefore + "\nAlso check the changelog.\n");
+        TaskLoop.Outcome reprompted = continueFrom(base, home, "jc1", "jc-prompt");
+        check.eq("an edited reviewer prompt is a different reviewer",
+                List.of("implement"), reusedStages(reprompted));
+        check.contains("named as such", declinedReason(reprompted, "review"),
+                "prompt_template_sha256 changed");
+        // Restored, so the next case measures the term it means to change and not this one.
+        Files.writeString(template, templateBefore);
+
+        // 4. The schema its answer has to satisfy.
+        Path schema = home.resolve("schemas/reviewer.json");
+        String original = Files.readString(schema);
+        Files.writeString(schema, original.replace("\"findings\"", "\"findings\" "));
+        TaskLoop.Outcome reschema = continueFrom(base, home, "jc1", "jc-schema");
+        check.eq("so is an edited answer schema", List.of("implement"), reusedStages(reschema));
+        check.contains("named as such", declinedReason(reschema, "review"),
+                "json_schema_sha256 changed");
+        Files.writeString(schema, original);
+
+        // 5. The workflow, keeping the stage name. A finding that used to send work back and
+        // now stops the run is a different bargain, under a label that did not move.
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: stop }
+                """);
+        TaskLoop.Outcome rerouted = continueFrom(base, home, "jc1", "jc-routing");
+        check.eq("a stage that kept its name but changed its routing is not the same stage",
+                List.of("implement"), reusedStages(rerouted));
+        check.contains("named as such", declinedReason(rerouted, "review"),
+                "on_findings changed");
+    }
+
+    private TaskLoop.Outcome continueFrom(Path project, Path home, String priorRunId, String runId)
+            throws Exception {
+        return new TaskLoop(new ProcessRunner(), (l, r) -> stubVisual(true)).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home), runId, false,
+                Map.of(), new TaskLoop.Continuation(priorRunId, null, true));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Object> reusedStages(TaskLoop.Outcome outcome) {
+        Object reused = outcome.summaryReport().get("reused_judgements");
+        if (!(reused instanceof Map<?, ?> map)) return List.of();
+        return listOf(((Map<String, Object>) map).get("stages"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String declinedReason(TaskLoop.Outcome outcome, String stage) {
+        Object declined = outcome.summaryReport().get("reuse_declined_by_stage");
+        if (!(declined instanceof Map<?, ?> map)) return "";
+        return String.valueOf(((Map<String, Object>) map).get(stage));
+    }
+
+    /**
+     * A carried verdict must be about the candidate it is spent on, not merely about the prior
+     * run's final tree.
+     *
+     * The first check proved the same judge under the same rules would be asked again. It did
+     * not prove the verdict describes the tree that stands at the moment it is consumed, and
+     * three ways for those to diverge slipped through:
+     *
+     *  - A1: an ordinary implementer re-dispatch during the resume moves the tree after the
+     *    reuse pool was built, and a review carried for the old tree is spent on the new one.
+     *  - A2: the prior run's review judged a revision that a later repair replaced, so the
+     *    review's tree never was the prior run's final tree — the run-level fingerprint check
+     *    passes while the per-verdict one should not.
+     *  - B: the workflow reassigns a stage's role under a stable name, and the old role's
+     *    verdict stands in for the new role's because the contract check compared the old role
+     *    against itself.
+     */
+    @SuppressWarnings("unchecked")
+    private void resumeCurrencyChecks(Check check, Path sandbox, Path home) throws Exception {
+        // A1 — the implementer rewrites during the resume.
+        Path a1 = newProject(sandbox, "resume-writer-rewrites", "medium", 20, true);
+        Path a1impl = sandbox.resolve("resume-writer-rewrites-impl.count");
+        Path a1review = sandbox.resolve("resume-writer-rewrites-review.count");
+        Files.deleteIfExists(a1impl);
+        Files.deleteIfExists(a1review);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", a1impl, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", a1review, 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome a1first = new TaskLoop(new ProcessRunner(),
+                (l, r) -> new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
+                        Map.of("message", "no browser"))).run(
+                new ConfigLoader().load(a1, "hello"), UserConfig.load(home), "wr1", false);
+        check.eq("A1 first run stops on the missing browser", "visual_qa_unavailable",
+                a1first.reason());
+        check.eq("its implementer wrote once", "1", Files.readString(a1impl).strip());
+        check.eq("its reviewer read once", "1", Files.readString(a1review).strip());
+
+        // Only the implementer's contract changes, so only the implement stage should decline
+        // reuse on its own terms; the review declines because the re-dispatch moved the tree.
+        Path implPrompt = home.resolve("prompts/implementer.md");
+        Files.writeString(implPrompt, Files.readString(implPrompt) + "\nAn added instruction.\n");
+        TaskLoop.Outcome a1resumed = continueFrom(a1, home, "wr1", "wr2");
+        check.eq("the re-dispatched implementer changed the tree", "2",
+                Files.readString(a1impl).strip());
+        check.that("the review is not carried across that change",
+                !reusedStages(a1resumed).contains("review"));
+        check.eq("it re-ran on the new tree instead", "2", Files.readString(a1review).strip());
+        check.that("and the resume records that the carried verdict was stale at consumption",
+                listOf(a1resumed.summaryReport().get("reuse_declined_at_consumption")).stream()
+                        .anyMatch(row -> row instanceof Map<?, ?> m && "review".equals(m.get("stage"))));
+        check.eq("so the candidate that passed review is the one now in the worktree",
+                Boolean.TRUE, a1resumed.summaryReport().get("candidate_review_passed"));
+
+        // A2 — the prior run's review judged a revision a later repair replaced.
+        Path a2 = newProject(sandbox, "resume-stale-review", "medium", 20, true);
+        Path a2impl = sandbox.resolve("resume-stale-review-impl.count");
+        Files.deleteIfExists(a2impl);
+        Files.deleteIfExists(sandbox.resolve("resume-stale-review-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", a2impl, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("resume-stale-review-review.count"), 1);
+        // The review does not recheck after a fix, so a browser repair leaves its verdict about
+        // an earlier revision — exactly the shape the prior run retires.
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: false }
+                    - { stage: browser, run: visual_harness, when: [visual_qa_required], on_fail: fix, recheck_after_fix: true }
+                """);
+        int[] a2visual = {0};
+        TaskLoop.Outcome a2first = new TaskLoop(new ProcessRunner(),
+                (l, r) -> ++a2visual[0] == 1 ? stubVisual(false)
+                        : new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
+                                Map.of("message", "no browser"))).run(
+                new ConfigLoader().load(a2, "hello"), UserConfig.load(home), "sr-first", false);
+        check.eq("A2 first run stops on the browser after a repair", "visual_qa_unavailable",
+                a2first.reason());
+        check.eq("the repair moved the tree", "2", Files.readString(a2impl).strip());
+        check.eq("and the prior run retired its review rather than keeping it", Boolean.FALSE,
+                a2first.summaryReport().get("candidate_review_passed"));
+        check.that("naming it as judging an earlier candidate",
+                listOf(a2first.summaryReport().get("stages_judging_an_earlier_candidate"))
+                        .contains("review"));
+
+        TaskLoop.Outcome a2resumed = continueFrom(a2, home, "sr-first", "sr-second");
+        check.that("the resume does not resurrect the retired review",
+                !reusedStages(a2resumed).contains("review"));
+        // The repair superseded the implement stage's own tree, so that stage verdict is stale
+        // too: the tree it produced was replaced before the run ended. Nothing is carried, and
+        // the resume rebuilds honestly rather than reusing a verdict about a vanished revision.
+        check.that("nothing stale is carried across the repair",
+                reusedStages(a2resumed).isEmpty());
+        check.contains("and the decline says the prior run had already retired the review",
+                declinedReason(a2resumed, "review"), "retired");
+        check.that("the resume reaches the human gate", a2resumed.ok());
+        check.eq("with a review that genuinely read this candidate", Boolean.TRUE,
+                a2resumed.summaryReport().get("candidate_review_passed"));
+
+        // B — the stage keeps its name but changes its role.
+        Path b = newProject(sandbox, "resume-role-swapped", "medium", 20, true);
+        Files.deleteIfExists(sandbox.resolve("resume-role-swapped-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("resume-role-swapped-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("resume-role-swapped-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("resume-role-swapped-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome bfirst = new TaskLoop(new ProcessRunner(),
+                (l, r) -> new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
+                        Map.of("message", "no browser"))).run(
+                new ConfigLoader().load(b, "hello"), UserConfig.load(home), "rs1", false);
+        check.eq("B first run stops on the missing browser", "visual_qa_unavailable",
+                bfirst.reason());
+
+        // A separate reader for the reassigned stage, with its own prompt and schema so its
+        // artifact is an architect's and not a reviewer's.
+        Files.writeString(home.resolve("prompts/architect.md"), "Assess the design.\n");
+        Files.writeString(home.resolve("schemas/architect.json"), """
+                { "title": "Architect artifact", "type": "object",
+                  "required": ["role", "task_id", "status", "summary"],
+                  "properties": {
+                    "role": { "const": "architect" },
+                    "task_id": { "type": "string" },
+                    "status": { "enum": ["completed", "aborted"] },
+                    "summary": { "type": "string" } } }
+                """);
+        writeProfile(home, "loop-architect", "architect", "architectvendor", true,
+                "architect", "role, task_id, status, summary",
+                "verdict-pass", sandbox.resolve("resume-role-swapped-arch.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                  architect: { profiles: [loop-architect], strategy: first, require_independent_vendor: false }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: architect, on_fail: stop }
+                    - { stage: browser, run: visual_harness, when: [visual_qa_required], on_fail: fix, recheck_after_fix: true }
+                """);
+        TaskLoop.Outcome bresumed = continueFrom(b, home, "rs1", "rs2");
+        check.that("the reviewer's verdict does not satisfy the architect stage",
+                !reusedStages(bresumed).contains("review"));
+        check.contains("declined because the stage now runs a role that profile cannot fill",
+                declinedReason(bresumed, "review"), "architect");
+        check.that("and the architect actually ran, as itself",
+                steps(bresumed).stream().anyMatch(s -> "loop-architect".equals(s.get("profile"))
+                        && "review".equals(s.get("stage"))
+                        && !Boolean.TRUE.toString().equals(String.valueOf(s.get("reused")))
+                        && s.get("reused_from") == null));
+        check.that("the implementer's own verdict, unchallenged, is still reused",
+                reusedStages(bresumed).contains("implement"));
+    }
+
+    /** The roster the live run had: one writer, two independent readers. */
+    private void liveShapeProfiles(Path home, Path sandbox, String scenario) throws IOException {
+        Files.deleteIfExists(sandbox.resolve(scenario + "-impl.count"));
+        Files.deleteIfExists(sandbox.resolve(scenario + "-review.count"));
+        Files.deleteIfExists(sandbox.resolve(scenario + "-review2.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve(scenario + "-impl.count"), 1);
+        // Objects twice, passes on the third reading — the run's actual arc.
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve(scenario + "-review.count"), 3);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve(scenario + "-review2.count"), 1);
+    }
+
+    private void liveShapePolicy(Path home, String repairReserve) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                budget: { repair_reserve: %s }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                    - { stage: browser, run: visual_harness, when: [visual_qa_required], on_fail: fix, recheck_after_fix: true }
+                """.formatted(repairReserve));
     }
 
     /**
@@ -1367,8 +2226,19 @@ public final class TaskLoopTest implements Suite {
         return newProject(sandbox, name, risk, maxRoleRuns, false);
     }
 
+    /** A task whose money ceiling binds before its call ceiling does. */
+    private Path newProject(Path sandbox, String name, String risk, long maxRoleRuns,
+                            String maxCostUsd) throws Exception {
+        return newProject(sandbox, name, risk, maxRoleRuns, false, maxCostUsd);
+    }
+
     private Path newProject(Path sandbox, String name, String risk, long maxRoleRuns, boolean visual)
             throws Exception {
+        return newProject(sandbox, name, risk, maxRoleRuns, visual, "10.0");
+    }
+
+    private Path newProject(Path sandbox, String name, String risk, long maxRoleRuns,
+                            boolean visual, String maxCostUsd) throws Exception {
         Path project = sandbox.resolve(name);
         Files.createDirectories(project.resolve(".warden/tasks"));
         Files.createDirectories(project.resolve("src"));
@@ -1404,9 +2274,9 @@ public final class TaskLoopTest implements Suite {
                   workspace_write: true
                 %sbudgets:
                   max_role_runs: %d
-                  max_cost_usd: 10.0
+                  max_cost_usd: %s
                 max_fix_attempts: 2
-                """.formatted(risk, visualBlock, maxRoleRuns));
+                """.formatted(risk, visualBlock, maxRoleRuns, maxCostUsd));
         Files.writeString(project.resolve("README.md"), "seed\n");
         ProcessRunner runner = new ProcessRunner();
         for (List<String> command : List.of(

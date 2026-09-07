@@ -60,6 +60,8 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("profile", profile.name());
         evidence.put("vendor", profile.vendor());
         evidence.put("model", profile.model());
+        evidence.put("effort_requested", profile.effort());
+        evidence.put("effort_verification", "not_reported_by_provider");
         evidence.put("read_only", profile.readOnly());
 
         // The run controller pins this before the first agent starts. Re-resolving HEAD here
@@ -84,6 +86,7 @@ public final class DirectCliExecutor implements RoleExecutor {
         // Each vendor spells the flag differently, so the profile still writes the flag out
         // (`args: ["--model", "{{model}}"]`); what is provided here is the value.
         argumentValues.put("model", profile.model() == null ? "" : profile.model());
+        argumentValues.put("effort", profile.effort() == null ? "" : profile.effort());
 
         List<String> command = new ArrayList<>();
         command.add(resolveExecutable(profile.command(), request.projectRoot()));

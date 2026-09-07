@@ -25,8 +25,13 @@ public final class OrcaClient {
                       String stdout, String stderr) {}
 
     private final ProcessRunner processes;
+    @FunctionalInterface public interface Transport {
+        Rpc invoke(Path workingDirectory, Duration timeout, List<String> args) throws Exception;
+    }
+    private final Transport transport;
 
-    public OrcaClient(ProcessRunner processes) { this.processes = processes; }
+    public OrcaClient(ProcessRunner processes) { this.processes = processes; this.transport = null; }
+    public OrcaClient(Transport transport) { this.processes = null; this.transport = transport; }
 
     public Map<String, Object> status(Path workingDirectory) {
         try {
@@ -85,6 +90,7 @@ public final class OrcaClient {
     }
 
     public Rpc invoke(Path workingDirectory, Duration timeout, List<String> args) throws Exception {
+        if (transport != null) return transport.invoke(workingDirectory, timeout, List.copyOf(args));
         List<String> command = new ArrayList<>();
         command.add(DirectCliExecutor.resolveExecutable("orca", workingDirectory));
         command.addAll(args);
@@ -123,6 +129,8 @@ public final class OrcaClient {
         boolean orchestration = capabilities instanceof List<?> list
                 && list.contains("orchestration.contract.v1");
         summary.put("orchestration_contract", orchestration);
+        summary.put("worker_launch_preferences", capabilities instanceof List<?> list
+                && list.contains("orchestration.worker-launch-preferences.v1"));
         return summary;
     }
 }
