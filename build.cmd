@@ -3,7 +3,14 @@ REM Build with javac only. No Gradle, no Maven, no network.
 setlocal
 cd /d "%~dp0"
 if "%WARDEN_JAVA_RELEASE%"=="" set WARDEN_JAVA_RELEASE=21
-if exist out rmdir /s /q out
+REM Delete only what this script produces. `out` is gitignored, which makes it the natural
+REM place to park a live run's configuration or a reviewer's saved reproductions, and
+REM `rmdir /s /q out` destroyed all of it on the next build, unrecoverably, because nothing
+REM there is tracked. Measured: a review's probe scripts and a live run's config directory
+REM were both lost to a routine test.cmd.
+if exist out\classes rmdir /s /q out\classes
+if exist out\test-classes rmdir /s /q out\test-classes
+if not exist out mkdir out
 mkdir out\classes
 mkdir out\test-classes
 dir /s /b src\main\java\*.java > out\sources.txt
