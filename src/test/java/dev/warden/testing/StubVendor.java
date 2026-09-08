@@ -133,6 +133,40 @@ public final class StubVendor {
                     + "\"expected\":\"acceptance rejects extra content\","
                     + "\"actual\":\"it accepts extra content\",\"confidence\":\"confirmed\"}]},"
                     + "\"total_cost_usd\":0.004}");
+            // Calls the same defect a P1 first and a P2 afterwards, changing nothing else. The
+            // one way a reviewer can end a run without anything about the work changing.
+            case "review-launders-severity" -> {
+                boolean first = withinFirst(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"" + (first ? "fail" : "pass") + "\","
+                        + "\"summary\":\"on reflection\",\"findings\":[{\"id\":\"disputed-one\","
+                        + "\"severity\":\"" + (first ? "P1" : "P2") + "\",\"path\":\"src/result.txt\","
+                        + "\"message\":\"the content is wrong\",\"expected\":\"right\","
+                        + "\"actual\":\"wrong\",\"confidence\":\"confirmed\"}]},"
+                        + "\"total_cost_usd\":0.004}");
+            }
+            // Echoes back whether its prompt carried the recheck package, so a test can prove
+            // the reviewer was actually told what it found last time.
+            case "review-reports-context" -> {
+                String prompt = "";
+                String promptFile = flag(args, "--prompt-file");
+                if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
+                    prompt = Files.readString(Path.of(promptFile), StandardCharsets.UTF_8);
+                }
+                boolean sawRecheck = prompt.contains("You have already read this candidate");
+                boolean sawId = prompt.contains("prior-finding");
+                // Once. Asking the counter twice in one dispatch advances it twice, which
+                // produced a failing verdict carrying no findings and so no fix round at all.
+                boolean objects = withinFirst(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"" + (objects ? "fail" : "pass") + "\","
+                        + "\"summary\":\"recheck_package=" + sawRecheck + " prior_id=" + sawId + "\","
+                        + "\"findings\":" + (objects
+                            ? "[{\"id\":\"prior-finding\",\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                              + "\"message\":\"needs work\",\"expected\":\"a\",\"actual\":\"b\","
+                              + "\"confidence\":\"confirmed\"}]"
+                            : "[]") + "},\"total_cost_usd\":0.004}");
+            }
             // A passing verdict with no `role` field, so the executor fills in whichever role
             // dispatched it. Lets one stub stand in for a reviewer or an architect stage
             // without pretending to be a role it is not.

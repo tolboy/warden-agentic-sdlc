@@ -184,8 +184,34 @@ public final class Findings {
             Object priorFingerprint = previous.get("candidate_fingerprint");
             row.put("candidate_moved", priorFingerprint != null && candidateFingerprint != null
                     && !priorFingerprint.equals(candidateFingerprint));
+            // A finding that stopped blocking because it was relabelled rather than fixed.
+            // It is still reported, at a severity that no longer counts — which is the one way
+            // a reviewer can make a run go green without anything about the work changing.
+            Map<String, String> was = severityById(previous.get("findings"));
+            Map<String, String> is = severityById(row.get("findings"));
+            List<String> downgraded = new ArrayList<>();
+            for (String id : before) {
+                if (after.contains(id)) continue;
+                String now2 = is.get(id);
+                if (now2 != null && "P1".equals(was.get(id))) downgraded.add(id);
+            }
+            row.put("severity_downgraded", downgraded);
         }
         return row;
+    }
+
+    /** Severity per finding id, from a recorded round's own finding list. */
+    private static Map<String, String> severityById(Object findings) {
+        Map<String, String> severities = new LinkedHashMap<>();
+        if (findings instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> entry && entry.get("id") != null) {
+                    severities.put(String.valueOf(entry.get("id")),
+                            String.valueOf(entry.get("severity")));
+                }
+            }
+        }
+        return severities;
     }
 
     private static List<String> idsOf(Object value) {

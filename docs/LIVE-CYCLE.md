@@ -505,7 +505,51 @@ reviewer with its own `git diff` grant finds them anyway and has not been told t
 directory is the controller's bookkeeping rather than part of the candidate. Recorded here as
 an observation about how the candidate is presented to a reviewer, not fixed in this pass.
 
-## 9. What this file still does not claim
+## 9. A finding that survived a round, and a repair that refused
+
+Run date: 2026-09-08, run `p1-live-1`. The task asks for a two-line file; the acceptance
+command deliberately checks only the first line, so the gate is weaker than the goal and a
+reviewer reading both has something real to object to. Same roster as section 8.
+
+```text
+ok  1m14s   tokens 31663/677   cost $0.0156            grok-implement
+ok  1.2s                                               machine gates
+ok  2m29s   tokens 20/9536     cost $0.9541  fail      claude-review (opus/max)
+    -> fix round 1 of 2: review sends the work back to implementer
+ok  3m+                        cost $0.0218            grok-implement, changed nothing
+ok  2m54s   tokens 18/11846    cost $0.9974  fail      claude-review, same finding
+done  repair_made_no_progress   4 vendor call(s), $1.9889 charged
+```
+
+**The work was correct and the reviewer was still right.** `src/units.txt` held exactly
+`metre=1` and `kilometre=1000`. Opus filed a P1 against `check.ps1`: the only acceptance
+command never verifies the second line, so the gate fails open on half the goal.
+
+**The repair refused, and said why.** Grok's receipt: *"Finding f-4e6ecbc93dd4 is not mine to
+fix … That script is outside the declared src/ blast radius, is hashed as the task acceptance
+command … a token edit that leaves the candidate equivalent is not useful, so src/units.txt was
+left unchanged."* That is what the repair package asks for in as many words, and it is the
+behaviour that used to cost a round of theatre.
+
+**The identity survived the round, and the reviewer carried it.** Opus supplied no ids, so
+Warden derived `f-4e6ecbc93dd4` from the path and message. The recheck package handed that id
+back with grok's account and the fact the candidate had not moved. On the second reading Opus
+reused it — `id_source` went from `derived` to `vendor` — even though it reworded the message
+to *"Still open, unchanged."* Nothing but the package could have told it that id.
+
+**The stop was arithmetic, not patience.** Same blocking id, `candidate_moved: false`, so
+`repair_made_no_progress` ended the run with one fix round left unspent. On the old behaviour
+that round would have bought another grok call and another Opus reading, at roughly the $1.01
+the first pair cost, to reach the same place.
+
+**What it also exposed.** Every finding came back `category_source: defaulted_absent` — Opus
+supplied no category, so Warden defaulted all of them to `product_defect`, when the P1 is
+plainly a `contract_gap`. The vocabulary existed and was validated; the shipped reviewer prompt
+simply never asked for one. Fixed by naming the categories in that prompt. `warden setup` never
+overwrites an existing prompt, so operators already running keep theirs until they choose to
+adopt it — the category is optional and a reviewer that supplies none still validates.
+
+## 10. What this file still does not claim
 
 * This run did not exercise the Orca adapter (`runner: orca`) as a **role runner**: Orca
   created worktrees here through the separate `OrcaIsolation` path. A later live smoke with

@@ -225,6 +225,44 @@ The implementer is told this in its fix context: a finding it cannot act on shou
 in its summary rather than with a token edit, because a repair that leaves the candidate
 byte-for-byte unchanged ends the run rather than buying another reading of the same bytes.
 
+## What a repair and a re-reading are told
+
+A fix round used to be briefed with the failure text and nothing else, which made every round
+after the first worse informed than the first. And a reviewer was told nothing at all, so it
+re-investigated from scratch each time and its findings drifted — which is also why two rounds
+could not be compared.
+
+**The repair package** carries the goal quoted from the contract rather than summarised, the
+non-goals, anything an earlier round already closed (so it stays closed), what the previous
+repair reported doing and whether the tree agreed, the failing findings with their ids and
+categories, the blast radius and authority it may not exceed, and how much room is left. It
+also says plainly that a finding it cannot act on should be answered in the summary rather than
+with a token edit, because a repair that changes no bytes ends the run.
+
+**The reviewer package** is given only to a stage re-reading a candidate it has seen before. It
+carries the findings that stage filed last time with their ids, the implementer's account of
+what it did, and — separately, because the two can disagree — whether the candidate actually
+moved. It asks two questions in order: is each finding closed, judged against the code rather
+than against the account of it; and did the repair break something that was working. It says to
+reuse ids for surviving objections, not to lower a severity to let a run pass, and that the
+whole investigation must happen again when the scope, the acceptance commands or the contract
+have changed, or when the earlier verdict rested on an observation that can go stale.
+
+Proven live on 2026-09-08 (`docs/LIVE-CYCLE.md` section 9): Warden derived an id for a finding
+the reviewer had not named, handed it back in the recheck package, and the reviewer reused it on
+its second reading — `id_source` moving from `derived` to `vendor` — while rewording the message
+around it.
+
+## Refusing a pass that was bought by relabelling
+
+A reviewer can end a run by calling its own P1 a P2. On a candidate that changed, that may be an
+honest reconsideration in the light of a repair. On a candidate that did not change, nothing new
+was learned about the code, and the only thing that moved is the label between the run and the
+human gate. `severity_downgraded_without_change` refuses that — not by overruling the reviewer's
+judgement of the defect, but by declining to treat the relabelling as a pass. A reviewer that
+believes the P1 was wrong should say so and why, which is a `review_disagreement` for a person to
+settle on the evidence.
+
 ## What the summary says, as three answers rather than one
 
 `ok: false` used to mean, indiscriminately, that the investigation found nothing, that a

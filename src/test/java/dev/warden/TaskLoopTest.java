@@ -254,6 +254,8 @@ public final class TaskLoopTest implements Suite {
             resumeCurrencyChecks(check, sandbox, home);
             findingIdentityChecks(check);
             findingHistoryChecks(check, sandbox, home);
+            handoverPackageChecks(check, sandbox, home);
+            severityLaunderingChecks(check, sandbox, home);
             liveRunShapeChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
@@ -2015,6 +2017,134 @@ public final class TaskLoopTest implements Suite {
         check.eq("only what blocks acceptance is counted as blocking", 1,
                 dev.warden.ledger.Findings.blockingIds(
                         dev.warden.ledger.Findings.of(noisy)).size());
+    }
+
+    /**
+     * What a repair and a re-reading are actually told.
+     *
+     * A fix round used to be briefed with the failure text and nothing else, which made every
+     * round after the first worse informed than the first: no statement of the goal it was
+     * still working towards, no memory of what it had already closed, no idea how much room
+     * was left. And a reviewer was told nothing at all, so it re-investigated from scratch
+     * every round and its findings drifted — the same defect described differently, which is
+     * also why two rounds could not be compared.
+     */
+    @SuppressWarnings("unchecked")
+    private void handoverPackageChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path handover = newProject(sandbox, "handover-packages", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("handover-packages-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("handover-packages-review.count"));
+        // The implementer moves the tree on its repair, so the round is real progress and the
+        // reviewer's second reading is of something new.
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("handover-packages-impl.count"), 1);
+        // Objects once, then passes — and reports back what its prompt contained.
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-reports-context", sandbox.resolve("handover-packages-review.count"), 2);
+        policy(home, "loop-review", "loop-impl");
+
+        TaskLoop.Outcome done = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(handover, "hello"), UserConfig.load(home), "hp1", false);
+        check.that("the round closes and the run reaches the human gate", done.ok());
+
+        // The repair package: the goal, the constraints and the budget, not just the failure.
+        String repair = Files.readString(handover.resolve(".warden/runs/hp1/context/fix-1-review.md"));
+        check.contains("the repair is given the goal, quoted rather than summarised",
+                repair, "# The goal, unchanged");
+        check.contains("and the goal itself", repair, "Create src/result.txt");
+        check.contains("the finding is named by its id so the answer can be matched to it",
+                repair, "prior-finding");
+        check.contains("and by the kind of problem it is", repair, "- category: product_defect");
+        check.contains("the blast radius is restated", repair, "# What you may not do");
+        check.contains("with the scope it may not leave", repair, "src");
+        check.contains("and the contract it may not edit", repair, "hashed");
+        check.contains("the room left is stated", repair, "# What is left");
+        check.contains("naming which round this is", repair, "fix round 1 of");
+        check.contains("and that nothing here lands", repair, "Nothing is landed");
+
+        // The reviewer package: what it filed, what the implementer says it did, and whether
+        // the tree agrees.
+        String recheck = Files.readString(
+                handover.resolve(".warden/runs/hp1/context/fix-1-review-recheck.md"));
+        check.contains("the reviewer is told it has read this before",
+                recheck, "You have already read this candidate");
+        check.contains("and is given back its own finding, by id", recheck, "prior-finding");
+        check.contains("with the implementer's account of what it did",
+                recheck, "What the implementer says it did");
+        check.contains("and whether the candidate actually moved",
+                recheck, "did change since your last reading");
+        check.contains("it is asked whether the findings actually closed",
+                recheck, "actually closed");
+        check.contains("and told a regression is a finding, not a footnote",
+                recheck, "a regression is a new finding");
+        check.contains("told to reuse ids so a survivor is distinguishable from a new finding",
+                recheck, "Reuse the finding ids");
+        check.contains("told not to launder severity", recheck, "Do not lower a severity");
+        check.contains("and told when a narrowed reading is not allowed",
+                recheck, "repeat it if the scope");
+
+        // The stub answers with what its prompt actually contained, so this is not a claim
+        // about a file on disk but about what reached the vendor.
+        Map<String, Object> second = steps(done).stream()
+                .filter(s -> "reviewer".equals(s.get("step"))
+                        && Long.valueOf(1L).equals(s.get("attempt")))
+                .findFirst().orElseThrow();
+        Map<String, Object> artifact = Json.parseObject(Files.readString(
+                handover.resolve(String.valueOf(second.get("artifact_path")))));
+        check.contains("the recheck package reached the vendor, not just the evidence directory",
+                String.valueOf(artifact.get("summary")), "recheck_package=true");
+        check.contains("carrying the id it filed last time",
+                String.valueOf(artifact.get("summary")), "prior_id=true");
+
+        // And the receipt the run keeps about the repair.
+        Map<String, Object> receipt =
+                (Map<String, Object>) done.summaryReport().get("last_repair_receipt");
+        check.eq("the repair receipt records the round", 1L, receipt.get("attempt"));
+        check.eq("and that the candidate really moved", Boolean.TRUE,
+                receipt.get("moved_candidate"));
+    }
+
+    /**
+     * A pass bought by relabelling is not a pass.
+     *
+     * A reviewer can end a run by calling its own P1 a P2. On a candidate that changed that may
+     * be an honest reconsideration; on one that did not change, nothing new was learned about
+     * the code and the only thing that moved is the label between the run and the human gate.
+     */
+    @SuppressWarnings("unchecked")
+    private void severityLaunderingChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path laundered = newProject(sandbox, "severity-laundering", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("severity-laundering-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("severity-laundering-review.count"));
+        // Writes identical bytes on the repair, so the second reading is of the same candidate.
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("severity-laundering-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-launders-severity", sandbox.resolve("severity-laundering-review.count"), 2);
+        policy(home, "loop-review", "loop-impl");
+
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner())
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(laundered, "hello"), UserConfig.load(home),
+                        "sl1", false);
+        check.that("a P1 relabelled below the line does not carry the run", !refused.ok());
+        check.eq("and the refusal names what happened",
+                "severity_downgraded_without_change", refused.reason());
+        Map<String, Object> caught =
+                (Map<String, Object>) refused.summaryReport().get("severity_downgraded_without_change");
+        check.eq("naming the finding that was relabelled",
+                List.of("disputed-one"), caught.get("downgraded_ids"));
+        check.eq("and the stage that relabelled it", "review", caught.get("at_stage"));
+        check.contains("the terminal says a relabelled finding is not a fixed one",
+                String.join("\n", printed), "not treating a relabelled finding as a fixed one");
+        check.contains("and the next step sends the disagreement to a person",
+                String.valueOf(refused.summaryReport().get("safe_next_step")),
+                "settle that on the evidence");
     }
 
     /** The roster the live run had: one writer, two independent readers. */

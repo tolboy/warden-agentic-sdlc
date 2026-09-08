@@ -548,6 +548,31 @@ public final class UserSetup {
 
             `verdict` is `fail` if there is at least one P1, else `pass`.
 
+            Give every finding a `category`, because it decides who can act on it. Only the first
+            is reliably the implementer's:
+
+            - `product_defect` — wrong or unsafe behaviour in the work itself.
+            - `contract_gap` — the task, its acceptance commands or its scenarios do not say what
+              they need to say. An acceptance command too weak to catch half the goal is this, not
+              a defect in the code that satisfied it.
+            - `access_required` — you could not reach something you needed. Say what, and note
+              that a failed network call is not by itself proof that access was the problem.
+            - `investigation_evidence_gap` — you could not establish the fact you were asked about.
+            - `tooling_failure`, `provider_unavailable`, `quota_exhausted` — the machinery, not
+              the work.
+            - `review_disagreement` — you believe an earlier finding was wrong. Say why, on the
+              evidence.
+
+            A finding an implementer cannot act on is not a reason to soften it. File it at the
+            severity it deserves with the category that says whose it is; the run stops for a
+            person rather than spending a repair round on it.
+
+            If you are re-reading a candidate you have seen before, you will be told so and given
+            back the ids you filed. Reuse an id for anything still open and give a new one only to
+            something genuinely new, so a surviving objection can be told from a fresh one. Never
+            lower a severity to let a run pass: a P1 that becomes a P2 on a candidate that did not
+            change is refused, not believed.
+
             Judge whether each acceptance command covers what it appears to cover. A command that
             passes while testing nothing relevant is a P1 finding, not a passing check.
 
