@@ -14,6 +14,7 @@ import dev.warden.gate.VisualQaRunner;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.Findings;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleContract;
 import dev.warden.role.RoleRunner;
@@ -675,6 +676,8 @@ public final class TaskLoop {
          * `reused_judgements` names what was consumed, so it is written as consumption happens.
          */
         private final java.util.Set<String> reusedStages = new java.util.LinkedHashSet<>();
+        /** Every judging round this run performed, per stage, with what it objected to. */
+        private final List<Map<String, Object>> findingHistory = new ArrayList<>();
         /** Per judging stage: whether it ran, whether it passed, and what it still objects to. */
         private final Map<String, Map<String, Object>> coverage = new LinkedHashMap<>();
         private int attempt;
@@ -769,6 +772,9 @@ public final class TaskLoop {
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
                 reviewed = (RoleRunner.Outcome) outcome;
                 blocking = recordFindings(stage, reviewed);
+                // The stage has now re-read the repaired candidate, so its answer is the only
+                // thing that can say whether the round achieved anything.
+                requireFindingsProgress(stage);
             }
             if (blocking > 0) throw new StopException(stage.findingsReason());
             finished(stage);
@@ -882,6 +888,54 @@ public final class TaskLoop {
                 // bug that let a failed recheck stay listed as passed.
                 finished(earlier);
             }
+        }
+
+        /**
+         * Stop a repair loop that is not repairing anything.
+         *
+         * The condition is the plan's, and both halves of it matter: the same confirmed
+         * blockers came back, *and* the evidence they are about did not move. Either alone is
+         * a bad signal. A repair that changes the tree and still leaves the finding open may
+         * have closed half of it, and stopping there would throw away real progress; a
+         * different finding on an unchanged tree means the reviewer looked somewhere new.
+         * Together they mean the round bought nothing, and the next one would buy the same.
+         *
+         * Measured live on 2026-09-07: a repair cost $0.031 and changed no bytes, and the
+         * round then spent $1.46 for one reviewer to reach the same pass and another the same
+         * fail. Nothing compared the tree before the repair with the tree after it, so the
+         * loop would have gone on doing that until `max_fix_attempts` ran out.
+         *
+         * Checked after the re-read rather than straight after the fix. Stopping the moment a
+         * repair writes nothing would be cheaper and is wrong: the stage that objected has not
+         * spoken yet, and it is the only thing that can say whether the objection still
+         * stands.
+         */
+        private void requireFindingsProgress(Workflow.Stage stage) {
+            Map<String, Object> now = lastFindingRound(stage.name());
+            if (now == null) return;
+            if (!(now.get("blocking_ids") instanceof List<?> blockers) || blockers.isEmpty()) return;
+            // `candidate_moved` is absent on a stage's first round, and a first round cannot
+            // be a repeat of anything.
+            if (!Boolean.FALSE.equals(now.get("candidate_moved"))) return;
+            boolean closedNothing = now.get("closed") instanceof List<?> closed && closed.isEmpty();
+            boolean foundNothingNew = now.get("new_findings") instanceof List<?> fresh && fresh.isEmpty();
+            if (!closedNothing || !foundNothingNew) return;
+
+            Map<String, Object> stalled = new LinkedHashMap<>();
+            stalled.put("at_stage", stage.name());
+            stalled.put("fix_attempt", (long) attempt);
+            stalled.put("candidate_fingerprint", now.get("candidate_fingerprint"));
+            stalled.put("open_blocking_ids", blockers.stream().map(String::valueOf).toList());
+            summary.put("repair_made_no_progress", stalled);
+            summary.put("resolution", "The repair for '" + stage.name() + "' left the candidate "
+                    + "byte-for-byte unchanged and the same blocking finding came back, so "
+                    + "another round would re-read the same bytes for the same verdict. Read "
+                    + "what the finding actually asks for: one an implementer cannot act on — a "
+                    + "weak acceptance command, a missing access grant, a disagreement about the "
+                    + "contract — is resolved by a person changing the task, not by another fix.");
+            progress.line("      the repair changed nothing and the same finding came back; "
+                    + "stopping rather than buying the same verdict again");
+            throw new StopException("repair_made_no_progress");
         }
 
         /**
@@ -1413,6 +1467,34 @@ public final class TaskLoop {
                     + "tree this resume has since changed; re-running it rather than believing it");
         }
 
+        /**
+         * What this stage objected to this round, against what it objected to last round.
+         *
+         * Kept per stage, because two reviewers reading the same candidate reach their own
+         * conclusions and a shared list would let one of them appear to have closed the
+         * other's finding. The comparison is what makes "the repair achieved nothing" a fact
+         * the run can state rather than a pattern a person has to notice across two reports.
+         */
+        private void recordFindingRound(Workflow.Stage stage, RoleRunner.Outcome outcome)
+                throws Exception {
+            List<Findings.Finding> found = Findings.of(readArtifact(loaded.root(), outcome));
+            Map<String, Object> previous = lastFindingRound(stage.name());
+            Map<String, Object> row = Findings.round(stage.name(), attempt, currentFingerprint(),
+                    found, previous);
+            findingHistory.add(row);
+            summary.put("finding_history", List.copyOf(findingHistory));
+        }
+
+        /** The most recent recorded round for this stage, or null when it has had none. */
+        private Map<String, Object> lastFindingRound(String stage) {
+            for (int index = findingHistory.size() - 1; index >= 0; index--) {
+                if (stage.equals(findingHistory.get(index).get("stage"))) {
+                    return findingHistory.get(index);
+                }
+            }
+            return null;
+        }
+
         /** The source tree as it stands now, or null when git cannot be asked. */
         private String currentFingerprint() {
             try {
@@ -1431,6 +1513,7 @@ public final class TaskLoop {
 
         private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
             long blocking = blockingFindings(loaded.root(), outcome);
+            recordFindingRound(stage, outcome);
             // Kept: an operator's greps, the report reader and the reuse rules for a
             // single-stage role all read this. It is keyed by role, so a chain with two review
             // stages has always had the second silently overwrite the first.
@@ -2403,6 +2486,12 @@ public final class TaskLoop {
                     + "or add a profile from another vendor, then: " + carryOn;
             case "failover_requires_confirmation" -> "warden approve " + runId
                     + " --decision switch  then  warden run " + taskId + " --continue " + runId;
+            case "repair_made_no_progress" -> "the last repair left the candidate byte-for-byte "
+                    + "unchanged and the same finding came back, so another round would re-read "
+                    + "the same bytes. Read the open findings in `warden report " + runId
+                    + " --text`: one an implementer cannot act on is a task for a person, not "
+                    + "for another fix round. Change the contract or the finding's premise, "
+                    + "then start a new run.";
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";
@@ -2667,6 +2756,13 @@ public final class TaskLoop {
                 Each finding states an expected and an actual. Address the difference, or, if the
                 reviewer is wrong, say so in your summary with the evidence that shows it — do not
                 silently leave a finding unaddressed.
+
+                If a finding is not something a change to this diff can fix — the acceptance
+                command is too weak, an access grant is missing, the contract itself is wrong —
+                say that in your summary and change nothing on its account. A repair that leaves
+                the candidate byte-for-byte unchanged ends the run rather than buying another
+                reading of the same bytes, so an honest "this one is not mine to fix" is worth
+                more here than a token edit.
                 """);
         return builder.toString();
     }

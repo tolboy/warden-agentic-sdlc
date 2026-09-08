@@ -115,6 +115,24 @@ public final class StubVendor {
                         + "\"status\":\"completed\",\"summary\":\"revision " + revision + "\","
                         + "\"files_changed\":[\"src/result.txt\",\"src/rev.txt\"]}}");
             }
+            // An implementer that reports success and writes nothing at all. The live shape of
+            // a repair whose finding is not the implementer's to fix — a weak acceptance
+            // command, a missing grant — where the honest answer is to change no bytes.
+            case "impl-noop" -> System.out.println(
+                    "{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                    + "\"status\":\"completed\",\"summary\":\"the finding is not mine to fix\","
+                    + "\"files_changed\":[]},\"total_cost_usd\":0.005}");
+            // A reviewer that objects with a categorised, vendor-identified finding, so the
+            // identity and category paths are exercised as a vendor would drive them.
+            case "review-categorised" -> System.out.println(
+                    "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                    + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"contract too weak\","
+                    + "\"findings\":[{\"id\":\"acceptance-too-weak\",\"category\":\"contract_gap\","
+                    + "\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                    + "\"message\":\"the acceptance command matches a substring\","
+                    + "\"expected\":\"acceptance rejects extra content\","
+                    + "\"actual\":\"it accepts extra content\",\"confidence\":\"confirmed\"}]},"
+                    + "\"total_cost_usd\":0.004}");
             // A passing verdict with no `role` field, so the executor fills in whichever role
             // dispatched it. Lets one stub stand in for a reviewer or an architect stage
             // without pretending to be a role it is not.

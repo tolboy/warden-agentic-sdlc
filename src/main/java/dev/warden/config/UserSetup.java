@@ -651,7 +651,13 @@ public final class UserSetup {
                       "expected": { "type": "string" },
                       "actual": { "type": "string" },
                       "suggestion": { "type": "string" },
-                      "confidence": { "enum": ["confirmed", "plausible"] }
+                      "confidence": { "enum": ["confirmed", "plausible"] },
+                      "category": {
+                        "enum": ["product_defect", "investigation_evidence_gap", "access_required",
+                                 "contract_gap", "tooling_failure", "quota_exhausted",
+                                 "provider_unavailable", "review_disagreement"]
+                      },
+                      "id": { "type": "string" }
                     }
                   }
                 },

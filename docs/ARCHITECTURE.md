@@ -168,6 +168,63 @@ about a candidate a reviewer had passed. And `reused_judgements` names what was 
 consumed, recorded as each verdict is spent rather than when the pool is built, because a
 verdict that looked reusable at the start can be invalidated before its turn.
 
+## What a finding is, and how a round knows it has seen one before
+
+A finding used to be prose with a severity on it. That is enough to hand back to an
+implementer once, and not enough for the question the second round asks: is this the defect we
+already tried to fix, or a different one. Two reports of one defect were two unrelated blobs of
+text, so nothing could say whether a repair had closed anything.
+
+Each finding now carries an identity and a category, both recorded with their provenance:
+
+- **`id` and `id_source`.** A vendor may name a finding; Warden checks the name. When it does
+  not, the id is derived from the path and the normalised message — case folded, whitespace
+  collapsed, trailing punctuation dropped — so reformatting alone does not mint a new finding.
+  `derived` and `vendor` are different strengths of claim and the report says which it has.
+- **`category` and `category_source`.** One of `product_defect`, `investigation_evidence_gap`,
+  `access_required`, `contract_gap`, `tooling_failure`, `quota_exhausted`,
+  `provider_unavailable`, `review_disagreement`. The model proposes and Warden validates: a
+  category outside the set becomes `product_defect` marked `defaulted_unrecognised`, never an
+  invented one. The distinction that matters is between a defect in the work and everything
+  else, because only the first is something handing the diff back can repair.
+
+Both fields are optional in the shipped schema, so a reviewer that supplies neither still
+validates and still gets a usable identity.
+
+`finding_history` records one row per judging round per stage: what it found, the tree it
+judged, and — from the second round on — which ids `closed`, which `persisted`, which are
+`new_findings`, and whether the candidate moved at all.
+
+**What this identity does not do.** It matches a re-report that keeps the same path and
+substantially the same wording. A genuine reword by a different vendor mints a new id, and two
+distinct defects on one path with near-identical messages collide. That is exactly why the
+loop's progress signal does not rest on finding text alone.
+
+## When a repair round is not repairing anything
+
+`repair_made_no_progress` stops a loop that is paying to rediscover the same objection. Both
+halves of the condition are required, and the plan's wording is the reason:
+
+- the same confirmed blockers came back, **and**
+- the evidence they are about did not move — the candidate fingerprint is unchanged.
+
+Either alone is a bad signal. A repair that changes the tree and still leaves the finding open
+may have closed half of it, and stopping would throw away real progress. A different finding on
+an unchanged tree means the reviewer looked somewhere new. Together they mean the round bought
+nothing and the next would buy the same.
+
+It is checked *after* the objecting stage re-reads, not straight after the fix. Stopping the
+moment a repair writes nothing would be cheaper and wrong: the stage that objected has not
+spoken yet, and it is the only thing that can say whether the objection still stands.
+
+Measured live on 2026-09-07 (`docs/LIVE-CYCLE.md` section 8): a repair cost $0.031 and changed
+no bytes, and the round then spent $1.46 for one reviewer to reach the same pass and another
+the same fail. Nothing compared the tree before the repair with the tree after it.
+
+The implementer is told this in its fix context: a finding it cannot act on should be answered
+in its summary rather than with a token edit, because a repair that leaves the candidate
+byte-for-byte unchanged ends the run rather than buying another reading of the same bytes.
+
 ## What the summary says, as three answers rather than one
 
 `ok: false` used to mean, indiscriminately, that the investigation found nothing, that a

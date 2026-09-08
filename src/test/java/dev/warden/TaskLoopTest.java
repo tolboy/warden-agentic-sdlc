@@ -99,12 +99,18 @@ public final class TaskLoopTest implements Suite {
             check.contains("the finding's expectation is handed back", reviewContext, "expected: the final content");
             check.contains("and its actual", reviewContext, "actual: an intermediate one");
 
-            // Blocking findings that survive the budget escalate rather than merge.
+            // Blocking findings that survive escalate rather than merge. The stand-in
+            // implementer rewrites identical bytes, so the reviewer's second reading is of the
+            // same tree and repeats itself — which the loop now names for what it is rather
+            // than spending the rest of its fix rounds rediscovering.
             Path blocked = newProject(sandbox, "blocked");
             writeProfiles(home, sandbox, "blocked", 1, 99);
             TaskLoop.Outcome stillBlocked = loop(blocked, home, "r5");
             check.that("surviving P1s stop the run", !stillBlocked.ok());
-            check.eq("with the reason named", "blocking_findings_remain", stillBlocked.reason());
+            check.eq("naming the repair that achieved nothing rather than only the findings",
+                    "repair_made_no_progress", stillBlocked.reason());
+            check.eq("after one fix round, not after exhausting them all", 1L,
+                    stillBlocked.summaryReport().get("attempts_used"));
 
             // Low risk pays no reviewer, but still passes every machine gate.
             Path cheap = newProject(sandbox, "cheap", "low");
@@ -246,6 +252,8 @@ public final class TaskLoopTest implements Suite {
             independenceChecks(check, sandbox, home);
             judgingContractChecks(check, sandbox, home);
             resumeCurrencyChecks(check, sandbox, home);
+            findingIdentityChecks(check);
+            findingHistoryChecks(check, sandbox, home);
             liveRunShapeChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
@@ -937,7 +945,10 @@ public final class TaskLoopTest implements Suite {
                 (loaded, runId) -> stubVisual(true, wide, narrow)).run(
                         new ConfigLoader().load(stubborn, "hello"), UserConfig.load(home), "v6", false);
         check.that("a visual finding that survives the budget stops the run", !unresolved.ok());
-        check.eq("and is named as such", "visual_findings_remain", unresolved.reason());
+        // The eyes object to the same screenshot twice and the stand-in implementer rewrites
+        // identical bytes, so the round achieved nothing and the run names that rather than
+        // spending the rest of its fix attempts on the same pixels.
+        check.eq("and is named as such", "repair_made_no_progress", unresolved.reason());
         check.that("the cost of finding that out is in the summary",
                 ((Number) unresolved.summaryReport().get("total_cost_usd")).doubleValue() > 0);
     }
@@ -1636,8 +1647,11 @@ public final class TaskLoopTest implements Suite {
                 declinedReason(swapped, "review"), "roster changed");
         check.that("so the new reviewer actually ran", steps(swapped).stream()
                 .anyMatch(step -> "audit-review".equals(step.get("profile"))));
+        // Its objection is honoured rather than skipped past. The stand-in implementer rewrites
+        // identical bytes, so the repair achieves nothing and the run says that rather than
+        // spending its remaining fix rounds rediscovering the same finding.
         check.eq("and its objection stands rather than being skipped past",
-                "blocking_findings_remain", swapped.reason());
+                "repair_made_no_progress", swapped.reason());
 
         // 2. Independence alone. Same profile, same prompt, one flag.
         writeProfiles(home, sandbox, "judging-contract", 1, 1);
@@ -1892,14 +1906,128 @@ public final class TaskLoopTest implements Suite {
                 reusedStages(bresumed).contains("implement"));
     }
 
+    /**
+     * A finding a later round can recognise, and a repair that is measured rather than assumed.
+     *
+     * Two reports of one defect used to be two unrelated blobs of prose, so the loop could not
+     * say whether a repair had closed anything or whether it was paying to rediscover the same
+     * objection. Measured live on 2026-09-07: a repair cost $0.031 and changed nothing, and the
+     * recheck then spent $1.46 for one reviewer to reach the same pass and another the same
+     * fail. Nothing compared the tree before the repair with the tree after it.
+     */
+    @SuppressWarnings("unchecked")
+    private void findingHistoryChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path stalled = newProject(sandbox, "repair-changes-nothing", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("repair-changes-nothing-impl.count"));
+        // Writes the result once so the gate passes, then reports success and changes nothing.
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("repair-changes-nothing-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-categorised", sandbox.resolve("repair-changes-nothing-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome first = new TaskLoop(new ProcessRunner())
+                .withProgress(printed::add)
+                .run(new ConfigLoader().load(stalled, "hello"), UserConfig.load(home), "fh1", false);
+
+        // The reviewer objected, the implementer was handed it and wrote identical bytes, and
+        // the reviewer then said the same thing about the same tree.
+        check.that("a repair that achieves nothing stops the run", !first.ok());
+        check.eq("and says so in its own words", "repair_made_no_progress", first.reason());
+        Map<String, Object> stall =
+                (Map<String, Object>) first.summaryReport().get("repair_made_no_progress");
+        check.eq("naming the stage whose finding went unaddressed", "review", stall.get("at_stage"));
+        check.eq("and the finding still open, by id",
+                List.of("acceptance-too-weak"), stall.get("open_blocking_ids"));
+        check.contains("the terminal says why another round was not bought",
+                String.join("\n", printed), "the same finding came back");
+        check.contains("and the next step points at a person, not another fix round",
+                String.valueOf(first.summaryReport().get("safe_next_step")),
+                "not for another fix round");
+
+        // The history is the point: one row per judging round, and what moved between them.
+        List<Map<String, Object>> history =
+                (List<Map<String, Object>>) first.summaryReport().get("finding_history");
+        check.eq("both readings were recorded", 2, history.size());
+        check.eq("for the stage that judged", "review", history.get(0).get("stage"));
+        check.eq("naming the blocking finding by a stable id",
+                List.of("acceptance-too-weak"), history.get(0).get("blocking_ids"));
+        Map<String, Object> finding =
+                ((List<Map<String, Object>>) history.get(0).get("findings")).get(0);
+        check.eq("the vendor's own id is kept", "vendor", finding.get("id_source"));
+        check.eq("and its category is taken as offered", "contract_gap", finding.get("category"));
+        check.eq("recorded as the vendor's choice", "vendor", finding.get("category_source"));
+        check.that("the round records the tree it judged",
+                history.get(0).get("candidate_fingerprint") instanceof String);
+
+        // The second round is the comparison, and it is what the stop rests on.
+        Map<String, Object> second = history.get(1);
+        check.eq("the repair closed nothing", List.of(), second.get("closed"));
+        check.eq("the same finding persisted", List.of("acceptance-too-weak"),
+                second.get("persisted"));
+        check.eq("and nothing new was found", List.of(), second.get("new_findings"));
+        check.eq("against a candidate that never moved", Boolean.FALSE,
+                second.get("candidate_moved"));
+    }
+
+    /**
+     * Identity and category, at the level they are decided.
+     *
+     * A vendor that names neither still has to produce a finding a second round can recognise,
+     * and a vendor that invents a category must not have it believed.
+     */
+    private void findingIdentityChecks(Check check) {
+        Map<String, Object> bare = Map.of("findings", List.of(Map.of(
+                "severity", "P1", "path", "src/a.txt", "message", "The label   is CLIPPED.")));
+        Map<String, Object> reworded = Map.of("findings", List.of(Map.of(
+                "severity", "P1", "path", "src/a.txt", "message", "the label is clipped")));
+        var one = dev.warden.ledger.Findings.of(bare).get(0);
+        var two = dev.warden.ledger.Findings.of(reworded).get(0);
+        check.eq("a finding with no id gets one derived", "derived", one.idSource());
+        check.eq("stable across case and whitespace and trailing punctuation",
+                one.id(), two.id());
+        check.that("and it looks like an id rather than a sentence",
+                one.id().startsWith("f-") && one.id().length() == 14);
+        check.eq("a category nobody offered is not invented",
+                "product_defect", one.category());
+        check.eq("and the report says Warden chose it",
+                "defaulted_absent", one.categorySource());
+
+        Map<String, Object> invented = Map.of("findings", List.of(Map.of(
+                "severity", "P1", "path", "src/a.txt", "message", "x",
+                "category", "vibes")));
+        var third = dev.warden.ledger.Findings.of(invented).get(0);
+        check.eq("a category outside the set is refused, not passed through",
+                "product_defect", third.category());
+        check.eq("and the refusal is visible", "defaulted_unrecognised", third.categorySource());
+
+        Map<String, Object> other = Map.of("findings", List.of(Map.of(
+                "severity", "P1", "path", "src/b.txt", "message", "the label is clipped")));
+        check.that("the same words about a different file are a different finding",
+                !one.id().equals(dev.warden.ledger.Findings.of(other).get(0).id()));
+
+        Map<String, Object> noisy = Map.of("findings", List.of(
+                Map.of("severity", "P2", "path", "src/a.txt", "message", "nit"),
+                Map.of("severity", "P1", "path", "src/a.txt", "message", "real")));
+        check.eq("only what blocks acceptance is counted as blocking", 1,
+                dev.warden.ledger.Findings.blockingIds(
+                        dev.warden.ledger.Findings.of(noisy)).size());
+    }
+
     /** The roster the live run had: one writer, two independent readers. */
     private void liveShapeProfiles(Path home, Path sandbox, String scenario) throws IOException {
         Files.deleteIfExists(sandbox.resolve(scenario + "-impl.count"));
         Files.deleteIfExists(sandbox.resolve(scenario + "-review.count"));
         Files.deleteIfExists(sandbox.resolve(scenario + "-review2.count"));
+        // An implementer whose repairs actually move the tree, so each round is genuine
+        // progress and the budget reserve — not the no-progress detector — is what this
+        // fixture measures.
         writeProfile(home, "loop-impl", "implementer", "implvendor", false,
                 "implementer", "role, task_id, status, summary, files_changed",
-                "impl", sandbox.resolve(scenario + "-impl.count"), 1);
+                "impl-grows", sandbox.resolve(scenario + "-impl.count"), 1);
         // Objects twice, passes on the third reading — the run's actual arc.
         writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
                 "reviewer", "role, task_id, status, verdict, summary, findings",

@@ -72,6 +72,10 @@ public final class RunReport {
         report.put("pending_stages", summary.get("pending_stages"));
         report.put("open_blocking_findings", summary.get("open_blocking_findings"));
         report.put("review_coverage", summary.get("review_coverage"));
+        // What each judging stage objected to, round by round, and what moved between them.
+        // Two reports of one defect used to be two unrelated blobs of text.
+        report.put("finding_history", summary.get("finding_history"));
+        report.put("repair_made_no_progress", summary.get("repair_made_no_progress"));
         report.put("budget_plan", summary.get("budget_plan"));
         report.put("budget_reserve", summary.get("budget_reserve"));
         report.put("budget_limit_hit", summary.get("budget_limit_hit"));
