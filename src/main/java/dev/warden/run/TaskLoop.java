@@ -1670,7 +1670,13 @@ public final class TaskLoop {
             if (stage.onFindings() == null) return null;
             String pack = reviewerPackage(stage);
             if (pack == null) return null;
-            return writeContext(ledger, attempt, stage.contextKind() + "-recheck", pack);
+            // Shared roles need separate evidence for each stage at the same attempt.
+            // Use the workflow position: operator-chosen names can have identical slugs.
+            String kind = stage.contextKind();
+            if (workflow.stagesFor(stage.role()).size() > 1) {
+                kind += "-stage-" + (workflow.stages().indexOf(stage) + 1);
+            }
+            return writeContext(ledger, attempt, kind + "-recheck", pack);
         }
 
         private RoleRunner.Outcome runRole(Workflow.Stage stage) throws Exception {

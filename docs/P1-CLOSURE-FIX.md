@@ -1,5 +1,45 @@
 # P1 closure follow-up - 2026-09-08
 
+## Current status, 2026-09-09
+
+P1 was accepted at the human gate of `p1-recheck-20260909` on candidate fingerprint
+`9ab10224e030` and integrated into `main` in `30e60a5`. The commit records seven
+distinct P1 defects repaired and the accepting machine gate at 1507 checks, zero failures.
+The earlier requests for a fresh first acceptance below describe intermediate states;
+they are superseded by that acceptance, not outstanding blockers for starting P2.
+
+The follow-up in this checkout closes the two non-blocking observations recorded in
+that commit: recheck context files now distinguish stages sharing a role, using the
+workflow position so stage-name normalization cannot cause a collision; continuation
+tests assert the absence of a fabricated repair, restored-history provenance and both
+changed and unchanged candidate briefings. The unchanged briefing is also checked in
+the dispatched reviewer prompt. Two-reviewer coverage checks that both context files
+survive and that the second dispatched prompt contains its own retained package.
+
+### Mapping to the revised P1 requirements
+
+| Requirement | Implementation and verification |
+|---|---|
+| Finding identity, categories, scenario, expected/actual, evidence, scope, lifecycle and supersedes; legacy input | `Findings`, shipped reviewer schema/prompt, `FindingsTest`; lifecycle belongs to the controller and legacy provenance survives restoration. |
+| Distinguish repairable product defects from other blockers | Eight validated categories; only `product_defect` P1 permits repair. TaskLoop regressions cover a blocking contract gap without an implementer call. Category validation does not prove the model's diagnosis. |
+| Compact repair packet | `repairPackage` retains the original goal, exclusions, findings/deltas, gate evidence, closures, authority and remaining calls; scripted handover tests inspect the packet and vendor receipt. |
+| Review history and repair receipt; renewed investigation when required | `reviewerPackage` supplies the run registry and receipt and instructs a full investigation when scope/contract changes or observations can go stale. Continuation and cross-stage tests cover delivery. Automatic observation TTL remains separate work. |
+| Bounded repair, no severity laundering or unsupported reopened requirements | Controller guards and registry regressions cover retraction, relabel, cross-stage closure, continuation and historical evidence reuse. P2/P3 do not buy repair. An optional arbiter is not implemented or required to close P1. |
+
+No paid live run was launched for this follow-up. The historical acceptance above
+applies to its recorded fingerprint; it is not a new human approval of this follow-up.
+P2 implementation has not started here.
+
+Validation of this follow-up: `test.cmd` built production and tests with release 21.
+The full invocation recorded **1426 passed** and two suite-level access errors:
+`dashboard` and `status-command` could not read their temporary directories inside
+the execution sandbox. Repeating only those suites with
+`java -cp out/test-classes dev.warden.testing.TestMain dashboard status-command`
+outside that sandbox passed **92/0**, exit 0. Thus all **1518 checks** passed across
+the full invocation and the targeted rerun, not in a single uninterrupted green run.
+`git diff --check` passed. Logs are local ignored artifacts at
+`out/p1-followup-test.log` and `out/p1-affected-suites.log`.
+
 ## Why the loop rejected readiness
 
 Audit run `do-p2-readiness-mtshaetv`, in a worktree of this repository, judged a

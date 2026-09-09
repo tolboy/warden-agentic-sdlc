@@ -1799,6 +1799,14 @@ public final class TaskLoopTest implements Suite {
         Path implPrompt = home.resolve("prompts/implementer.md");
         Files.writeString(implPrompt, Files.readString(implPrompt) + "\nAn added instruction.\n");
         TaskLoop.Outcome a1resumed = continueFrom(a1, home, "wr1", "wr2");
+        String resumedContext = Files.readString(
+                a1.resolve(".warden/runs/wr2/context/fix-0-review-recheck.md"));
+        check.contains("changed resume still does not claim a repair", resumedContext,
+                "No repair has run since.");
+        check.contains("resume briefing detects a change since the restored reading", resumedContext,
+                "has changed since that reading.");
+        check.that("changed resume does not claim an unchanged candidate",
+                !resumedContext.contains("has not changed at all"));
         check.eq("the re-dispatched implementer changed the tree", "2",
                 Files.readString(a1impl).strip());
         check.that("the review is not carried across that change",
@@ -2161,6 +2169,19 @@ public final class TaskLoopTest implements Suite {
         check.contains("resume records history provenance", history, "source_run=before");
         String context = Files.readString(project.resolve(".warden/runs/after/context/fix-0-review-recheck.md"));
         check.contains("resume reviewer gets closures before first new repair", context, "defect A");
+        check.contains("resume briefing does not invent a repair", context, "No repair has run since.");
+        check.contains("resume briefing identifies restored history", context, "restored from the run before it");
+        check.contains("resume briefing reports the unchanged candidate", context,
+                "**has not changed at all** since that reading.");
+        check.that("resume briefing has no fabricated implementer receipt",
+                !context.contains("What the implementer says it did"));
+        Map<String, Object> resumedReview = steps(resumed).stream()
+                .filter(s -> "review".equals(s.get("stage")) && s.get("reused_from") == null)
+                .findFirst().orElseThrow();
+        Path resumedPrompt = project.resolve(String.valueOf(resumedReview.get("artifact_path")))
+                .getParent().getParent().resolve("prompts/reviewer.md");
+        check.contains("the dispatched resume prompt carries the actual briefing",
+                Files.readString(resumedPrompt), context);
         check.eq("resume did not buy a repair after the drop", 0L,
                 steps(resumed).stream().filter(s -> "implementer".equals(s.get("step"))
                         && s.get("reused_from") == null).count());
@@ -2209,6 +2230,14 @@ public final class TaskLoopTest implements Suite {
         check.contains("including the closed defect", secondPrompt, "reproduce A");
         check.contains("with the stage that filed it", secondPrompt, "recorded_at_stage");
         check.contains("and the repair receipt", secondPrompt, "What the implementer says it did");
+        Path contexts = handoff.resolve(".warden/runs/handoff/context");
+        String firstContext = Files.readString(contexts.resolve("fix-1-review-stage-3-recheck.md"));
+        String secondContext = Files.readString(contexts.resolve("fix-1-review-stage-4-recheck.md"));
+        check.contains("first stage's context survives the second dispatch", firstContext,
+                "# You have already read this candidate");
+        check.contains("second stage retains its distinct first-reading context", secondContext,
+                "# A previous stage has already read this candidate");
+        check.contains("second dispatch uses its own retained context", secondPrompt, secondContext);
         Map<String, Object> secondArtifact = Json.parseObject(Files.readString(secondArtifactFile));
         check.contains("the inherited package reached the vendor",
                 String.valueOf(secondArtifact.get("summary")), "inherited=true");
