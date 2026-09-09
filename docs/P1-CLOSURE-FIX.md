@@ -2,8 +2,8 @@
 
 ## Why the loop rejected readiness
 
-Audit run `do-p2-readiness-mtshaetv` in
-`~/orca/workspaces/warden/w-p2-readiness` judged a documentation-only candidate.
+Audit run `do-p2-readiness-mtshaetv`, in a worktree of this repository, judged a
+documentation-only candidate.
 Astra's initial review (`--review-second-0/artifacts/reviewer.json`) rejected the report's
 YES because it substituted planner dependencies for mandatory P1 acceptance (section 6.7).
 The fix changed the report to NO; both final reviews accepted that corrected conclusion.
@@ -62,10 +62,11 @@ shipped reviewer prompt and schema there, with backups; see the smoke section be
 
 ## Validation
 
-Final full suite: **checks: 1491 passed, 0 failed**, process exit **0**. Reproduced
-2026-09-09 from a clean `test.cmd` build (`javac --release 21`); this fingerprint's
-figure, not the 1481/0 of the tree before the cross-stage recheck fix, and not the
-1450/0 before the handoff that fix completes.
+Final full suite: **checks: 1507 passed, 0 failed**, process exit **0**. Measured by the
+machine gate of the accepting run, twice, and reproduced from a clean `test.cmd` build
+(`javac --release 21`). That is this fingerprint's figure: the tree before the historical
+evidence fix was 1491/0, before the cross-stage recheck fix 1481/0, and before the handoff
+that fix completes 1450/0.
 Production build: `build.cmd`, release 21, exit 0. The acceptance command is `test.cmd`,
 which builds both trees with `javac --release 21` and runs `dev.warden.testing.TestMain`.
 An earlier full run before the continuation addition passed 1378 checks with zero failures;
@@ -88,8 +89,8 @@ that re-files A on a receipt already used before an earlier closure of A, which 
 stop as `finding_protocol_failure` before another repair. These use local
 StubVendor processes, not paid providers. Git Bash `./bin/warden --help` exits successfully.
 
-The contract gap found by the failing live smoke was reproduced in a fresh child worktree at
-`~/orca/workspaces/p1-closure-smoke/codex-p1-closure-acceptance`. Its corrected
+The contract gap found by the failing live smoke was reproduced in a fresh child worktree of
+the smoke fixture, which is a separate repository. Its corrected
 `tools/Check.java` ran 13 positive and negative cases, and a seven-mutation harness showed
 the old gate accepted every regression while the corrected gate rejected all seven. The
 fixture's Warden contract passed dry-run with no vendor dispatch and no paid calls.
@@ -139,16 +140,17 @@ runner, so `worker_done`/settlement receipts still rest on the 2026-09-04 smoke 
 
 ## What a fresh review of this candidate found, 2026-09-09
 
-The patch was frozen at `b47546c` in the Orca worktree
-`~/orca/workspaces/warden/p1-candidate` and reviewed as task
+The patch was frozen at `b47546c` in an Orca worktree of this repository and reviewed as task
 `p1-closure-candidate` on a chain of `gates -> review -> review-second`, with no implement
 stage because the candidate already existed. Two runs, `p1-candidate-20260909` and
 `p1-candidate-20260909-cont`: twelve vendor calls, $24.12 priced plus two Astra calls the
 vendor reports no price for, and a green gate on every round.
 
-Opus 5 at effort max read the diff four times and GPT 6 Astra twice. **Seven P1 defects were
-found in this code.** Six were repaired inside the loop and confirmed closed by the reviewer
-that had filed each one. Every one of the seven was in the guard rather than in the registry:
+Opus 5 at effort max read the diff four times and GPT 6 Astra twice. **Six P1 defects were
+found in this code across those two runs.** Five were repaired inside the loop and confirmed
+closed by the reviewer that had filed each one. A seventh was found later, by the run that
+accepted this work, and it is recorded at the end of this section. Every one of them was in
+the guard rather than in the registry:
 `Findings` computed `blocking_retracted`, `severity_downgraded` and the closure set correctly
 throughout, and the controller did not always ask for them.
 
@@ -181,10 +183,10 @@ closure. The registry now keeps `seen_evidence_refs` across incarnations, and th
 consults historical rounds, not only the latest record. The last `evidence_refs` on a closed
 finding remains the last report.
 
-This candidate also carries edits to `docs/ADAPTIVE-WORKFLOW-PLAN.md` made during those runs.
-The primary checkout's copy of that plan was rewritten separately on 2026-09-09 and is the
-specification of record. Whoever lands this candidate should keep that rewrite and drop this
-candidate's older edits to that one file rather than merging them.
+The plan this stage comes from is not in this repository. It was rewritten by its author on
+2026-09-09 and is kept outside the published history, along with the two P0 review documents,
+because it names working paths and a private target project. Section and item numbers quoted
+here refer to it.
 
 ## Other Hermes observations
 

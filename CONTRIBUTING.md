@@ -81,7 +81,7 @@ to a colleague who asked why the commit exists.
 
 ## Documentation
 
-English is the source of truth. `README.ru.md`, `docs/ru/` and `spec/ru/` are translations,
+English is the source of truth. `README.ru.md` and `spec/ru/` are translations,
 kept because a lot of the phrasing was worked out in Russian first.
 
 If you change behaviour, update the English document that describes it in the same commit.

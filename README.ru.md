@@ -431,7 +431,7 @@ implement → gates → [fix ≤ N] → review → [fix ≤ N]
 `doctor`, `ledger`, `report`, `status`, `approve`, `land`.
 
 Прогнано вживую на настоящем проекте (SvelteKit, Orca 1.4.190, Windows) — стенограмма в
-[`docs/ru/LIVE-CYCLE.md`](docs/ru/LIVE-CYCLE.md):
+[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md):
 
 - `warden do` создал worktree через Orca от **фактической** текущей ветки и разрешил всю цепочку;
 - цикл `gates → review → browser` целиком зелёный: `npm run check` и `npm run build`, ревью
@@ -444,7 +444,7 @@ implement → gates → [fix ≤ N] → review → [fix ≤ N]
 
 **Полный цикл до зелёного, с живым реализатором и живой ролью с глазами** — прогон
 `chapter-hearth-3` на том же проекте, стенограмма в
-[`docs/ru/LIVE-CYCLE.md`](docs/ru/LIVE-CYCLE.md):
+[`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md):
 
 - шесть вызовов вендора, $3.91 из бюджета $40, один раунд починки, `stale_judgements`
   пусто — ревьюер перечитал дерево после починки, как объявлено в `recheck_after_fix`;
@@ -457,7 +457,7 @@ implement → gates → [fix ≤ N] → review → [fix ≤ N]
 Не выдаются за готовые: live-прогон Orca-адаптера как исполнителя роли и visual QA
 pixel-diff. Точная матрица:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), разбор на подставных вендорах:
-[`docs/ru/WALKTHROUGH.md`](docs/ru/WALKTHROUGH.md), повторяемая настройка:
+[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md), повторяемая настройка:
 [`docs/SETUP.md`](docs/SETUP.md).
 
 Инварианты, которые реализация обязана удерживать, перечислены в разделе 8 спецификации.

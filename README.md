@@ -484,8 +484,7 @@ Grok and Claude on the operator's own subscriptions.
 Section 8 of the specification lists the invariants the implementation must hold. Each one is
 a defect that was already found in the previous JavaScript version.
 
-Russian versions: [`README.ru.md`](README.ru.md), [`docs/ru/`](docs/ru),
-[`spec/ru/SPEC.md`](spec/ru/SPEC.md).
+Russian versions: [`README.ru.md`](README.ru.md) and [`spec/ru/SPEC.md`](spec/ru/SPEC.md).
 
 ## Contributing, security, licence
 

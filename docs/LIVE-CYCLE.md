@@ -485,10 +485,9 @@ delta: every step row, before and after the fix, carries the same fingerprint
 `d256f6e2f0b9…`. The implementer was paid $0.031 to change nothing, and the recheck then paid
 $1.46 for Opus to reach the same pass and Astra to reach the same fail. The loop has no notion
 that a repair which moved no bytes cannot move a verdict, so it spent a full round discovering
-it. That is the concrete case for the progress detector in P3 of
-[`ADAPTIVE-WORKFLOW-PLAN.md`](ADAPTIVE-WORKFLOW-PLAN.md) — *repeat of the same confirmed
-blockers with no change in the evidence, and absence of candidate delta* — and it is measured
-rather than argued.
+it. That is the concrete case for the progress detector in P3 of the adaptive workflow plan,
+which is kept outside this repository — *repeat of the same confirmed blockers with no change
+in the evidence, and absence of candidate delta* — and it is measured rather than argued.
 
 Totals across both runs: five vendor calls, $1.4898 charged, `unpriced_calls: 2` and
 `cost_ceiling_binding: false`, because codex reported no price. Nothing was landed.
