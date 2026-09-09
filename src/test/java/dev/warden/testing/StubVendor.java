@@ -33,6 +33,18 @@ public final class StubVendor {
      * the profile also appends `--prompt-file <path>`, and a positional reading of that
      * silently turned a flag into a counter file.
      */
+    private static java.util.Map<String, Object> p1(String id) {
+        return java.util.Map.of("id", id, "severity", "P1", "path", "src/result.txt",
+                "message", "the content is wrong", "expected", "right", "actual", "wrong",
+                "confidence", "confirmed");
+    }
+
+    private static java.util.Map<String, Object> p2(String id) {
+        return java.util.Map.of("id", id, "severity", "P2", "path", "src/result.txt",
+                "message", "the content is wrong", "expected", "right", "actual", "wrong",
+                "confidence", "confirmed");
+    }
+
     private static String flag(String[] args, String name) {
         for (int index = 0; index + 1 < args.length; index++) {
             if (args[index].equals(name)) return args[index + 1];
@@ -124,6 +136,27 @@ public final class StubVendor {
                     + "\"files_changed\":[]},\"total_cost_usd\":0.005}");
             // A reviewer that objects with a categorised, vendor-identified finding, so the
             // identity and category paths are exercised as a vendor would drive them.
+            case "review-closes-three", "review-reinvents-closed" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                List<String> ids = n == 1 ? List.of("A", "B", "C")
+                        : n == 2 ? List.of("B", "C") : n == 3 ? List.of("C")
+                        : mode.equals("review-reinvents-closed") ? List.of("renamed-A") : List.of();
+                boolean namedEvidence = mode.equals("review-reinvents-closed");
+                var findings = ids.stream().map(id -> namedEvidence
+                        ? java.util.Map.<String, Object>of("id", id, "severity", "P1",
+                                "path", "src/result.txt", "message", "defect " + id,
+                                "expected", "good", "actual", "bad", "confidence", "confirmed",
+                                "evidence_refs", List.of())
+                        : java.util.Map.<String, Object>of("id", id, "severity", "P1",
+                                "path", "src/result.txt", "message", "defect " + id,
+                                "expected", "good", "actual", "bad", "confidence", "confirmed"))
+                        .toList();
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", ids.isEmpty() ? "pass" : "fail", "summary", "round " + n,
+                                "findings", findings))));
+            }
             case "review-categorised" -> System.out.println(
                     "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
                     + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"contract too weak\","
@@ -133,8 +166,40 @@ public final class StubVendor {
                     + "\"expected\":\"acceptance rejects extra content\","
                     + "\"actual\":\"it accepts extra content\",\"confidence\":\"confirmed\"}]},"
                     + "\"total_cost_usd\":0.004}");
-            // Calls the same defect a P1 first and a P2 afterwards, changing nothing else. The
-            // one way a reviewer can end a run without anything about the work changing.
+            // Same shape as review-categorised, but a product_defect so the repair loop
+            // actually runs. Used to drive repair_made_no_progress rather than a
+            // non-actionable stop.
+            case "review-repeats-p1" -> System.out.println(
+                    "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                    + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"still broken\","
+                    + "\"findings\":[{\"id\":\"still-broken\",\"category\":\"product_defect\","
+                    + "\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                    + "\"message\":\"the content is still wrong\","
+                    + "\"expected\":\"right\",\"actual\":\"wrong\",\"confidence\":\"confirmed\"}]},"
+                    + "\"total_cost_usd\":0.004}");
+            // First reading: a product_defect and a contract_gap. Later readings: the gap
+            // alone, so a real repair of the defect is not followed by another paid round
+            // for something the implementer cannot close.
+            case "review-mixed-then-gap" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                var defect = java.util.Map.<String, Object>of("id", "real-defect",
+                        "category", "product_defect", "severity", "P1", "path", "src/result.txt",
+                        "message", "the content is wrong", "expected", "right", "actual", "wrong",
+                        "confidence", "confirmed");
+                var gap = java.util.Map.<String, Object>of("id", "acceptance-too-weak",
+                        "category", "contract_gap", "severity", "P1", "path", "src/result.txt",
+                        "message", "the acceptance command matches a substring",
+                        "expected", "acceptance rejects extra content",
+                        "actual", "it accepts extra content", "confidence", "confirmed");
+                var findings = n == 1 ? List.of(defect, gap) : List.of(gap);
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", "fail", "summary", "round " + n, "findings", findings))));
+            }
+            // Calls the same defect a P1 first and a P2 afterwards, changing nothing else.
+            // One of the two ways a reviewer can end a run without anything about the work
+            // changing; the other is to omit the finding, which is the next mode.
             case "review-launders-severity" -> {
                 boolean first = withinFirst(args);
                 System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
@@ -144,6 +209,141 @@ public final class StubVendor {
                         + "\"message\":\"the content is wrong\",\"expected\":\"right\","
                         + "\"actual\":\"wrong\",\"confidence\":\"confirmed\"}]},"
                         + "\"total_cost_usd\":0.004}");
+            }
+            // Same first reading as review-launders-severity, then a pass with an empty
+            // findings array — a full retraction rather than a relabel.
+            case "review-retracts-finding" -> {
+                boolean first = withinFirst(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"" + (first ? "fail" : "pass") + "\","
+                        + "\"summary\":\"on reflection\",\"findings\":" + (first
+                        ? "[{\"id\":\"disputed-one\",\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                          + "\"message\":\"the content is wrong\",\"expected\":\"right\","
+                          + "\"actual\":\"wrong\",\"confidence\":\"confirmed\"}]"
+                        : "[]") + "},\"total_cost_usd\":0.004}");
+            }
+            // Two confirmed P1s, then a round that drops them on the same tree while
+            // keeping one throwaway blocker (or relabelling one and keeping a throwaway).
+            // The laundering stop has to fire even though blocking is still above zero.
+            case "review-launders-behind-blocker", "review-relabels-behind-blocker" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                List<java.util.Map<String, Object>> findings;
+                if (n == 1) {
+                    findings = List.of(p1("real-one"), p1("real-two"));
+                } else if (mode.equals("review-relabels-behind-blocker")) {
+                    findings = List.of(p2("real-one"), p1("noise"));
+                } else {
+                    findings = List.of(p1("noise"));
+                }
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", "fail", "summary", "round " + n, "findings", findings))));
+            }
+            // Files A with its original evidence once, then passes — the first reviewer
+            // of a two-stage chain whose closure the second reader must inherit.
+            case "review-closes-one" -> {
+                boolean objects = withinFirst(args);
+                var findings = objects
+                        ? List.of(java.util.Map.<String, Object>of("id", "A", "severity", "P1",
+                                "path", "src/result.txt", "message", "defect A",
+                                "expected", "good", "actual", "bad", "confidence", "confirmed",
+                                "scenario", "reproduce A", "evidence_refs", List.of("receipt-0")))
+                        : List.of();
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", objects ? "fail" : "pass",
+                                "summary", objects ? "still open" : "closed A",
+                                "findings", findings))));
+            }
+            // Always re-raises A on receipt-0. Used as review-second after review-closes-one.
+            case "review-reraise-stale" -> System.out.println(
+                    "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                    + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"A is back\","
+                    + "\"findings\":[{\"id\":\"A\",\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                    + "\"message\":\"defect A\",\"expected\":\"good\",\"actual\":\"bad\","
+                    + "\"confidence\":\"confirmed\",\"scenario\":\"reproduce A\","
+                    + "\"evidence_refs\":[\"receipt-0\"]}]},\"total_cost_usd\":0.004}");
+            // Passes twice, then raises B on the very evidence review-second closed it with.
+            // The first reviewer of a chain whose recheck lands after another stage's closure.
+            case "review-raises-closed-on-recheck" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                List<java.util.Map<String, Object>> findings = n < 3 ? List.of()
+                        : List.of(java.util.Map.<String, Object>of("id", "B", "severity", "P1",
+                                "path", "src/result.txt", "message", "defect B",
+                                "expected", "good", "actual", "bad", "confidence", "confirmed",
+                                "scenario", "reproduce B", "evidence_refs", List.of("receipt-b")));
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", n < 3 ? "pass" : "fail",
+                                "summary", "round " + n, "findings", findings))));
+            }
+            // Files B, closes it and files C instead, then passes. The second reviewer whose
+            // closure the first one has to be able to see when it is rechecked later.
+            case "review-second-closes-then-new" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                java.util.Map<String, Object> filed = java.util.Map.of("id", "B", "severity", "P1",
+                        "path", "src/result.txt", "message", "defect B", "expected", "good",
+                        "actual", "bad", "confidence", "confirmed", "scenario", "reproduce B",
+                        "evidence_refs", List.of("receipt-b"));
+                java.util.Map<String, Object> instead = java.util.Map.of("id", "C", "severity", "P1",
+                        "path", "src/result.txt", "message", "defect C", "expected", "good",
+                        "actual", "bad", "confidence", "confirmed", "scenario", "reproduce C",
+                        "evidence_refs", List.of("receipt-c"));
+                List<java.util.Map<String, Object>> findings =
+                        n == 1 ? List.of(filed) : n == 2 ? List.of(instead) : List.of();
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", findings.isEmpty() ? "pass" : "fail",
+                                "summary", "round " + n, "findings", findings))));
+            }
+            // A stays in play across two closures, with C open so the loop continues.
+            // Round 5 re-files A on receipt-0, which was already used before the first
+            // closure; the protocol guard has to stop the run before another repair.
+            case "review-reuses-historical-evidence" -> {
+                succeedsNow(args);
+                int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                java.util.Map<String, Object> a0 = java.util.Map.of("id", "A", "severity", "P1",
+                        "path", "src/result.txt", "message", "defect A", "expected", "good",
+                        "actual", "bad", "confidence", "confirmed", "scenario", "reproduce A",
+                        "evidence_refs", List.of("receipt-0"));
+                java.util.Map<String, Object> a1 = java.util.Map.of("id", "A", "severity", "P1",
+                        "path", "src/result.txt", "message", "defect A", "expected", "good",
+                        "actual", "bad", "confidence", "confirmed", "scenario", "reproduce A",
+                        "evidence_refs", List.of("receipt-1"));
+                java.util.Map<String, Object> blocker = java.util.Map.of("id", "C", "severity", "P1",
+                        "path", "src/result.txt", "message", "defect C", "expected", "good",
+                        "actual", "bad", "confidence", "confirmed", "scenario", "reproduce C",
+                        "evidence_refs", List.of("receipt-c"));
+                List<java.util.Map<String, Object>> findings = n == 1 ? List.of(a0, blocker)
+                        : n == 2 ? List.of(blocker)
+                        : n == 3 ? List.of(a1, blocker)
+                        : n == 4 ? List.of(blocker)
+                        : List.of(a0, blocker);
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", "fail", "summary", "round " + n, "findings", findings))));
+            }
+            // Passes, and reports whether the inherited registry reached the prompt.
+            case "review-reports-inherited" -> {
+                String prompt = "";
+                String promptFile = flag(args, "--prompt-file");
+                if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
+                    prompt = Files.readString(Path.of(promptFile), StandardCharsets.UTF_8);
+                }
+                boolean sawPrior = prompt.contains("A previous stage has already read this candidate");
+                boolean sawRegistry = prompt.contains("Cumulative finding registry");
+                boolean sawRepair = prompt.contains("What the implementer says it did");
+                boolean sawClosedA = prompt.contains("reproduce A") || prompt.contains("`A`");
+                boolean sawStage = prompt.contains("recorded_at_stage") || prompt.contains("[stage review]");
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"pass\","
+                        + "\"summary\":\"inherited=" + sawPrior + " registry=" + sawRegistry
+                        + " repair=" + sawRepair + " closed_A=" + sawClosedA
+                        + " stage=" + sawStage + "\","
+                        + "\"findings\":[]},\"total_cost_usd\":0.004}");
             }
             // Echoes back whether its prompt carried the recheck package, so a test can prove
             // the reviewer was actually told what it found last time.

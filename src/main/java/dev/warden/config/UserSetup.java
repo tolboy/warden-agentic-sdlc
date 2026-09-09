@@ -548,6 +548,17 @@ public final class UserSetup {
 
             `verdict` is `fail` if there is at least one P1, else `pass`.
 
+            Include `evidence_refs` (non-empty references to observed receipts, logs, or tests),
+            `scenario`, `expected`, `actual`, and `scope_relation` (the acceptance it concerns).
+            Use `supersedes` as an array of prior IDs when renaming or replacing a finding.
+            Reopening a closed finding needs new evidence references. After any closure, every
+            new P1 also needs evidence, even if it uses a new ID — including a finding closed
+            by an earlier stage, and including a new ID whose only evidence_refs were already
+            recorded. A reference already used for an earlier incarnation of a finding is not
+            new merely because a later report replaced evidence_refs. Warden owns lifecycle
+            status; omission closes a finding, while reporting it again reopens it subject to
+            this check.
+
             Give every finding a `category`, because it decides who can act on it. Only the first
             is reliably the implementer's:
 
@@ -564,14 +575,16 @@ public final class UserSetup {
               evidence.
 
             A finding an implementer cannot act on is not a reason to soften it. File it at the
-            severity it deserves with the category that says whose it is; the run stops for a
-            person rather than spending a repair round on it.
+            severity it deserves with the category that says whose it is. Only a product_defect
+            P1 sends the work back to the implementer; a P1 in any other category stops the run
+            for a person instead of buying another repair.
 
             If you are re-reading a candidate you have seen before, you will be told so and given
             back the ids you filed. Reuse an id for anything still open and give a new one only to
             something genuinely new, so a surviving objection can be told from a fresh one. Never
-            lower a severity to let a run pass: a P1 that becomes a P2 on a candidate that did not
-            change is refused, not believed.
+            lower a severity to let a run pass, and never drop a P1 you filed to let it pass
+            either: a P1 that becomes a P2, or vanishes, on a candidate that did not change is
+            refused, not believed.
 
             Judge whether each acceptance command covers what it appears to cover. A command that
             passes while testing nothing relevant is a P1 finding, not a passing check.
@@ -682,7 +695,10 @@ public final class UserSetup {
                                  "contract_gap", "tooling_failure", "quota_exhausted",
                                  "provider_unavailable", "review_disagreement"]
                       },
-                      "id": { "type": "string" }
+                      "id": { "type": "string" },
+                      "evidence_refs": { "type": "array", "items": { "type": "string" } },
+                      "supersedes": { "type": "array", "items": { "type": "string" } },
+                      "scope_relation": { "type": "string" }
                     }
                   }
                 },

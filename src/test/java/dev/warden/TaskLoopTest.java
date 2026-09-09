@@ -90,8 +90,13 @@ public final class TaskLoopTest implements Suite {
             check.eq("and escalates to a human", "human_escalation", gaveUp.nextAction());
 
             // A blocking review sends the work back with expected/actual attached.
+            // The repair has to move the tree: dropping the finding on identical bytes is the
+            // laundering stop, not an addressed review.
             Path reviewed = newProject(sandbox, "reviewed");
             writeProfiles(home, sandbox, "reviewed", 1, 2);
+            writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                    "implementer", "role, task_id, status, summary, files_changed",
+                    "impl-grows", sandbox.resolve("reviewed-impl.count"), 1);
             TaskLoop.Outcome afterReview = loop(reviewed, home, "r4");
             check.that("a blocking review that is addressed ends green", afterReview.ok());
             String reviewContext = Files.readString(
@@ -254,8 +259,16 @@ public final class TaskLoopTest implements Suite {
             resumeCurrencyChecks(check, sandbox, home);
             findingIdentityChecks(check);
             findingHistoryChecks(check, sandbox, home);
+            nonactionableBlockerChecks(check, sandbox, home);
             handoverPackageChecks(check, sandbox, home);
+            cumulativeClosureChecks(check, sandbox, home);
+            crossStageRegistryChecks(check, sandbox, home);
+            crossStageRecheckChecks(check, sandbox, home);
+            historicalEvidenceReuseChecks(check, sandbox, home);
             severityLaunderingChecks(check, sandbox, home);
+            severityLaunderingBehindBlockerChecks(check, sandbox, home);
+            severityLaunderingOnResumeChecks(check, sandbox, home);
+            provenanceResumeChecks(check, sandbox, home);
             liveRunShapeChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
@@ -913,8 +926,13 @@ public final class TaskLoopTest implements Suite {
                         && step.get("profile") != null));
 
         // Configured, and it finds something the browser could not: one fix round, then green.
+        // The repair has to move the tree: dropping the visual P1 on identical bytes is the
+        // laundering stop, not a fixed finding.
         Path watched = newProject(sandbox, "visual-role-on", "medium", 20, true);
         writeProfiles(home, sandbox, "visual-role-on", 1, 1);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("visual-role-on-impl.count"), 1);
         writeEyesProfile(home, sandbox, "visual-role-on", 2);
         policyWithEyes(home);
         TaskLoop.Outcome watchedRun = new TaskLoop(new ProcessRunner(),
@@ -1927,7 +1945,7 @@ public final class TaskLoopTest implements Suite {
                 "impl", sandbox.resolve("repair-changes-nothing-impl.count"), 1);
         writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
                 "reviewer", "role, task_id, status, verdict, summary, findings",
-                "review-categorised", sandbox.resolve("repair-changes-nothing-review.count"), 1);
+                "review-repeats-p1", sandbox.resolve("repair-changes-nothing-review.count"), 1);
         policy(home, "loop-review", "loop-impl");
 
         List<String> printed = new java.util.ArrayList<>();
@@ -1943,7 +1961,7 @@ public final class TaskLoopTest implements Suite {
                 (Map<String, Object>) first.summaryReport().get("repair_made_no_progress");
         check.eq("naming the stage whose finding went unaddressed", "review", stall.get("at_stage"));
         check.eq("and the finding still open, by id",
-                List.of("acceptance-too-weak"), stall.get("open_blocking_ids"));
+                List.of("still-broken"), stall.get("open_blocking_ids"));
         check.contains("the terminal says why another round was not bought",
                 String.join("\n", printed), "the same finding came back");
         check.contains("and the next step points at a person, not another fix round",
@@ -1956,11 +1974,11 @@ public final class TaskLoopTest implements Suite {
         check.eq("both readings were recorded", 2, history.size());
         check.eq("for the stage that judged", "review", history.get(0).get("stage"));
         check.eq("naming the blocking finding by a stable id",
-                List.of("acceptance-too-weak"), history.get(0).get("blocking_ids"));
+                List.of("still-broken"), history.get(0).get("blocking_ids"));
         Map<String, Object> finding =
                 ((List<Map<String, Object>>) history.get(0).get("findings")).get(0);
         check.eq("the vendor's own id is kept", "vendor", finding.get("id_source"));
-        check.eq("and its category is taken as offered", "contract_gap", finding.get("category"));
+        check.eq("and its category is taken as offered", "product_defect", finding.get("category"));
         check.eq("recorded as the vendor's choice", "vendor", finding.get("category_source"));
         check.that("the round records the tree it judged",
                 history.get(0).get("candidate_fingerprint") instanceof String);
@@ -1968,11 +1986,72 @@ public final class TaskLoopTest implements Suite {
         // The second round is the comparison, and it is what the stop rests on.
         Map<String, Object> second = history.get(1);
         check.eq("the repair closed nothing", List.of(), second.get("closed"));
-        check.eq("the same finding persisted", List.of("acceptance-too-weak"),
+        check.eq("the same finding persisted", List.of("still-broken"),
                 second.get("persisted"));
         check.eq("and nothing new was found", List.of(), second.get("new_findings"));
         check.eq("against a candidate that never moved", Boolean.FALSE,
                 second.get("candidate_moved"));
+    }
+
+    /**
+     * A P1 the reviewer itself said is not the implementer's does not buy a repair.
+     *
+     * Categories used to be recorded and then ignored: every P1 drove a fix round, and an
+     * unrelated edit that moved the fingerprint defeated the no-progress detector. The live
+     * run paid a repair plus a re-read for a contract_gap the implementer had already refused.
+     */
+    @SuppressWarnings("unchecked")
+    private void nonactionableBlockerChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path gap = newProject(sandbox, "contract-gap-no-repair", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("contract-gap-no-repair-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("contract-gap-no-repair-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("contract-gap-no-repair-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-categorised", sandbox.resolve("contract-gap-no-repair-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome stopped = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(gap, "hello"), UserConfig.load(home), "cg1", false);
+        check.that("a contract_gap P1 does not reach the human gate", !stopped.ok());
+        check.eq("it stops for a person rather than buying a repair",
+                "blocking_findings_remain", stopped.reason());
+        check.eq("naming the leftover by id", List.of("acceptance-too-weak"),
+                stopped.summaryReport().get("nonactionable_blocking_ids"));
+        check.eq("the implementer ran once, for the original write, not again", 1L,
+                steps(stopped).stream().filter(s -> "implementer".equals(s.get("step"))).count());
+        check.eq("and the reviewer was not paid to re-read the same tree", 1L,
+                steps(stopped).stream().filter(s -> "reviewer".equals(s.get("step"))).count());
+        check.contains("the next step points at the task, not another fix",
+                String.valueOf(stopped.summaryReport().get("safe_next_step")),
+                "not the implementer's to close");
+        Map<String, Object> filed =
+                ((List<Map<String, Object>>) ((List<Map<String, Object>>) stopped.summaryReport()
+                        .get("finding_history")).get(0).get("findings")).get(0);
+        check.eq("the vendor's category is what routed it", "contract_gap", filed.get("category"));
+
+        Path mixed = newProject(sandbox, "mixed-then-gap", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("mixed-then-gap-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("mixed-then-gap-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("mixed-then-gap-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-mixed-then-gap", sandbox.resolve("mixed-then-gap-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome afterDefect = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(mixed, "hello"), UserConfig.load(home), "mg1", false);
+        check.that("closing the product_defect does not pass the run", !afterDefect.ok());
+        check.eq("the leftover gap still stops for a person",
+                "blocking_findings_remain", afterDefect.reason());
+        check.eq("without buying a second repair for it", 2L,
+                steps(afterDefect).stream().filter(s -> "implementer".equals(s.get("step"))).count());
+        check.eq("the reviewer read twice: once to file both, once to see the gap remain", 2L,
+                steps(afterDefect).stream().filter(s -> "reviewer".equals(s.get("step"))).count());
+        check.eq("and names the leftover", List.of("acceptance-too-weak"),
+                afterDefect.summaryReport().get("nonactionable_blocking_ids"));
     }
 
     /**
@@ -2017,6 +2096,279 @@ public final class TaskLoopTest implements Suite {
         check.eq("only what blocks acceptance is counted as blocking", 1,
                 dev.warden.ledger.Findings.blockingIds(
                         dev.warden.ledger.Findings.of(noisy)).size());
+    }
+
+    @SuppressWarnings("unchecked")
+    private void cumulativeClosureChecks(Check check, Path sandbox, Path home) throws Exception {
+        for (String mode : List.of("review-closes-three", "review-reinvents-closed")) {
+            Path project = newProject(sandbox, mode, "medium", 20);
+            Path taskFile = project.resolve(".warden/tasks/hello.yaml");
+            Files.writeString(taskFile, Files.readString(taskFile).replace("max_fix_attempts: 2", "max_fix_attempts: 3"));
+            writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                    "implementer", "role, task_id, status, summary, files_changed",
+                    "impl-grows", sandbox.resolve(mode + "-impl.count"), 1);
+            writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                    "reviewer", "role, task_id, status, verdict, summary, findings",
+                    mode, sandbox.resolve(mode + "-review.count"), 1);
+            policy(home, "loop-review", "loop-impl");
+            TaskLoop.Outcome result = new TaskLoop(new ProcessRunner()).run(
+                    new ConfigLoader().load(project, "hello"), UserConfig.load(home), "closure", false);
+            check.eq(mode + " result", mode.equals("review-closes-three")
+                    ? "ready_for_human" : "finding_protocol_failure", result.reason());
+            String repair = Files.readString(project.resolve(".warden/runs/closure/context/fix-3-review.md"));
+            check.contains("third repair retains A", repair, "- A");
+            check.contains("third repair retains B", repair, "- B");
+            String recheck = Files.readString(project.resolve(".warden/runs/closure/context/fix-3-review-recheck.md"));
+            check.contains("third reviewer gets cumulative registry", recheck, "Cumulative finding registry");
+            check.contains("third reviewer gets original closed defect", recheck, "defect A");
+            check.that("terminal state has safe next step", result.summaryReport().get("safe_next_step") instanceof String);
+        }
+        // Cap 3: implement + review spend 2, the repair reserve is 2, so the first run
+        // stops before any fix. Cap 6 used to let two repairs through; the implementer
+        // then judged a stale revision, resume rewrote the tree, and dropping A was
+        // allowed because candidate_moved was already true.
+        Path project = newProject(sandbox, "closure-resume", "medium", 3);
+        Path taskFile = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(taskFile, Files.readString(taskFile).replace("max_fix_attempts: 2", "max_fix_attempts: 3"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("closure-resume-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-closes-three", sandbox.resolve("closure-resume-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome stopped = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home), "before", false);
+        check.eq("closure chain stops at reserve", "budget_insufficient_to_finish", stopped.reason());
+        Files.writeString(taskFile, Files.readString(taskFile).replace("max_role_runs: 3", "max_role_runs: 20"));
+        TaskLoop.Outcome resumed = continueFrom(project, home, "before", "after");
+        // review-closes-three drops A on its second call. The resume re-dispatches the
+        // reviewer at attempt 0 against the restored round, on a tree the reused
+        // implementer did not touch. That drop used to reach ready_for_human because
+        // the laundering guard lived only inside the fix loop.
+        check.eq("dropping a P1 on resume of an unchanged tree is not a pass",
+                "severity_downgraded_without_change", resumed.reason());
+        Map<String, Object> caught =
+                (Map<String, Object>) resumed.summaryReport().get("severity_downgraded_without_change");
+        check.that("the stop recorded which ids moved", caught != null);
+        if (caught != null) {
+            check.eq("naming the finding the resumed first reading dropped",
+                    List.of("A"), caught.get("retracted_ids"));
+            check.eq("the other path is empty", List.of(), caught.get("downgraded_ids"));
+        }
+        String history = resumed.summaryReport().get("finding_history").toString();
+        check.contains("resume retains original closed defect", history, "defect A");
+        check.contains("resume records history provenance", history, "source_run=before");
+        String context = Files.readString(project.resolve(".warden/runs/after/context/fix-0-review-recheck.md"));
+        check.contains("resume reviewer gets closures before first new repair", context, "defect A");
+        check.eq("resume did not buy a repair after the drop", 0L,
+                steps(resumed).stream().filter(s -> "implementer".equals(s.get("step"))
+                        && s.get("reused_from") == null).count());
+    }
+
+    /**
+     * A later reviewer inherits the registry, with stage provenance, and cannot raise a
+     * closed finding as a new requirement on the original evidence.
+     *
+     * Round comparison stays per stage so one reader omitting another's finding is not a
+     * closure. The registry is the run's lifecycle: review-second's first dispatch used to
+     * get no package and treat A as an initial finding.
+     */
+    @SuppressWarnings("unchecked")
+    private void crossStageRegistryChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path handoff = newProject(sandbox, "registry-handoff", "medium", 20);
+        Path handoffTask = handoff.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(handoffTask, Files.readString(handoffTask)
+                .replace("max_fix_attempts: 2", "max_fix_attempts: 3"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("registry-handoff-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-closes-one", sandbox.resolve("registry-handoff-review.count"), 2);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-reports-inherited", sandbox.resolve("registry-handoff-review2.count"), 1);
+        twoReviewerPolicy(home);
+
+        TaskLoop.Outcome handed = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(handoff, "hello"), UserConfig.load(home), "handoff", false);
+        check.eq("an honest second reader still reaches the human gate",
+                "ready_for_human", handed.reason());
+        Map<String, Object> secondStep = steps(handed).stream()
+                .filter(s -> "review-second".equals(s.get("stage"))).findFirst().orElse(null);
+        check.that("review-second dispatched", secondStep != null);
+        if (secondStep == null) return;
+        Path secondArtifactFile = handoff.resolve(String.valueOf(secondStep.get("artifact_path")));
+        Path secondPromptFile = secondArtifactFile.getParent().getParent().resolve("prompts/reviewer.md");
+        String secondPrompt = Files.readString(secondPromptFile);
+        check.contains("the second reviewer is told a previous stage already read",
+                secondPrompt, "A previous stage has already read this candidate");
+        check.contains("and is given the cumulative registry",
+                secondPrompt, "Cumulative finding registry");
+        check.contains("including the closed defect", secondPrompt, "reproduce A");
+        check.contains("with the stage that filed it", secondPrompt, "recorded_at_stage");
+        check.contains("and the repair receipt", secondPrompt, "What the implementer says it did");
+        Map<String, Object> secondArtifact = Json.parseObject(Files.readString(secondArtifactFile));
+        check.contains("the inherited package reached the vendor",
+                String.valueOf(secondArtifact.get("summary")), "inherited=true");
+        check.contains("carrying the registry",
+                String.valueOf(secondArtifact.get("summary")), "registry=true");
+        check.contains("carrying the repair",
+                String.valueOf(secondArtifact.get("summary")), "repair=true");
+        check.contains("carrying closed A",
+                String.valueOf(secondArtifact.get("summary")), "closed_A=true");
+        List<Map<String, Object>> history =
+                (List<Map<String, Object>>) handed.summaryReport().get("finding_history");
+        Map<String, Object> secondRound = history.stream()
+                .filter(row -> "review-second".equals(row.get("stage"))).findFirst().orElseThrow();
+        check.eq("omitting the first reviewer's findings is not this stage's retraction",
+                null, secondRound.get("blocking_retracted"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> secondRegistry =
+                (List<Map<String, Object>>) secondRound.get("finding_registry");
+        Map<String, Object> closedA = secondRegistry.stream()
+                .filter(row -> "A".equals(row.get("id"))).findFirst().orElseThrow();
+        check.eq("A stays closed in the inherited registry", "closed", closedA.get("status"));
+        check.eq("and still names the stage that filed it", "review", closedA.get("recorded_at_stage"));
+
+        Path reraise = newProject(sandbox, "registry-reraise", "medium", 20);
+        Path reraiseTask = reraise.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(reraiseTask, Files.readString(reraiseTask)
+                .replace("max_fix_attempts: 2", "max_fix_attempts: 3"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("registry-reraise-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-closes-one", sandbox.resolve("registry-reraise-review.count"), 2);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-reraise-stale", sandbox.resolve("registry-reraise-review2.count"), 1);
+        twoReviewerPolicy(home);
+
+        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(reraise, "hello"), UserConfig.load(home), "reraise", false);
+        check.that("re-raising a closed finding does not reach the human gate", !refused.ok());
+        check.eq("it stops as a protocol failure, not another repair",
+                "finding_protocol_failure", refused.reason());
+        check.eq("the second reviewer did not buy a repair", 2L,
+                steps(refused).stream().filter(s -> "implementer".equals(s.get("step"))).count());
+        check.contains("naming that A needed new evidence",
+                String.valueOf(refused.summaryReport().get("finding_protocol_failure")),
+                "needs new evidence_refs");
+    }
+
+    /**
+     * A stage rechecked after another stage's closure can still see that closure.
+     *
+     * review passes; review-second files B, then closes it on a tree the repair moved and
+     * files C instead, which buys a second repair; review is rechecked and raises B again on
+     * the evidence B was closed with. No round delta can catch that, because review's own
+     * last round never held B. The registry can, once it belongs to the run rather than to
+     * one stage's chain of readings.
+     */
+    @SuppressWarnings("unchecked")
+    private void crossStageRecheckChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "registry-recheck", "medium", 20);
+        Path taskFile = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(taskFile, Files.readString(taskFile)
+                .replace("max_fix_attempts: 2", "max_fix_attempts: 3"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("registry-recheck-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-raises-closed-on-recheck",
+                sandbox.resolve("registry-recheck-review.count"), 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-second-closes-then-new",
+                sandbox.resolve("registry-recheck-review2.count"), 1);
+        twoReviewerPolicy(home);
+
+        TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home), "recheck", false);
+        check.eq("raising another stage's closure on its original evidence stops the run",
+                "finding_protocol_failure", outcome.reason());
+        check.contains("naming the rule it broke",
+                String.valueOf(outcome.summaryReport().get("finding_protocol_failure")),
+                "needs new evidence_refs");
+        List<Map<String, Object>> history =
+                (List<Map<String, Object>>) outcome.summaryReport().get("finding_history");
+        Map<String, Object> closure = history.stream()
+                .filter(row -> "review-second".equals(row.get("stage")))
+                .reduce((first, second) -> second).orElseThrow();
+        check.eq("the stage that filed B is the one that closed it",
+                List.of("B"), closure.get("closed"));
+        Map<String, Object> firstReading = history.stream()
+                .filter(row -> "review".equals(row.get("stage"))).findFirst().orElseThrow();
+        check.eq("the passing first reading closed nothing of anyone else's",
+                List.of(), firstReading.get("closed_ids"));
+    }
+
+    /**
+     * Evidence already used for a previous incarnation of A is not new after a
+     * later report replaced evidence_refs. C stays open so the loop can close A
+     * twice; the fifth reading re-files A on receipt-0 and must stop as a
+     * protocol failure before another repair.
+     */
+    @SuppressWarnings("unchecked")
+    private void historicalEvidenceReuseChecks(Check check, Path sandbox, Path home)
+            throws Exception {
+        Path project = newProject(sandbox, "historical-evidence", "medium", 20);
+        Path taskFile = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(taskFile, Files.readString(taskFile)
+                .replace("max_fix_attempts: 2", "max_fix_attempts: 5"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("historical-evidence-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-reuses-historical-evidence",
+                sandbox.resolve("historical-evidence-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+
+        TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                "historical", false);
+        check.eq("reusing a receipt from an earlier incarnation stops the run",
+                "finding_protocol_failure", outcome.reason());
+        check.contains("naming the rule it broke",
+                String.valueOf(outcome.summaryReport().get("finding_protocol_failure")),
+                "needs new evidence_refs");
+        check.eq("and does not buy another repair after that reading", 5L,
+                steps(outcome).stream().filter(s -> "implementer".equals(s.get("step"))).count());
+        List<Map<String, Object>> history =
+                (List<Map<String, Object>>) outcome.summaryReport().get("finding_history");
+        Map<String, Object> secondClose = history.stream()
+                .filter(row -> "review".equals(row.get("stage"))
+                        && List.of("A").equals(row.get("closed")))
+                .reduce((first, second) -> second).orElseThrow();
+        List<Map<String, Object>> registry =
+                (List<Map<String, Object>>) secondClose.get("finding_registry");
+        Map<String, Object> closedA = registry.stream()
+                .filter(row -> "A".equals(row.get("id"))).findFirst().orElseThrow();
+        check.eq("the last evidence on A is still the second incarnation",
+                List.of("receipt-1"), closedA.get("evidence_refs"));
+        check.eq("and the first receipt is still on the record",
+                List.of("receipt-0", "receipt-1"), closedA.get("seen_evidence_refs"));
+    }
+
+    private void twoReviewerPolicy(Path home) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                """);
     }
 
     /**
@@ -2107,44 +2459,212 @@ public final class TaskLoopTest implements Suite {
     }
 
     /**
-     * A pass bought by relabelling is not a pass.
+     * A pass bought by relabelling or by dropping a finding is not a pass.
      *
-     * A reviewer can end a run by calling its own P1 a P2. On a candidate that changed that may
-     * be an honest reconsideration; on one that did not change, nothing new was learned about
-     * the code and the only thing that moved is the label between the run and the human gate.
+     * A reviewer can end a run by calling its own P1 a P2, or by omitting it. On a candidate
+     * that changed that may be an honest reconsideration; on one that did not change, nothing
+     * new was learned about the code and the only thing that moved is the report between the
+     * run and the human gate. Both paths have to stop, or the weaker one is the way through.
      */
     @SuppressWarnings("unchecked")
     private void severityLaunderingChecks(Check check, Path sandbox, Path home) throws Exception {
-        Path laundered = newProject(sandbox, "severity-laundering", "medium", 20);
-        Files.deleteIfExists(sandbox.resolve("severity-laundering-impl.count"));
-        Files.deleteIfExists(sandbox.resolve("severity-laundering-review.count"));
-        // Writes identical bytes on the repair, so the second reading is of the same candidate.
+        record Mode(String project, String reviewMode, String idKey, String otherKey, String description) {}
+        for (Mode mode : List.of(
+                new Mode("severity-laundering", "review-launders-severity", "downgraded_ids",
+                        "retracted_ids", "a P1 relabelled below the line does not carry the run"),
+                new Mode("severity-retraction", "review-retracts-finding", "retracted_ids",
+                        "downgraded_ids",
+                        "a P1 dropped on an unchanged candidate does not carry the run"))) {
+            Path project = newProject(sandbox, mode.project(), "medium", 20);
+            Files.deleteIfExists(sandbox.resolve(mode.project() + "-impl.count"));
+            Files.deleteIfExists(sandbox.resolve(mode.project() + "-review.count"));
+            // Writes identical bytes on the repair, so the second reading is of the same candidate.
+            writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                    "implementer", "role, task_id, status, summary, files_changed",
+                    "impl", sandbox.resolve(mode.project() + "-impl.count"), 1);
+            writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                    "reviewer", "role, task_id, status, verdict, summary, findings",
+                    mode.reviewMode(), sandbox.resolve(mode.project() + "-review.count"), 2);
+            policy(home, "loop-review", "loop-impl");
+
+            List<String> printed = new java.util.ArrayList<>();
+            TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner())
+                    .withProgress(printed::add)
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                            mode.project(), false);
+            check.that(mode.description(), !refused.ok());
+            check.eq(mode.project() + " refusal names what happened",
+                    "severity_downgraded_without_change", refused.reason());
+            Map<String, Object> caught =
+                    (Map<String, Object>) refused.summaryReport().get("severity_downgraded_without_change");
+            check.eq(mode.project() + " naming the finding",
+                    List.of("disputed-one"), caught.get(mode.idKey()));
+            check.eq(mode.project() + " the other path is empty",
+                    List.of(), caught.get(mode.otherKey()));
+            check.eq(mode.project() + " stage", "review", caught.get("at_stage"));
+            check.contains(mode.project() + " terminal",
+                    String.join("\n", printed),
+                    "not treating a dropped or relabelled finding as a fixed one");
+            check.contains(mode.project() + " next step",
+                    String.valueOf(refused.summaryReport().get("safe_next_step")),
+                    "settle that on the evidence");
+        }
+    }
+
+    /**
+     * A throwaway blocker kept alive for one round does not carry a retraction or a
+     * relabel past the stop.
+     *
+     * requireNoSeverityLaundering used to return whenever any P1 was still open, so dropping
+     * the confirmed findings on a byte-identical tree and filing noise instead reached the
+     * human gate as a pass. The lists are computed against the previous round only; if the
+     * laundering round is allowed to proceed, no later round ever sees the dropped ids.
+     */
+    @SuppressWarnings("unchecked")
+    private void severityLaunderingBehindBlockerChecks(Check check, Path sandbox, Path home)
+            throws Exception {
+        record Mode(String project, String reviewMode, String idKey, List<String> ids,
+                    String description) {}
+        for (Mode mode : List.of(
+                new Mode("launder-behind-drop", "review-launders-behind-blocker", "retracted_ids",
+                        List.of("real-one", "real-two"),
+                        "dropping confirmed P1s behind a throwaway blocker does not pass"),
+                new Mode("launder-behind-relabel", "review-relabels-behind-blocker",
+                        "downgraded_ids", List.of("real-one"),
+                        "relabelling a P1 behind a throwaway blocker does not pass"))) {
+            Path project = newProject(sandbox, mode.project(), "medium", 20);
+            Files.deleteIfExists(sandbox.resolve(mode.project() + "-impl.count"));
+            Files.deleteIfExists(sandbox.resolve(mode.project() + "-review.count"));
+            writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                    "implementer", "role, task_id, status, summary, files_changed",
+                    "impl", sandbox.resolve(mode.project() + "-impl.count"), 1);
+            writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                    "reviewer", "role, task_id, status, verdict, summary, findings",
+                    mode.reviewMode(), sandbox.resolve(mode.project() + "-review.count"), 1);
+            policy(home, "loop-review", "loop-impl");
+            List<String> printed = new java.util.ArrayList<>();
+            TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner())
+                    .withProgress(printed::add)
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                            mode.project(), false);
+            check.that(mode.description(), !refused.ok());
+            check.eq(mode.project() + " refusal names what happened",
+                    "severity_downgraded_without_change", refused.reason());
+            Map<String, Object> caught =
+                    (Map<String, Object>) refused.summaryReport().get("severity_downgraded_without_change");
+            check.eq(mode.project() + " naming the original finding(s)",
+                    mode.ids(), caught.get(mode.idKey()));
+            check.eq(mode.project() + " did not buy a second repair", 2L,
+                    steps(refused).stream().filter(s -> "implementer".equals(s.get("step"))).count());
+            check.contains(mode.project() + " next step",
+                    String.valueOf(refused.summaryReport().get("safe_next_step")),
+                    "settle that on the evidence");
+        }
+    }
+
+    /**
+     * Restoring finding history on --continue is not enough: the first reading of the
+     * resumed run has to be checked against it.
+     *
+     * requireNoSeverityLaundering used to live only inside the fix loop. A resume after a
+     * budget stop restores the previous round and re-dispatches the reviewer at attempt 0.
+     * When that reading dropped every P1, repairableFindings was 0, the loop was never
+     * entered, and the run reached the human gate as a pass on a tree no repair had touched.
+     * An honest re-read of the same P1s still proceeds to repair.
+     */
+    @SuppressWarnings("unchecked")
+    private void severityLaunderingOnResumeChecks(Check check, Path sandbox, Path home)
+            throws Exception {
+        Path drop = newProject(sandbox, "launder-on-resume", "medium", 3);
+        Files.deleteIfExists(sandbox.resolve("launder-on-resume-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("launder-on-resume-review.count"));
         writeProfile(home, "loop-impl", "implementer", "implvendor", false,
                 "implementer", "role, task_id, status, summary, files_changed",
-                "impl", sandbox.resolve("severity-laundering-impl.count"), 1);
+                "impl", sandbox.resolve("launder-on-resume-impl.count"), 1);
         writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
                 "reviewer", "role, task_id, status, verdict, summary, findings",
-                "review-launders-severity", sandbox.resolve("severity-laundering-review.count"), 2);
+                "review-retracts-finding", sandbox.resolve("launder-on-resume-review.count"), 2);
         policy(home, "loop-review", "loop-impl");
-
-        List<String> printed = new java.util.ArrayList<>();
-        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner())
-                .withProgress(printed::add)
-                .run(new ConfigLoader().load(laundered, "hello"), UserConfig.load(home),
-                        "sl1", false);
-        check.that("a P1 relabelled below the line does not carry the run", !refused.ok());
-        check.eq("and the refusal names what happened",
-                "severity_downgraded_without_change", refused.reason());
+        TaskLoop.Outcome stopped = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(drop, "hello"), UserConfig.load(home), "lr-before", false);
+        check.eq("resume-launder first run stops at reserve",
+                "budget_insufficient_to_finish", stopped.reason());
+        Path dropTask = drop.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(dropTask, Files.readString(dropTask).replace("max_role_runs: 3", "max_role_runs: 20"));
+        TaskLoop.Outcome resumed = continueFrom(drop, home, "lr-before", "lr-after");
+        check.that("a full retraction on resume is not a pass", !resumed.ok());
+        check.eq("it names the same stop as a retraction after a repair",
+                "severity_downgraded_without_change", resumed.reason());
         Map<String, Object> caught =
-                (Map<String, Object>) refused.summaryReport().get("severity_downgraded_without_change");
-        check.eq("naming the finding that was relabelled",
-                List.of("disputed-one"), caught.get("downgraded_ids"));
-        check.eq("and the stage that relabelled it", "review", caught.get("at_stage"));
-        check.contains("the terminal says a relabelled finding is not a fixed one",
-                String.join("\n", printed), "not treating a relabelled finding as a fixed one");
-        check.contains("and the next step sends the disagreement to a person",
-                String.valueOf(refused.summaryReport().get("safe_next_step")),
+                (Map<String, Object>) resumed.summaryReport().get("severity_downgraded_without_change");
+        check.that("the full-drop stop recorded which ids moved", caught != null);
+        if (caught != null) {
+            check.eq("naming the dropped finding", List.of("disputed-one"), caught.get("retracted_ids"));
+        }
+        check.eq("resume did not buy a repair to justify the drop", 0L,
+                steps(resumed).stream().filter(s -> "implementer".equals(s.get("step"))
+                        && s.get("reused_from") == null).count());
+        check.contains("next step is a person settling the disagreement",
+                String.valueOf(resumed.summaryReport().get("safe_next_step")),
                 "settle that on the evidence");
+
+        Path keep = newProject(sandbox, "honest-resume", "medium", 3);
+        Files.deleteIfExists(sandbox.resolve("honest-resume-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("honest-resume-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("honest-resume-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("honest-resume-review.count"), 3);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome honestStopped = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(keep, "hello"), UserConfig.load(home), "hr-before", false);
+        check.eq("honest-resume first run stops at reserve",
+                "budget_insufficient_to_finish", honestStopped.reason());
+        Path keepTask = keep.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(keepTask, Files.readString(keepTask).replace("max_role_runs: 3", "max_role_runs: 20"));
+        TaskLoop.Outcome honest = continueFrom(keep, home, "hr-before", "hr-after");
+        check.eq("an honest re-read of the same P1 still proceeds to repair",
+                "ready_for_human", honest.reason());
+        check.that("the resume paid for a repair after the standing P1",
+                steps(honest).stream().anyMatch(s -> "implementer".equals(s.get("step"))
+                        && s.get("reused_from") == null));
+    }
+
+    /**
+     * Provenance survives an explicit continuation. A derived id still has an id string
+     * in the recorded round, and replaying it through Findings.of would stamp it vendor.
+     */
+    @SuppressWarnings("unchecked")
+    private void provenanceResumeChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "provenance-resume", "medium", 20);
+        Files.deleteIfExists(sandbox.resolve("provenance-resume-impl.count"));
+        Files.deleteIfExists(sandbox.resolve("provenance-resume-review.count"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("provenance-resume-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("provenance-resume-review.count"), 2);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome first = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "pr1", false);
+        check.that("the first run reaches the human gate", first.ok());
+        Map<String, Object> filed =
+                ((List<Map<String, Object>>) ((List<Map<String, Object>>) first.summaryReport()
+                        .get("finding_history")).get(0).get("findings")).get(0);
+        check.eq("the first reading derived the id", "derived", filed.get("id_source"));
+        check.eq("and defaulted the category", "defaulted_absent", filed.get("category_source"));
+        TaskLoop.Outcome resumed = continueFrom(project, home, "pr1", "pr2");
+        check.that("the continuation still reaches the human gate", resumed.ok());
+        Map<String, Object> restored =
+                ((List<Map<String, Object>>) ((List<Map<String, Object>>) resumed.summaryReport()
+                        .get("finding_history")).get(0).get("findings")).get(0);
+        check.eq("continuation keeps the derived id", "derived", restored.get("id_source"));
+        check.eq("continuation keeps the defaulted category", "defaulted_absent",
+                restored.get("category_source"));
+        check.eq("and the id itself is the one that was stored", filed.get("id"), restored.get("id"));
     }
 
     /** The roster the live run had: one writer, two independent readers. */

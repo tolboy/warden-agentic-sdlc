@@ -186,7 +186,9 @@ Each finding now carries an identity and a category, both recorded with their pr
   `provider_unavailable`, `review_disagreement`. The model proposes and Warden validates: a
   category outside the set becomes `product_defect` marked `defaulted_unrecognised`, never an
   invented one. The distinction that matters is between a defect in the work and everything
-  else, because only the first is something handing the diff back can repair.
+  else, because only the first is something handing the diff back can repair. A P1 whose
+  category is not `product_defect` still blocks acceptance, but it stops the run for a person
+  instead of buying another implementer call.
 
 Both fields are optional in the shipped schema, so a reviewer that supplies neither still
 validates and still gets a usable identity.
@@ -244,24 +246,29 @@ carries the findings that stage filed last time with their ids, the implementer'
 what it did, and — separately, because the two can disagree — whether the candidate actually
 moved. It asks two questions in order: is each finding closed, judged against the code rather
 than against the account of it; and did the repair break something that was working. It says to
-reuse ids for surviving objections, not to lower a severity to let a run pass, and that the
-whole investigation must happen again when the scope, the acceptance commands or the contract
-have changed, or when the earlier verdict rested on an observation that can go stale.
+reuse ids for surviving objections, not to lower a severity or drop a P1 to let a run pass, and
+that the whole investigation must happen again when the scope, the acceptance commands or the
+contract have changed, or when the earlier verdict rested on an observation that can go stale.
 
 Proven live on 2026-09-08 (`docs/LIVE-CYCLE.md` section 9): Warden derived an id for a finding
 the reviewer had not named, handed it back in the recheck package, and the reviewer reused it on
 its second reading — `id_source` moving from `derived` to `vendor` — while rewording the message
 around it.
 
-## Refusing a pass that was bought by relabelling
+## Refusing a pass that was bought by relabelling or by dropping a finding
 
-A reviewer can end a run by calling its own P1 a P2. On a candidate that changed, that may be an
-honest reconsideration in the light of a repair. On a candidate that did not change, nothing new
-was learned about the code, and the only thing that moved is the label between the run and the
-human gate. `severity_downgraded_without_change` refuses that — not by overruling the reviewer's
-judgement of the defect, but by declining to treat the relabelling as a pass. A reviewer that
-believes the P1 was wrong should say so and why, which is a `review_disagreement` for a person to
-settle on the evidence.
+A reviewer can end a run by calling its own P1 a P2, or by omitting it from the next report. On a
+candidate that changed, that may be an honest reconsideration in the light of a repair. On a
+candidate that did not change, nothing new was learned about the code, and the only thing that
+moved is the report between the run and the human gate. `severity_downgraded_without_change`
+refuses both paths — not by overruling the reviewer's judgement of the defect, but by declining
+to treat the relabelling or the retraction as a pass, even when another blocker is still open
+in the same round, and even on a stage's first reading after `--continue`. Restoring the history
+is what makes that comparison possible; the controller then has to consult it, or a resume after
+a budget stop can drop a standing P1 on an unchanged candidate and reach the human gate as a
+pass. A throwaway P1 kept alive for one reading is not a reason to let the original drop
+through. A reviewer that believes the P1 was wrong should say so and why, which is a
+`review_disagreement` for a person to settle on the evidence.
 
 ## What the summary says, as three answers rather than one
 
@@ -400,3 +407,44 @@ while the controller is still running finishes the work in the same process, and
 `role_human_input_required` when the budget expires with the question still open. The worker is
 retained and the message id recorded, so answering it and running the role again attaches to
 that same worker.
+
+## Cumulative finding lifecycle (P1 follow-up, 2026-09-08)
+
+Each judging round stores a `finding_registry` and `closed_ids`. Round deltas
+(`closed` / `persisted` / `new_findings`, retractions, relabels) stay per stage: one
+reviewer omitting another's finding is not a closure. The registry is the run's
+lifecycle, and every dispatch is handed it as it stands: not only a later stage's
+first reading, but a stage rechecked after another stage closed something.
+`recorded_at_stage` names who filed each id, so a closed requirement cannot
+re-enter as a new one on the original evidence, from any stage on any round.
+Ownership decides closure as well as provenance: omission closes a record only
+when the stage omitting it is the stage that filed it, because one reviewer's
+silence is not another reviewer's closure and an invented closure would arm the
+stale-evidence rule against a blocker nobody had filed twice.
+Both repair and recheck packages include the cumulative
+registry; a second independent reviewer receives it on first dispatch, together
+with the repair receipt. An explicit continuation restores that history when task
+and acceptance still match, including budget-only changes. Historical findings
+are context, not reused verdicts. Legacy history is replayed stage by stage;
+absent evidence remains absent. Provenance is taken from the stored row: a derived
+id is not restamped as vendor-named just because the recorded map now carries an
+id string.
+
+Reviewer fields `evidence_refs`, `supersedes` (arrays of strings) and `scope_relation` are
+optional for old artifacts. Status is controller-owned: open, closed, or reopened.
+Duplicate IDs, unknown/self supersedes links, and reopening without a new evidence reference
+stop with `finding_protocol_failure` before another repair or human-success gate.
+After any closure, a new-style artifact that names `evidence_refs` or `supersedes` must
+produce new evidence for a fresh P1, even without a supersedes link; changing wording/ID
+therefore cannot silently bypass the evidence requirement. "New" is relative to every
+reference already in the registry, not only the same id. A later report that replaces
+`evidence_refs` does not make an earlier receipt new: the registry keeps
+`seen_evidence_refs` across incarnations, and the guard consults historical rounds, not
+only the latest record. A legacy artifact that never spoke those fields cannot be checked
+that way: the round records `unverified_invariants` and the run continues. Reopening a
+known id still requires evidence regardless of vintage.
+Evidence quality remains a reviewer obligation; external observation TTL remains later work.
+
+The joined report includes protocol failures, the last repair receipt and severity laundering.
+Successful human-gate summaries include an explicit approve command. Existing user prompts
+and schemas are never overwritten by setup; adopt the new optional fields deliberately.

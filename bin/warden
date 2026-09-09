@@ -1,3 +1,7 @@
 #!/usr/bin/env sh
 WARDEN_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-exec java -cp "$WARDEN_HOME/out/classes" dev.warden.Main "$@"
+WARDEN_CLASSES="$WARDEN_HOME/out/classes"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) WARDEN_CLASSES="$(cygpath -w "$WARDEN_CLASSES")" ;;
+esac
+exec java -cp "$WARDEN_CLASSES" dev.warden.Main "$@"

@@ -75,6 +75,9 @@ public final class RunReport {
         // What each judging stage objected to, round by round, and what moved between them.
         // Two reports of one defect used to be two unrelated blobs of text.
         report.put("finding_history", summary.get("finding_history"));
+        for (String key : List.of("finding_protocol_failure", "last_repair_receipt",
+                "severity_downgraded_without_change", "nonactionable_blocking_ids"))
+            report.put(key, summary.get(key));
         report.put("repair_made_no_progress", summary.get("repair_made_no_progress"));
         report.put("budget_plan", summary.get("budget_plan"));
         report.put("budget_reserve", summary.get("budget_reserve"));

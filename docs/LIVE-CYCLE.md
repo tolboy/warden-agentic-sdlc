@@ -549,7 +549,63 @@ simply never asked for one. Fixed by naming the categories in that prompt. `ward
 overwrites an existing prompt, so operators already running keep theirs until they choose to
 adopt it — the category is optional and a reviewer that supplies none still validates.
 
-## 10. What this file still does not claim
+## 10. A closed finding that stayed closed
+
+Run date: 2026-09-08. Two runs in a purpose-built fixture, `p1-closure-smoke`, whose seeded
+converter is correct on the path its acceptance gate checks and wrong on two paths it does
+not. Both worktrees were made by Orca through `warden do --isolation orca --draft-only`; the
+roster is the one from section 8b, Grok writing and Opus then Astra reading.
+
+Run `p1-closure-live-1` asked for a `--list` mode. Both reviewers passed it, so it reached the
+human gate in three calls for $0.8244 with one unpriced Astra call. Opus filed the seeded
+`mile` contradiction as a P2 rather than a P1: the goal never said units.txt was authoritative,
+and it declined to block on a defect the diff had not introduced. A passing run proves the
+lifecycle and nothing about closure, which is why there is a second run.
+
+Run `p1-closure-live-2` asked for a stdin batch mode, in a scope that reaches `tools/Units.java`
+but not the acceptance gate. That is the whole design: the batch path calls the converter's
+silent zero-factor lookup, so one mistyped unit turns a whole stream into zeros at exit 0, and
+the gate that would catch it is out of the implementer's blast radius.
+
+```text
+review 0   fail   F1 P1, F2 P1, F3 P2, F4 P2, F5 P3        $1.1692
+fix 1             F1/F3/F4/F5 fixed, F2 refused as not mine
+review 1   fail   F2 P1 only, plus a new F6 P3             $0.7211
+fix 2             F6 fixed, four closures explicitly left closed
+review 2   fail   F2 P1 only                               $0.9005
+done  blocking_findings_remain   6 vendor call(s), $2.9378 charged
+```
+
+**The registry accumulated and never dropped a closure.** `closed_ids` went `[]`, then the four
+ids the first repair closed, then those four plus `F6`. Opus stopped mentioning F1 after round
+0; it stayed in the registry as `closed`, with its severity, scenario and five evidence
+references intact, and the second repair package opened with the four ids under *Already closed
+by an earlier round — keep them closed*.
+
+**Both packages carried what the plan said they must.** The repair package held the unchanged
+goal, every finding's id, category, expected, actual and reproduction, and the note that a
+`contract_gap` is usually not the implementer's to fix. The recheck package held the cumulative
+registry as JSON, the previous findings, the repair's own account of each id, and the fact that
+the candidate had moved.
+
+**Nothing was laundered and no protocol violation fired.** `protocol_violations` was empty in
+all three rounds, `severity_downgraded_without_change` never triggered, and F2 kept the same id
+from its first filing to the stop. The refusal to fix F2 was correct and stayed correct: the
+acceptance gate is outside the declared scope, so the run ended for a person with one open
+blocker rather than buying more rounds.
+
+**The reviewer supplied the new fields itself.** Every finding arrived with a vendor `id`, a
+vendor `category`, `evidence_refs` and `scope_relation` — `id_source` and `category_source`
+both `vendor`, where the run in section 9 had to derive them. That required adopting the
+shipped `~/.warden/prompts/reviewer.md` and `schemas/reviewer.json`, which `warden setup` will
+not overwrite; the operator's previous pair is kept beside each as `.before-p1-closure`.
+
+Both runs wrote their state to the Orca worktree card — status, cost, the approve command and
+an Orca gate id. `p1-closure-live-1` was accepted as a smoke result and
+`p1-closure-live-2` was aborted because its remaining blocker was a contract gap outside the
+declared converter scope. Neither decision landed code.
+
+## 11. What this file still does not claim
 
 * This run did not exercise the Orca adapter (`runner: orca`) as a **role runner**: Orca
   created worktrees here through the separate `OrcaIsolation` path. A later live smoke with
@@ -564,6 +620,17 @@ adopt it — the category is optional and a reviewer that supplies none still va
   and proves nothing about Orca **launch receipts** — `launch.status`, requested versus
   effective effort — which still rest on the 2026-09-04 smoke in [`SMOKE.md`](SMOKE.md) and on
   the suite. The two `orca-*` reviewer profiles remain unverified and outside the roster.
-* No live run has yet exercised a repair that genuinely changes the candidate. Section 8's
-  repair moved no bytes, which is why it demonstrates the missing progress detector rather
-  than the repair path working.
+* The earlier budget/resume smoke in section 8 exercised a repair that moved no bytes, which
+  demonstrates the missing progress detector. The closure smoke in section 10 separately
+  exercised candidate-changing repairs and three readings of the same stage.
+* The closure smoke in section 10 proves the invariant on the `review` stage only.
+  `review-second` was never reached in the failing run, and reached the passing run with
+  nothing to file, so no second independent reader has yet re-read a registry live.
+  The suite now covers that handoff: the second reviewer receives the inherited
+  registry and repair receipt, and re-raising a closed id on original evidence
+  stops as `finding_protocol_failure`.
+* A reviewer reopening a closed finding, or naming a fresh blocker after a closure, without
+  new evidence is refused by `finding_protocol_failure`. No live reviewer did either, so that
+  stop is covered by the suite and not by a run.
+* Carrying a finding registry across `--continue` is likewise suite-covered only. Neither
+  live run ended in a state where a continuation would have been an honest reading of the stop.

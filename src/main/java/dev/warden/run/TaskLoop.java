@@ -485,6 +485,7 @@ public final class TaskLoop {
         }
 
         summary.put("reason", "ready_for_human");
+        summary.put("safe_next_step", "warden approve " + runId + " --decision accept|reject");
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
         // Named, not asserted. The chain is declared now, so "all machine, review and visual
@@ -700,7 +701,7 @@ public final class TaskLoop {
                String diffBaseCommit, List<Map<String, Object>> steps, Map<String, Object> summary,
                Budget budget, TaskSpec.ResolvedTask task, Workflow workflow, boolean reviewByRisk,
                Progress progress, Continuation carried,
-               Map<String, Map<String, Object>> reusable, CallPlan callPlan) {
+               Map<String, Map<String, Object>> reusable, CallPlan callPlan) throws Exception {
             this.callPlan = callPlan;
             this.loaded = loaded;
             this.user = user;
@@ -720,7 +721,31 @@ public final class TaskLoop {
             this.progress = progress;
             this.carried = carried;
             this.reusable = new LinkedHashMap<>(reusable);
+            restoreFindingHistory();
             roles.occupying(this::named);
+        }
+
+        /** Keep lifecycle memory on an authorised continuation, even when content needs re-review. */
+        private void restoreFindingHistory() throws Exception {
+            if (!carried.continuesRun()) return;
+            Path file = loaded.root().resolve(".warden/runs").resolve(carried.fromRunId()).resolve("task-run.json");
+            if (!Files.isRegularFile(file)) return;
+            Map<String, Object> prior = Json.parseObject(Files.readString(file));
+            if (!task.id().equals(prior.get("task_id"))) return;
+            if (!java.util.Objects.equals(summary.get("contract_sha256"), prior.get("contract_sha256"))
+                    && !(summary.get("acceptance_sha256") instanceof String hash
+                    && hash.equals(prior.get("acceptance_sha256")))) return;
+            if (prior.get("finding_history") instanceof List<?> rows) for (Object item : rows) {
+                if (!(item instanceof Map<?, ?> entry) || !(entry.get("stage") instanceof String stage)) continue;
+                Map<String, Object> rebuilt = Findings.roundOf(stage,
+                        entry.get("attempt") instanceof Number n ? n.longValue() : 0,
+                        entry.get("candidate_fingerprint") instanceof String fp ? fp : null,
+                        Findings.recorded(entry.get("findings")), List.copyOf(findingHistory));
+                rebuilt.put("source_run", entry.get("source_run") instanceof String source
+                        ? source : carried.fromRunId());
+                findingHistory.add(rebuilt);
+            }
+            if (!findingHistory.isEmpty()) summary.put("finding_history", List.copyOf(findingHistory));
         }
 
         int attempt() { return attempt; }
@@ -768,18 +793,22 @@ public final class TaskLoop {
             // printed for somebody to notice.
             RoleRunner.Outcome reviewed = (RoleRunner.Outcome) outcome;
             long blocking = recordFindings(stage, reviewed);
-            while (blocking > 0 && "fix".equals(stage.onFindings()) && attempt < task.maxFixAttempts()) {
+            while (repairableFindings(stage) > 0 && "fix".equals(stage.onFindings())
+                    && attempt < task.maxFixAttempts()) {
                 fixRound(stage, index, reviewContext(loaded.root(), reviewed));
                 outcome = execute(stage);
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
                 reviewed = (RoleRunner.Outcome) outcome;
                 blocking = recordFindings(stage, reviewed);
-                // The stage has now re-read the repaired candidate, so its answer is the only
-                // thing that can say whether the round achieved anything.
-                requireNoSeverityLaundering(stage, blocking);
+                // Laundering of a P1 is already refused inside recordFindings, including on
+                // this stage's first reading. This stall detector is specifically about a
+                // repair that changed nothing and brought the same blockers back.
                 requireFindingsProgress(stage);
             }
-            if (blocking > 0) throw new StopException(stage.findingsReason());
+            if (blocking > 0) {
+                noteNonactionableStop(stage);
+                throw new StopException(stage.findingsReason());
+            }
             finished(stage);
         }
 
@@ -921,10 +950,11 @@ public final class TaskLoop {
             }
 
             Map<String, Object> last = lastFindingRound(stage.name());
-            List<String> alreadyClosed = last == null ? List.of() : stringsOf(last.get("closed"));
+            List<String> alreadyClosed = last == null ? List.of() : stringsOf(last.get("closed_ids"));
             if (!alreadyClosed.isEmpty()) {
                 out.append("# Already closed by an earlier round — keep them closed\n\n");
                 for (String id : alreadyClosed) out.append("- ").append(id).append('\n');
+                out.append(Json.writePretty(last.get("finding_registry"))).append("\n");
                 out.append("\nA repair that reopens one of these has not made progress; it has "
                         + "traded one finding for another.\n\n");
             }
@@ -967,34 +997,80 @@ public final class TaskLoop {
         }
 
         /**
-         * What a stage that has read this candidate before is told, so it can check closure
-         * rather than start again.
+         * What a judging stage is told so it can check closure rather than start again.
+         *
+         * Two memories, kept distinct. A stage that has already read this candidate is asked
+         * whether its own findings closed, and is allowed a narrowed reading while the tree
+         * is the tree it read. A later stage's first reading is independent — its verdict is
+         * its own — but it still receives the registry and the repair receipt, with the stage
+         * that filed each finding preserved, so a closed requirement cannot re-enter as a
+         * new one on the original evidence.
          *
          * A reviewer given no memory re-investigates from scratch every round, which costs a
          * full reading each time and produces findings that drift — the same defect described
          * differently, or a new objection to code nobody touched. It is also the reason a
          * second round could not be compared to the first.
-         *
-         * What it is *not* is permission to skim. The last paragraph says plainly when the
-         * whole investigation has to happen again, because a narrowed reading is only sound
-         * while the thing being read is the thing that was read before.
          */
         private String reviewerPackage(Workflow.Stage stage) {
-            Map<String, Object> last = lastFindingRound(stage.name());
+            Map<String, Object> own = lastFindingRound(stage.name());
+            Map<String, Object> last = own != null ? own : lastInheritedFindingRound(stage.name());
             if (last == null) return null;
-            StringBuilder out = new StringBuilder("# You have already read this candidate\n\n");
-            out.append("This is not a fresh review. You looked at this task on an earlier round "
-                    + "and filed the findings below; an implementer has since been given them.\n\n");
+            boolean firstReadingOfThisStage = own == null;
+            StringBuilder out = new StringBuilder();
+            if (firstReadingOfThisStage) {
+                out.append("# A previous stage has already read this candidate\n\n");
+                out.append("This is your first reading of this task. Another reviewer already "
+                        + "read this candidate");
+                if (lastRepair != null) {
+                    out.append(" and an implementer has since been given what they filed");
+                }
+                out.append(". Their verdict is not yours — read the code. The registry below is "
+                        + "so you can reuse ids, check closures, and not raise a closed "
+                        + "requirement as a new one without new evidence.\n\n");
+            } else {
+                out.append("# You have already read this candidate\n\n");
+                out.append("This is not a fresh review. You looked at this task on an earlier round "
+                        + "and filed the findings below");
+                if (lastRepair != null) {
+                    out.append("; an implementer has since been given them.\n\n");
+                } else {
+                    // A resumed run reaches this branch with its reading restored and no repair
+                    // behind it: `lastRepair` belongs to this run, and a restore does not carry
+                    // one. Claiming a repair briefed a paid reviewer on something untrue, on the
+                    // one round where dropping a finding is refused precisely because the tree
+                    // did not move.
+                    out.append(". No repair has run since. This is a resumed run and the reading "
+                            + "below was restored from the run before it; the candidate itself ")
+                            .append(movedSince(last) ? "has changed since that reading."
+                                    : "**has not changed at all** since that reading.")
+                            .append("\n\n");
+                }
+            }
 
-            out.append("## What you filed last time\n\n");
-            if (last.get("findings") instanceof List<?> rows && !rows.isEmpty()) {
+            out.append("## Cumulative finding registry (including closed findings)\n\n")
+                    .append(Json.writePretty(Findings.registryOf(findingHistory))).append("\n\n")
+                    .append("Reuse IDs. Link renamed findings with supersedes. Reopening or a new "
+                            + "P1 after a closure requires new evidence_refs; bare verdicts stop the run.\n\n");
+            out.append(firstReadingOfThisStage
+                    ? "## What they filed\n\n" : "## What you filed last time\n\n");
+            Object listed = firstReadingOfThisStage
+                    ? Findings.registryOf(findingHistory) : last.get("findings");
+            if (listed instanceof List<?> rows && !rows.isEmpty()) {
                 for (Object row : rows) {
                     if (!(row instanceof Map<?, ?> finding)) continue;
                     out.append("- `").append(finding.get("id")).append("` (")
                             .append(finding.get("severity")).append(", ")
-                            .append(finding.get("category")).append(") ")
-                            .append(finding.get("path")).append(" — ")
-                            .append(finding.get("message")).append('\n');
+                            .append(finding.get("category"));
+                    if (finding.get("status") instanceof String status && !status.isBlank()) {
+                        out.append(", ").append(status);
+                    }
+                    out.append(") ").append(finding.get("path")).append(" — ")
+                            .append(finding.get("message"));
+                    if (finding.get("recorded_at_stage") instanceof String filed
+                            && !filed.isBlank()) {
+                        out.append(" [stage ").append(filed).append(']');
+                    }
+                    out.append('\n');
                 }
             } else {
                 out.append("- (nothing)\n");
@@ -1010,34 +1086,59 @@ public final class TaskLoop {
                 }
                 out.append("\nThe candidate itself ")
                         .append(Boolean.TRUE.equals(lastRepair.get("moved_candidate"))
-                                ? "did change since your last reading."
-                                : "**did not change at all** since your last reading.")
+                                ? "did change since " + (firstReadingOfThisStage
+                                        ? "the last reading." : "your last reading.")
+                                : "**did not change at all** since "
+                                        + (firstReadingOfThisStage
+                                                ? "the last reading." : "your last reading."))
                         .append('\n');
             }
 
-            out.append("""
+            if (firstReadingOfThisStage) {
+                out.append("""
 
-                    ## What is being asked of you now
+                        ## What is being asked of you now
 
-                    Two questions, in this order. Is each finding above actually closed, judged
-                    against the code rather than against the implementer's account of it? And did
-                    the repair break something that was working — a regression is a new finding,
-                    not a footnote.
+                        Your verdict is independent of theirs. Two extra obligations come with
+                        the registry: a finding they closed stays closed unless you have new
+                        evidence, and a new P1 after a closure needs new evidence too. A
+                        regression is a new finding, not a footnote.
 
-                    Reuse the finding ids above for anything still open, so the run can tell a
-                    surviving objection from a fresh one. Give a new id only to something genuinely
-                    new.
+                        Reuse the finding ids above for the same defect, so the run can tell a
+                        surviving objection from a fresh one. Give a new id only to something
+                        genuinely new.
 
-                    Do not lower a severity to let the run pass. If a P1 was wrong, say it was
-                    wrong and why; a P1 that quietly becomes a P2 on a candidate that did not
-                    change is refused by the controller, not believed.
+                        Do not lower a severity to let the run pass, and do not drop a P1 you
+                        filed to let it pass either. If a P1 was wrong, say it was wrong and why;
+                        a P1 that quietly becomes a P2, or vanishes, on a candidate that did not
+                        change is refused by the controller, not believed.
+                        """);
+            } else {
+                out.append("""
 
-                    You do not have to repeat the whole investigation to answer those two
-                    questions. You do have to repeat it if the scope, the acceptance commands or
-                    the contract have changed since your last reading, or if your earlier verdict
-                    rested on an observation that can go stale — a live page, a deployment, a
-                    network call. Say which of those applies in your summary.
-                    """);
+                        ## What is being asked of you now
+
+                        Two questions, in this order. Is each finding above actually closed, judged
+                        against the code rather than against the implementer's account of it? And did
+                        the repair break something that was working — a regression is a new finding,
+                        not a footnote.
+
+                        Reuse the finding ids above for anything still open, so the run can tell a
+                        surviving objection from a fresh one. Give a new id only to something genuinely
+                        new.
+
+                        Do not lower a severity to let the run pass, and do not drop a P1 you
+                        filed to let it pass either. If a P1 was wrong, say it was wrong and why;
+                        a P1 that quietly becomes a P2, or vanishes, on a candidate that did not
+                        change is refused by the controller, not believed.
+
+                        You do not have to repeat the whole investigation to answer those two
+                        questions. You do have to repeat it if the scope, the acceptance commands or
+                        the contract have changed since your last reading, or if your earlier verdict
+                        rested on an observation that can go stale — a live page, a deployment, a
+                        network call. Say which of those applies in your summary.
+                        """);
+            }
             return out.toString();
         }
 
@@ -1047,6 +1148,91 @@ public final class TaskLoop {
                 for (Object row : rows) items.add(String.valueOf(row));
             }
             return items;
+        }
+
+        /**
+         * Refuse a pass that was bought by relabelling or by dropping a finding, rather than
+         * by fixing.
+         *
+         * A reviewer can end a run by calling its own P1 a P2, or by omitting it. On a
+         * candidate that changed, that may be an honest reconsideration in the light of a
+         * repair. On a candidate that did not change, nothing new was learned about the code,
+         * and the only thing that moved is the report standing between the run and the human
+         * gate.
+         *
+         * The controller does not overrule the reviewer's judgement of the defect — it refuses
+         * to treat the relabelling or the retraction as a pass, even when another blocker is
+         * still open in the same round, and even on a stage's first reading of a resumed run.
+         * Restoring the history on `--continue` is what makes that comparison possible; a
+         * first reading that then drops or relabels a P1 on an unchanged candidate is the
+         * same pass-by-rewriting-the-report as one that follows a no-op repair. A throwaway
+         * P1 kept alive for one reading is not a reason to let the original drop through. A
+         * reviewer that believes the P1 was wrong should say so and why, which reads as a
+         * `review_disagreement` a person can adjudicate.
+         */
+        private void requireNoSeverityLaundering(Workflow.Stage stage) {
+            Map<String, Object> now = lastFindingRound(stage.name());
+            if (now == null || !Boolean.FALSE.equals(now.get("candidate_moved"))) return;
+            List<String> weakened = List.copyOf(stringsOf(now.get("severity_downgraded")));
+            List<String> dropped = List.copyOf(stringsOf(now.get("blocking_retracted")));
+            if (weakened.isEmpty() && dropped.isEmpty()) return;
+            Map<String, Object> laundered = new LinkedHashMap<>();
+            laundered.put("at_stage", stage.name());
+            laundered.put("downgraded_ids", weakened);
+            laundered.put("retracted_ids", dropped);
+            laundered.put("candidate_fingerprint", now.get("candidate_fingerprint"));
+            summary.put("severity_downgraded_without_change", laundered);
+            String how = dropped.isEmpty() ? "came back at a lower severity"
+                    : weakened.isEmpty() ? "vanished from the report"
+                    : "came back at a lower severity or vanished from the report";
+            summary.put("resolution", "'" + stage.name() + "' stopped blocking only because a "
+                    + "finding it had called P1 " + how + ", on a candidate "
+                    + "that did not change. Nothing new was learned about the code between the "
+                    + "two readings. If the P1 was wrong, that is a disagreement for a person to "
+                    + "settle on the evidence, not a pass.");
+            progress.line("      a P1 became non-blocking on an unchanged candidate; not "
+                    + "treating a dropped or relabelled finding as a fixed one");
+            throw new StopException("severity_downgraded_without_change");
+        }
+
+        /**
+         * P1s the implementer can be expected to close by editing the candidate. A
+         * contract_gap, access grant, quota or disagreement still blocks acceptance, but
+         * handing the diff back will not close it.
+         */
+        private long repairableFindings(Workflow.Stage stage) {
+            Map<String, Object> now = lastFindingRound(stage.name());
+            if (now == null || !(now.get("findings") instanceof List<?> rows)) return 0;
+            long n = 0;
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> finding
+                        && "P1".equals(String.valueOf(finding.get("severity")))
+                        && "product_defect".equals(String.valueOf(finding.get("category")))) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        /** Name the leftover when the only remaining P1s are not the implementer's. */
+        private void noteNonactionableStop(Workflow.Stage stage) {
+            if (repairableFindings(stage) > 0) return;
+            Map<String, Object> now = lastFindingRound(stage.name());
+            if (now == null || !(now.get("findings") instanceof List<?> rows)) return;
+            List<String> leftover = new ArrayList<>();
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> finding
+                        && "P1".equals(String.valueOf(finding.get("severity")))
+                        && !"product_defect".equals(String.valueOf(finding.get("category")))) {
+                    leftover.add(String.valueOf(finding.get("id")));
+                }
+            }
+            if (leftover.isEmpty()) return;
+            summary.put("nonactionable_blocking_ids", leftover);
+            summary.put("resolution", "The remaining P1(s) are categorised as something an "
+                    + "implementer cannot close by editing the candidate. A person has to change "
+                    + "the task, grant access, or settle the disagreement; another fix round "
+                    + "would not.");
         }
 
         /**
@@ -1069,40 +1255,6 @@ public final class TaskLoop {
          * spoken yet, and it is the only thing that can say whether the objection still
          * stands.
          */
-        /**
-         * Refuse a pass that was bought by relabelling rather than by fixing.
-         *
-         * A reviewer can end a run by calling its own P1 a P2. On a candidate that changed,
-         * that may be an honest reconsideration in the light of a repair. On a candidate that
-         * did not change, nothing new was learned about the code, and the only thing that
-         * moved is the label standing between the run and the human gate.
-         *
-         * The controller does not overrule the reviewer's judgement of the defect — it refuses
-         * to treat the relabelling as a pass. A reviewer that believes the P1 was wrong should
-         * say so and why, which reads as a `review_disagreement` a person can adjudicate.
-         */
-        private void requireNoSeverityLaundering(Workflow.Stage stage, long blocking) {
-            if (blocking > 0) return;
-            Map<String, Object> now = lastFindingRound(stage.name());
-            if (now == null || !Boolean.FALSE.equals(now.get("candidate_moved"))) return;
-            if (!(now.get("severity_downgraded") instanceof List<?> weakened) || weakened.isEmpty()) {
-                return;
-            }
-            Map<String, Object> laundered = new LinkedHashMap<>();
-            laundered.put("at_stage", stage.name());
-            laundered.put("downgraded_ids", weakened.stream().map(String::valueOf).toList());
-            laundered.put("candidate_fingerprint", now.get("candidate_fingerprint"));
-            summary.put("severity_downgraded_without_change", laundered);
-            summary.put("resolution", "'" + stage.name() + "' stopped blocking only because a "
-                    + "finding it had called P1 came back at a lower severity, on a candidate "
-                    + "that did not change. Nothing new was learned about the code between the "
-                    + "two readings. If the P1 was wrong, that is a disagreement for a person to "
-                    + "settle on the evidence, not a pass.");
-            progress.line("      a P1 became non-blocking on an unchanged candidate; not "
-                    + "treating a relabelled finding as a fixed one");
-            throw new StopException("severity_downgraded_without_change");
-        }
-
         private void requireFindingsProgress(Workflow.Stage stage) {
             Map<String, Object> now = lastFindingRound(stage.name());
             if (now == null) return;
@@ -1507,14 +1659,15 @@ public final class TaskLoop {
          * What this dispatch is told beyond its own prompt, or null when it needs nothing.
          *
          * Two different memories, and never both: an implementer starting from a person's
-         * rejection, and a judging stage re-reading a candidate it has seen before. Anything
-         * else gets the plain prompt, because a role with nothing to remember should not be
-         * handed a preamble telling it so.
+         * rejection, and a judging stage being handed findings — its own previous round, or
+         * an earlier stage's registry on its first reading. Anything else gets the plain
+         * prompt, because a role with nothing to remember should not be handed a preamble
+         * telling it so.
          */
         private Path contextFor(Workflow.Stage stage) throws Exception {
             Path rejection = rejectionContextFor(stage.role());
             if (rejection != null) return rejection;
-            if (stage.onFindings() == null || attempt == 0) return null;
+            if (stage.onFindings() == null) return null;
             String pack = reviewerPackage(stage);
             if (pack == null) return null;
             return writeContext(ledger, attempt, stage.contextKind() + "-recheck", pack);
@@ -1705,25 +1858,58 @@ public final class TaskLoop {
         /**
          * What this stage objected to this round, against what it objected to last round.
          *
-         * Kept per stage, because two reviewers reading the same candidate reach their own
-         * conclusions and a shared list would let one of them appear to have closed the
-         * other's finding. The comparison is what makes "the repair achieved nothing" a fact
-         * the run can state rather than a pattern a person has to notice across two reports.
+         * Round deltas stay per stage, because two reviewers reading the same candidate reach
+         * their own conclusions and a shared closed/persisted list would let one of them
+         * appear to have closed the other's finding. The registry is the exception: a later
+         * stage's first reading inherits it so a closed requirement cannot re-enter repair
+         * on the original evidence. The comparison of one stage to itself is still what
+         * makes "the repair achieved nothing" a fact the run can state.
          */
         private void recordFindingRound(Workflow.Stage stage, RoleRunner.Outcome outcome)
                 throws Exception {
             List<Findings.Finding> found = Findings.of(readArtifact(loaded.root(), outcome));
-            Map<String, Object> previous = lastFindingRound(stage.name());
-            Map<String, Object> row = Findings.round(stage.name(), attempt, currentFingerprint(),
-                    found, previous);
+            // The run's whole history, not this stage's last round. The deltas below are still
+            // this stage against itself; the lifecycle the evidence rules are checked against
+            // belongs to the run, so a stage rechecked after another stage closed something
+            // still sees that closure.
+            Map<String, Object> row = Findings.roundOf(stage.name(), attempt, currentFingerprint(),
+                    found, List.copyOf(findingHistory));
             findingHistory.add(row);
             summary.put("finding_history", List.copyOf(findingHistory));
+            if (!stringsOf(row.get("protocol_violations")).isEmpty()) {
+                summary.put("finding_protocol_failure", row.get("protocol_violations"));
+                throw new StopException("finding_protocol_failure");
+            }
+        }
+
+        /**
+         * Whether the tree has moved since the round a re-reading is being compared against.
+         * Asked only where there is no repair receipt to say it instead.
+         */
+        private boolean movedSince(Map<String, Object> last) {
+            Object judged = last == null ? null : last.get("candidate_fingerprint");
+            String now = currentFingerprint();
+            return judged instanceof String fingerprint && now != null && !fingerprint.equals(now);
         }
 
         /** The most recent recorded round for this stage, or null when it has had none. */
         private Map<String, Object> lastFindingRound(String stage) {
             for (int index = findingHistory.size() - 1; index >= 0; index--) {
                 if (stage.equals(findingHistory.get(index).get("stage"))) {
+                    return findingHistory.get(index);
+                }
+            }
+            return null;
+        }
+
+        /**
+         * The most recent round filed by any other stage. A later reviewer's first reading
+         * has no previous round of its own; this is the registry and repair context it
+         * still has to see.
+         */
+        private Map<String, Object> lastInheritedFindingRound(String stage) {
+            for (int index = findingHistory.size() - 1; index >= 0; index--) {
+                if (!stage.equals(findingHistory.get(index).get("stage"))) {
                     return findingHistory.get(index);
                 }
             }
@@ -1788,6 +1974,10 @@ public final class TaskLoop {
                 progress.line("      " + blocking + " blocking finding(s) from " + stage.role()
                         + " — see warden report for what it saw");
             }
+            // Consulted here rather than only after a repair: a stage's first reading of a
+            // resumed run has a previous round restored from the prior run, and that is the
+            // one round of that run that would otherwise never reach the fix-loop guards.
+            requireNoSeverityLaundering(stage);
             return blocking;
         }
 
@@ -2717,22 +2907,34 @@ public final class TaskLoop {
                 yield "raise budgets.max_role_runs in .warden/tasks/" + taskId + ".yaml"
                         + (floor > 0 ? " to at least " + floor : "") + ", then: " + carryOn + kept;
             }
+            case "finding_protocol_failure" -> "inspect finding_protocol_failure and finding_history in "
+                    + "warden report " + runId + " --text; resolve identity/evidence before a new run";
             case "quota_exhausted" -> "wait for the quota window named in the vendor message, "
                     + "or add a profile from another vendor, then: " + carryOn;
             case "failover_requires_confirmation" -> "warden approve " + runId
                     + " --decision switch  then  warden run " + taskId + " --continue " + runId;
-            case "severity_downgraded_without_change" -> "a finding that had been P1 came back "
-                    + "below the blocking line on a candidate that did not change, so the run "
-                    + "would have passed on a relabelling. Read the two readings in `warden "
-                    + "report " + runId + " --text`. If the P1 was wrong, settle that on the "
-                    + "evidence and adjust the task or the finding deliberately; then start a "
-                    + "new run.";
+            case "severity_downgraded_without_change" -> "a finding that had been P1 stopped "
+                    + "blocking on a candidate that did not change, so the run would have "
+                    + "passed on a relabelling or a dropped finding. Read the two readings in "
+                    + "`warden report " + runId + " --text`. If the P1 was wrong, settle that "
+                    + "on the evidence and adjust the task or the finding deliberately; then "
+                    + "start a new run.";
             case "repair_made_no_progress" -> "the last repair left the candidate byte-for-byte "
                     + "unchanged and the same finding came back, so another round would re-read "
                     + "the same bytes. Read the open findings in `warden report " + runId
                     + " --text`: one an implementer cannot act on is a task for a person, not "
                     + "for another fix round. Change the contract or the finding's premise, "
                     + "then start a new run.";
+            case "blocking_findings_remain" -> {
+                if (summary.get("nonactionable_blocking_ids") instanceof List<?> leftover
+                        && !leftover.isEmpty()) {
+                    yield "the remaining P1(s) are not the implementer's to close. Read them in "
+                            + "`warden report " + runId + " --text`, change the task or grant "
+                            + "what they ask for, then start a new run.";
+                }
+                yield "read `warden report " + runId + " --text`, then either address what it "
+                        + "names and start a new run, or " + carryOn;
+            }
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";
