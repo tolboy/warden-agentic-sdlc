@@ -218,6 +218,23 @@ Still not proven anywhere, and refused rather than faked:
 - tamper-evident external ledger storage;
 - automatic landing — which is not a gap but a decision. Warden never merges.
 
+### Where the receipts behind this file are, as of 2026-09-09
+
+The numbers and quotations above were read from run receipts at the time. The working copies
+those receipts lived in have since been cleared, so what can be re-audited today is narrower
+than what this file records, and saying that no link broke would not be the same as saying
+nothing was lost.
+
+- The `warden-orca-review-smoke` and `p1-closure-smoke` fixtures were copied whole, verified,
+  and kept outside this repository before removal. Their evidence, including ten decision
+  records, is auditable from that archive.
+- The `warden-e2e-smoke` probe worktree named in section 2 was deleted without being archived.
+  Two run directories went with it, neither holding a decision record. **Those runs cannot be
+  re-audited**; recovery has not been attempted and is not confirmed possible. What survives
+  of them is this file's own account, which is a record rather than a receipt. The fixture
+  itself is reproducible: section 2 is the contract and section 4 the commands, and a reader
+  following them builds a fresh one rather than inspecting the old.
+
 ### Attempted 2026-09-03 — `runner: orca` reviewer, Claude `opus`
 
 Throwaway repo `warden-orca-review-smoke`, Orca worktree

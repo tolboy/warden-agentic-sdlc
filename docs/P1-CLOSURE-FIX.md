@@ -49,8 +49,12 @@ YES because it substituted planner dependencies for mandatory P1 acceptance (sec
 The fix changed the report to NO; both final reviews accepted that corrected conclusion.
 The success gate accepted an accurate negative audit, not completed P1.
 The final Astra review also retained P2 feedback about missing full-suite and live-smoke
-acceptance mapping. The old candidate and its receipts have been preserved; its gate was later
-resolved as an accepted audit result, not as approval of this code.
+acceptance mapping. That gate then stayed unresolved. On 2026-09-09 it was **rejected**, as a
+historical audit no longer in use: the rejection closes that run and touches neither this code
+nor the separate acceptance of P1 recorded later on its own fingerprint. An earlier version of
+this paragraph said the gate had been resolved as an accepted audit; it had not been resolved
+at all. The candidate and its receipts were archived outside this repository before the
+worktree was removed.
 
 ## Repair in the primary checkout
 
