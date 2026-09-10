@@ -64,6 +64,12 @@ renders and logs no console errors" plus a comment saying what belongs there. Al
 real task has its scenarios written by hand, and this is the one place worth stopping —
 after it, vendor calls start costing money.
 
+`--prepare off|auto|always` (default `off`) is separate from that stop. `off` keeps today's
+deterministic `TaskDraft`. `auto` dispatches a read-only planner only when the task id has
+no contract on disk yet, and reuses a ready contract only when it still preserves the
+supplied goal, scope and risk. `always` dispatches it even then. The planner drafts; Warden
+validates. `--prepare always --draft-only` spends the planner and never the implementer.
+
 ```text
 warden do --project /path/to/repo --draft-only "Add a Settings button"
 ```
@@ -166,7 +172,7 @@ Here the tool is separated from the projects it connects to.
                              warden do "<goal>"
                                        │
                  ┌─────────────────────┴───────────────────────┐
-                 │  Orca worktree · task draft · linter        │
+                 │  Orca worktree · draft (or planner) · linter│
                  │  Warden creates no branches and merges none │
                  └─────────────────────┬───────────────────────┘
                                        ▼

@@ -995,7 +995,8 @@ public final class OrcaExecutor implements RoleExecutor {
 
     private static List<String> schemaErrors(Profile profile, Request request, Map<String, Object> artifact)
             throws Exception {
-        if (!profile.enforceSchema() || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
+        boolean mustCheck = profile.enforceSchema() || "planner".equals(request.role());
+        if (!mustCheck || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
             return List.of();
         }
         Object schema = Json.parse(Files.readString(request.schemaFile()));

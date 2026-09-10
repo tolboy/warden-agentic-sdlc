@@ -21,17 +21,24 @@ public final class ConductorBridge {
 
     public Outcome run(Path projectRoot, String taskId, String runId, boolean autoReject,
                        Duration timeout) throws IOException, InterruptedException {
+        return run(projectRoot, taskId, runId, autoReject, timeout, "off");
+    }
+
+    public Outcome run(Path projectRoot, String taskId, String runId, boolean autoReject,
+                       Duration timeout, String prepare) throws IOException, InterruptedException {
         Path workflow = locateWorkflow();
         if (workflow == null) {
             throw new IOException("conductor/do.yaml not found next to Warden; set WARDEN_HOME");
         }
+        String mode = prepare == null || prepare.isBlank() ? "off" : prepare;
         List<String> command = new ArrayList<>();
         command.add(DirectCliExecutor.resolveExecutable("conductor", projectRoot));
         command.addAll(List.of("run", workflow.toString(),
                 "--input", "task=" + taskId,
                 "--input", "project_dir=" + projectRoot.toAbsolutePath().normalize(),
                 "--input", "run_id=" + runId,
-                "--input", "actor=" + System.getProperty("user.name", "local-operator")));
+                "--input", "actor=" + System.getProperty("user.name", "local-operator"),
+                "--input", "prepare=" + mode));
         if (autoReject) command.add("--skip-gates");
 
         ProcessBuilder builder = new ProcessBuilder(command)

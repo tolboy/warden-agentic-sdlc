@@ -7,7 +7,7 @@ The source of truth is Warden, not a target-project branch.
 | Task spec and linter | Warden config | Implemented: intent, non-goals, risk, scope, authority, acceptance, visual scenarios, budgets and limits |
 | Workflow declaration | Warden user policy | Implemented: `workflow.stages` in `~/.warden/policy.yaml` declares the order of stages, what each runs (`role` / `machine_gates` / `visual_harness`), the closed set of conditions gating it, and where a failure or a finding routes. Omitting the block runs the built-in chain. Stop reasons and the fix bound are deliberately not configurable |
 | Run narration | Warden CLI | Implemented: `do` and `run` print the plan, each stage as it is reached, the profile and vendor of each dispatch, per-stage result with elapsed time, tokens and cost, each fix round and its destination, and the commands the human gate now expects — all on stderr, so stdout stays the single JSON object Conductor and scripts read. `--quiet` disables it. Nothing printed is evidence; it restates the ledger |
-| Policy/run controller | Warden | Live: `warden do` created an Orca worktree from the actual current branch and resolved the whole chain, and run `chapter-hearth-3` carried it through to a green human gate: implementer, gates, independent review, browser harness and the visual role, one fix round, six vendor calls, $3.91 (docs/LIVE-CYCLE.md). `warden do` is the operator command: isolate (Orca worktree) → draft a task → implement → gates → fix ≤ N → review → fix ≤ N → browser harness → fix ≤ N → visual QA role → fix ≤ N → human gate. Never lands. `warden run` remains the inner loop |
+| Policy/run controller | Warden | Live: `warden do` created an Orca worktree from the actual current branch and resolved the whole chain, and run `chapter-hearth-3` carried it through to a green human gate: implementer, gates, independent review, browser harness and the visual role, one fix round, six vendor calls, $3.91 (docs/LIVE-CYCLE.md). `warden do` is the operator command: isolate (Orca worktree) → draft a task (deterministic `TaskDraft`, or an optional read-only `planner` when `--prepare auto|always`) → implement → gates → fix ≤ N → review → fix ≤ N → browser harness → fix ≤ N → visual QA role → fix ≤ N → human gate. Never lands. The planner drafts; Warden validates. `warden run` remains the inner loop |
 | Role/profile resolver | Warden user policy | Implemented: verification, availability, rotation, independent vendor, and exclusion of profiles that ran out during the run |
 | Vendor quota handling | Warden execution | Implemented: a spent subscription is classified apart from an ordinary failure, and both attempts stay in the evidence. Verified live against a genuinely exhausted Codex account. Whether the role may fail over at all is `failover.on_quota_exhausted` — `confirm` (default) stops with a FAILOVER decision naming both vendors and what the swap costs in independence, `auto` switches and logs `role_failover`, `stop` never switches. The authorisation to proceed is the recorded decision, carried by `warden run --continue <run-id>`, and it permits exactly one role-to-profile substitution |
 | Direct CLI adapter | Warden SPI | Implemented. Live: Grok review, Claude Sonnet review, Codex mini implement (`prompt_delivery: stdin`, `--approve-for-me`). JSONL `agent_message` recovery for Codex. Windows batch-shim refusal unchanged |
@@ -34,7 +34,7 @@ not trusted policy.
 
 | Where | What it decides |
 |---|---|
-| `~/.warden/policy.yaml` | which profiles may fill `implementer`, `reviewer`, `visual_qa`; rotation; whether a reviewer must be an independent vendor; which risks pay for review; and `workflow.stages` — the order those roles run in and the condition under which each runs at all |
+| `~/.warden/policy.yaml` | which profiles may fill `implementer`, `reviewer`, `visual_qa`, `planner`; rotation; whether a reviewer must be an independent vendor; which risks pay for review; and `workflow.stages` — the order those roles run in and the condition under which each runs at all. `planner` is optional and absent from the shipped policy; `architect` remains a loadable role with no shipped profile and no stage |
 | `~/.warden/profiles/*.yaml` | one vendor filling one role: command, args, `runner`, `prompt_delivery`, `attachments.flag`, `quota.signatures`, `model`, and the `verification` block the resolver refuses without. `warden profiles --verify <name>` runs that block's probe and keeps the transcript; `--confirm` stamps the date, and only after the probe passed in the same invocation |
 | `<project>/.warden/` | what "done" means: checks, scopes, task contracts, `visual_qa` scenarios |
 
@@ -48,6 +48,52 @@ the gates, the evidence and the decision record; Orca owns worktrees, worker lif
 and the surfaces a person uses; Conductor is an optional outer adapter for timeout and
 an external human gate. Duplicating the role DAG in Conductor would create two competing
 resume/retry state machines. The cut is [`docs/adr/0001-layer-split.md`](adr/0001-layer-split.md).
+
+## The planner drafts; Warden validates
+
+`planner` is a role like the others — a profile can declare it, `policy.yaml` can name it,
+and `RoleResolver` applies the same verification, strategy and independence rules. It is
+not a workflow stage and it is not in the shipped policy. `warden do --prepare off|auto|always`
+(default `off`) is what dispatches it, so no existing project changes behaviour.
+
+The planner runs before a task contract exists, so a task contract cannot bound it. Warden
+bounds it instead: the profile's `limits.wall_clock_minutes`, one call with no repair,
+`read_only: true` enforced by the worktree content fingerprint, and no authority to write
+or to reach the network. The one-call bound is a dispatch gate: quota failover is another
+vendor call and is refused, while a protocol failure may retry once after the tree is
+restored. A planner that moved the tree is `planner_protocol_violation`. `CallPlan` is
+written into the run marker before the vendor is paid, so a report cannot discover the
+planner afterwards and call it free. That reservation is one plan: the run's real
+ceiling measured with the same skip predicate the loop routes by, not the bootstrap's
+cap of one laid against the undeclared chain. `--draft-only` records the bootstrap
+itself — a cap of one and `paying_stages` naming the planner alone — because no
+workflow stage will run.
+
+What it returns is a draft. Warden compiles that draft into a frozen contract, or refuses
+it and names the field: acceptance must resolve to a named check under `checks:` in
+`.warden/project.yaml` (a shell string is never promoted), `scope` must be a named scope,
+the operator's original goal is carried verbatim, and `required_access` may not exceed
+what the invocation already authorised. A draft that fails the shipped schema is
+`role_artifact_schema_violation` even when the profile skipped enforcement. The planner
+may request a visual contract; if it omits `visual_qa`, Warden applies the same rule
+`TaskDraft` uses, so `--prepare always` is not weaker than `--prepare off` on a UI goal.
+An existing contract is not truncated: `--prepare always` on a task id that already has a
+file keeps that file, or refuses `task_conflict` when the intent differs — the same
+protection `TaskDraft` already gives. `--prepare auto` on a contract the planner itself
+wrote does not rewrite it through `TaskDraft`; it still refuses `task_conflict` when that
+file does not preserve the supplied operator goal, scope or risk, so a ready contract for
+one piece of work is not executed as another. Planner-added text after the original goal
+is kept. Compiled named checks stay names: several of them are written as
+`checks.names`, and a name that later disappears from `project.yaml` is refused rather
+than run as a shell string. `--prepare always --draft-only` spends the planner and never
+the implementer. The call is a `role_run` and `CallPlan` reserves for it.
+A later `warden run` (including Conductor's inner process) joins that reservation instead
+of refusing `run_id_exists`. When auto skipped the planner, the same reservation still
+records `prepare=auto`, so the inner run's JSON does not say `off`.
+
+**Not built here:** an interactive draft editor, TTL or timestamps on network observations,
+and subtask execution. The schema records subtasks; nothing runs them. There is no
+`warden draft` command.
 
 ## What a failure is allowed to do
 
@@ -68,6 +114,8 @@ Every vendor failure resolves to exactly one of these, and the choice is made in
 | `visual_findings_remain` | Stop for a human | The model looked and still objects. Warden does not overrule it |
 | `goal_mangled_by_console_encoding` | Refuse before anything is written | The JVM decodes argv with `sun.jnu.encoding`; on a non-UTF-8 Windows host a Cyrillic goal is already `?` by the time `main` runs, and no JVM flag changes it. `--goal-file` is the channel that works |
 | `role_violated_read_only` | Discard the artifact whatever it claims | The declaration is intent; the worktree fingerprint is the fact |
+| `planner_protocol_violation` | Discard the planner's draft; restore only what the planner wrote, including a commit (`reset --mixed` to the captured HEAD, then the dirty files); retry once. A tree Warden did not snapshot is not `reset --hard` — that would destroy work that predates the run, including in `--in-place`. If restore cannot prove the tree is back at the captured HEAD and fingerprint, stop with no retry. The discarded attempt's prompt, raw stdout and report keep their own names so a retry cannot overwrite the receipt. | A planner that moved the worktree is a protocol failure, not an ordinary P1. The second failure stops. |
+| `planner_draft_invalid` | Refuse the draft and write no contract | Acceptance must name a `checks:` entry, scope must be a named scope, the operator's goal must be carried verbatim, and `required_access` may not exceed the invocation |
 
 The exclusion list for quota lives in memory for the lifetime of one process, deliberately.
 Persisting it would leave a vendor disabled after its quota window rolled over, and that kind

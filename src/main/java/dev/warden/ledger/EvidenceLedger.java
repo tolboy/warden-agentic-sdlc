@@ -33,12 +33,22 @@ public final class EvidenceLedger {
      * their own run ids; only the outer TaskLoop reserves a workflow id.
      */
     public Path reserveWorkflowRun(String taskId) throws IOException {
+        return reserveWorkflowRun(taskId, Map.of());
+    }
+
+    /**
+     * @param extra fields recorded on the reservation itself, so a finished run still says
+     *              how it was prepared. Unknown keys are the caller's; the schema version
+     *              and identity fields stay Warden's.
+     */
+    public Path reserveWorkflowRun(String taskId, Map<String, Object> extra) throws IOException {
         Path marker = runDirectory.resolve("run.json");
         Map<String, Object> reservation = new LinkedHashMap<>();
         reservation.put("schema_version", 1L);
         reservation.put("run_id", runDirectory.getFileName().toString());
         reservation.put("task_id", taskId);
         reservation.put("reserved_at", Instant.now().toString());
+        if (extra != null) extra.forEach(reservation::put);
         try {
             Files.writeString(marker, Json.writePretty(reservation) + System.lineSeparator(),
                     StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
@@ -59,6 +69,57 @@ public final class EvidenceLedger {
             }
         }
         return marker;
+    }
+
+    /**
+     * Record that preparation finished and spent these vendor calls, so a later controller
+     * — {@code warden run} in this process, or Conductor's inner {@code warden run} — can
+     * join the reservation instead of refusing it as a duplicate.
+     */
+    public void markPrepared(int roleRuns, double costUsd, int unpriced) throws IOException {
+        Path marker = runDirectory.resolve("run.json");
+        if (!Files.isRegularFile(marker)) {
+            throw new IOException("cannot mark preparation: run id is not reserved");
+        }
+        Map<String, Object> reservation = Json.parseObject(Files.readString(marker, StandardCharsets.UTF_8));
+        reservation.put("prepared", true);
+        reservation.put("preparation_role_runs", (long) Math.max(0, roleRuns));
+        reservation.put("preparation_cost_usd", costUsd);
+        reservation.put("preparation_unpriced", (long) Math.max(0, unpriced));
+        Files.writeString(marker, Json.writePretty(reservation) + System.lineSeparator(),
+                StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+
+    /**
+     * Take exclusive ownership of a run the planner already reserved. CREATE_NEW on
+     * {@code loop.json} is the same fence {@link #reserveWorkflowRun} uses on {@code run.json}:
+     * a second controller is refused before it can overwrite evidence.
+     *
+     * @return the reservation body, including the preparation spend the loop must count
+     */
+    public Map<String, Object> claimPreparedLoop(String taskId) throws IOException {
+        Path marker = runDirectory.resolve("run.json");
+        if (!Files.isRegularFile(marker)) {
+            throw new RunExistsException("run id already reserved: " + runDirectory.getFileName(), null);
+        }
+        Map<String, Object> reservation = Json.parseObject(Files.readString(marker, StandardCharsets.UTF_8));
+        if (!String.valueOf(reservation.get("task_id")).equals(taskId)
+                || !Boolean.TRUE.equals(reservation.get("prepared"))) {
+            throw new RunExistsException("run id already reserved: " + runDirectory.getFileName(), null);
+        }
+        Path claim = runDirectory.resolve("loop.json");
+        try {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("schema_version", 1L);
+            body.put("run_id", runDirectory.getFileName().toString());
+            body.put("task_id", taskId);
+            body.put("claimed_at", Instant.now().toString());
+            Files.writeString(claim, Json.writePretty(body) + System.lineSeparator(),
+                    StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        } catch (java.nio.file.FileAlreadyExistsException duplicate) {
+            throw new RunExistsException("run id already reserved: " + runDirectory.getFileName(), duplicate);
+        }
+        return reservation;
     }
 
     /**

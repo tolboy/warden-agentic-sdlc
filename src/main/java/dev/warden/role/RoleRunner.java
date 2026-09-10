@@ -68,10 +68,18 @@ public final class RoleRunner {
      * The seam exists so that a bounded loop's budget is enforced per vendor call rather than
      * per role: without it, a role that failed over twice would spend three times what its
      * caller had counted, and the overrun would be discovered by paying for it.
+     *
+     * {@link #hasRoom()} is asked before a failover {@code continue}, so a one-call bootstrap
+     * can return the spent-subscription outcome instead of throwing from inside the next
+     * iteration after a prompt for a call that must not happen has already been written.
+     * The loop's budget still uses a method reference and keeps the default, so it still
+     * refuses at {@link #requireDispatch} — existing stop reasons stay the same.
      */
     @FunctionalInterface
     public interface DispatchGate {
         void requireDispatch();
+
+        default boolean hasRoom() { return true; }
     }
 
     /**
@@ -99,8 +107,30 @@ public final class RoleRunner {
     private final dev.warden.run.Progress progress;
     private Occupied occupied = NOBODY;
     private String stageName;
+    /** 1-based dispatch of this runner for the current role. A later {@link #run} of the
+     *  same role (the planner's protocol retry) must not reuse the first call's report name. */
+    private int evidenceDispatch = 1;
+    /** Monotonic across vendor attempts that share a role and a run directory, including
+     *  failover and a later {@link #forDispatch} of that same call. Reset when either
+     *  changes so a reused loop runner still names the first prompt of a later stage
+     *  {@code reviewer.md} in that stage's own directory. {@code evidenceDispatch + attempt - 1}
+     *  collides when a first dispatch already used {@code attempt-2} and a retry starts
+     *  at attempt 1 in the same directory. */
+    private int nextEvidenceSerial = 1;
+    private String evidenceSerialKey;
 
     public RoleRunner atStage(String name) { stageName = name; return this; }
+
+    /**
+     * Name this {@link #run} as the Nth dispatch of the role (1-based). The first keeps the
+     * historical {@code planner} / {@code role-planner.json} names; a later one writes
+     * {@code planner.attempt-N} so a retry cannot overwrite the discarded attempt's prompt,
+     * raw stdout or report while that attempt's ledger event still points at them.
+     */
+    public RoleRunner forDispatch(int dispatch) {
+        this.evidenceDispatch = dispatch < 1 ? 1 : dispatch;
+        return this;
+    }
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
@@ -239,6 +269,11 @@ public final class RoleRunner {
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
         TaskSpec.ResolvedTask task = loaded.resolved();
         String mergeBase = pinnedDiffBase != null ? pinnedDiffBase : git.mergeBase(task.baseRef());
+        String serialKey = role + "\0" + runId;
+        if (!serialKey.equals(evidenceSerialKey)) {
+            evidenceSerialKey = serialKey;
+            nextEvidenceSerial = 1;
+        }
 
         long rotation = rotationFor(root, role, stagePosition, dryRun);
 
@@ -279,7 +314,9 @@ public final class RoleRunner {
 
             boolean inheritsUnfinishedWork = attempt > 1
                     && !git.fingerprint(mergeBase).equals(fingerprintAtStart);
-            String evidenceName = attempt == 1 ? role : role + ".attempt-" + attempt;
+            int evidenceSerial = nextEvidenceSerial++;
+            String evidenceName = evidenceSerial <= 1 ? role : role + ".attempt-" + evidenceSerial;
+            String reportStem = evidenceDispatch <= 1 ? role : role + ".attempt-" + evidenceDispatch;
 
             Map<String, String> values = promptValues(loaded, task, runId, mergeBase, user, profile,
                     contextFile, inheritsUnfinishedWork, attempts, attachments);
@@ -423,6 +460,23 @@ public final class RoleRunner {
                     String mode = user.policy().failoverMode();
                     boolean preAuthorized = candidate.name().equals(authorizedFailover.get(role));
                     if ("auto".equals(mode) || preAuthorized) {
+                        if (!gate.hasRoom()) {
+                            // A one-call bound (the planner bootstrap) cannot spend a second
+                            // vendor. Return the spent-subscription outcome rather than
+                            // throwing from the next iteration, so the first call is still
+                            // a role_run with its cost attached.
+                            report.put("failover_declined_by_budget", candidate.name());
+                            report.put("exhausted_profiles", List.copyOf(exhausted));
+                            report.put("resolution", "another profile could fill this role, but "
+                                    + "no further vendor dispatch is allowed under the budget "
+                                    + "in force");
+                            report.put("vendor_attempts", attempts);
+                            report.put("attempts_cost_usd", spent);
+                            Path path = ledger.writeReport("role-" + reportStem, report);
+                            ledger.append("role_run", report);
+                            return new Outcome(false, result.code(), role, profile.name(),
+                                    profile.vendor(), resolution.rejected(), path, report);
+                        }
                         // Switching vendors mid-role changes who wrote the work, so it is an
                         // event in its own right rather than a line in a report nobody reads.
                         ledger.append("role_failover", failoverEvent(role, profile, candidate,
@@ -441,7 +495,7 @@ public final class RoleRunner {
                                 + "Record the choice with `warden approve <run-id> --decision switch`, "
                                 + "then re-run with `--continue <run-id>`; or set "
                                 + "failover.on_quota_exhausted: auto to let Warden switch unattended.");
-                        Path pendingPath = ledger.writeReport("role-" + role, report);
+                        Path pendingPath = ledger.writeReport("role-" + reportStem, report);
                         ledger.append("role_run", report);
                         return new Outcome(false, "role_failover_requires_confirmation", role,
                                 profile.name(), profile.vendor(), resolution.rejected(),
@@ -479,7 +533,7 @@ public final class RoleRunner {
                         .map(entry -> String.valueOf(entry.get("profile"))).toList());
             }
 
-            Path path = ledger.writeReport("role-" + role, report);
+            Path path = ledger.writeReport("role-" + reportStem, report);
             ledger.append("role_run", report);
             return new Outcome(result.ok(), result.code(), role, profile.name(), profile.vendor(),
                     resolution.rejected(), path, report);
@@ -660,6 +714,9 @@ public final class RoleRunner {
         values.put("visual_scenarios", bullets(task.visualQa().scenarios()));
         values.put("authority", "workspace_write=" + task.authority().workspaceWrite()
                 + ", network=" + task.authority().network() + ", land=" + task.authority().land());
+        values.put("operator_goal", task.goal());
+        values.put("named_checks", namedEntries(loaded.project().checks()));
+        values.put("named_scopes", namedEntries(loaded.project().scopes()));
         values.put("max_fix_attempts", String.valueOf(task.maxFixAttempts()));
         values.put("timeout_minutes", String.valueOf(task.timeoutMinutes()));
         values.put("budget_max_role_runs", String.valueOf(task.budget().maxRoleRuns()));
@@ -764,6 +821,21 @@ public final class RoleRunner {
         if (items == null || items.isEmpty()) return "(none)";
         StringBuilder builder = new StringBuilder();
         for (String item : items) builder.append("- ").append(item).append('\n');
+        return builder.toString().stripTrailing();
+    }
+
+    /**
+     * Named project entries as the planner (and any later reader) must see them: the name
+     * Warden will accept, and the value that name already resolves to. A model that invents
+     * a fourth name is refused at compile time; this list is what "already exists" means.
+     */
+    private static String namedEntries(Map<String, ? extends List<String>> named) {
+        if (named == null || named.isEmpty()) return "(none)";
+        StringBuilder builder = new StringBuilder();
+        for (Map.Entry<String, ? extends List<String>> entry : named.entrySet()) {
+            builder.append("- `").append(entry.getKey()).append("`: ")
+                    .append(entry.getValue()).append('\n');
+        }
         return builder.toString().stripTrailing();
     }
 

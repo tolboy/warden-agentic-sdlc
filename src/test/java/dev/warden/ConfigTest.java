@@ -205,6 +205,16 @@ public final class ConfigTest implements Suite {
         check.rejects("typo in a bare check name refused", "which is not defined under checks",
                 () -> TaskSpec.parse("version: 1\nid: x\ngoal: g\nscope: ui\nchecks: nope\n", "task.yaml")
                         .resolve(project, "task.yaml"));
+        check.eq("a single-token literal in a checks list is still a command", List.of("pytest"),
+                TaskSpec.parse("version: 1\nid: x\ngoal: g\nscope: ui\nchecks: [\"pytest\"]\n", "task.yaml")
+                        .resolve(project, "task.yaml").acceptanceCommands());
+        check.eq("a names mapping expands every named check", List.of("npm run check"),
+                TaskSpec.parse("version: 1\nid: x\ngoal: g\nscope: ui\nchecks:\n  names: [fast]\n", "task.yaml")
+                        .resolve(project, "task.yaml").acceptanceCommands());
+        check.rejects("a names mapping refuses a check that is not defined",
+                "which is not defined under checks",
+                () -> TaskSpec.parse("version: 1\nid: x\ngoal: g\nscope: ui\nchecks:\n  names: [fast, gone]\n",
+                        "task.yaml").resolve(project, "task.yaml"));
         check.eq("the list form still allows an explicit path", List.of("nope"),
                 TaskSpec.parse("version: 1\nid: x\ngoal: g\nscope: [\"nope\"]\n", "task.yaml")
                         .resolve(project, "task.yaml").scopePaths());

@@ -142,21 +142,30 @@ public final class Values {
     }
 
     /**
-     * A field that may be written as a bare name or as a list. The two forms mean different
-     * things and the caller needs to know which was used, so the form is reported alongside
-     * the values — see {@link Selector}.
+     * A field that may be written as a bare name, as a list, or as a {@code names:} mapping.
+     * The three forms mean different things and the caller needs to know which was used, so
+     * the form is reported alongside the values — see {@link Selector}.
      */
     public Selector selector(String key) {
         Object raw = map.get(key);
         if (raw == null) return new Selector(false, List.of());
         if (raw instanceof String single) return new Selector(true, List.of(single));
+        if (raw instanceof Map<?, ?>) {
+            // `checks: {names: [fast, full]}` is several names, each of which must exist —
+            // the same rule as a bare `checks: fast`. A YAML list remains the handwritten
+            // literal form, so `checks: ["pytest"]` is still a command.
+            Values nested = optMap(key);
+            nested.rejectUnknownKeys(Set.of("names"));
+            return new Selector(true, nested.requireStringList("names"));
+        }
         return new Selector(false, readStringList(key, raw));
     }
 
     /**
      * `scope: ui` is a NAME and must be defined in project.yaml; `scope: ["src/lib"]` is an
      * explicit list. Keeping the two forms distinct is what makes a typo in a scope name an
-     * error instead of a silently wrong blast radius.
+     * error instead of a silently wrong blast radius. Several names use the same mapping the
+     * checks field uses: `checks: {names: [fast, full]}` is names, not commands.
      */
     public record Selector(boolean bareName, List<String> entries) {
         public boolean isEmpty() { return entries.isEmpty(); }

@@ -47,15 +47,28 @@ public final class CallPlan {
     private final List<Workflow.Stage> stages;
     private final Workflow workflow;
     private final Predicate<Workflow.Stage> skipped;
+    private final List<String> preparationStages;
 
     /**
      * @param skipped whether a stage will not run at all — the same predicate the loop uses,
      *                so the plan and the execution cannot disagree about which stages count
      */
     public CallPlan(Workflow workflow, Predicate<Workflow.Stage> skipped) {
+        this(workflow, skipped, List.of());
+    }
+
+    /**
+     * @param preparationStages paying role names that run before the declared chain — the
+     *                          planner, today. Counted in {@link #minimumToFinish()} so the
+     *                          reservation happens before dispatch rather than being found
+     *                          in the ledger afterwards. Empty when preparation is off.
+     */
+    public CallPlan(Workflow workflow, Predicate<Workflow.Stage> skipped,
+                    List<String> preparationStages) {
         this.workflow = workflow;
         this.stages = workflow.stages();
         this.skipped = skipped;
+        this.preparationStages = List.copyOf(preparationStages);
     }
 
     /** Vendor calls a run that never repairs anything needs, from the top of the chain. */
@@ -135,7 +148,7 @@ public final class CallPlan {
 
     /** The stages that would be dispatched, named, for a preview that spends nothing. */
     public List<String> payingStages() {
-        List<String> names = new ArrayList<>();
+        List<String> names = new ArrayList<>(preparationStages);
         for (Workflow.Stage stage : stages) {
             if (stage.kind() == Workflow.Kind.ROLE && !skipped.test(stage)) names.add(stage.name());
         }
@@ -206,6 +219,7 @@ public final class CallPlan {
 
     private int callsFrom(int index) {
         int calls = 0;
+        if (index <= 0) calls += preparationStages.size();
         for (int position = Math.max(0, index); position < stages.size(); position++) {
             Workflow.Stage stage = stages.get(position);
             if (stage.kind() == Workflow.Kind.ROLE && !skipped.test(stage)) calls++;

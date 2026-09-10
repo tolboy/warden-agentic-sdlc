@@ -154,6 +154,18 @@ public final class DirectCliExecutor implements RoleExecutor {
 
         Duration duration = Duration.ofMillis(process.durationMillis());
 
+        // Telemetry is read before the verdict, not after it, and this order is the whole
+        // point. A call that failed still spent money, and it reports what it spent in the
+        // same envelope key it uses when it succeeds: a grok run killed by its own turn
+        // ceiling printed `"total_cost_usd": 1.33` and was recorded as costing nothing, and
+        // an Opus review that did the same hid $4.88. The budget ceiling then measures only
+        // the calls that worked, which is the opposite of what a ceiling is for — the run
+        // most worth costing is the one that failed. A planner that mutated the worktree is
+        // the same: the protocol failure is a verdict, and the call still cost what it cost.
+        Map<String, Object> envelope = Json.findLastObject(process.stdout());
+        if (envelope != null) collectTelemetry(envelope, evidence);
+        noteModelMismatch(profile, evidence);
+
         if (profile.readOnly()) {
             String fingerprintAfter = git.fingerprint(mergeBase);
             boolean unchanged = fingerprintBefore.equals(fingerprintAfter);
@@ -173,17 +185,6 @@ public final class DirectCliExecutor implements RoleExecutor {
             evidence.put("failure", "role_timeout");
             return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
-
-        // Telemetry is read before the verdict, not after it, and this order is the whole
-        // point. A call that failed still spent money, and it reports what it spent in the
-        // same envelope key it uses when it succeeds: a grok run killed by its own turn
-        // ceiling printed `"total_cost_usd": 1.33` and was recorded as costing nothing, and
-        // an Opus review that did the same hid $4.88. The budget ceiling then measures only
-        // the calls that worked, which is the opposite of what a ceiling is for — the run
-        // most worth costing is the one that failed.
-        Map<String, Object> envelope = Json.findLastObject(process.stdout());
-        if (envelope != null) collectTelemetry(envelope, evidence);
-        noteModelMismatch(profile, evidence);
 
         if (process.exitCode() != 0) {
             Result quota = quotaFailure(request, process, duration, evidence);
@@ -315,7 +316,11 @@ public final class DirectCliExecutor implements RoleExecutor {
     /** Conformance is ours, even when the vendor claimed to enforce the schema. */
     static List<String> schemaErrors(Profile profile, Request request, Map<String, Object> artifact)
             throws Exception {
-        if (!profile.enforceSchema() || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
+        // The planner's draft is compiled into a contract. A profile may skip schema
+        // enforcement for other roles; it may not skip it for the planner. Warden does not
+        // trust a draft that fails the schema the prompt advertised.
+        boolean mustCheck = profile.enforceSchema() || "planner".equals(request.role());
+        if (!mustCheck || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
             return List.of();
         }
         Object schema = Json.parse(Files.readString(request.schemaFile()));

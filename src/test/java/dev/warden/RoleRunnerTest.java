@@ -457,6 +457,13 @@ public final class RoleRunnerTest implements Suite {
                 !loaded.profiles().get("codex-implement").verified()
                         && !loaded.profiles().get("codex-implement").readOnly());
         check.that("policy references resolve", loaded.danglingProfileReferences().isEmpty());
+        check.that("setup ships a planner prompt next to the other three",
+                first.created().contains("prompts/planner.md"));
+        check.that("and a planner schema, never overwriting",
+                first.created().contains("schemas/planner.json"));
+        check.that("and does not put a planner in the shipped policy",
+                !dev.warden.config.Policy.parse(UserSetup.policyTemplate(), "policy.yaml")
+                        .roles().containsKey("planner"));
 
         UserSetup.Result second = new UserSetup().run(home);
         check.that("a second setup overwrites nothing", second.created().isEmpty());

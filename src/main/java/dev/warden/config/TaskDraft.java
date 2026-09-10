@@ -125,6 +125,50 @@ public final class TaskDraft {
     }
 
     /**
+     * Reuse an on-disk contract when it still denotes this invocation's intent.
+     *
+     * {@link #write} compares the operator's goal for equality, which is right when this
+     * class wrote the file. A planner may append after that goal and may not replace or
+     * drop it, so a later {@code --prepare auto} has to accept the prefix and still refuse
+     * a different goal, scope or risk — otherwise a ready contract for one piece of work
+     * would run as another.
+     */
+    public static Written requireSameIntent(Path file, String id, String goal, String scope,
+                                            String risk) throws IOException {
+        if (!Files.isRegularFile(file)) {
+            throw new TaskConflict("task '" + id + "' does not exist at " + file);
+        }
+        TaskSpec existing;
+        try {
+            existing = TaskSpec.parse(Files.readString(file, StandardCharsets.UTF_8), file.toString());
+        } catch (RuntimeException invalid) {
+            throw new TaskConflict("task '" + id + "' already exists but cannot be validated: "
+                    + invalid.getMessage());
+        }
+        boolean sameScope = existing.scope().entries().size() == 1
+                && scope.equals(existing.scope().entries().get(0));
+        boolean sameRisk = risk.equals(existing.risk());
+        boolean sameId = id.equals(existing.id());
+        if (!sameId || !goalPreserved(goal, existing.goal()) || !sameScope || !sameRisk) {
+            throw new TaskConflict("task '" + id + "' already exists with different intent; "
+                    + "choose a different --task-id or explicitly edit/review " + file
+                    + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
+                    + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk());
+        }
+        return new Written(file, id, true);
+    }
+
+    /**
+     * The operator's original goal is a prefix of the contract goal. Equality covers a
+     * {@code TaskDraft} file; a planner-compiled file continues with {@code \n\n}.
+     */
+    static boolean goalPreserved(String operatorGoal, String contractGoal) {
+        String handed = operatorGoal == null ? "" : operatorGoal.strip();
+        String existing = contractGoal == null ? "" : contractGoal;
+        return handed.equals(existing) || existing.startsWith(handed + "\n\n");
+    }
+
+    /**
      * A slug that is a legal task id. Non-latin text becomes {@code task} plus a short
      * hash so a Russian goal still gets a stable, unique file name rather than an empty one.
      */
@@ -158,7 +202,7 @@ public final class TaskDraft {
      * parse its own file: `line 3: unterminated quoted string`. The four escapes below are
      * exactly the four the reader in {@code Yaml} accepts, so what is written can be read.
      */
-    static String quote(String value) {
+    public static String quote(String value) {
         return "\"" + value.replace("\\", "\\\\")
                 .replace("\"", "\\\"")
                 .replace("\r", "\\r")
@@ -220,7 +264,7 @@ public final class TaskDraft {
      * A `start`/`url` pair only where there is something to start. Writing an npm command into
      * a Gradle project's contract produces a check that fails for a reason unrelated to the task.
      */
-    private static String previewBlock(Path projectRoot) {
+    static String previewBlock(Path projectRoot) {
         PreviewServer serving = PreviewServer.detect(projectRoot);
         if (serving == null) return "";
         return "  start: \"" + serving.command() + "\"\n"
@@ -233,7 +277,7 @@ public final class TaskDraft {
      * — plus a written instruction to add the real one. A weak honest check that also produces
      * a screenshot for the visual_qa role beats a confident wrong one.
      */
-    private static String scenarioBlock(String label) {
+    static String scenarioBlock(String label) {
         // Written with literal indentation rather than a text block: these lines are nested
         // inside `visual_qa.scenarios`, and a text block's incidental-whitespace stripping
         // silently flattened them to column zero, producing YAML the linter rejected.

@@ -16,6 +16,9 @@ workflow:
     actor:
       type: string
       required: true
+    prepare:
+      type: string
+      required: false
   limits:
     max_iterations: 4
     # Agent execution is bounded below; the remaining time is an explicit human-gate TTL.
@@ -36,6 +39,8 @@ agents:
       - "{{ workflow.input.task }}"
       - "--run-id"
       - "{{ workflow.input.run_id }}"
+      - "--prepare"
+      - "{{ workflow.input.prepare }}"
     working_dir: "{{ workflow.input.project_dir }}"
     # Warden permits task timeouts up to 240 minutes. Give shutdown/evidence writes 15 more.
     timeout: 15300

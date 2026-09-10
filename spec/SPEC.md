@@ -111,6 +111,11 @@ scope: [ui, "src/extra"]      # names and paths may be mixed inside a list
 
 checks: fast                  # a set name; must be defined in checks
 checks: ["./gradlew test"]    # an explicit command
+checks:
+  names: [fast, full]         # several names; each must exist. A YAML list is
+                              # still a handwritten command list, so this form is
+                              # how compiled named checks stay names if one is later
+                              # removed from project.yaml
 ```
 
 Otherwise a typo in a scope name would silently become a path to a directory that does not
@@ -237,6 +242,9 @@ roles:
   visual_qa:                          # optional; off by default
     profiles: [codex-visual-qa]
     strategy: first
+  # planner:                          # optional; absent from the shipped policy
+  #   profiles: [your-planner]
+  #   strategy: first
 review:
   required_for_risk: [medium, high]
 ```
@@ -245,6 +253,14 @@ The `visual_qa` role runs only if it is declared here **and** the task asks for
 `visual_qa.required: true`. The browser harness works independently of it: the harness is the
 floor, not a layer on top. The role adds what a machine cannot measure and costs a vendor call
 — so the operator enables it, rather than the loop deciding for them.
+
+`planner` is a loadable role like the others — a profile can declare it, `policy.yaml` can
+name it, and the resolver applies the same verification, strategy and independence rules.
+It is not a workflow stage and it is not in the shipped policy. `warden do --prepare
+off|auto|always` (default `off`) is what dispatches it. The planner drafts; Warden validates.
+`--prepare auto` reuses a ready contract without a planner call, and refuses `task_conflict`
+when that file does not preserve the supplied operator goal or the invocation's scope and
+risk. Not built: an interactive draft editor, TTL on network observations, or subtask execution.
 
 **`strategy: rotate` means two different things, decided by the workflow rather than by a
 counter.** A role dispatched by exactly one stage rotates *across runs*: the position advances
@@ -287,12 +303,15 @@ warden doctor               what is installed, authenticated, and misconfigured
 warden do "<goal>"          the whole workflow: isolation (Orca), a task, the loop; stops
                             before a human. --project DIR --scope NAME --in-place --dry-run
                             --init-repo --draft-only --goal-file FILE --quiet
+                            --prepare off|auto|always (default off)
 warden validate <task>      check project.yaml, the task, the profiles and the policy
 warden gates <task>         preflight and machine gates, no vendors and no cost
 warden visual-qa <task>     start the preview, screenshot, assert control visibility
 warden role <role> <task>   one role; --dry-run spends nothing
 warden run <task>           the whole loop; stops before a human
                             --continue <run-id> carries a recorded decision forward
+                            --prepare off|auto|always records the mode `warden do`
+                            had in force (does not dispatch a planner)
                             --no-orca-gate does not mirror the pending decision
                             into Orca
 warden ledger               a table of runs: verdicts, cost, time, findings

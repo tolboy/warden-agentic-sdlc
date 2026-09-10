@@ -58,9 +58,13 @@ This creates `~/.warden/` and never overwrites a file that already exists:
 ~/.warden/
 ├ policy.yaml            which profiles may fill which role; rotation; failover; workflow
 ├ profiles/*.yaml        one vendor filling one role: command, args, quota signatures, model
-├ prompts/*.md           the role prompt templates
+├ prompts/*.md           the role prompt templates (implementer, reviewer, visual_qa, planner)
 └ schemas/*.json         the JSON schema each role's artifact must satisfy
 ```
+
+A `planner` prompt and schema are shipped next to the other three. The shipped policy does
+not name the role; `warden do --prepare auto|always` is how it runs, and only if a profile
+declares it. The planner drafts; Warden validates.
 
 Set `WARDEN_CONFIG_HOME` to put this somewhere other than `~/.warden`. Note that this is
 **not** `WARDEN_HOME`, which the launcher scripts use for the installation directory — the two

@@ -1,9 +1,11 @@
 package dev.warden.run;
 
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.PlannerDraft;
 import dev.warden.config.ProjectConfig;
 import dev.warden.config.ProjectInitializer;
 import dev.warden.config.TaskDraft;
+import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
@@ -42,7 +44,19 @@ public final class DoCommand {
     public record Options(Path project, String goal, String scope, String risk, String taskId,
                           String runId, String baseRef, boolean inPlace, boolean dryRun,
                           boolean conductor, boolean autoRejectGates, boolean initRepo,
-                          boolean draftOnly, String isolation) {
+                          boolean draftOnly, String isolation, String prepare) {
+        public Options {
+            prepare = Preparation.parseMode(prepare);
+        }
+
+        public Options(Path project, String goal, String scope, String risk, String taskId,
+                       String runId, String baseRef, boolean inPlace, boolean dryRun,
+                       boolean conductor, boolean autoRejectGates, boolean initRepo,
+                       boolean draftOnly, String isolation) {
+            this(project, goal, scope, risk, taskId, runId, baseRef, inPlace, dryRun,
+                    conductor, autoRejectGates, initRepo, draftOnly, isolation, "off");
+        }
+
         public Options(Path project, String goal, String scope, String risk, String taskId,
                        String runId, String baseRef, boolean inPlace, boolean dryRun,
                        boolean conductor, boolean autoRejectGates, boolean initRepo) {
@@ -172,7 +186,8 @@ public final class DoCommand {
                 hasFlag(args, "--in-place") || hasFlag(args, "--no-worktree"),
                 hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
                 hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"),
-                hasFlag(args, "--draft-only"), option(args, "--isolation", null));
+                hasFlag(args, "--draft-only"), option(args, "--isolation", null),
+                option(args, "--prepare", "off"));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -265,12 +280,120 @@ public final class DoCommand {
         // A project with no check command has only its browser scenarios to define done.
         List<String> defaultCommands = project.defaultChecks() == null ? List.of()
                 : project.checks().getOrDefault(project.defaultChecks(), List.of());
+        Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+        boolean contractExists = Files.isRegularFile(taskFile);
+        boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists);
+
         TaskDraft.Written drafted;
-        try {
-            drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk,
-                    defaultCommands.isEmpty());
-        } catch (TaskDraft.TaskConflict conflict) {
-            return fail("task_conflict", requested, root, taskId, conflict.getMessage());
+        // The mode that was in force, even when auto skipped the planner. TaskLoop writes
+        // this into the run summary; defaulting to NONE (off) made --prepare auto look like
+        // off after the fact.
+        TaskLoop.Preparation preparation = new TaskLoop.Preparation(
+                options.prepare(), false, 0, 0, 0, false);
+        CallPlan preparationPlan = null;
+        long preparationCap = 1;
+        if (dispatchPlanner) {
+            // Setup first so the planner reads the tree a later implementer would, not an
+            // empty worktree whose checks cannot run. The --prepare off path below is left
+            // in the historical order so TaskDraft's bytes do not move.
+            if ("git".equals(backend) && "created".equals(placement.reason())) {
+                String failedSetup = runSetup(project.setup(), root);
+                if (failedSetup != null) {
+                    return fail("setup_failed", requested, root, taskId, failedSetup);
+                }
+            }
+            if (user.policy() != null) {
+                // Reserved before the vendor is paid, not reconstructed afterwards. One
+                // coherent plan: --draft-only is the bootstrap (cap of one, the planner
+                // alone), because no workflow stage will run. A run that continues into
+                // the loop uses the same skip predicate and ceiling TaskLoop will write
+                // a moment later. Mixing the bootstrap's numerator of one with the
+                // undeclared chain as the denominator is how run.json used to claim
+                // sufficient_for_success: false on a run that then finished.
+                if (options.draftOnly()) {
+                    preparationPlan = new CallPlan(user.policy().workflow(),
+                            stage -> true, List.of("planner"));
+                    preparationCap = 1;
+                } else {
+                    TaskSpec.ResolvedTask measured = measureForReservation(root, project,
+                            taskId, options.goal(), scope, risk, contractExists);
+                    preparationPlan = TaskLoop.planFor(user.policy().workflow(), user,
+                            measured, List.of("planner"));
+                    preparationCap = measured.budget().maxRoleRuns();
+                }
+            }
+            try {
+                Map<String, Object> reservation = new LinkedHashMap<>();
+                reservation.put("prepare", options.prepare());
+                if (preparationPlan != null) {
+                    reservation.put("budget_plan", preparationPlan.toMap(
+                            preparationCap, user.policy().repairReserve()));
+                }
+                new dev.warden.ledger.EvidenceLedger(root, runId)
+                        .reserveWorkflowRun(taskId, reservation);
+            } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+                return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
+            }
+            Preparation.Outcome prepared;
+            prepared = new Preparation(processes, progress).run(root, project, user, taskId,
+                    runId, options.goal(), scope, risk, PlannerDraft.Access.DO_DEFAULT,
+                    options.dryRun());
+            if (!prepared.ok()) {
+                Map<String, Object> report = fail(prepared.code(), requested, root, taskId,
+                        prepared.message() == null ? prepared.code() : prepared.message()).report();
+                report.put("prepare", options.prepare());
+                report.put("run_id", runId);
+                return new Outcome(false, prepared.code(), requested, root, taskId, report);
+            }
+            if (options.dryRun() && prepared.written() == null && !contractExists) {
+                Map<String, Object> report = new LinkedHashMap<>();
+                report.put("ok", true);
+                report.put("code", "dry_run");
+                report.put("prepare", options.prepare());
+                report.put("goal", options.goal());
+                report.put("task_id", taskId);
+                report.put("run_id", runId);
+                report.put("project", String.valueOf(requested));
+                report.put("worktree", String.valueOf(root));
+                report.put("isolated", placement.isolated());
+                report.put("scope", scope);
+                report.put("risk", risk);
+                report.put("lands", false);
+                return new Outcome(true, "dry_run", requested, root, taskId, report);
+            }
+            if (prepared.written() == null && contractExists) {
+                drafted = new TaskDraft.Written(taskFile, taskId, true);
+            } else if (prepared.written() == null) {
+                return fail("planner_draft_invalid", requested, root, taskId,
+                        "planner produced no contract");
+            } else {
+                drafted = prepared.written();
+            }
+            preparation = new TaskLoop.Preparation(options.prepare(), true, prepared.roleRuns(),
+                    prepared.costUsd(), prepared.unpriced(), true);
+            // So a later `warden run` or the Conductor inner process can join this reservation
+            // instead of refusing it as a duplicate. The planner wrote evidence here; the loop
+            // has not started yet.
+            new dev.warden.ledger.EvidenceLedger(root, runId)
+                    .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced());
+        } else if ("auto".equals(options.prepare()) && contractExists) {
+            // A ready contract is not rewritten, but it is still this invocation's contract.
+            // TaskDraft.write compares the operator's goal for equality, which would refuse
+            // the file a planner itself just wrote (it may append after that goal). Skip the
+            // planner, refuse task_conflict when the existing file does not preserve the
+            // supplied goal, scope or risk, and leave planner-added text in place.
+            try {
+                drafted = TaskDraft.requireSameIntent(taskFile, taskId, options.goal(), scope, risk);
+            } catch (TaskDraft.TaskConflict conflict) {
+                return fail("task_conflict", requested, root, taskId, conflict.getMessage());
+            }
+        } else {
+            try {
+                drafted = new TaskDraft().write(root, taskId, options.goal(), scope, risk,
+                        defaultCommands.isEmpty());
+            } catch (TaskDraft.TaskConflict conflict) {
+                return fail("task_conflict", requested, root, taskId, conflict.getMessage());
+            }
         }
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
 
@@ -278,7 +401,7 @@ public final class DoCommand {
         // runs a repo's setup when Orca made the checkout; when git made it, this is the only
         // thing that will. Only on a fresh one: joining a worktree that already exists means
         // the setup already ran there, and running `npm install` again is minutes for nothing.
-        if ("git".equals(backend) && "created".equals(placement.reason())) {
+        if (!dispatchPlanner && "git".equals(backend) && "created".equals(placement.reason())) {
             String failedSetup = runSetup(loaded.project().setup(), root);
             if (failedSetup != null) {
                 return fail("setup_failed", requested, root, taskId, failedSetup);
@@ -292,28 +415,52 @@ public final class DoCommand {
             // way to stop here and do that: `do` went straight on to dispatch, and the only
             // way to get the draft without spending was --dry-run, which resolves the whole
             // chain and reads like a rehearsal rather than a checkpoint.
+            //
+            // `--prepare always --draft-only` still spends the planner call, then stops.
+            // No implementer, no gates, no reviewer.
             Map<String, Object> report = new LinkedHashMap<>();
             report.put("ok", true);
             report.put("code", "drafted");
             report.put("next_action", "review_the_contract");
+            report.put("prepare", options.prepare());
             report.put("goal", options.goal());
             report.put("task_id", taskId);
             report.put("task_existed", drafted.existed());
             report.put("task_file", drafted.file().toString());
+            if (dispatchPlanner) report.put("run_id", runId);
             report.put("project", String.valueOf(requested));
             report.put("worktree", String.valueOf(root));
             report.put("isolated", placement.isolated());
             report.put("scope", scope);
             report.put("risk", risk);
             report.put("lands", false);
+            if (preparationPlan != null) {
+                report.put("budget_plan", preparationPlan.toMap(
+                        preparationCap, user.policy().repairReserve()));
+            }
             progress.blank();
             progress.line("draft " + drafted.file());
             progress.line("      read it, write the browser scenarios this task actually "
                     + "promises, then:");
             progress.line("      cd " + root);
-            progress.line("      warden run " + taskId + " --run-id <id>");
+            // A planner call lives on the reservation at this run id. Printing the
+            // placeholder <id> — correct when --prepare off reserved nothing — sent
+            // the operator into a new loop that never joined it, so the planner was
+            // not counted and the paid reservation was orphaned.
+            progress.line("      warden run " + taskId + " --run-id "
+                    + (dispatchPlanner ? runId : "<id>"));
             progress.blank();
             return new Outcome(true, "drafted", requested, root, taskId, report);
+        }
+        if (!dispatchPlanner && "auto".equals(options.prepare())) {
+            // The planner did not run, so nothing reserved the run id. Conductor's inner
+            // `warden run` still has to record prepare=auto; without this marker it joins
+            // nothing and writes Preparation.NONE's off.
+            try {
+                preparation = Preparation.recordSkipped(root, runId, taskId, options.prepare());
+            } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+                return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
+            }
         }
         if (options.conductor()) {
             return runWithConductor(options, requested, root, placement, backend, drafted, loaded, taskId,
@@ -322,16 +469,23 @@ public final class DoCommand {
         Workspace card = board.at(root);
         Path narration = root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
         if (watch && !options.dryRun()) card.watch(narration, runId);
-        TaskLoop.Outcome loop = new TaskLoop(processes)
-                .withProgress(Progress.tee(progress, Progress.toFile(narration)))
-                .withWorkspace(card)
-                .withOrcaGate(orcaGate && !options.dryRun())
-                .run(loaded, user, runId, options.dryRun());
+        TaskLoop.Outcome loop;
+        try {
+            loop = new TaskLoop(processes)
+                    .withProgress(Progress.tee(progress, Progress.toFile(narration)))
+                    .withWorkspace(card)
+                    .withOrcaGate(orcaGate && !options.dryRun())
+                    .withPreparation(preparation)
+                    .run(loaded, user, runId, options.dryRun());
+        } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+            return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
+        }
 
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("ok", loop.ok());
         report.put("code", loop.reason());
         report.put("next_action", loop.nextAction());
+        report.put("prepare", options.prepare());
         report.put("goal", options.goal());
         report.put("task_id", taskId);
         report.put("task_existed", drafted.existed());
@@ -377,7 +531,7 @@ public final class DoCommand {
         // Agent execution has its own task budget. This outer bound is the separate human-gate
         // TTL; Conductor checkpoints the workflow if the operator does not answer within a day.
         ConductorBridge.Outcome conductor = new ConductorBridge().run(root, taskId, runId,
-                options.autoRejectGates(), Duration.ofHours(24));
+                options.autoRejectGates(), Duration.ofHours(24), options.prepare());
         Path summaryFile = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
         Map<String, Object> summary = Files.isRegularFile(summaryFile)
                 ? dev.warden.json.Json.parseObject(Files.readString(summaryFile)) : Map.of();
@@ -395,6 +549,7 @@ public final class DoCommand {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("ok", accepted);
         report.put("code", code);
+        report.put("prepare", options.prepare());
         report.put("goal", options.goal());
         report.put("task_id", taskId);
         report.put("task_existed", drafted.existed());
@@ -453,6 +608,42 @@ public final class DoCommand {
             throw new Isolation.IsolationException("detached_head",
                     "could not read the current branch of " + project + ": " + notAskable.getMessage());
         }
+    }
+
+    /**
+     * The task facts a reservation can know before the planner is paid.
+     *
+     * An existing contract is measured as the loop will measure it. Without one, risk
+     * comes from the invocation and visual_qa is treated as not required: naming a
+     * stage the loop will skip is the lie this reservation used to tell. A stage the
+     * planner may later request is added when the loop writes its own plan, once a
+     * contract exists to measure. Omitted {@code budgets:} default to the same
+     * numbers {@link TaskSpec} uses, which is what a planner-compiled contract gets.
+     */
+    private static TaskSpec.ResolvedTask measureForReservation(Path root, ProjectConfig project,
+            String taskId, String goal, String scope, String risk, boolean contractExists) {
+        if (contractExists) {
+            try {
+                return new ConfigLoader().load(root, taskId).resolved();
+            } catch (Exception unreadable) {
+                // Fall through: a file we cannot measure still has to reserve one
+                // coherent plan, not a mix of the bootstrap cap and the full chain.
+            }
+        }
+        return new TaskSpec.ResolvedTask(
+                taskId,
+                goal,
+                List.of(),
+                risk,
+                project.baseRef(),
+                List.copyOf(project.scopes().getOrDefault(scope, List.of())),
+                List.of(),
+                List.of(),
+                new TaskSpec.Authority(true, false, false),
+                new TaskSpec.VisualQa(false, List.of(), null, null),
+                new TaskSpec.Budget(6, 20.0),
+                project.defaultMaxFixAttempts(),
+                project.defaultTimeoutMinutes());
     }
 
     /**
