@@ -86,33 +86,39 @@ jobs:
   hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest
+    env:
+      # A pull request hands over its own base and head; a push hands over the commit it
+      # started from and the one it ends at. Both are read as environment values rather than
+      # interpolated into a shell line, so nothing carried by the event reaches a command.
+      HYGIENE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      HYGIENE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The range scans read commits, not only the tree, and checkout keeps one commit by
+          # default. This repository builds from a bare JDK with no dependency to download, so
+          # its history is the cheap part of the job.
+          fetch-depth: 0
 
       # These checks are the release gate that keeps a private path or a machine-local
-      # identifier from returning to the tree. They are checks, not style preferences:
-      # every one of them matched something real before this repository was opened.
-      # `git grep` is deliberate — it looks at tracked files only, so a maintainer's local
-      # run directories under .warden/runs/ cannot make this job fail or pass by accident.
-      # The segment after the home directory must *start* with a letter or a digit. A dot is
-      # legal inside a Windows user name but never begins an elision, so `C:\Users\...\npm`
-      # in a comment illustrating what `where.exe` prints is not a personal path — and the
-      # first run of this job failed on exactly that.
+      # identifier from returning to the tree. The patterns and the file lists they read are
+      # in scripts/hygiene.sh, which is also runnable by hand before a push.
+      #
+      # Each check runs twice. The tip scan asks whether the tree is clean. The range scan asks
+      # whether any commit in this push added one, which is the question a tip scan cannot ask:
+      # a commit that adds a personal path and a commit that rewords it away leave a clean tip
+      # and a published history that still carries the path.
       - name: No absolute personal paths
-        run: |
-          if git grep -nE '(C:\\+Users\\+[A-Za-z0-9][A-Za-z0-9._-]*|/home/[a-z][a-z0-9._-]*|/Users/[a-z][a-z0-9._-]*)' \
-               -- '*.md' '*.java' '*.yaml' '*.yml' '*.mjs' '*.sh' '*.cmd' '*.json' '*.jsonl' ; then
-            echo "::error::an absolute personal path is committed; use <warden> / <project> placeholders"
-            exit 1
-          fi
+        run: scripts/hygiene.sh tip paths
 
       - name: No machine-local identifiers in documentation
-        run: |
-          if git grep -nE '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b' \
-               -- 'docs/*.md' 'spec/*.md' 'docs/ru/*.md' 'spec/ru/*.md' README.md README.ru.md ; then
-            echo "::error::a UUID is committed in documentation; describe the id, do not print it"
-            exit 1
-          fi
+        run: scripts/hygiene.sh tip uuids
+
+      - name: No absolute personal paths in any pushed commit
+        run: scripts/hygiene.sh range paths "$HYGIENE_BASE" "$HYGIENE_HEAD"
+
+      - name: No machine-local identifiers in any pushed commit
+        run: scripts/hygiene.sh range uuids "$HYGIENE_BASE" "$HYGIENE_HEAD"
 
       - name: Every documentation link resolves
         run: |

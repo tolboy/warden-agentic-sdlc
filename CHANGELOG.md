@@ -9,6 +9,17 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Changed
+
+- The hygiene job now reads every commit a push or a pull request introduces, not only the
+  resulting tree. A tip-only gate was green while a commit added three absolute paths to a
+  document and the next commit reworded them away, and the paths were still in the history the
+  push would have published; they were found by hand and removed with a history rewrite. The
+  patterns and the file lists moved into `scripts/hygiene.sh` so the two scans cannot come to
+  disagree, and the script is runnable before a push. Where the range cannot be established —
+  a new branch or tag, a force-push whose starting commit was never fetched, a manual run — the
+  job says so and reads the tip commit alone rather than claiming a range it did not read.
+
 ## [0.2.0] — 2026-09-06
 
 The release where the loop was run against a repository that is not a web application, in a
