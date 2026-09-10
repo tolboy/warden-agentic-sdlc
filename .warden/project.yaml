@@ -39,3 +39,36 @@ defaults:
   risk: medium
   max_fix_attempts: 2
   timeout_minutes: 10
+
+# What `warden land` is allowed to do with a candidate a person has accepted, and no more.
+# `land` never merges. Without flags it prints the plan; `--commit` commits the accepted
+# paths, `--push` pushes with `-u`, and `--pull-request` implies `--push` and then opens a
+# request. Merging stays a human action on the forge.
+#
+# `remote` has to be here or `--push` and `--pull-request` refuse: LandCommand stops when
+# the remote is null rather than guessing which remote an accepted candidate belongs on.
+#
+# `pull_request` is argv, not a shell string. Warden substitutes {{remote}}, {{branch}},
+# {{base}}, {{title}} and {{body_file}} into the list without a shell, so a title
+# containing a quote stays one argument. The body is written to a temporary file and
+# deleted afterwards; the title defaults to the first line of the commit message, which
+# is the second reason that line has to be a real subject.
+#
+# `note:` is deliberately absent. ProjectConfig accepts it under LAND_KEYS but the Land
+# record carries only remote, base and pullRequest, so a note here would validate and be
+# silently dropped. Reported rather than used.
+land:
+  remote: origin
+  base: main
+  pull_request:
+    - "gh"
+    - "pr"
+    - "create"
+    - "--base"
+    - "{{base}}"
+    - "--head"
+    - "{{branch}}"
+    - "--title"
+    - "{{title}}"
+    - "--body-file"
+    - "{{body_file}}"
