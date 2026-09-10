@@ -46,6 +46,11 @@ scripts/hygiene.sh range paths "$(git merge-base origin/main HEAD)" HEAD
 is the check that catches a personal path introduced by one commit and reworded away by the
 next. Substitute `uuids` for `paths` to run the other check. CI runs all four.
 
+`scripts/hygiene-selftest.sh` checks the gate itself against throwaway repositories that
+contain the things it is supposed to reject. Run it after changing a pattern. Note that it has
+to write the strings the gate rejects while being scanned by that gate, so its fixtures are
+assembled from fragments; a new one has to keep doing that.
+
 ## Tests
 
 The suite is hand-rolled: `src/test/java/dev/warden/testing/` gives you `Suite` and `Check`,

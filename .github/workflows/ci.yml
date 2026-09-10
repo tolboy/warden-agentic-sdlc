@@ -92,6 +92,9 @@ jobs:
       # interpolated into a shell line, so nothing carried by the event reaches a command.
       HYGIENE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       HYGIENE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Where no base is handed over at all, the range is read against the published
+      # branch instead. A tag push and a manual run both arrive without one.
+      HYGIENE_FALLBACK_BASE: origin/${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,6 +102,11 @@ jobs:
           # default. This repository builds from a bare JDK with no dependency to download, so
           # its history is the cheap part of the job.
           fetch-depth: 0
+
+      # First, because everything below trusts it: the gate is checked against throwaway
+      # repositories that contain the things it is supposed to reject.
+      - name: The gate catches what it claims to
+        run: scripts/hygiene-selftest.sh
 
       # These checks are the release gate that keeps a private path or a machine-local
       # identifier from returning to the tree. The patterns and the file lists they read are

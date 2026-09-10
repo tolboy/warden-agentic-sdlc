@@ -89,24 +89,55 @@ case "$mode" in
       exit 1
     fi
 
-    # A push hands over the commit it started from. Three ways that is not a usable base: a
-    # branch or tag created by this push reports all zeros, a force-push can name a commit
-    # that is no longer reachable and so was never fetched, and a manual run names nothing.
-    # `base..head` itself needs no ancestry — it is the set of commits reachable from the new
-    # tip and not from the old one, which is the right answer after a force-push too.
-    if [ -n "$base" ] && [ -n "$(printf '%s' "$base" | tr -d 0)" ] &&
-      git rev-parse -q --verify "$base^{commit}" >/dev/null 2>&1; then
-      # `head --not base`, not `base..head`: the two are the same set, and the spelled-out
-      # form does not make git first ask the filesystem whether `<sha>..<sha>` is a file —
-      # which on Windows answers with an error rather than "no", and aborts the command.
-      commits=$(git rev-list --no-merges "$head" --not "$base")
+    # A push hands over the commit it started from, and `head --not base` is then the exact
+    # set this push introduces. It needs no ancestry, so it stays right after a force-push.
+    # `base..head` says the same thing, but git first asks the filesystem whether
+    # `<sha>..<sha>` is a file, and Windows answers with an error rather than with "no".
+    usable=""
+    if [ -n "$base" ] && [ -n "$(printf '%s' "$base" | tr -d 0)" ]; then
+      if ! git rev-parse -q --verify "$base^{commit}" >/dev/null 2>&1; then
+        # A named commit that is not here was never fetched, which is what a force-push does.
+        # The server often still serves it by name, so ask once before giving up on the exact
+        # range. No prompt: an unauthenticated remote must fail rather than wait for a password.
+        GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin "$base" >/dev/null 2>&1 || :
+      fi
+      if git rev-parse -q --verify "$base^{commit}" >/dev/null 2>&1; then
+        usable=$base
+      fi
+    fi
+
+    if [ -n "$usable" ]; then
+      commits=$(git rev-list --no-merges "$head" --not "$usable")
     else
-      # `head --not head^@` is the tip commit and nothing its parents already carried, which
-      # is also empty for a merge and whole for a root commit.
-      commits=$(git rev-list --no-merges "$head" --not "$head^@")
-      echo "::warning::hygiene: no usable base commit (given: '${base:-none}'); reading only" \
-        "$(git rev-parse --short "$head") instead of a range. Earlier commits of this push are" \
-        "covered by the tip scan alone, which cannot see a line a later commit removed."
+      # No usable base: a branch or tag created by this push reports all zeros, a manual run
+      # names nothing, and a force-push can name a commit the server will not serve. Reading
+      # the tip commit alone would put back the hole this file exists to close, so read
+      # everything the published branch does not already carry instead. A tag of a commit
+      # already on that branch is then an empty range, which is the right answer and not worth
+      # a warning. Two things this cannot do: when the tip *is* the published branch, which is
+      # what a push to it looks like once its starting commit is unusable, the range is empty
+      # and only the tip scan speaks; and a branch with no ancestor in common with the
+      # published one is read back to its root.
+      fallback=""
+      for candidate in ${HYGIENE_FALLBACK_BASE:-} origin/main origin/master; do
+        if git rev-parse -q --verify "$candidate^{commit}" >/dev/null 2>&1; then
+          fallback=$candidate
+          break
+        fi
+      done
+
+      if [ -n "$fallback" ]; then
+        commits=$(git rev-list --no-merges "$head" --not "$fallback")
+        short=$(git rev-parse --short "$head")
+        echo "hygiene: no usable base ('${base:-none}'); reading $short against $fallback."
+      else
+        commits=$(git rev-list --no-merges "$head" --not "$head^@")
+        short=$(git rev-parse --short "$head")
+        note="hygiene: no usable base ('${base:-none}') and no published branch to"
+        note="$note compare against; reading $short alone. Only the tip scan covers what"
+        note="$note an earlier commit of this push added and a later one removed."
+        echo "::warning::$note"
+      fi
     fi
 
     # A merge commit is skipped: every commit it brings in is read on its own, and the tree it
