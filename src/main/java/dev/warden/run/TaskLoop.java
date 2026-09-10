@@ -73,11 +73,52 @@ public final class TaskLoop {
         VisualQaRunner.Outcome run(ConfigLoader.Loaded loaded, String runId) throws Exception;
     }
 
+    /**
+     * What {@code warden do --prepare} already did before this loop started.
+     *
+     * The planner is not a workflow stage: the shipped chain is unchanged. Preparation
+     * still costs a vendor call, still writes a {@code role_run}, and still has to be in
+     * the budget arithmetic, or a report would show it as free.
+     *
+     * @param mode            {@code off}, {@code auto} or {@code always}, as the invocation asked
+     * @param runReserved     the caller already fenced {@code run.json} (the planner wrote
+     *                        evidence into it)
+     * @param roleRuns        vendor calls already spent, counted against {@code max_role_runs}
+     * @param costUsd         cost already spent, counted against {@code max_cost_usd}
+     * @param unpriced        of those calls, how many reported no price
+     * @param includedInPlan  whether {@link CallPlan} should reserve a planner call
+     */
+    public record Preparation(String mode, boolean runReserved, int roleRuns, double costUsd,
+                              int unpriced, boolean includedInPlan) {
+        public static final Preparation NONE = new Preparation("off", false, 0, 0, 0, false);
+
+        /**
+         * Rebuild what {@code warden do --prepare} recorded on the reservation, so a second
+         * process (Conductor's {@code warden run}, or an operator following --draft-only)
+         * counts the planner the same way the in-process loop does.
+         */
+        public static Preparation fromReservation(Map<String, Object> reservation) {
+            String mode = reservation.get("prepare") instanceof String value ? value : "off";
+            int runs = reservation.get("preparation_role_runs") instanceof Number number
+                    ? number.intValue() : 0;
+            double cost = reservation.get("preparation_cost_usd") instanceof Number number
+                    ? number.doubleValue() : 0;
+            int unpriced = reservation.get("preparation_unpriced") instanceof Number number
+                    ? number.intValue() : 0;
+            boolean included = false;
+            if (reservation.get("budget_plan") instanceof Map<?, ?> plan) {
+                included = String.valueOf(plan.get("paying_stages")).contains("planner");
+            }
+            return new Preparation(mode, true, runs, cost, unpriced, included);
+        }
+    }
+
     private final ProcessRunner processes;
     private final VisualCheck visualCheck;
     private final Progress progress;
     private final Workspace workspace;
     private final boolean orcaGate;
+    private final Preparation preparation;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (loaded, runId) -> new VisualQaRunner(processes).run(loaded, runId));
@@ -93,7 +134,7 @@ public final class TaskLoop {
      * would be ambiguous at every call site and a lambda could silently pick the wrong one.
      */
     public TaskLoop withProgress(Progress narration) {
-        return new TaskLoop(processes, visualCheck, narration, workspace, orcaGate);
+        return new TaskLoop(processes, visualCheck, narration, workspace, orcaGate, preparation);
     }
 
     /**
@@ -102,7 +143,8 @@ public final class TaskLoop {
      * only what a person would act on goes to the card.
      */
     public TaskLoop withWorkspace(Workspace board) {
-        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board), orcaGate);
+        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board), orcaGate,
+                preparation);
     }
 
     /**
@@ -115,7 +157,12 @@ public final class TaskLoop {
      * see {@link dev.warden.execution.orca.OrcaDecisionGate}.
      */
     public TaskLoop withOrcaGate(boolean publish) {
-        return new TaskLoop(processes, visualCheck, progress, workspace, publish);
+        return new TaskLoop(processes, visualCheck, progress, workspace, publish, preparation);
+    }
+
+    public TaskLoop withPreparation(Preparation preparation) {
+        return new TaskLoop(processes, visualCheck, progress, workspace, orcaGate,
+                preparation == null ? Preparation.NONE : preparation);
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
@@ -129,11 +176,17 @@ public final class TaskLoop {
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
                     Workspace workspace, boolean orcaGate) {
+        this(processes, visualCheck, progress, workspace, orcaGate, Preparation.NONE);
+    }
+
+    public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
+                    Workspace workspace, boolean orcaGate, Preparation preparation) {
         this.processes = processes;
         this.visualCheck = visualCheck;
         this.progress = progress;
         this.workspace = workspace;
         this.orcaGate = orcaGate;
+        this.preparation = preparation == null ? Preparation.NONE : preparation;
     }
 
     /**
@@ -217,7 +270,19 @@ public final class TaskLoop {
         EvidenceLedger ledger = new EvidenceLedger(root, runId);
         // Reservation is the first mutation. A duplicate controller is refused before it can
         // overwrite evidence, spend a token, or start a second Orca worker in the same tree.
-        ledger.reserveWorkflowRun(task.id());
+        // Preparation already reserved when the planner ran: that call wrote evidence into
+        // this directory, and reserving again would refuse the rest of the run as a duplicate.
+        // A second process — Conductor's inner `warden run`, or `warden run` after
+        // `--draft-only` — did not make that reservation itself, so it joins it.
+        Preparation prior = preparation;
+        Path reservation = ledger.runDirectory().resolve("run.json");
+        if (prior.runReserved()) {
+            ledger.claimPreparedLoop(task.id());
+        } else if (Files.isRegularFile(reservation)) {
+            prior = Preparation.fromReservation(ledger.claimPreparedLoop(task.id()));
+        } else {
+            ledger.reserveWorkflowRun(task.id());
+        }
         // Both values are selected before any vendor can write. HEAD and the contract files
         // are mutable names/bytes; resolving them inside each later role or gate lets a worker
         // move the baseline or rewrite its own acceptance criteria.
@@ -228,6 +293,7 @@ public final class TaskLoop {
         Map<String, String> configSnapshot = WardenTree.snapshot(root);
         String contractHash = WardenTree.digest(configSnapshot);
         Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd());
+        budget.alreadySpent(prior.roleRuns(), prior.costUsd(), prior.unpriced());
         // One runner for the whole loop: a vendor that ran out at implement time must not be
         // dispatched again at review time. The gate makes the budget count vendor calls, not
         // role invocations, so a failover cannot spend more than the task allowed.
@@ -245,7 +311,8 @@ public final class TaskLoop {
         // Built here, from the same predicate the engine routes by, and consulted before the
         // first dispatch as well as before every repair.
         CallPlan callPlan = new CallPlan(workflow,
-                stage -> skipReason(stage, user, task, reviewByRisk) != null);
+                stage -> skipReason(stage, user, task, reviewByRisk) != null,
+                prior.includedInPlan() ? List.of("planner") : List.of());
 
         List<Map<String, Object>> steps = new ArrayList<>();
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -260,6 +327,7 @@ public final class TaskLoop {
                 task.acceptanceFingerprint()));
         summary.put("risk", task.risk());
         summary.put("dry_run", dryRun);
+        summary.put("prepare", prior.mode());
         summary.put("max_fix_attempts", task.maxFixAttempts());
         summary.put("budget_max_role_runs", task.budget().maxRoleRuns());
         summary.put("budget_max_cost_usd", task.budget().maxCostUsd());
@@ -2080,6 +2148,16 @@ public final class TaskLoop {
 
         int runs() { return runs; }
         double spent() { return spent; }
+
+        /**
+         * Vendor calls that already happened before this loop, counted so preparation is
+         * not free. A reservation is never given back: see {@link #requireRoleRun}.
+         */
+        void alreadySpent(int priorRuns, double priorCost, int priorUnpriced) {
+            this.runs = Math.max(0, priorRuns);
+            this.spent = Math.max(0, priorCost);
+            this.unpriced = Math.max(0, priorUnpriced);
+        }
 
         /**
          * Vendor calls the ceiling still allows, or {@link Integer#MAX_VALUE} when the task

@@ -22,6 +22,7 @@ import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
 import dev.warden.run.DoCommand;
+import dev.warden.run.Preparation;
 import dev.warden.run.TaskLoop;
 
 import java.nio.file.Path;
@@ -337,6 +338,7 @@ public final class Main {
         String runId = option(args, "--run-id", loadedDefaultRunId());
         boolean dryRun = hasFlag(args, "--dry-run");
         String continueFrom = option(args, "--continue", null);
+        String prepare = option(args, "--prepare", null);
         TaskLoop.Outcome outcome;
         try {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
@@ -347,12 +349,20 @@ public final class Main {
             // Not for a preview. A dry run answers in seconds and dispatches nobody; opening a
             // window on the operator's board for it is the same overreach as moving its card.
             if (hasFlag(args, "--watch") && !dryRun) card.watch(narration, runId);
-            outcome = new TaskLoop(new ProcessRunner())
+            TaskLoop loop = new TaskLoop(new ProcessRunner())
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
-                    .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"))
-                    .run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
+                    .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"));
+            // Conductor's inner `warden run` is a new process and cannot see DoCommand's
+            // in-memory Preparation. The reservation carries the mode when a planner ran
+            // (or when auto skipped and still recorded it); --prepare is the same fact
+            // arriving on the command line so a skipped auto is not recorded as off.
+            if (prepare != null) {
+                loop = loop.withPreparation(new TaskLoop.Preparation(
+                        Preparation.parseMode(prepare), false, 0, 0, 0, false));
+            }
+            outcome = loop.run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
@@ -910,9 +920,19 @@ public final class Main {
                                            --draft-only stops after writing the contract, so
                                            its browser scenarios can be written before any
                                            vendor is paid to satisfy them
+                                           --prepare off|auto|always (default off) dispatches
+                                           a read-only planner to draft the contract; Warden
+                                           validates what it returns. auto only when the task
+                                           has no contract yet. always --draft-only spends the
+                                           planner and never the implementer
                   warden run <task>            the bounded loop; stops at the human gate
                                                --no-orca-gate does not mirror the pending
                                                decision into Orca as a decision gate
+                                               --prepare off|auto|always records the mode
+                                               `warden do` had in force, so a skipped auto
+                                               is not written as off. Does not dispatch a
+                                               planner; joining a prepared reservation still
+                                               counts that spend.
                                                --continue <run-id> carries a recorded decision
                                                from that run into this one: an authorised
                                                `switch`, a rejection's reason, or a `retry`

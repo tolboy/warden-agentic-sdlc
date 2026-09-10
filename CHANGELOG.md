@@ -9,6 +9,34 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Added
+
+- A `planner` role. `warden do --prepare off|auto|always` (default `off`) can dispatch a
+  read-only planner to turn an operator's goal into a contract Warden itself has validated,
+  before the first paying implementer call. The planner drafts; Warden validates: acceptance
+  must name a check already in `project.yaml`, scope must be a named scope, the operator's
+  goal is carried verbatim, and `required_access` may not exceed the invocation. A planner
+  that writes to the worktree is `planner_protocol_violation` and its draft is discarded.
+  `--prepare always --draft-only` spends the planner and never the implementer. The call is
+  counted under `by_role.planner`. `CallPlan` reserves it in the run marker before dispatch.
+  The one-call bootstrap is a dispatch gate: quota failover is not a second call; a protocol
+  failure may retry once. A protocol failure restores only what the planner wrote,
+  including a commit; work that predates the run survives, including under `--in-place`. If
+  restore cannot prove the tree is back at the captured baseline, there is no retry. The
+  discarded attempt's evidence keeps its own name. An existing contract is not truncated:
+  `--prepare always` keeps a hand-written visual contract, or refuses `task_conflict` when
+  the intent differs. `--prepare auto` on a contract the planner already wrote does not
+  rewrite it, and refuses `task_conflict` when that file does not preserve the supplied
+  operator goal, scope or risk. Several compiled named checks are written as names that
+  must keep existing in `project.yaml`, not as a list that would run a removed name as a
+  command. A later `warden run` (and Conductor's inner process) joins the prepared
+  reservation instead of refusing `run_id_exists`, including when auto skipped the planner,
+  so the inner run still records `prepare=auto`. A draft that fails the shipped schema is
+  `role_artifact_schema_violation` even when the profile skipped enforcement. The planner
+  may request a visual contract, and an omitted `visual_qa` uses the same rule `TaskDraft`
+  does. Not built: an interactive draft editor, TTL on network observations, or subtask
+  execution. The shipped policy does not declare a planner.
+
 ### Changed
 
 - The hygiene job now reads every commit a push or a pull request introduces, not only the

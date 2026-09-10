@@ -43,7 +43,7 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 | Field | Meaning |
 |---|---|
 | `total` | Vendor attempts recorded across every run in this project; a failover adds another attempt |
-| `by_role` | Split by `implementer`, `reviewer`, `architect`, `visual_qa` |
+| `by_role` | Split by `implementer`, `reviewer`, `architect`, `visual_qa`, `planner` |
 | `by_profile` | Split by the concrete configured profile used for each attempt |
 | `by_vendor` | Split by the vendor that answered, so independence is auditable after the fact |
 | `by_model` | Split by the model as the vendor reported it, not as the profile requested it |

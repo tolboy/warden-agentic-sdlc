@@ -45,6 +45,20 @@ public final class StubVendor {
                 "confidence", "confirmed");
     }
 
+    private static String extractPlannerGoal(String prompt) {
+        String marker = "Operator goal (verbatim)\n: ";
+        int at = prompt.indexOf(marker);
+        if (at < 0) {
+            marker = "Operator goal (verbatim)\r\n: ";
+            at = prompt.indexOf(marker);
+        }
+        if (at < 0) return "Create src/result.txt containing ok";
+        int start = at + marker.length();
+        int end = prompt.indexOf('\n', start);
+        String line = (end < 0 ? prompt.substring(start) : prompt.substring(start, end)).strip();
+        return line.isEmpty() ? "Create src/result.txt containing ok" : line;
+    }
+
     private static String flag(String[] args, String name) {
         for (int index = 0; index + 1 < args.length; index++) {
             if (args[index].equals(name)) return args[index + 1];
@@ -497,11 +511,107 @@ public final class StubVendor {
                         + "\"findings\":" + findings + "},"
                         + "\"total_cost_usd\":0.003}");
             }
+            case "plan", "plan-shell", "plan-scope", "plan-goal", "plan-access", "plan-sneaky",
+                    "plan-commit", "plan-stage", "plan-schema" -> {
+                String prompt = "";
+                String promptFile = flag(args, "--prompt-file");
+                if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
+                    prompt = Files.readString(Path.of(promptFile), StandardCharsets.UTF_8);
+                }
+                String goal = extractPlannerGoal(prompt);
+                boolean commitViolation = mode.equals("plan-commit")
+                        && (flag(args, "--counter") == null || !succeedsNow(args));
+                if (mode.equals("plan-sneaky") || mode.equals("plan-stage") || commitViolation) {
+                    Path target = Path.of("src", "result.txt");
+                    Files.createDirectories(target.getParent());
+                    Files.writeString(target, mode.equals("plan-commit") ? "committed-by-planner" : "tampered",
+                            StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                    if (mode.equals("plan-commit")) {
+                        git("add", "--", "src/result.txt");
+                        git("-c", "user.email=planner@example.invalid", "-c", "user.name=planner",
+                                "-c", "commit.gpgsign=false", "commit", "-qm", "wip");
+                    } else if (mode.equals("plan-stage")) {
+                        git("add", "--", "src/result.txt");
+                    }
+                }
+                boolean reserved = callPlanWasReserved(args);
+                java.util.Map<String, Object> access = new java.util.LinkedHashMap<>();
+                access.put("workspace_write", true);
+                access.put("network", false);
+                access.put("land", mode.equals("plan-access"));
+                Object acceptance = mode.equals("plan-shell")
+                        ? java.util.List.of("npm test")
+                        : java.util.List.of(java.util.Map.of("check", "fast", "covers", "the file exists"));
+                java.util.Map<String, Object> estimate = new java.util.LinkedHashMap<>();
+                estimate.put("role_runs", 2);
+                estimate.put("cost_usd", 0.5);
+                estimate.put("rationale", "one implementer, one review");
+                java.util.Map<String, Object> artifact = new java.util.LinkedHashMap<>();
+                artifact.put("role", "planner");
+                artifact.put("task_id", "hello");
+                artifact.put("status", "completed");
+                artifact.put("operator_goal", mode.equals("plan-goal") ? "a different goal" : goal);
+                artifact.put("task_kind", mode.equals("plan-schema") ? "not-a-kind" : "feature");
+                artifact.put("deliverable", "src/result.txt containing ok");
+                artifact.put("non_goals", java.util.List.of("Do not rewrite the harness"));
+                artifact.put("subtasks", java.util.List.of(java.util.Map.of(
+                        "id", "write-file", "goal", "write src/result.txt", "depends_on", java.util.List.of())));
+                artifact.put("acceptance", acceptance);
+                artifact.put("target", "local");
+                artifact.put("required_access", access);
+                artifact.put("risk", "low");
+                artifact.put("scope", mode.equals("plan-scope") ? "invented" : "app");
+                artifact.put("estimate", estimate);
+                artifact.put("stop_conditions", java.util.List.of("stop if the file already exists"));
+                artifact.put("summary", "drafted");
+                artifact.put("call_plan_reserved_before_dispatch", reserved);
+                java.util.Map<String, Object> envelope = new java.util.LinkedHashMap<>();
+                envelope.put("structuredOutput", artifact);
+                envelope.put("total_cost_usd", 0.01);
+                envelope.put("num_turns", 2);
+                envelope.put("usage", java.util.Map.of("input_tokens", 4, "output_tokens", 6, "total_tokens", 10));
+                System.out.println(dev.warden.json.Json.write(envelope));
+            }
             case "check" -> System.exit(Files.isRegularFile(Path.of("src", "result.txt")) ? 0 : 1);
             default -> {
                 System.err.println("unknown stub vendor mode: " + mode);
                 System.exit(2);
             }
+        }
+    }
+
+    /**
+     * True when {@code run.json} already names the planner in {@code paying_stages} at the
+     * moment this process starts — proof the reservation happened before the vendor call,
+     * not after it returned.
+     */
+    private static boolean callPlanWasReserved(String[] args) {
+        String promptFile = flag(args, "--prompt-file");
+        if (promptFile == null) return false;
+        Path runJson = Path.of(promptFile).toAbsolutePath().normalize().getParent();
+        if (runJson != null) runJson = runJson.getParent();
+        if (runJson == null) return false;
+        Path marker = runJson.resolve("run.json");
+        try {
+            if (!Files.isRegularFile(marker)) return false;
+            String body = Files.readString(marker, StandardCharsets.UTF_8);
+            return body.contains("paying_stages") && body.contains("planner");
+        } catch (Exception unread) {
+            return false;
+        }
+    }
+
+    /** Runs git in the vendor process cwd (the project) without writing to stdout. */
+    private static void git(String... args) throws Exception {
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.addAll(List.of(args));
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        builder.redirectError(ProcessBuilder.Redirect.DISCARD);
+        int code = builder.start().waitFor();
+        if (code != 0) {
+            throw new IllegalStateException("git " + String.join(" ", args) + " exited " + code);
         }
     }
 }

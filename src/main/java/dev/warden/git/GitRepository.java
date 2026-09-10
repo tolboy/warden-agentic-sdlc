@@ -12,8 +12,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Git is the workspace truth: merge-base diff, blast radius and content fingerprint. */
@@ -190,15 +192,161 @@ public final class GitRepository {
         return violations;
     }
 
+    /**
+     * Dirty paths, their bytes, HEAD and the content fingerprint at one moment, used to put
+     * back only what a later writer introduced — including a commit.
+     *
+     * {@code reset --hard} plus {@code clean -fd} is not this. Those revert every tracked
+     * modification and delete every untracked non-ignored file in the run root, including
+     * work that predates the snapshot — and under {@code warden do --in-place} that root is
+     * the operator's own checkout.
+     */
+    public static final class WorkingTreeSnapshot {
+        private final String head;
+        private final String fingerprint;
+        private final Map<String, FileState> files;
+
+        private WorkingTreeSnapshot(String head, String fingerprint, Map<String, FileState> files) {
+            this.head = head;
+            this.fingerprint = fingerprint;
+            this.files = Map.copyOf(files);
+        }
+    }
+
+    private record FileState(boolean present, byte[] bytes) {
+        static FileState of(byte[] bytes) { return new FileState(true, bytes); }
+        static FileState missing() { return new FileState(false, null); }
+    }
+
+    /**
+     * Every path {@link #changedPaths()} currently reports, with the bytes that are there
+     * (or a missing marker for a deletion vs HEAD), plus HEAD and the content fingerprint
+     * against that commit. {@code .warden/runs} is already absent from the path set, so
+     * evidence is not captured and is not later reverted.
+     */
+    public WorkingTreeSnapshot snapshotWorkingTree() throws IOException, InterruptedException {
+        String head = git(List.of("rev-parse", "HEAD")).stdout().strip();
+        if (head.isBlank()) {
+            throw new IOException("git rev-parse HEAD returned no commit; refusing to snapshot a tree with no HEAD");
+        }
+        Map<String, FileState> files = new LinkedHashMap<>();
+        for (String path : changedPaths()) {
+            Path file = resolveInside(path);
+            if (Files.isRegularFile(file)) files.put(path, FileState.of(Files.readAllBytes(file)));
+            else files.put(path, FileState.missing());
+        }
+        return new WorkingTreeSnapshot(head, fingerprint(head), files);
+    }
+
+    /**
+     * Discard only what moved after {@code before} was taken.
+     *
+     * A commit the later writer made is moved back with {@code reset --mixed} to the captured
+     * HEAD, not {@code reset --hard}: mixed keeps the working tree, including evidence under
+     * {@code .warden/runs} and untracked operator files, so the file-level restore can put
+     * back only the writer's delta. Paths the writer introduced are then reverted to HEAD if
+     * they are tracked and deleted if they are not. Paths that were already dirty are put
+     * back byte-for-byte, including untracked files the writer deleted.
+     *
+     * Refuses rather than guessing when there is no snapshot, and refuses when the tree
+     * cannot be shown to match the captured HEAD and fingerprint — a retry on a tree the
+     * writer still holds would re-baseline the read-only check after the mutation.
+     */
+    public void restoreWorkingTree(WorkingTreeSnapshot before) throws IOException, InterruptedException {
+        if (before == null) {
+            throw new IOException("no working-tree snapshot; refusing to reset a tree Warden did not capture");
+        }
+        String head = git(List.of("rev-parse", "HEAD")).stdout().strip();
+        if (!before.head.equals(head)) {
+            git(List.of("reset", "--mixed", before.head));
+        }
+        Set<String> now = changedPaths();
+        for (String path : now) {
+            if (before.files.containsKey(path)) continue;
+            revertIntroduced(path);
+        }
+        for (Map.Entry<String, FileState> entry : before.files.entrySet()) {
+            Path file = resolveInside(entry.getKey());
+            FileState state = entry.getValue();
+            if (!state.present()) {
+                if (Files.isRegularFile(file)) Files.delete(file);
+                continue;
+            }
+            Path parent = file.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Files.write(file, state.bytes());
+        }
+        String headAfter = git(List.of("rev-parse", "HEAD")).stdout().strip();
+        if (!before.head.equals(headAfter)) {
+            throw new IOException("restore could not return HEAD to " + before.head
+                    + " (now " + headAfter + "); refusing to retry on a tree the writer mutated");
+        }
+        if (!before.fingerprint.equals(fingerprint(before.head))) {
+            throw new IOException("restore could not return the worktree to the captured baseline; "
+                    + "refusing to retry on a tree the writer mutated");
+        }
+    }
+
+    /**
+     * Whether HEAD and the content fingerprint still match {@code before}. The planner
+     * bootstrap asks this after the call, so a mutation is a protocol failure even if the
+     * profile's {@code read_only} flag did not trigger the executor's own check.
+     */
+    public boolean matchesSnapshot(WorkingTreeSnapshot before) throws IOException, InterruptedException {
+        if (before == null) {
+            throw new IOException("no working-tree snapshot; refusing to treat an uncaptured tree as unchanged");
+        }
+        String head = git(List.of("rev-parse", "HEAD")).stdout().strip();
+        return before.head.equals(head) && before.fingerprint.equals(fingerprint(before.head));
+    }
+
+    private void revertIntroduced(String path) throws IOException, InterruptedException {
+        String gitPath = path.replace('\\', '/');
+        // ls-files --error-unmatch succeeds for a staged addition that is not in HEAD, and
+        // checkout HEAD -- path then fails. Ask HEAD, not the index.
+        ProcessRunner.Result inHead = gitRaw(List.of("cat-file", "-e", "HEAD:" + gitPath));
+        if (inHead.ok()) {
+            git(List.of("checkout", "HEAD", "--", path));
+            return;
+        }
+        gitRaw(List.of("rm", "-f", "--cached", "--", path));
+        deleteRecursively(resolveInside(path));
+    }
+
+    private Path resolveInside(String relative) throws IOException {
+        Path file = root.resolve(relative).normalize();
+        if (!file.startsWith(root)) {
+            throw new IOException("refusing to restore a path that escapes the worktree: " + relative);
+        }
+        return file;
+    }
+
+    private static void deleteRecursively(Path file) throws IOException {
+        if (!Files.exists(file) && !Files.isSymbolicLink(file)) return;
+        if (Files.isDirectory(file)) {
+            try (var paths = Files.walk(file)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.deleteIfExists(path);
+                }
+            }
+        } else {
+            Files.deleteIfExists(file);
+        }
+    }
+
     public ProcessRunner.Result git(List<String> args) throws IOException, InterruptedException {
+        ProcessRunner.Result result = gitRaw(args);
+        if (!result.ok()) throw new IOException("git " + String.join(" ", args) + " failed: " + result.stderr());
+        return result;
+    }
+
+    private ProcessRunner.Result gitRaw(List<String> args) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>();
         command.add("git");
         command.add("-c");
         command.add("safe.directory=" + root.toString().replace('\\', '/'));
         command.addAll(args);
-        ProcessRunner.Result result = processes.run(command, root, GIT_TIMEOUT);
-        if (!result.ok()) throw new IOException("git " + String.join(" ", args) + " failed: " + result.stderr());
-        return result;
+        return processes.run(command, root, GIT_TIMEOUT);
     }
 
     public static String sha256(Path... files) throws IOException {

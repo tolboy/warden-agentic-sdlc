@@ -42,6 +42,46 @@ public final class RuntimeTest implements Suite {
                     git.changedPaths(originalBase).contains("committed-outside.txt"));
             Files.writeString(repository.resolve("src/value.txt"), "changed\n");
             check.eq("changed path found", Set.of("src/value.txt"), git.changedPaths());
+            Files.writeString(repository.resolve("notes-keep.md"), "keep\n");
+            GitRepository.WorkingTreeSnapshot snap = git.snapshotWorkingTree();
+            check.that("a snapshot matches the tree it was taken from", git.matchesSnapshot(snap));
+            Files.writeString(repository.resolve("src/value.txt"), "planner-clobber\n");
+            check.that("and does not match after a later write", !git.matchesSnapshot(snap));
+            Files.writeString(repository.resolve("src/planner-new.txt"), "new\n");
+            Files.delete(repository.resolve("notes-keep.md"));
+            git.restoreWorkingTree(snap);
+            check.eq("a surgical restore keeps the operator's uncommitted edit",
+                    "changed\n", Files.readString(repository.resolve("src/value.txt")));
+            check.eq("and the untracked file that predates the snapshot",
+                    "keep\n", Files.readString(repository.resolve("notes-keep.md")));
+            check.that("and drops the file the later writer created",
+                    !Files.exists(repository.resolve("src/planner-new.txt")));
+            String headBeforeCommit = git.mergeBase("HEAD");
+            GitRepository.WorkingTreeSnapshot beforePlannerCommit = git.snapshotWorkingTree();
+            Files.writeString(repository.resolve("src/planner-committed.txt"), "from a commit\n");
+            command(repository, "git", "add", "--", "src/planner-committed.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests", "-c", "user.email=warden@example.invalid",
+                    "commit", "-m", "wip");
+            git.restoreWorkingTree(beforePlannerCommit);
+            check.eq("a surgical restore undoes a commit the later writer made",
+                    headBeforeCommit, git.mergeBase("HEAD"));
+            check.that("and drops the file that commit added",
+                    !Files.exists(repository.resolve("src/planner-committed.txt")));
+            check.eq("without losing the operator's uncommitted edit",
+                    "changed\n", Files.readString(repository.resolve("src/value.txt")));
+            GitRepository.WorkingTreeSnapshot beforeStaged = git.snapshotWorkingTree();
+            Files.writeString(repository.resolve("src/planner-staged.txt"), "staged only\n");
+            command(repository, "git", "add", "--", "src/planner-staged.txt");
+            git.restoreWorkingTree(beforeStaged);
+            check.that("a surgical restore drops a staged-but-uncommitted addition",
+                    !Files.exists(repository.resolve("src/planner-staged.txt")));
+            ProcessRunner.Result stillStaged = runner.run(
+                    List.of("git", "diff", "--cached", "--name-only", "--", "src/planner-staged.txt"),
+                    repository, Duration.ofSeconds(30));
+            check.that("and clears it from the index", stillStaged.stdout().isBlank());
+            check.eq("still without losing the operator's uncommitted edit",
+                    "changed\n", Files.readString(repository.resolve("src/value.txt")));
+            Files.delete(repository.resolve("notes-keep.md"));
             check.eq("scope accepts real child", List.of(), git.outsideScope(git.changedPaths(), List.of("src")));
             check.eq("scope rejects prefix collision", List.of("src/value.txt"),
                     git.outsideScope(git.changedPaths(), List.of("sr")));
