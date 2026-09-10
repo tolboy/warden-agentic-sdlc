@@ -172,7 +172,7 @@ Here the tool is separated from the projects it connects to.
                              warden do "<goal>"
                                        │
                  ┌─────────────────────┴───────────────────────┐
-                 │  Orca worktree · task draft (or planner) · linter │
+                 │  Orca worktree · draft (or planner) · linter│
                  │  Warden creates no branches and merges none │
                  └─────────────────────┬───────────────────────┘
                                        ▼

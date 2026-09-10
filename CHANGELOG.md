@@ -53,6 +53,20 @@ that exists in code but has never been run live says so.
 - `scripts/hygiene-selftest.sh` checks the gate against throwaway repositories carrying the
   things it must reject, including the pair of commits that adds a path and rewords it away.
 
+### Fixed
+
+- The preparation reservation no longer mixes the planner's one-call bootstrap with the
+  undeclared workflow chain. For a run that continues into the loop, `run.json` records
+  the same ceiling and skip predicate the loop will write a moment later: `requested_cap`
+  is `budgets.max_role_runs`, and `paying_stages` names the planner plus the stages the
+  loop will actually dispatch. `--draft-only` still records the bootstrap (a cap of one
+  and the planner alone). `--prepare off` is unchanged.
+- After `--prepare always --draft-only`, the next-step line prints the run id that was
+  actually reserved, so following it joins the planner's spend instead of starting a loop
+  that never sees it. `--prepare off` still prints `--run-id <id>`.
+- The architecture diagram in `README.md` and `README.ru.md` no longer lets "(or planner)"
+  overflow the ASCII box.
+
 ## [0.2.0] — 2026-09-06
 
 The release where the loop was run against a repository that is not a web application, in a

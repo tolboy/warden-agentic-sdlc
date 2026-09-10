@@ -5,6 +5,7 @@ import dev.warden.config.PlannerDraft;
 import dev.warden.config.ProjectConfig;
 import dev.warden.config.ProjectInitializer;
 import dev.warden.config.TaskDraft;
+import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
@@ -290,6 +291,7 @@ public final class DoCommand {
         TaskLoop.Preparation preparation = new TaskLoop.Preparation(
                 options.prepare(), false, 0, 0, 0, false);
         CallPlan preparationPlan = null;
+        long preparationCap = 1;
         if (dispatchPlanner) {
             // Setup first so the planner reads the tree a later implementer would, not an
             // empty worktree whose checks cannot run. The --prepare off path below is left
@@ -301,18 +303,31 @@ public final class DoCommand {
                 }
             }
             if (user.policy() != null) {
-                // Reserved before the vendor is paid, not reconstructed afterwards. draft-only
-                // skips every workflow stage so the plan is the planner call itself.
-                preparationPlan = new CallPlan(user.policy().workflow(),
-                        options.draftOnly() ? stage -> true : stage -> false,
-                        List.of("planner"));
+                // Reserved before the vendor is paid, not reconstructed afterwards. One
+                // coherent plan: --draft-only is the bootstrap (cap of one, the planner
+                // alone), because no workflow stage will run. A run that continues into
+                // the loop uses the same skip predicate and ceiling TaskLoop will write
+                // a moment later. Mixing the bootstrap's numerator of one with the
+                // undeclared chain as the denominator is how run.json used to claim
+                // sufficient_for_success: false on a run that then finished.
+                if (options.draftOnly()) {
+                    preparationPlan = new CallPlan(user.policy().workflow(),
+                            stage -> true, List.of("planner"));
+                    preparationCap = 1;
+                } else {
+                    TaskSpec.ResolvedTask measured = measureForReservation(root, project,
+                            taskId, options.goal(), scope, risk, contractExists);
+                    preparationPlan = TaskLoop.planFor(user.policy().workflow(), user,
+                            measured, List.of("planner"));
+                    preparationCap = measured.budget().maxRoleRuns();
+                }
             }
             try {
                 Map<String, Object> reservation = new LinkedHashMap<>();
                 reservation.put("prepare", options.prepare());
                 if (preparationPlan != null) {
                     reservation.put("budget_plan", preparationPlan.toMap(
-                            1, user.policy().repairReserve()));
+                            preparationCap, user.policy().repairReserve()));
                 }
                 new dev.warden.ledger.EvidenceLedger(root, runId)
                         .reserveWorkflowRun(taskId, reservation);
@@ -420,14 +435,20 @@ public final class DoCommand {
             report.put("risk", risk);
             report.put("lands", false);
             if (preparationPlan != null) {
-                report.put("budget_plan", preparationPlan.toMap(1, user.policy().repairReserve()));
+                report.put("budget_plan", preparationPlan.toMap(
+                        preparationCap, user.policy().repairReserve()));
             }
             progress.blank();
             progress.line("draft " + drafted.file());
             progress.line("      read it, write the browser scenarios this task actually "
                     + "promises, then:");
             progress.line("      cd " + root);
-            progress.line("      warden run " + taskId + " --run-id <id>");
+            // A planner call lives on the reservation at this run id. Printing the
+            // placeholder <id> — correct when --prepare off reserved nothing — sent
+            // the operator into a new loop that never joined it, so the planner was
+            // not counted and the paid reservation was orphaned.
+            progress.line("      warden run " + taskId + " --run-id "
+                    + (dispatchPlanner ? runId : "<id>"));
             progress.blank();
             return new Outcome(true, "drafted", requested, root, taskId, report);
         }
@@ -587,6 +608,42 @@ public final class DoCommand {
             throw new Isolation.IsolationException("detached_head",
                     "could not read the current branch of " + project + ": " + notAskable.getMessage());
         }
+    }
+
+    /**
+     * The task facts a reservation can know before the planner is paid.
+     *
+     * An existing contract is measured as the loop will measure it. Without one, risk
+     * comes from the invocation and visual_qa is treated as not required: naming a
+     * stage the loop will skip is the lie this reservation used to tell. A stage the
+     * planner may later request is added when the loop writes its own plan, once a
+     * contract exists to measure. Omitted {@code budgets:} default to the same
+     * numbers {@link TaskSpec} uses, which is what a planner-compiled contract gets.
+     */
+    private static TaskSpec.ResolvedTask measureForReservation(Path root, ProjectConfig project,
+            String taskId, String goal, String scope, String risk, boolean contractExists) {
+        if (contractExists) {
+            try {
+                return new ConfigLoader().load(root, taskId).resolved();
+            } catch (Exception unreadable) {
+                // Fall through: a file we cannot measure still has to reserve one
+                // coherent plan, not a mix of the bootstrap cap and the full chain.
+            }
+        }
+        return new TaskSpec.ResolvedTask(
+                taskId,
+                goal,
+                List.of(),
+                risk,
+                project.baseRef(),
+                List.copyOf(project.scopes().getOrDefault(scope, List.of())),
+                List.of(),
+                List.of(),
+                new TaskSpec.Authority(true, false, false),
+                new TaskSpec.VisualQa(false, List.of(), null, null),
+                new TaskSpec.Budget(6, 20.0),
+                project.defaultMaxFixAttempts(),
+                project.defaultTimeoutMinutes());
     }
 
     /**

@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +73,7 @@ public final class PlannerTest implements Suite {
             prepareAutoRefusesMismatchedIntent(check, sandbox, home);
             skippedAutoModeReachesInnerRun(check, sandbox, home);
             prepareAlwaysDraftOnly(check, sandbox, home);
+            prepareAlwaysGoesToLoop(check, sandbox, home);
             prepareAlwaysDoesNotTruncateExisting(check, sandbox, home);
             prepareAlwaysVisualParity(check, sandbox, home);
             stubDraftRefusals(check, sandbox, home);
@@ -236,11 +238,14 @@ public final class PlannerTest implements Suite {
                 StandardCharsets.UTF_8);
 
         UserConfig user = UserConfig.load(home);
-        DoCommand.Outcome off = new DoCommand(new ProcessRunner()).run(
+        List<String> narration = new ArrayList<>();
+        DoCommand.Outcome off = new DoCommand(new ProcessRunner(), narration::add).run(
                 new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-off",
                         "HEAD", true, false, false, false, false, true, null, "off"),
                 user);
         check.eq("--prepare off still drafts", "drafted", off.code());
+        check.contains("and still prints a placeholder run id, because nothing was reserved",
+                String.join("\n", narration), "warden run hello --run-id <id>");
         String actual = Files.readString(project.resolve(".warden/tasks/hello.yaml"),
                 StandardCharsets.UTF_8);
         check.eq("--prepare off writes the contract TaskDraft writes today", expected, actual);
@@ -402,11 +407,17 @@ public final class PlannerTest implements Suite {
         Path project = sandbox.resolve("always-draft");
         scaffoldProject(project);
         UserConfig user = UserConfig.load(home);
-        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner()).run(
+        List<String> narration = new ArrayList<>();
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration::add).run(
                 new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-always",
                         "HEAD", true, false, false, false, false, true, null, "always"),
                 user);
         check.eq("--prepare always --draft-only runs the planner", "drafted", outcome.code());
+        String printed = String.join("\n", narration);
+        check.contains("the next-step line names the run id that was reserved",
+                printed, "warden run hello --run-id do-always");
+        check.that("and does not print the placeholder an operator would not join",
+                !printed.contains("--run-id <id>"));
         check.eq("and reports always", "always", outcome.report().get("prepare"));
         check.that("and writes the compiled contract",
                 Files.isRegularFile(project.resolve(".warden/tasks/hello.yaml")));
@@ -446,6 +457,50 @@ public final class PlannerTest implements Suite {
         } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
             check.contains("as the same reservation fence", duplicate.getMessage(), "already reserved");
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void prepareAlwaysGoesToLoop(Check check, Path sandbox, Path home) throws Exception {
+        Path project = sandbox.resolve("always-loop");
+        scaffoldProject(project);
+        writeImplementerProfile(home);
+        writePolicy(home, "stub-plan", "stub-impl", "confirm");
+        UserConfig user = UserConfig.load(home);
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-always-loop",
+                        "HEAD", true, false, false, false, false, false, null, "always"),
+                user);
+        check.that("--prepare always without --draft-only reaches the loop",
+                outcome.ok() || "ready_for_human".equals(outcome.code()));
+        Path marker = project.resolve(".warden/runs/do-always-loop/run.json");
+        check.that("the run marker was written", Files.isRegularFile(marker));
+        Map<String, Object> reservation = Json.parseObject(
+                Files.readString(marker, StandardCharsets.UTF_8));
+        Map<String, Object> reservedPlan = (Map<String, Object>) reservation.get("budget_plan");
+        check.that("CallPlan reserved a plan before the loop", reservedPlan != null);
+        check.eq("the reservation's cap is the run's ceiling, not the bootstrap's one",
+                6L, reservedPlan.get("requested_cap"));
+        check.eq("and it says this chain can finish",
+                Boolean.TRUE, reservedPlan.get("sufficient_for_success"));
+        List<?> stages = (List<?>) reservedPlan.get("paying_stages");
+        check.that("it names the planner", stages != null && stages.contains("planner"));
+        check.that("and the implement stage the loop will dispatch",
+                stages != null && stages.contains("implement"));
+        check.that("and not the reviewer this low-risk task skips",
+                stages != null && !stages.contains("review"));
+        check.that("and not the visual role this task does not ask for",
+                stages != null && !stages.contains("look"));
+        check.eq("minimum_success_calls matches those paying stages",
+                (long) stages.size(), reservedPlan.get("minimum_success_calls"));
+        Path summary = project.resolve(".warden/runs/do-always-loop/task-run.json");
+        check.that("the loop wrote its JSON", Files.isRegularFile(summary));
+        Map<String, Object> loopPlan = (Map<String, Object>) Json.parseObject(
+                Files.readString(summary, StandardCharsets.UTF_8)).get("budget_plan");
+        check.eq("the two records of one run name the same paying stages",
+                loopPlan.get("paying_stages"), reservedPlan.get("paying_stages"));
+        check.eq("and the same cap",
+                loopPlan.get("requested_cap"), reservedPlan.get("requested_cap"));
+        writePolicy(home, "stub-plan");
     }
 
     private void stubDraftRefusals(Check check, Path sandbox, Path home) throws Exception {

@@ -309,9 +309,9 @@ public final class TaskLoop {
         boolean visualRoleConfigured = user.policy() != null
                 && user.policy().roles().containsKey("visual_qa");
         // Built here, from the same predicate the engine routes by, and consulted before the
-        // first dispatch as well as before every repair.
-        CallPlan callPlan = new CallPlan(workflow,
-                stage -> skipReason(stage, user, task, reviewByRisk) != null,
+        // first dispatch as well as before every repair. The preparation reservation uses
+        // the same helper so run.json cannot describe a different chain from this summary.
+        CallPlan callPlan = planFor(workflow, user, task,
                 prior.includedInPlan() ? List.of("planner") : List.of());
 
         List<Map<String, Object>> steps = new ArrayList<>();
@@ -607,12 +607,27 @@ public final class TaskLoop {
     }
 
     /**
+     * The budget plan this loop records, from the same skip predicate it routes by.
+     *
+     * The preparation reservation calls this before the planner is paid so {@code run.json}
+     * and the summary written a moment later cannot disagree about which stages count or
+     * whether the cap can finish them.
+     */
+    static CallPlan planFor(Workflow workflow, UserConfig user, TaskSpec.ResolvedTask task,
+                            List<String> preparationStages) {
+        boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
+        return new CallPlan(workflow,
+                stage -> skipReason(stage, user, task, reviewByRisk) != null,
+                preparationStages);
+    }
+
+    /**
      * Why a stage will not run at all, or null when it will.
      *
-     * Static, and asked in two places on purpose. The loop asks it to decide what to execute;
-     * {@link CallPlan} asks it to decide what to count. A budget plan built from a different
-     * notion of which stages run than the loop uses would reserve calls for a reviewer that
-     * risk had already excluded, or fail to reserve one that risk had brought back.
+     * Static, and asked through {@link #planFor} on purpose. The loop asks it to decide what
+     * to execute; the preparation reservation asks it so the plan it records cannot name a
+     * reviewer that risk had already excluded, or fail to reserve one that risk had brought
+     * back.
      */
     private static String skipReason(Workflow.Stage stage, UserConfig user,
                                      TaskSpec.ResolvedTask task, boolean reviewByRisk) {

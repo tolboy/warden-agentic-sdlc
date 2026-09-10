@@ -63,7 +63,11 @@ or to reach the network. The one-call bound is a dispatch gate: quota failover i
 vendor call and is refused, while a protocol failure may retry once after the tree is
 restored. A planner that moved the tree is `planner_protocol_violation`. `CallPlan` is
 written into the run marker before the vendor is paid, so a report cannot discover the
-planner afterwards and call it free.
+planner afterwards and call it free. That reservation is one plan: the run's real
+ceiling measured with the same skip predicate the loop routes by, not the bootstrap's
+cap of one laid against the undeclared chain. `--draft-only` records the bootstrap
+itself — a cap of one and `paying_stages` naming the planner alone — because no
+workflow stage will run.
 
 What it returns is a draft. Warden compiles that draft into a frozen contract, or refuses
 it and names the field: acceptance must resolve to a named check under `checks:` in
