@@ -35,6 +35,22 @@ JVM, and CI builds it on JDK 21 and 25 across Linux and Windows. Override the fl
 `WARDEN_JAVA_RELEASE` if you are testing something specific, but do not raise it in a PR
 without a reason in the description.
 
+The hygiene gate is a script rather than a block of CI, so you can run it before you push:
+
+```bash
+scripts/hygiene.sh tip paths
+scripts/hygiene.sh range paths "$(git merge-base origin/main HEAD)" HEAD
+```
+
+`tip` reads the tree you have; `range` reads the lines each commit in that range *added*, which
+is the check that catches a personal path introduced by one commit and reworded away by the
+next. Substitute `uuids` for `paths` to run the other check. CI runs all four.
+
+`scripts/hygiene-selftest.sh` checks the gate itself against throwaway repositories that
+contain the things it is supposed to reject. Run it after changing a pattern. Note that it has
+to write the strings the gate rejects while being scanned by that gate, so its fixtures are
+assembled from fragments; a new one has to keep doing that.
+
 ## Tests
 
 The suite is hand-rolled: `src/test/java/dev/warden/testing/` gives you `Suite` and `Check`,
