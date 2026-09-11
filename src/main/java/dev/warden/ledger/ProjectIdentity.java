@@ -53,16 +53,29 @@ public final class ProjectIdentity {
     public static String resolve(Path projectRoot) {
         Path root = projectRoot.toAbsolutePath().normalize();
         String name = projectName(root);
+
+        // The record is read before git is asked, because a resolved tree has nothing left
+        // to ask about. Asking anyway is a process per construction - measured at 73ms on
+        // the maintainer's Windows host - paid on every ledger this run opens, to be told
+        // what the file already said. git is consulted only when the record is missing, or
+        // when it is there without the git-derived name to link it to.
+        Map<String, Object> record = readRecord(root);
+        boolean resolved = record.get("project_id") instanceof String recorded
+                && !recorded.isBlank();
+        if (resolved && record.get("git_project_id") instanceof String linked
+                && !linked.isBlank()) {
+            return String.valueOf(record.get("project_id"));
+        }
+
         Probe probe = gitProbe(root);
         String gitId = probe.roots().isEmpty() ? null : gitIdentity(probe.roots(), name);
 
-        Map<String, Object> record = readRecord(root);
-        if (record.get("project_id") instanceof String recorded && !recorded.isBlank()) {
-            if (gitId != null && !gitId.equals(String.valueOf(record.get("git_project_id")))) {
+        if (resolved) {
+            if (gitId != null) {
                 record.put("git_project_id", gitId);
                 writeRecord(root, record);
             }
-            return recorded;
+            return String.valueOf(record.get("project_id"));
         }
 
         if (gitId != null) return persist(root, gitId, name, gitId, false);
