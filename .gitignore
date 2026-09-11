@@ -4,11 +4,8 @@ out/
 *.iml
 conductor-*.log
 
-# Planning documents. They are working notes, not part of what this repository publishes:
-# they name absolute paths on the maintainer's machine and a private target project. Kept
-# on disk, deliberately outside the history. The documents that are published, and that a
-# reader needs, are docs/ARCHITECTURE.md, docs/LIVE-CYCLE.md and docs/P1-CLOSURE-FIX.md.
-docs/ADAPTIVE-WORKFLOW-PLAN.md
-docs/LEAN-WORKFLOW-PLAN.md
-docs/OPUS-P0-REVIEW.md
-docs/OPUS-P0-REVIEW-2.md
+# The planning documents used to be ignored here. They are tracked now, on 2026-09-11:
+# development follows them, so they are the same account as the commit messages, one level
+# up. What kept them out was never the reasoning in them - it was that they named absolute
+# paths on the maintainer's machine and a private target project. Those are placeholders
+# now, and scripts/hygiene.sh is what keeps them that way, on every commit a push adds.
