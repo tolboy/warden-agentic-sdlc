@@ -29,6 +29,31 @@ public final class LedgerReader {
             "role_runner_unimplemented",
             "role_unresolved");
 
+    /**
+     * Event types the home corpus writes into the same local stream, and that this reader
+     * never saw before that corpus existed: the per-call vendor journal, the refusal a
+     * writing role meets when the contract grants it no authority, and the two markers a
+     * prepared run leaves behind.
+     *
+     * This slice is contracted to leave `warden ledger` printing exactly what it printed
+     * without it - the same run verdicts, the same event counts, the same configuration
+     * totals. Filtering them once, here, is what keeps that true for every consumer below
+     * rather than for whichever tally someone remembered to exempt.
+     */
+    private static final Set<String> CORPUS_ONLY_EVENTS = Set.of(
+            "authority_denied", "run_prepared", "run_reserved", "vendor_attempt");
+
+    private static List<Map<String, Object>> localView(List<Map<String, Object>> events) {
+        List<Map<String, Object>> visible = new ArrayList<>(events.size());
+        for (Map<String, Object> event : events) {
+            Object type = event.get("type");
+            if (type == null || !CORPUS_ONLY_EVENTS.contains(String.valueOf(type))) {
+                visible.add(event);
+            }
+        }
+        return visible;
+    }
+
     public Map<String, Object> summarize(Path projectRoot) throws IOException {
         Path runs = projectRoot.resolve(".warden/runs");
         List<Map<String, Object>> runRows = new ArrayList<>();
@@ -38,7 +63,8 @@ public final class LedgerReader {
         if (Files.isDirectory(runs)) {
             try (var directories = Files.list(runs)) {
                 for (Path run : directories.filter(Files::isDirectory).sorted(Comparator.comparing(Path::toString)).toList()) {
-                    List<Map<String, Object>> events = readEvents(run.resolve("evidence.jsonl"));
+                    List<Map<String, Object>> events =
+                            localView(readEvents(run.resolve("evidence.jsonl")));
                     String verdict = "no_evidence";
                     for (Map<String, Object> event : events) {
                         if (event.get("ok") instanceof Boolean ok) verdict = ok ? "passed" : "failed";

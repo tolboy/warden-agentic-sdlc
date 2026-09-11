@@ -14,6 +14,7 @@ import dev.warden.gate.VisualQaRunner;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.HomeCorpus;
 import dev.warden.ledger.Findings;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleContract;
@@ -121,7 +122,7 @@ public final class TaskLoop {
     private final Preparation preparation;
 
     public TaskLoop(ProcessRunner processes) {
-        this(processes, (loaded, runId) -> new VisualQaRunner(processes).run(loaded, runId));
+        this(processes, (VisualCheck) null);
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck) {
@@ -267,7 +268,10 @@ public final class TaskLoop {
                        Map<String, String> authorizedFailover, Continuation carried) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
-        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
+        if (carried.continuesRun()) {
+            ledger.bindParent(EvidenceLedger.runInstanceIdOf(root, carried.fromRunId()));
+        }
         // Reservation is the first mutation. A duplicate controller is refused before it can
         // overwrite evidence, spend a token, or start a second Orca worker in the same tree.
         // Preparation already reserved when the planner ran: that call wrote evidence into
@@ -299,7 +303,7 @@ public final class TaskLoop {
         // role invocations, so a failover cannot spend more than the task allowed.
         RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId,
                 authorizedFailover, progress);
-        GateRunner gates = new GateRunner(processes);
+        GateRunner gates = new GateRunner(processes).withHome(user.home());
 
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
@@ -490,6 +494,10 @@ public final class TaskLoop {
             summary.put("budget_stop", exceeded.getMessage());
             summary.put("budget_limit_hit", exceeded.limit());
             return stop(ledger, summary, "budget_exhausted", steps, engine.attempt(), budget);
+        } catch (HomeCorpus.UnavailableException unavailable) {
+            summary.put("corpus_status", "error");
+            summary.put("corpus_error", unavailable.getMessage());
+            return stop(ledger, summary, "ledger_unavailable", steps, engine.attempt(), budget);
         } catch (Exception unexpected) {
             summary.put("unexpected_error", Map.of(
                     "type", unexpected.getClass().getName(),
@@ -525,6 +533,8 @@ public final class TaskLoop {
             summary.put("next_action", "none");
             Path file = ledger.writeReport("task-run", summary);
             ledger.append("task_dry_run", summary);
+            ledger.recordCorpusVisibility(summary);
+            ledger.writeReport("task-run", summary);
             progress.blank();
             progress.line("done  dry_run   nothing was dispatched and nothing was spent");
             // The preview's whole job is to answer "will this work" before it costs anything,
@@ -602,6 +612,8 @@ public final class TaskLoop {
                 "run_id", runId, "kind", decision.kind().jsonValue(),
                 "path", root.relativize(new ApprovalStore(root).decisionPath(runId)).toString().replace('\\', '/')));
         ledger.append("task_run", summary);
+        ledger.recordCorpusVisibility(summary);
+        ledger.writeReport("task-run", summary);
         footer(runId, "ready_for_human", "human_gate", budget, summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
     }
@@ -1697,7 +1709,8 @@ public final class TaskLoop {
                             contractSnapshot, diffBaseCommit);
                 }
                 case VISUAL_HARNESS -> {
-                    VisualQaRunner.Outcome outcome = runVisual(loaded, runId, attempt, dryRun, steps);
+                    VisualQaRunner.Outcome outcome = runVisual(loaded, runId, attempt, dryRun, steps,
+                            user.home());
                     harness.put(stage.name(), outcome);
                     return outcome;
                 }
@@ -2757,7 +2770,8 @@ public final class TaskLoop {
     }
 
     private VisualQaRunner.Outcome runVisual(ConfigLoader.Loaded loaded, String runId, int attempt,
-                                             boolean dryRun, List<Map<String, Object>> steps)
+                                             boolean dryRun, List<Map<String, Object>> steps,
+                                             Path home)
             throws Exception {
         if (dryRun) {
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -2767,7 +2781,10 @@ public final class TaskLoop {
             steps.add(entry);
             return null;
         }
-        VisualQaRunner.Outcome outcome = visualCheck.run(loaded, stepRunId(runId, "visual-qa", attempt));
+        VisualQaRunner.Outcome outcome = visualCheck != null
+                ? visualCheck.run(loaded, stepRunId(runId, "visual-qa", attempt))
+                : new VisualQaRunner(processes).withHome(home)
+                        .run(loaded, stepRunId(runId, "visual-qa", attempt));
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("step", "visual_qa");
         entry.put("attempt", (long) attempt);
@@ -2794,7 +2811,7 @@ public final class TaskLoop {
         List<Path> screenshots = visual == null ? List.of() : screenshotsOf(visual);
         Path context = null;
         if (visual != null) {
-            EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
+            EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId, user.home());
             Path directory = ledger.runDirectory().resolve("context");
             Files.createDirectories(directory);
             context = directory.resolve("visual-" + attempt + "-harness.json");
@@ -2882,6 +2899,8 @@ public final class TaskLoop {
                 "path", root.relativize(new ApprovalStore(root).decisionPath(decision.runId()))
                         .toString().replace('\\', '/')));
         ledger.append("task_run", summary);
+        ledger.recordCorpusVisibility(summary);
+        ledger.writeReport("task-run", summary);
         footer(runIdentity, reason, "human_escalation", budget, summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
     }

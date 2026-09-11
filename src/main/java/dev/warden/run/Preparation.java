@@ -86,9 +86,14 @@ public final class Preparation {
      */
     public static TaskLoop.Preparation recordSkipped(Path root, String runId, String taskId,
                                                      String mode) throws IOException {
+        return recordSkipped(root, runId, taskId, mode, null);
+    }
+
+    public static TaskLoop.Preparation recordSkipped(Path root, String runId, String taskId,
+                                                     String mode, Path home) throws IOException {
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("prepare", mode);
-        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, home);
         ledger.reserveWorkflowRun(taskId, extra);
         ledger.markPrepared(0, 0, 0);
         return new TaskLoop.Preparation(mode, true, 0, 0, 0, false);

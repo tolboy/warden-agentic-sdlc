@@ -16,7 +16,7 @@ The source of truth is Warden, not a target-project branch.
 | Configuration integrity | Warden | Implemented: the whole `.warden` tree except `runs/` is snapshotted before the first dispatch and compared after every role and around every gate command. Any modification, addition or deletion is `contract_mutated` naming the path. Because that holds, `.warden` sits outside the task's source blast radius without opening a hole |
 | Workspace/tool policy | Git + TaskSpec authority | Scope and local write/network/land declarations implemented; tool allowlists pending |
 | Pre-agent baseline | Warden | Implemented: optional `defaults.baseline_checks` names a project check set run before the first vendor. Red is `baseline_failed` and zero vendor calls. The same commands are the floor of the later acceptance gate, so an agent cannot break a test that was green at dispatch and still pass a narrower task check. A baseline command that mutates project source is `baseline_mutated_source`. Omitted by existing projects and by greenfield `warden init`. Not a `workflow.stages` item and not configurable away. Covered by the suite; not a live claim |
-| Evidence ledger | Warden | Implemented: machine reports, append-only JSONL, `warden ledger` aggregation, and per-attempt vendor cost, turns, tokens and model as reported. A failover is two `vendor_attempts`, not one `role_run`: every split (`by_profile`, `by_vendor`, `by_model`, `by_outcome`) and every telemetry total counts the actual dispatch. Historical ledgers without the nested array remain one attempt per `role_run`. Every vendor runs through its own CLI on the operator's subscription, so a price exists only if that CLI printed one: `unpriced_calls` and `cost_ceiling_binding` say how much of a run the `max_cost_usd` ceiling actually measured, because a run where nothing priced itself can spend every allowed call and charge $0.00 against a $40 limit. `max_role_runs` is the bound that always holds. Telemetry is read from the vendor's envelope **before** the outcome is judged, so a call that failed is costed like any other: a run whose grok implementer died at its turn ceiling reported `total_cost_usd: 1.33` and was recorded as free, and an Opus review that did the same hid $4.88, because extraction used to happen only after a valid artifact. A ceiling that measures only the calls that worked is not measuring the run most worth costing |
+| Evidence ledger | Warden | Implemented: machine reports, append-only JSONL, `warden ledger` aggregation, and per-attempt vendor cost, turns, tokens and model as reported. A failover is two `vendor_attempts`, not one `role_run`: every split (`by_profile`, `by_vendor`, `by_model`, `by_outcome`) and every telemetry total counts the actual dispatch. Historical ledgers without the nested array remain one attempt per `role_run`. Every vendor runs through its own CLI on the operator's subscription, so a price exists only if that CLI printed one: `unpriced_calls` and `cost_ceiling_binding` say how much of a run the `max_cost_usd` ceiling actually measured, because a run where nothing priced itself can spend every allowed call and charge $0.00 against a $40 limit. `max_role_runs` is the bound that always holds. Telemetry is read from the vendor's envelope **before** the outcome is judged, so a call that failed is costed like any other: a run whose grok implementer died at its turn ceiling reported `total_cost_usd: 1.33` and was recorded as free, and an Opus review that did the same hid $4.88, because extraction used to happen only after a valid artifact. A ceiling that measures only the calls that worked is not measuring the run most worth costing. Each local append also projects an allowlisted measurement into `<UserConfig.home>/ledger/` through one write-then-deliver protocol; see below. `warden ledger` remains local to the project tree and takes no new arguments |
 | Run report | Warden | Implemented: `warden report <run-id>` joins the per-stage evidence into one view — stages in order, vendor/model/cost/tokens/duration per call, browser scenarios and screenshot hashes, source files changed since the pinned base, and the human decision. A value the vendor never reported stays absent and renders as `?` rather than becoming a zero. Verified live: Grok 4.6 review, $0.0835, 104042/13006 tokens |
 | Conductor | Optional outer adapter | Machine-only workflow implemented; it does not duplicate Warden's role loop. Not part of the primary path. See [`docs/adr/0001-layer-split.md`](adr/0001-layer-split.md) |
 | Visual QA — harness | Warden machine adapter | Implemented and project-neutral: `scripts/visual-qa.mjs` drives Edge/Chrome via CDP and asserts `text=` / `css=` / `testid=` / `role=` matchers as `visible`, `hidden`, `click` or `click@FX,FY -> <assertion>` (a point inside the element's own box, so a full-window canvas is reachable anywhere and not only at its centre), plus `no-console-errors`, and a `wait <n>` step that holds and photographs — without one, everything the harness sees is the page 1.2 s after a click, which is blind to any UI running on its own clock. Declared waits extend the adapter's own timeout, so a contract that asked for time does not come back as `visual_qa_unavailable`. Verifies the viewport it was asked for was the one the CSS saw. Each scenario writes a bounded accessibility snapshot ranked so the named control is first (then interactive nodes, then named ones), with role, name, bounding box, focused and ignored; ranking is `--rank-a11y` with no browser, the same shape as `--validate-only`. A pass without a screenshot is `visual_qa_no_evidence`; a stranger already serving the URL is `visual_qa_port_occupied`; no browser is `visual_qa_unavailable` |
@@ -29,6 +29,153 @@ The source of truth is Warden, not a target-project branch.
 `warden init` now creates a conservative, non-overwriting starter contract for npm, Gradle
 wrapper, Maven, Cargo or Make projects. Its inferred commands are a review starting point,
 not trusted policy.
+
+## Home measurement corpus
+
+Local evidence stays at `<projectRoot>/.warden/runs/<run-id>/evidence.jsonl`. It is still
+the source `warden ledger` reads, and it still holds the raw material of a run: prompts,
+vendor streams, finding text, command lines. Deleting the project tree deletes that.
+
+A second, durable record lives at `<UserConfig.home>/ledger/` — by default `~/.warden/ledger/`,
+honouring `WARDEN_CONFIG_HOME`. Tests always pass a temporary home and never write into the
+operator's own. The home corpus is versioned append-only JSONL, one segment file per writer
+process (`host-pid-start`), so two JVMs never interleave lines in one file. Where a single
+file must be shared (the event-id index), the exclusive OS lock `JsonFile.underExclusiveLock`
+already implements is taken. `JsonFile.writeAtomically` is the model for that index and for
+the delivery-mark set, not for the append stream.
+
+The home corpus is a measurement, not an archive of the run. Absence of text does **not**
+make it safe to publish: identifiers, timestamps, model names, spend and fingerprints can
+still identify an operator, a project and a vendor account. A portable export additionally
+omits absolute paths, account names and private URLs; that is still not a public dataset.
+
+Every existing evidence producer writes through `EvidenceLedger.append`, including the
+workflow reservation and `markPrepared`, each completed vendor attempt (before another
+attempt is considered), gates, visual QA, role outcomes, workflow summaries and human
+decisions. `warden ledger` remains local to the project tree and takes no new arguments.
+
+Import of surviving history, copy detection, a `--global` reader and a second aggregator
+are not built in this slice. `warden ledger` keeps its present local scope and fields.
+
+### Identity and units of accounting
+
+Every event receives `event_id`, `schema_version` (currently 1), event time, `type` and a
+per-run `seq`. Project identity is not the path: it is the sorted git root-commit set plus
+the `project:` name, or a UUID when there is no git history, and either way it is recorded
+once under `.warden/runs/.project-identity` and the record wins from then on. That is what
+keeps one project to one id when git is missing from a process's PATH, when `rev-list`
+outruns its timeout, and when HEAD moves onto an orphan branch with different roots. A
+tree that was first seen without git keeps the id it was given, and a later successful
+probe writes its git-derived id beside it as `git_project_id` rather than starting a
+second identity nothing joins; a probe that could not run at all is marked `provisional`. Copies of a git repository keep the same project id; two projects whose
+operators chose the same `run_id` do not merge, because the run instance is a separate
+UUID stored in `run-instance.json`. Lineage for `--continue` is the parent run instance,
+and only when that file exists — unknown lineage stays unknown. Stage, role invocation,
+vendor attempt and candidate fingerprint are linked as separate identifiers when the
+producer has them.
+
+An actual vendor attempt is counted once (`accounting.kind = vendor_attempt`, with
+`vendor_attempt_count` for failovers). The planner is a call and enters calls and spend.
+A `task_run` / `task_dry_run` is a workflow summary and is not a new call. Role success,
+workflow outcome and human accept stay three fields under `outcomes` and three aggregates.
+
+### Allowlist projection
+
+The shared record is derived from the local one, never the reverse. Projection is an
+allowlist, including through nested structures. A field nobody allowed does not pass
+because it is new. Goal, prompt, vendor reply, finding text, arbitrary error strings,
+argv, environment, credentials, diffs and sources are excluded. A finding contributes
+its id, severity, status, stage and closure/reopen links, and no text. The workflow
+records that lifecycle under `finding_history` (and a role_run copies allowlisted
+findings from the artifact); both are projected field by field. References to
+raw material stay in the run's local `provenance.jsonl`.
+
+`role_contract` is still the reuse comparison and is not changed. A `measurement_context`
+snapshot is recorded alongside it: wall-clock and task time limits, turn limit when
+declared, effective grants, prompt-template and schema hashes, the Warden version, and
+requested / effective / reported model and effort, each labelled with its source. The
+label itself is part of the measurement (`source` on the labelled value, and on grants);
+it is not stripped as if it were source text. A missing value stays absent and never
+becomes zero. An unknown effective setting is never replaced by the requested one.
+
+### Write-then-deliver protocol
+
+One `EvidenceLedger.append` performs four steps. They are not a transaction.
+
+1. **Identity and local write.** The event is assigned its ids, appended to the run's
+   `evidence.jsonl`, and forced to disk.
+2. **Journal.** The already-projected body (allowlist applied, so the journal holds no
+   raw content either) is appended to `outbox.jsonl` beside the run's evidence, with the
+   event id and a content hash, and forced. The journal travels with the tree, so an
+   undelivered measurement is discoverable from the tree that produced it.
+3. **Shared write.** The projected line is appended to this writer's segment under
+   `<UserConfig.home>/ledger/segments/` and forced. If the segment already ends in an
+   unterminated fragment (a crash mid-line), that tail is isolated with a newline first
+   so the new record is not concatenated onto it. The durable acknowledgement is the
+   return of that force **and** an independent read of a complete JSON object with that
+   `event_id`: before both, nothing may report the measurement as delivered, and after
+   it the record survives deletion of the project tree.
+4. **Delivery mark, best effort.** `outbox-delivered.json` records the event id. A crash
+   before it leaves the event undelivered in the journal, never lost.
+
+The event-id index is an append-only log, `ledger/index.jsonl`, folded into the
+`ledger/index.json` snapshot when it grows past a megabyte. Delivering one measurement
+appends one line to it and one line to a segment, and costs nothing that scales with the
+corpus. The full reconciliation — snapshot, then log, then every line of every segment —
+is a recovery step, not a per-append one: it runs the first time a process touches a home,
+which is also the only moment a crash between a segment append and the index write could
+be hiding. While another process appends, the log grows, and the next delivery reads the
+tail it added rather than the whole store.
+
+Sequence allocation, the local evidence append, the journal and the delivery-mark set
+are serialised per run with the exclusive OS lock `JsonFile.underExclusiveLock` already
+implements (`evidence.lock` beside the run's evidence). Two processes must not assign
+the same `seq`, splice outbox lines, or lose a delivery mark by an unlocked
+read-modify-write.
+
+Recovery replays delivery, not execution. On the next write against that home, every
+journal row not marked delivered is re-appended. The corpus is deduplicated by
+`event_id`: the same id with the same content hash is a no-op; the same id with different
+content is recorded in `conflicts.jsonl` rather than silently dropping one line. No
+vendor call is ever repeated to recover the metrics of a call already paid for. A
+completed vendor attempt is journaled as its own `vendor_attempt` event before failover
+or the next dispatch is considered, so recovery has the cost, tokens and outcome
+without executing the call again.
+
+A copy of the corpus taken while a writer is live is either consistent by this protocol
+(every forced, acknowledged line is a complete JSON object) or explicitly incomplete
+(an isolated unterminated fragment is unreadable on its own line). There is no
+atomic snapshot of a live append stream.
+
+### When the corpus cannot be written
+
+A failure at step 3 leaves the local evidence and the journal intact and marks the run
+`pending` or `error` in `corpus_status.json`. That file answers one question — did what
+this run wrote reach the corpus — and both writers of it, an append after a confirmed
+delivery and a recovery, decide through `HomeCorpus.refreshStatusFromJournal`, because
+counting different things is how a recovery once overwrote a pending an append had earned.
+An absent `corpus_status.json` is not evidence of delivery: the journal is counted instead,
+so a run whose status write failed does not read as delivered.
+
+Whether the *tree* may be deleted is a different question with a different lifetime, and it
+is counted when it is answered rather than remembered: `tree_safe_to_delete` is true only
+when no run under `.warden/runs` has an undelivered journal row. A cached answer is wrong in
+both directions — a neighbouring run that fails a minute later leaves a stale yes, and one
+that is recovered afterwards leaves a stale no — and a tree deleted on a stale yes loses a
+measurement that no import in this slice could bring back. The CLI reports that state (`corpus_status`,
+and `tree_safe_to_delete: false`) on approve, `run`, `do` (including a planning-only
+`--draft-only` completion), a preflight failure, a standalone role, standalone gates
+and visual-qa; the decision or settlement itself still succeeds locally. New paid
+dispatch stops: `RoleRunner.DispatchGate.requireDispatch()` is the choke point crossed
+before anything is spent. It recovers undelivered rows, then exercises this writer's
+segment, the index lock, and index persistence (the same atomic replace delivery uses)
+— a writable `.writable` probe is not enough — and refuses with `ledger_unavailable`
+until journal and corpus reconcile. Settlement of a worker already running and the
+recording of a human decision are never blocked for analytics and are never
+re-dispatched. Pending means the tree is not yet safe to delete. After recovery,
+completeness is restored by reconciling journal against corpus, not by a timer. Calls
+made with `--prepare off`, planning-only runs, refusals before dispatch and a late
+approve take this same write path.
 
 ## Roles and models
 

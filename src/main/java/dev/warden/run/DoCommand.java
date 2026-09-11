@@ -12,6 +12,7 @@ import dev.warden.approval.HumanDecision;
 import dev.warden.execution.Isolation;
 import dev.warden.execution.orca.OrcaIsolation;
 import dev.warden.git.GitWorktreeIsolation;
+import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
 
 import java.nio.charset.StandardCharsets;
@@ -329,9 +330,9 @@ public final class DoCommand {
                     reservation.put("budget_plan", preparationPlan.toMap(
                             preparationCap, user.policy().repairReserve()));
                 }
-                new dev.warden.ledger.EvidenceLedger(root, runId)
+                new EvidenceLedger(root, runId, user.home())
                         .reserveWorkflowRun(taskId, reservation);
-            } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+            } catch (EvidenceLedger.RunExistsException duplicate) {
                 return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
             }
             Preparation.Outcome prepared;
@@ -343,6 +344,7 @@ public final class DoCommand {
                         prepared.message() == null ? prepared.code() : prepared.message()).report();
                 report.put("prepare", options.prepare());
                 report.put("run_id", runId);
+                attachCorpusVisibility(report, root, runId, user.home());
                 return new Outcome(false, prepared.code(), requested, root, taskId, report);
             }
             if (options.dryRun() && prepared.written() == null && !contractExists) {
@@ -359,13 +361,17 @@ public final class DoCommand {
                 report.put("scope", scope);
                 report.put("risk", risk);
                 report.put("lands", false);
+                attachCorpusVisibility(report, root, runId, user.home());
                 return new Outcome(true, "dry_run", requested, root, taskId, report);
             }
             if (prepared.written() == null && contractExists) {
                 drafted = new TaskDraft.Written(taskFile, taskId, true);
             } else if (prepared.written() == null) {
-                return fail("planner_draft_invalid", requested, root, taskId,
-                        "planner produced no contract");
+                Map<String, Object> report = fail("planner_draft_invalid", requested, root, taskId,
+                        "planner produced no contract").report();
+                report.put("run_id", runId);
+                attachCorpusVisibility(report, root, runId, user.home());
+                return new Outcome(false, "planner_draft_invalid", requested, root, taskId, report);
             } else {
                 drafted = prepared.written();
             }
@@ -374,7 +380,7 @@ public final class DoCommand {
             // So a later `warden run` or the Conductor inner process can join this reservation
             // instead of refusing it as a duplicate. The planner wrote evidence here; the loop
             // has not started yet.
-            new dev.warden.ledger.EvidenceLedger(root, runId)
+            new EvidenceLedger(root, runId, user.home())
                     .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced());
         } else if ("auto".equals(options.prepare()) && contractExists) {
             // A ready contract is not rewritten, but it is still this invocation's contract.
@@ -438,6 +444,9 @@ public final class DoCommand {
                 report.put("budget_plan", preparationPlan.toMap(
                         preparationCap, user.policy().repairReserve()));
             }
+            if (dispatchPlanner) {
+                attachCorpusVisibility(report, root, runId, user.home());
+            }
             progress.blank();
             progress.line("draft " + drafted.file());
             progress.line("      read it, write the browser scenarios this task actually "
@@ -457,8 +466,9 @@ public final class DoCommand {
             // `warden run` still has to record prepare=auto; without this marker it joins
             // nothing and writes Preparation.NONE's off.
             try {
-                preparation = Preparation.recordSkipped(root, runId, taskId, options.prepare());
-            } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+                preparation = Preparation.recordSkipped(root, runId, taskId, options.prepare(),
+                        user.home());
+            } catch (EvidenceLedger.RunExistsException duplicate) {
                 return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
             }
         }
@@ -477,7 +487,7 @@ public final class DoCommand {
                     .withOrcaGate(orcaGate && !options.dryRun())
                     .withPreparation(preparation)
                     .run(loaded, user, runId, options.dryRun());
-        } catch (dev.warden.ledger.EvidenceLedger.RunExistsException duplicate) {
+        } catch (EvidenceLedger.RunExistsException duplicate) {
             return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
         }
 
@@ -514,6 +524,11 @@ public final class DoCommand {
         report.put("decision_state", loop.summaryReport().get("decision_state"));
         report.put("decision_options", loop.summaryReport().get("decision_options"));
         report.put("approve_with", loop.summaryReport().get("approve_with"));
+        for (String key : List.of("corpus_status", "corpus_undelivered", "corpus_reason",
+                "tree_safe_to_delete")) {
+            Object value = loop.summaryReport().get(key);
+            if (value != null) report.put(key, value);
+        }
         report.put("lands", false);
         return new Outcome(loop.ok(), loop.reason(),
                 requested, root, taskId, report);
@@ -730,6 +745,21 @@ public final class DoCommand {
         if (!committed.ok()) {
             throw new java.io.IOException("git commit failed: " + committed.stderr().strip()
                     + " (set user.name and user.email, or run git init yourself)");
+        }
+    }
+
+    /**
+     * Planning-only completion still writes through the shared protocol. The local draft
+     * can be ok while delivery is pending or error; the CLI report must say so.
+     */
+    private static void attachCorpusVisibility(Map<String, Object> report, Path root, String runId,
+                                               Path home) {
+        if (report == null || root == null || runId == null) return;
+        try {
+            new EvidenceLedger(root, runId, home).recordCorpusVisibility(report);
+        } catch (Exception ignored) {
+            report.putIfAbsent("corpus_status", "error");
+            report.put("tree_safe_to_delete", false);
         }
     }
 

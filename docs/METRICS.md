@@ -153,5 +153,38 @@ from the role with eyes.
 - **Unpriced cost.** See above. `unknown_count` is the answer, not an estimate.
 - **Time a person spent thinking.** `wait_millis` measures how long a decision sat pending,
   which is not the same thing and is not offered as if it were.
-- **Anything across projects.** The ledger reads one project's `.warden/runs`. There is no
-  central collector, nothing is uploaded, and no run leaves the machine it ran on.
+- **Anything across projects.** `warden ledger` still reads one project's `.warden/runs`.
+  There is no `--global` flag in this slice and no second aggregator. A durable home
+  corpus is written at `<UserConfig.home>/ledger/` so a confirmed measurement survives
+  deletion of the project tree; it is not what `warden ledger` prints.
+
+## What the home corpus records, and what stays unknown
+
+The home corpus is the allowlisted projection of the same events, not a second opinion
+about them. It records opaque ids, hashes, requested/effective/reported model and effort
+with their sources, role/runner, cost, tokens, time, stop reasons, verdicts, finding
+lifecycle (id, severity, status, stage, closure and reopen links), task kind/risk, the
+role contract hashes, and a `measurement_context` snapshot of limits, grants and versions.
+Each requested, effective and reported value keeps the `source` label that named it
+(profile, launch_receipt, vendor, unknown); an explicit unknown source is kept, not
+dropped.
+
+It does not record goal, prompt, vendor reply, finding text, arbitrary error strings,
+argv, environment, credentials, diffs or source text. A field nobody allowlisted does not
+pass because it is new. A missing numeric value stays absent; it is never stored as
+zero, and an unknown effective setting is never filled in from the requested one.
+
+Role success, workflow outcome and human accept are three fields. A vendor attempt is
+counted once, on the `vendor_attempt` event journaled as soon as that call returns;
+the enclosing `role_run` is a summary and is not a new call. A workflow summary carried
+through a resume is not a new call; the planner is a call. A reservation and
+`markPrepared` are `run_reserved` / `run_prepared` measurements (phase `reserve` /
+`prepared`) and are not calls. Unknown lineage is left unknown.
+
+Finding identity in the corpus comes from `findings` on the role event and from
+`finding_history` on the workflow summary: id, severity, status, stage, closure and
+reopen links. Finding text does not enter.
+
+The corpus is not safe to publish because it holds no text. Identifiers and spend still
+describe an operator and a vendor account. Import of surviving history and a reader that
+works outside a repository are not built here.

@@ -413,6 +413,10 @@ public final class PlannerTest implements Suite {
                         "HEAD", true, false, false, false, false, true, null, "always"),
                 user);
         check.eq("--prepare always --draft-only runs the planner", "drafted", outcome.code());
+        check.eq("and reports corpus delivery on the planning-only completion", "ok",
+                outcome.report().get("corpus_status"));
+        check.eq("and says the tree is safe to delete after a confirmed write", true,
+                outcome.report().get("tree_safe_to_delete"));
         String printed = String.join("\n", narration);
         check.contains("the next-step line names the run id that was reserved",
                 printed, "warden run hello --run-id do-always");

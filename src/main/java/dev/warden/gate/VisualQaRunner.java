@@ -31,12 +31,22 @@ public final class VisualQaRunner {
 
     private final ProcessRunner processes;
     private final Path script;
+    private Path home;
 
     public VisualQaRunner(ProcessRunner processes) { this(processes, locateScript()); }
 
     public VisualQaRunner(ProcessRunner processes, Path script) {
         this.processes = processes;
         this.script = script;
+    }
+
+    /**
+     * The operator home this harness writes measurements into. Must be passed by the caller;
+     * this class never reads the environment.
+     */
+    public VisualQaRunner withHome(Path home) {
+        this.home = home;
+        return this;
     }
 
     /**
@@ -85,7 +95,7 @@ public final class VisualQaRunner {
     }
 
     public Outcome run(ConfigLoader.Loaded loaded, String runId) throws IOException, InterruptedException {
-        EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
+        EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId, home);
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("schema_version", 1L);
         report.put("task_id", loaded.resolved().id());
@@ -215,6 +225,7 @@ public final class VisualQaRunner {
         report.put("finished_at", Instant.now().toString());
         Path path = ledger.writeReport("visual-qa", report);
         ledger.append("visual_qa", Map.of("ok", ok, "code", code, "report", path.toString()));
+        ledger.recordCorpusVisibility(report);
         return new Outcome(ok, code, path, report);
     }
 
