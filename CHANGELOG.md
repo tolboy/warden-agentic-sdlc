@@ -11,6 +11,18 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- A durable home measurement corpus at `<UserConfig.home>/ledger/`. Every existing evidence
+  producer writes through one `EvidenceLedger.append`: local evidence first, then an
+  allowlisted journal, then this writer's segment under the home, then a best-effort
+  delivery mark. Recovery replays delivery, not execution. New paid dispatch refuses
+  with `ledger_unavailable` while the corpus cannot be written; settlement of a running
+  worker and a human decision are never blocked for analytics; the CLI reports
+  `corpus_status` and whether the tree is safe to delete. The projection is an
+  allowlist and carries no goal, prompt, vendor reply, finding text, argv or credentials.
+  Project identity is not the path. `warden ledger` is unchanged: local scope, same
+  fields, no new arguments. Import of surviving history and a `--global` reader are not
+  built here. The corpus is not safe to publish merely because it holds no text.
+
 - A `planner` role. `warden do --prepare off|auto|always` (default `off`) can dispatch a
   read-only planner to turn an operator's goal into a contract Warden itself has validated,
   before the first paying implementer call. The planner drafts; Warden validates: acceptance

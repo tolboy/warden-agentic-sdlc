@@ -388,10 +388,13 @@ public final class StatusCommandTest implements Suite {
             throws Exception {
         String bin = wardenBin().toString();
         String body;
+        Path home = isolatedHome(cwd);
         if (windows()) {
-            body = "@echo off\r\nset \"PATH=" + bin + ";%PATH%\"\r\n" + approve + "\r\n";
+            body = "@echo off\r\nset \"WARDEN_CONFIG_HOME=" + home + "\"\r\nset \"PATH="
+                    + bin + ";%PATH%\"\r\n" + approve + "\r\n";
         } else {
-            body = "PATH=\"" + bin + ":$PATH\"\n" + approve + "\n";
+            body = "export WARDEN_CONFIG_HOME=\"" + home + "\"\nexport PATH=\"" + bin
+                    + ":$PATH\"\n" + approve + "\n";
         }
         Files.writeString(script, body);
         List<String> shell = windows()
@@ -400,10 +403,19 @@ public final class StatusCommandTest implements Suite {
         return new ProcessRunner().run(shell, cwd, Duration.ofSeconds(30));
     }
 
+    private static Path isolatedHome(Path cwd) throws Exception {
+        Path home = cwd.resolve(".warden-test-home");
+        Files.createDirectories(home);
+        return home.toAbsolutePath().normalize();
+    }
+
     private static ProcessRunner.Result pasteIntoPwsh(Path cwd, Path script, String approve)
             throws Exception {
         String bin = wardenBin().toString().replace("'", "''");
-        Files.writeString(script, "$env:PATH = '" + bin + ";' + $env:PATH\n" + approve + "\n");
+        Path home = isolatedHome(cwd);
+        Files.writeString(script, "$env:WARDEN_CONFIG_HOME = '"
+                + home.toString().replace("'", "''") + "'\n$env:PATH = '"
+                + bin + ";' + $env:PATH\n" + approve + "\n");
         return new ProcessRunner().run(
                 List.of("pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         script.toAbsolutePath().toString()),

@@ -152,11 +152,14 @@ public final class Main {
         if (args.length < 2) throw new IllegalArgumentException("gates requires a task id or YAML path");
         String runId = option(args, "--run-id", loadedDefaultRunId());
         ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
-        GateRunner.Outcome outcome = new GateRunner(new ProcessRunner()).run(loaded, runId);
+        UserConfig user = UserConfig.load();
+        GateRunner.Outcome outcome = new GateRunner(new ProcessRunner()).withHome(user.home())
+                .run(loaded, runId);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
         result.put("code", outcome.code());
         result.put("report", outcome.report().toString());
+        result.putAll(new EvidenceLedger(loaded.root(), runId, user.home()).corpusVisibility());
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
     }
@@ -165,11 +168,14 @@ public final class Main {
         if (args.length < 2) throw new IllegalArgumentException("visual-qa requires a task id or YAML path");
         String runId = option(args, "--run-id", loadedDefaultRunId());
         ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
-        VisualQaRunner.Outcome outcome = new VisualQaRunner(new ProcessRunner()).run(loaded, runId);
+        UserConfig user = UserConfig.load();
+        VisualQaRunner.Outcome outcome = new VisualQaRunner(new ProcessRunner()).withHome(user.home())
+                .run(loaded, runId);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
         result.put("code", outcome.code());
         result.put("report", outcome.report().toString());
+        result.putAll(new EvidenceLedger(loaded.root(), runId, user.home()).corpusVisibility());
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
     }
@@ -311,9 +317,27 @@ public final class Main {
 
         ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), taskSelector);
         UserConfig user = UserConfig.load();
-        RoleRunner.Outcome outcome = new RoleRunner(new ProcessRunner()).run(
-                loaded, user, roleName, runId, implementerVendor,
-                contextPath == null ? null : Path.of(contextPath), dryRun);
+        RoleRunner.Outcome outcome;
+        try {
+            outcome = new RoleRunner(new ProcessRunner()).run(
+                    loaded, user, roleName, runId, implementerVendor,
+                    contextPath == null ? null : Path.of(contextPath), dryRun);
+        } catch (dev.warden.ledger.HomeCorpus.UnavailableException unavailable) {
+            // The loop names this refusal; a single role used to let it fall through to
+            // main's catch-all and reach the operator as `warden_error` on stderr. Nothing
+            // was spent either way - the gate is crossed before dispatch - but a refusal
+            // whose name changes with the command it was met on is not a refusal anyone can
+            // handle in a script.
+            Map<String, Object> refused = new LinkedHashMap<>();
+            refused.put("ok", false);
+            refused.put("code", "ledger_unavailable");
+            refused.put("role", roleName);
+            refused.put("run_id", runId);
+            refused.put("message", unavailable.getMessage());
+            refused.put("next", "restore write access to the home corpus, then run this again");
+            System.out.println(Json.write(refused));
+            return 1;
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
@@ -325,6 +349,7 @@ public final class Main {
         result.put("run_id", runId);
         if (outcome.report() != null) result.put("report", outcome.report().toString());
         if (outcome.details() != null) result.put("details", outcome.details());
+        result.putAll(new EvidenceLedger(loaded.root(), runId, user.home()).corpusVisibility());
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
     }
@@ -389,6 +414,11 @@ public final class Main {
         result.put("decision_options", outcome.summaryReport().get("decision_options"));
         result.put("decision_updated_at", outcome.summaryReport().get("decision_updated_at"));
         result.put("failover_pending", outcome.summaryReport().get("failover_pending"));
+        for (String key : List.of("corpus_status", "corpus_undelivered", "corpus_reason",
+                "tree_safe_to_delete")) {
+            Object value = outcome.summaryReport().get(key);
+            if (value != null) result.put(key, value);
+        }
         result.put("report_path", writeRunReport(Path.of("."), runId));
         System.out.println(Json.write(result));
         return outcome.ok() ? 0 : 1;
@@ -491,7 +521,8 @@ public final class Main {
     private static int recordPreflightFailure(String taskSelector, String runId, Exception failure)
             throws Exception {
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
-        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        UserConfig user = UserConfig.load();
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
         ledger.reserveWorkflowRun(taskSelector);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("run_id", runId);
@@ -516,6 +547,8 @@ public final class Main {
                 "run_id", runId, "kind", decision.kind().jsonValue(),
                 "path", summary.get("decision_path")));
         ledger.append("task_run", summary);
+        ledger.recordCorpusVisibility(summary);
+        ledger.writeReport("task-run", summary);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", false);
@@ -527,6 +560,7 @@ public final class Main {
         result.put("decision_state", summary.get("decision_state"));
         result.put("decision_options", summary.get("decision_options"));
         result.put("decision_updated_at", summary.get("decision_updated_at"));
+        result.putAll(ledger.corpusVisibility());
         result.put("message", String.valueOf(failure.getMessage()));
         System.out.println(Json.write(result));
         return 1;
@@ -806,7 +840,9 @@ public final class Main {
             recorded.put("wait_millis", waitMillis);
             recorded.put("updated_at", resolved.updatedAt().toString());
             recorded.put("lands", false);
-            new dev.warden.ledger.EvidenceLedger(root, runId).append("human_decision", recorded);
+            UserConfig user = UserConfig.load();
+            EvidenceLedger decisionLedger = new EvidenceLedger(root, runId, user.home());
+            decisionLedger.append("human_decision", recorded);
             // The card stops asking. `accept` and `abort` close the run; every other decision
             // expects another one, so it goes back to the running column rather than to a
             // column that reads as done to whoever glances at the board next.
@@ -823,6 +859,7 @@ public final class Main {
             result.put("decision", resolved.toMap());
             if (gateReport != null) result.put("orca_gate", gateReport);
             result.put("summary_projection_updated", summaryProjectionUpdated);
+            result.putAll(decisionLedger.corpusVisibility());
             result.put("lands", false);
             result.put("next", "accept".equals(choice)
                     ? "inspect the exact diff and land it manually if desired"

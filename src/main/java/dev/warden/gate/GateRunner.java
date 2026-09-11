@@ -19,6 +19,7 @@ import java.util.Set;
 /** Deterministic preflight and acceptance gates. No model participates in routing decisions. */
 public final class GateRunner {
     private final ProcessRunner processes;
+    private Path home;
 
     private record Kind(String phase, String reportName, String eventType) {}
 
@@ -26,6 +27,15 @@ public final class GateRunner {
     private static final Kind BASELINE = new Kind("baseline", "baseline-gate", "baseline_gate");
 
     public GateRunner(ProcessRunner processes) { this.processes = processes; }
+
+    /**
+     * The operator home this gate writes measurements into. Must be passed by the caller;
+     * this class never reads the environment.
+     */
+    public GateRunner withHome(Path home) {
+        this.home = home;
+        return this;
+    }
 
     public record Outcome(boolean ok, String code, Path report, Map<String, Object> data) {}
 
@@ -60,7 +70,7 @@ public final class GateRunner {
                                 Map<String, String> pinnedConfig, String pinnedMergeBase,
                                 List<String> commandsToRun, Kind kind)
             throws IOException, InterruptedException {
-        EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId);
+        EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId, home);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);
         Map<String, String> config = pinnedConfig != null ? pinnedConfig
@@ -188,6 +198,7 @@ public final class GateRunner {
         Path path = ledger.writeReport(kind.reportName(), report);
         ledger.append(kind.eventType(),
                 Map.of("ok", ok, "code", code, "report", path.toString()));
+        ledger.recordCorpusVisibility(report);
         return new Outcome(ok, code, path, report);
     }
 

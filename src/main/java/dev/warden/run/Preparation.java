@@ -86,9 +86,14 @@ public final class Preparation {
      */
     public static TaskLoop.Preparation recordSkipped(Path root, String runId, String taskId,
                                                      String mode) throws IOException {
+        return recordSkipped(root, runId, taskId, mode, null);
+    }
+
+    public static TaskLoop.Preparation recordSkipped(Path root, String runId, String taskId,
+                                                     String mode, Path home) throws IOException {
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("prepare", mode);
-        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, home);
         ledger.reserveWorkflowRun(taskId, extra);
         ledger.markPrepared(0, 0, 0);
         return new TaskLoop.Preparation(mode, true, 0, 0, 0, false);
@@ -122,6 +127,12 @@ public final class Preparation {
                         .run(loaded, user, "planner", runId, null, context, dryRun);
             } catch (Exhausted exhausted) {
                 return fail("budget_exhausted", exhausted.getMessage(),
+                        null, runs, cost, unpriced);
+            } catch (dev.warden.ledger.HomeCorpus.UnavailableException unavailable) {
+                // Same refusal the loop reports, under the same name. Preparation crosses
+                // the dispatch gate like any other paid call, and nothing is spent when it
+                // refuses; what was missing was the name on this surface.
+                return fail("ledger_unavailable", unavailable.getMessage(),
                         null, runs, cost, unpriced);
             } catch (IllegalStateException unconfigured) {
                 return new Outcome(false, "role_unresolved", String.valueOf(unconfigured.getMessage()),

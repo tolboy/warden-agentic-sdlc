@@ -3021,6 +3021,57 @@ public final class TaskLoopTest implements Suite {
         check.contains("and the file, from one call", Files.readString(teed), "[1/3] implement");
     }
 
+
+    /**
+     * Give a fixture a git repository with its files in the base commit.
+     *
+     * `git init` and the two `git config` calls produce the same bytes every time, so they
+     * run once per suite and the result is copied. That is three processes saved per fixture
+     * and this suite builds sixty-nine of them - worth having, though it is a small share of
+     * what this suite spends: the measured cost is the worktree fingerprint, which runs four
+     * git commands every time it is taken.
+     */
+    private void seedRepository(Path project) throws Exception {
+        copyTree(gitTemplate(project.getParent()), project.resolve(".git"));
+        ProcessRunner runner = new ProcessRunner();
+        for (List<String> command : List.of(
+                List.of("git", "add", "-A"),
+                List.of("git", "commit", "-qm", "base"))) {
+            runner.run(command, project, Duration.ofSeconds(60));
+        }
+    }
+
+    /** An empty repository on `main` with an identity, built once and copied after that. */
+    private Path gitTemplate(Path sandbox) throws Exception {
+        if (gitTemplate != null && Files.isDirectory(gitTemplate)) return gitTemplate;
+        Path template = sandbox.resolve(".git-template");
+        Files.createDirectories(template);
+        ProcessRunner runner = new ProcessRunner();
+        for (List<String> command : List.of(
+                List.of("git", "init", "-q", "-b", "main", "."),
+                List.of("git", "config", "user.email", "test@example.invalid"),
+                List.of("git", "config", "user.name", "test"))) {
+            runner.run(command, template, Duration.ofSeconds(60));
+        }
+        gitTemplate = template.resolve(".git");
+        return gitTemplate;
+    }
+
+    private Path gitTemplate;
+
+    private static void copyTree(Path from, Path to) throws IOException {
+        try (var walk = Files.walk(from)) {
+            for (Path source : walk.toList()) {
+                Path target = to.resolve(from.relativize(source).toString());
+                if (Files.isDirectory(source)) Files.createDirectories(target);
+                else {
+                    Files.createDirectories(target.getParent());
+                    Files.copy(source, target);
+                }
+            }
+        }
+    }
+
     private Path newProject(Path sandbox, String name) throws Exception {
         return newProject(sandbox, name, "medium", 20);
     }
@@ -3085,15 +3136,7 @@ public final class TaskLoopTest implements Suite {
                 max_fix_attempts: 2
                 """.formatted(risk, visualBlock, maxRoleRuns, maxCostUsd));
         Files.writeString(project.resolve("README.md"), "seed\n");
-        ProcessRunner runner = new ProcessRunner();
-        for (List<String> command : List.of(
-                List.of("git", "init", "-q", "-b", "main", "."),
-                List.of("git", "config", "user.email", "test@example.invalid"),
-                List.of("git", "config", "user.name", "test"),
-                List.of("git", "add", "-A"),
-                List.of("git", "commit", "-qm", "base"))) {
-            runner.run(command, project, Duration.ofSeconds(60));
-        }
+        seedRepository(project);
         return project;
     }
 
@@ -3134,15 +3177,7 @@ public final class TaskLoopTest implements Suite {
                 """);
         Files.writeString(project.resolve("src/health.txt"), green ? "green\n" : "red\n");
         Files.writeString(project.resolve("README.md"), "seed\n");
-        ProcessRunner runner = new ProcessRunner();
-        for (List<String> command : List.of(
-                List.of("git", "init", "-q", "-b", "main", "."),
-                List.of("git", "config", "user.email", "test@example.invalid"),
-                List.of("git", "config", "user.name", "test"),
-                List.of("git", "add", "-A"),
-                List.of("git", "commit", "-qm", "base"))) {
-            runner.run(command, project, Duration.ofSeconds(60));
-        }
+        seedRepository(project);
         return project;
     }
 

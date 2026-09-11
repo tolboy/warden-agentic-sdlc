@@ -10,6 +10,9 @@ import dev.warden.execution.RoleExecutor;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.Findings;
+import dev.warden.ledger.HomeCorpus;
+import dev.warden.ledger.MeasurementContext;
 import dev.warden.process.ProcessRunner;
 
 import java.nio.charset.StandardCharsets;
@@ -266,8 +269,9 @@ public final class RoleRunner {
 
         Path root = loaded.root();
         GitRepository git = new GitRepository(root, processes);
-        EvidenceLedger ledger = new EvidenceLedger(root, runId);
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
         TaskSpec.ResolvedTask task = loaded.resolved();
+        String roleInvocationId = java.util.UUID.randomUUID().toString();
         String mergeBase = pinnedDiffBase != null ? pinnedDiffBase : git.mergeBase(task.baseRef());
         String serialKey = role + "\0" + runId;
         if (!serialKey.equals(evidenceSerialKey)) {
@@ -290,10 +294,11 @@ public final class RoleRunner {
                 resolution = new RoleResolver().resolve(role, user.policy(), user.profiles(),
                         implementerVendor, rotation, this::available, exhausted);
             } catch (RoleResolver.Unresolvable failure) {
-                return unresolved(ledger, role, user, attempts, failure, spent);
+                return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId);
             } catch (RuntimeException failure) {
                 return unresolved(ledger, role, user, attempts,
-                        new RoleResolver.Unresolvable(String.valueOf(failure.getMessage()), Map.of()), spent);
+                        new RoleResolver.Unresolvable(String.valueOf(failure.getMessage()), Map.of()), spent,
+                        roleInvocationId);
             }
 
             Profile profile = resolution.selected();
@@ -308,6 +313,14 @@ public final class RoleRunner {
                         "message", "profile '" + profile.name() + "' writes to the workspace, but the task "
                                 + "grants authority.workspace_write: false",
                         "resolution", "either raise the task's authority deliberately, or use a read-only role");
+                Map<String, Object> denied = new LinkedHashMap<>();
+                denied.put("role", role);
+                denied.put("profile", profile.name());
+                denied.put("vendor", profile.vendor());
+                denied.put("ok", false);
+                denied.put("code", "authority_denied");
+                denied.put("role_invocation_id", roleInvocationId);
+                ledger.append("authority_denied", denied);
                 return new Outcome(false, "authority_denied", role, profile.name(), profile.vendor(),
                         resolution.rejected(), null, details);
             }
@@ -358,6 +371,8 @@ public final class RoleRunner {
             // before believing its verdict. See RoleContract.
             report.put("role_contract", RoleContract.of(stageName == null ? role : stageName,
                     role, spec, profile, user));
+            report.put("measurement_context", MeasurementContext.snapshot(profile, task, user));
+            report.put("role_invocation_id", roleInvocationId);
             report.put("avoided_vendor", implementerVendor);
             if (backfilled) report.put("prompt_backfilled", List.of("visual_scenarios"));
             report.put("rejected_profiles", resolution.rejected());
@@ -411,6 +426,10 @@ public final class RoleRunner {
             }
 
             // Budget is checked here — after the routing decision, before anything is spent.
+            // The home corpus is the other choke point: a measurement that cannot be saved
+            // refuses a new paid dispatch. Settlement of a worker already running is past
+            // this line and is never blocked for analytics.
+            if (user.home() != null) HomeCorpus.requireDispatch(user.home(), root);
             gate.requireDispatch();
             report.put("view_state", "running");
             report.put("controller_pid", ProcessHandle.current().pid());
@@ -439,6 +458,13 @@ public final class RoleRunner {
             report.put("code", result.code());
             report.put("duration_millis", result.duration().toMillis());
             report.putAll(result.evidence());
+            report.put("measurement_context", MeasurementContext.withReported(
+                    asMap(report.get("measurement_context")), result));
+            try {
+                report.put("candidate_fingerprint", git.sourceFingerprint(mergeBase));
+            } catch (Exception ignored) {
+                // A fingerprint that cannot be taken stays unknown rather than becoming a guess.
+            }
             report.put("view_state", result.ok() ? "completed"
                     : "role_human_input_required".equals(result.code()) ? "needs_you" : "failed");
             dev.warden.dashboard.RoleView.update(ledger.runDirectory(), evidenceName, report);
@@ -446,15 +472,28 @@ public final class RoleRunner {
                 report.put("inherited_unfinished_work", true);
             }
 
-            attempts.add(attemptRecord(attempt, profile, result, inheritsUnfinishedWork));
+            if (result.artifact() != null) {
+                List<Findings.Finding> found = Findings.of(result.artifact());
+                if (!found.isEmpty()) {
+                    report.put("findings", found.stream().map(Findings.Finding::toMap).toList());
+                }
+            }
+
+            Map<String, Object> attemptRow = attemptRecord(attempt, profile, result, inheritsUnfinishedWork);
+            attempts.add(attemptRow);
             if (report.get("cost_usd") instanceof Number number) spent += number.doubleValue();
+            journalAttempt(ledger, role, roleInvocationId, report, attemptRow);
 
             boolean quota = "role_quota_exhausted".equals(result.code());
             if (quota) {
                 exhausted.add(profile.name());
-                ledger.append("role_quota_exhausted", Map.of(
-                        "role", role, "profile", profile.name(), "vendor", profile.vendor(),
-                        "quota", result.evidence().getOrDefault("quota", Map.of())));
+                Map<String, Object> quotaEvent = new LinkedHashMap<>();
+                quotaEvent.put("role", role);
+                quotaEvent.put("profile", profile.name());
+                quotaEvent.put("vendor", profile.vendor());
+                quotaEvent.put("role_invocation_id", roleInvocationId);
+                quotaEvent.put("quota", result.evidence().getOrDefault("quota", Map.of()));
+                ledger.append("role_quota_exhausted", quotaEvent);
                 Profile candidate = failoverCandidate(role, user, implementerVendor, rotation);
                 if (candidate != null) {
                     String mode = user.policy().failoverMode();
@@ -479,8 +518,10 @@ public final class RoleRunner {
                         }
                         // Switching vendors mid-role changes who wrote the work, so it is an
                         // event in its own right rather than a line in a report nobody reads.
-                        ledger.append("role_failover", failoverEvent(role, profile, candidate,
-                                result, preAuthorized ? "human_switch_decision" : "policy_auto"));
+                        Map<String, Object> failover = failoverEvent(role, profile, candidate,
+                                result, preAuthorized ? "human_switch_decision" : "policy_auto");
+                        failover.put("role_invocation_id", roleInvocationId);
+                        ledger.append("role_failover", failover);
                         continue;
                     }
                     if ("confirm".equals(mode)) {
@@ -595,7 +636,7 @@ public final class RoleRunner {
      */
     private Outcome unresolved(EvidenceLedger ledger, String role, UserConfig user,
                                List<Map<String, Object>> attempts, RoleResolver.Unresolvable failure,
-                               double spent) throws Exception {
+                               double spent, String roleInvocationId) throws Exception {
         boolean quota = !attempts.isEmpty()
                 || failure.rejected().containsValue("quota_exhausted_this_run");
         String code = quota ? "role_quota_exhausted" : "role_unresolved";
@@ -613,14 +654,35 @@ public final class RoleRunner {
                     + "subscription; add a profile from another vendor, or wait for the quota "
                     + "window named in the vendor message and re-run");
         }
-        ledger.append(code, Map.of("role", role, "message", String.valueOf(failure.getMessage())));
+        Map<String, Object> unresolved = new LinkedHashMap<>();
+        unresolved.put("role", role);
+        unresolved.put("role_invocation_id", roleInvocationId);
+        unresolved.put("message", String.valueOf(failure.getMessage()));
+        ledger.append(code, unresolved);
         return new Outcome(false, code, role, null, null, failure.rejected(), null, details);
+    }
+
+    private void journalAttempt(EvidenceLedger ledger, String role, String roleInvocationId,
+                                Map<String, Object> report, Map<String, Object> attempt)
+            throws Exception {
+        Map<String, Object> event = new LinkedHashMap<>(attempt);
+        event.put("role", role);
+        event.put("stage", report.get("stage"));
+        event.put("task_id", report.get("task_id"));
+        event.put("workflow_run_id", report.get("workflow_run_id"));
+        event.put("role_invocation_id", roleInvocationId);
+        event.put("vendor_attempt", attempt.get("attempt"));
+        event.put("measurement_context", report.get("measurement_context"));
+        event.put("role_contract", report.get("role_contract"));
+        if (report.get("findings") != null) event.put("findings", report.get("findings"));
+        ledger.append("vendor_attempt", event);
     }
 
     private Map<String, Object> attemptRecord(int attempt, Profile profile, RoleExecutor.Result result,
                                               boolean inheritsUnfinishedWork) {
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("attempt", (long) attempt);
+        entry.put("vendor_attempt_id", java.util.UUID.randomUUID().toString());
         entry.put("profile", profile.name());
         entry.put("vendor", profile.vendor());
         entry.put("runner", profile.runner());
@@ -837,6 +899,11 @@ public final class RoleRunner {
                     .append(entry.getValue()).append('\n');
         }
         return builder.toString().stripTrailing();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Object value) {
+        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : new LinkedHashMap<>();
     }
 
     private static List<String> commandPreview(Profile profile) {
