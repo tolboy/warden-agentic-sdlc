@@ -317,9 +317,27 @@ public final class Main {
 
         ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), taskSelector);
         UserConfig user = UserConfig.load();
-        RoleRunner.Outcome outcome = new RoleRunner(new ProcessRunner()).run(
-                loaded, user, roleName, runId, implementerVendor,
-                contextPath == null ? null : Path.of(contextPath), dryRun);
+        RoleRunner.Outcome outcome;
+        try {
+            outcome = new RoleRunner(new ProcessRunner()).run(
+                    loaded, user, roleName, runId, implementerVendor,
+                    contextPath == null ? null : Path.of(contextPath), dryRun);
+        } catch (dev.warden.ledger.HomeCorpus.UnavailableException unavailable) {
+            // The loop names this refusal; a single role used to let it fall through to
+            // main's catch-all and reach the operator as `warden_error` on stderr. Nothing
+            // was spent either way - the gate is crossed before dispatch - but a refusal
+            // whose name changes with the command it was met on is not a refusal anyone can
+            // handle in a script.
+            Map<String, Object> refused = new LinkedHashMap<>();
+            refused.put("ok", false);
+            refused.put("code", "ledger_unavailable");
+            refused.put("role", roleName);
+            refused.put("run_id", runId);
+            refused.put("message", unavailable.getMessage());
+            refused.put("next", "restore write access to the home corpus, then run this again");
+            System.out.println(Json.write(refused));
+            return 1;
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());

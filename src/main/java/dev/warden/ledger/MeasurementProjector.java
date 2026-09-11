@@ -277,8 +277,11 @@ public final class MeasurementProjector {
                 accounting.put("vendor_attempt_count", 1L);
             }
             case "role_run" -> {
-                // Per-attempt events carry the call count. This record is the role summary.
-                accounting.put("kind", "vendor_attempt");
+                // Per-attempt events carry the call count; this record is the summary of the
+                // role that made them. The kind is the unit, so an aggregator that groups by
+                // it counts calls once without having to remember that one kind sometimes
+                // means a call and sometimes does not.
+                accounting.put("kind", "role_summary");
                 accounting.put("counts_as_new_calls", false);
                 int attempts = 1;
                 if (original.get("vendor_attempts") instanceof List<?> list && !list.isEmpty()) {

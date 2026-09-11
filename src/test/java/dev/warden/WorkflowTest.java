@@ -29,6 +29,7 @@ public final class WorkflowTest implements Suite {
 
     @Override public void run(Check check) {
         repairPreviewChecks(check);
+        reuseAfterAFailureThatWasNotAboutTheWork(check);
         Policy silent = Policy.parse(ROLES, "policy.yaml");
         check.that("a policy that declares no workflow is not treated as declaring one",
                 !silent.workflowDeclared());
@@ -227,5 +228,23 @@ public final class WorkflowTest implements Suite {
         return ((List<?>) plan.toMap(cap, mode).get("recovery_branches")).stream()
                 .map(value -> (java.util.Map<?, ?>) value)
                 .filter(value -> name.equals(value.get("stage"))).findFirst().orElseThrow();
+    }
+
+    /**
+     * Which stop reasons a continuation is allowed to carry verdicts through. Paying an
+     * implementer and two readers again to recover a measurement is the one cost this
+     * repository promises not to charge, so the corpus refusal belongs on this side.
+     */
+    private void reuseAfterAFailureThatWasNotAboutTheWork(Check check) {
+        check.eq("a corpus that could not be written is not a verdict on the diff",
+                false, dev.warden.run.TaskLoop.isAboutTheWork("ledger_unavailable"));
+        check.eq("nor is a ceiling the operator chose",
+                false, dev.warden.run.TaskLoop.isAboutTheWork("budget_exhausted"));
+        check.eq("nor a vendor stopped by its own turn limit",
+                false, dev.warden.run.TaskLoop.isAboutTheWork("turn_ceiling_reached"));
+        check.eq("a reviewer that found blockers is",
+                true, dev.warden.run.TaskLoop.isAboutTheWork("blocking_findings_remain"));
+        check.eq("and so is a repair that went nowhere",
+                true, dev.warden.run.TaskLoop.isAboutTheWork("repair_made_no_progress"));
     }
 }

@@ -247,7 +247,25 @@ public final class TaskLoop {
             // acceptance surface are still checked, so an implementer that got halfway through
             // a repair before the budget refused it has moved the tree and declines reuse.
             "budget_exhausted",
-            "budget_insufficient_to_finish");
+            "budget_insufficient_to_finish",
+            // A corpus that cannot be written said nothing about the diff. The refusal is
+            // there so a measurement is not lost, and making the operator pay for the
+            // implementer and both readers again to recover it is the exact cost this slice
+            // promises never to charge: recovery replays delivery, not execution. The
+            // fingerprint and acceptance checks below still apply, so a run that had already
+            // moved the tree before the corpus refused declines reuse on its own.
+            "ledger_unavailable");
+
+    /**
+     * Whether a stop reason is a judgement on the candidate.
+     *
+     * A continuation throws away earlier verdicts when it is, and keeps them when it is not.
+     * The list above carries the argument for each entry; this is the seam where the answer
+     * can be checked without paying for a run to reach every one of them.
+     */
+    public static boolean isAboutTheWork(String reason) {
+        return !NOT_ABOUT_THE_WORK.contains(reason);
+    }
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
             throws Exception {
@@ -2345,7 +2363,7 @@ public final class TaskLoop {
         if (!Files.isRegularFile(priorSummary)) return declineReuse(summary, "no summary for " + priorRunId);
         Map<String, Object> prior = Json.parseObject(Files.readString(priorSummary));
         String priorReason = String.valueOf(prior.get("reason"));
-        if (!NOT_ABOUT_THE_WORK.contains(priorReason)) {
+        if (isAboutTheWork(priorReason)) {
             return declineReuse(summary, priorRunId + " stopped with `" + priorReason
                     + "`, which is a verdict on the work; only a failure that was never about "
                     + "the work leaves an earlier judgement standing");
@@ -3025,6 +3043,11 @@ public final class TaskLoop {
                 yield "raise budgets.max_role_runs in .warden/tasks/" + taskId + ".yaml"
                         + (floor > 0 ? " to at least " + floor : "") + ", then: " + carryOn + kept;
             }
+            case "ledger_unavailable" -> "restore write access to the home corpus at "
+                    + "<WARDEN_CONFIG_HOME>/ledger (the reason is in corpus_error), then: "
+                    + carryOn + ". The verdicts this run reached are kept: a corpus that "
+                    + "could not be written is not a judgement on the work, and no vendor is "
+                    + "re-dispatched to recover a measurement.";
             case "finding_protocol_failure" -> "inspect finding_protocol_failure and finding_history in "
                     + "warden report " + runId + " --text; resolve identity/evidence before a new run";
             case "quota_exhausted" -> "wait for the quota window named in the vendor message, "
