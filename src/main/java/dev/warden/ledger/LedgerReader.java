@@ -157,6 +157,11 @@ public final class LedgerReader {
         summary.put("metrics", metrics.toMap());
         if (metrics.ambiguousCoverage > 0) {
             summary.put("ambiguous_coverage", metrics.ambiguousCoverage);
+            // The same reason a skipped row withholds it: some of what was paid for is not
+            // attributable, so a number presented as the total would be a guess wearing a
+            // decimal point.
+            summary.put("incomplete", Boolean.TRUE);
+            withholdExactSpend(summary);
         }
         markIncomplete(summary, skipped);
         return summary;
@@ -279,9 +284,18 @@ public final class LedgerReader {
                     Map<String, Object> attempt = body instanceof Map<?, ?> map
                             ? (Map<String, Object>) map : Map.of();
                     if (covered.coversAttempt(attempt)) continue;
-                    if (!flagged && covered.ambiguousWith(attempt, event)) {
-                        ambiguousCoverage++;
-                        flagged = true;
+                    if (covered.ambiguousWith(attempt, event)) {
+                        // Neither merged nor split. Counting this side as well would put one
+                        // paid call into the exact total twice, which is what an operator
+                        // reads as money spent; asserting it is the journaled call would
+                        // claim what the evidence cannot say. It goes to unknown, the pair
+                        // is reported, and the total stops claiming to be exact.
+                        if (!flagged) {
+                            ambiguousCoverage++;
+                            flagged = true;
+                        }
+                        acceptUnknownAccounting();
+                        continue;
                     }
                     acceptRoleAttempt(event, attempt, index == attempts.size() - 1);
                 }

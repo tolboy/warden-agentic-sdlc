@@ -375,8 +375,12 @@ public final class CorpusReaderTest implements Suite {
                 StandardCharsets.UTF_8);
         CorpusImport.run(histHome, modernSrc);
         Map<String, Object> mixed = new LedgerReader().summarizeCorpus(histHome, "hist-P");
-        check.eq("historical expansion plus a modern journal does not double-count",
-                histCalls + 2L, number(object(object(mixed.get("metrics")).get("role_runs")).get("total")));
+        check.eq("a journal that covers its own role summary is counted once",
+                histCalls, number(object(object(mixed.get("metrics")).get("role_runs")).get("total")));
+        check.that("and the historical calls it cannot be told apart from are flagged",
+                number(mixed.get("ambiguous_coverage")) >= 1);
+        check.eq("so the total spend is withheld rather than guessed", null,
+                object(object(object(mixed.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
 
         // P6AR-003: distinct vendor_attempt_id values stay measurable even when
         // every record lacks run identity. An anonymous journaled attempt must
@@ -462,10 +466,13 @@ public final class CorpusReaderTest implements Suite {
                 StandardCharsets.UTF_8);
         CorpusImport.run(ambCovHome, ambJournal);
         Map<String, Object> ambCov = new LedgerReader().summarizeCorpus(ambCovHome, "P");
-        check.eq("unlinked historical attempts plus an unlinked journal stay measurable",
-                3L, number(object(object(ambCov.get("metrics")).get("role_runs")).get("total")));
+        check.eq("the settled call is counted and the unsettled pair is not counted twice",
+                1L, number(object(object(ambCov.get("metrics")).get("role_runs")).get("total")));
         check.that("an unlinked relationship is flagged rather than merged",
                 number(ambCov.get("ambiguous_coverage")) >= 1);
+        check.eq("and the report says it is incomplete", Boolean.TRUE, ambCov.get("incomplete"));
+        check.eq("with no exact total spend", null,
+                object(object(object(ambCov.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
 
         // P6AR-005: an id on only one representation does not prove two distinct calls.
         Path asymHome = sandbox.resolve("p6ar005-home");
@@ -500,10 +507,12 @@ public final class CorpusReaderTest implements Suite {
                 StandardCharsets.UTF_8);
         CorpusImport.run(asymHome, journalIdentified);
         Map<String, Object> asym = new LedgerReader().summarizeCorpus(asymHome, "P");
-        check.eq("asymmetric nested-unidentified plus journal C stays measurable",
-                2L, number(object(object(asym.get("metrics")).get("role_runs")).get("total")));
+        check.eq("an id on the journal only leaves one counted call, not two",
+                1L, number(object(object(asym.get("metrics")).get("role_runs")).get("total")));
         check.that("an id on the journal only is flagged rather than treated as two calls",
                 number(asym.get("ambiguous_coverage")) >= 1);
+        check.eq("and the total spend is withheld", null,
+                object(object(object(asym.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
 
         Path reverseHome = sandbox.resolve("p6ar005-reverse-home");
         Path nestedIdentified = sandbox.resolve("p6ar005-nested-a");
@@ -524,10 +533,12 @@ public final class CorpusReaderTest implements Suite {
                 StandardCharsets.UTF_8);
         CorpusImport.run(reverseHome, journalUnlinkedAsym);
         Map<String, Object> reverse = new LedgerReader().summarizeCorpus(reverseHome, "P");
-        check.eq("asymmetric nested A plus unlinked journal stays measurable",
-                2L, number(object(object(reverse.get("metrics")).get("role_runs")).get("total")));
+        check.eq("and the reverse asymmetry counts one call, not two",
+                1L, number(object(object(reverse.get("metrics")).get("role_runs")).get("total")));
         check.that("an id on the nested attempt only is flagged rather than treated as two calls",
                 number(reverse.get("ambiguous_coverage")) >= 1);
+        check.eq("with the total spend withheld there too", null,
+                object(object(object(reverse.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
 
         Path unitHome = sandbox.resolve("unit-unknown-home");
         Path unitSrc = sandbox.resolve("unit-unknown-src");
@@ -590,8 +601,11 @@ public final class CorpusReaderTest implements Suite {
                 item instanceof Map<?, ?> map && "truncated".equals(map.get("reason"))));
         check.eq("an incomplete local report withholds exact spend",
                 null, object(object(object(local.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
-        check.that("an incomplete local report does not print a success rate",
-                !local.containsKey("success_rate"));
+        // No report prints a rate, incomplete or not: this one counts outcomes and says
+        // whether the count is whole. Asserting the absence of a field nobody writes proves
+        // nothing, so the check is what an incomplete report does say.
+        check.eq("an incomplete local report says so rather than implying a rate",
+                Boolean.TRUE, local.get("incomplete"));
         check.that("readable local events still produce a report", local.get("run_count") instanceof Number);
 
         Path home = sandbox.resolve("corr-home");
@@ -613,8 +627,8 @@ public final class CorpusReaderTest implements Suite {
         check.eq("a damaged corpus is marked incomplete", true, global.get("incomplete"));
         check.eq("an incomplete corpus withholds exact spend",
                 null, object(object(object(global.get("metrics")).get("telemetry")).get("cost_usd")).get("total"));
-        check.that("an incomplete corpus does not print a success rate",
-                !global.containsKey("success_rate"));
+        check.that("an incomplete corpus still reports the outcomes it did read",
+                object(global.get("outcomes")).get("role_ok") instanceof java.util.Map);
         Map<String, Object> globalSkipped = object(global.get("skipped"));
         check.that("corpus skips name the segment file",
                 String.valueOf(globalSkipped.get("records")).contains("segments/"));
@@ -665,8 +679,8 @@ public final class CorpusReaderTest implements Suite {
                 item instanceof Map<?, ?> map && map.get("offset") instanceof Number));
         check.that("surviving priced attempt is still a call",
                 number(object(object(incGlobal.get("metrics")).get("role_runs")).get("total")) >= 1);
-        check.that("an incomplete import does not print a success rate",
-                !incGlobal.containsKey("success_rate"));
+        check.eq("an incomplete import says so rather than implying a rate",
+                Boolean.TRUE, incGlobal.get("incomplete"));
 
         // P6AR-002: importing a second file that contains only a project-P row
         // with an unsupported schema must still mark the named-P report
