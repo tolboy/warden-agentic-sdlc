@@ -323,7 +323,10 @@ otherwise look exactly like a run where nobody sent a cost — and would be beli
 field exists in the JSON as `*_unknown_calls`.
 
 The same report is written automatically to `.warden/runs/<run-id>/report.json` after `do` and
-`run`; `warden ledger` aggregates every run in the project.
+`run`; `warden ledger` aggregates every run in the project. `--global` reads the home
+corpus from outside a repository, filtered by project identity; omitting that filter
+reports imported measurements whose identity is unknown. `--import` copies selected
+local runs and archives.
 
 ## The chain of model calls
 

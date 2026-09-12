@@ -33,7 +33,7 @@ import java.util.UUID;
 /**
  * Write-path acceptance for the home measurement corpus: durability, crash windows,
  * identity, lifecycle, a failing store, the allowlist, and measurement context.
- * Import of surviving history and the global reader are not built here.
+ * Import of surviving history and the global reader live in {@link CorpusReaderTest}.
  */
 public final class HomeCorpusTest implements Suite {
     @Override public String name() { return "home-corpus"; }

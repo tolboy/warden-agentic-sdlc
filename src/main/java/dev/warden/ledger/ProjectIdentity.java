@@ -88,6 +88,19 @@ public final class ProjectIdentity {
         return persist(root, minted, name, null, !probe.answered());
     }
 
+    /**
+     * The identity already recorded for this tree, or {@code null}.
+     *
+     * A reader must never mint one. {@link #resolve} writes {@code .project-identity} when
+     * it is missing and may link a git-derived name; this method only reads the file.
+     */
+    public static String recorded(Path projectRoot) {
+        if (projectRoot == null) return null;
+        Map<String, Object> record = readRecord(projectRoot.toAbsolutePath().normalize());
+        if (record.get("project_id") instanceof String id && !id.isBlank()) return id;
+        return null;
+    }
+
     /** What a git probe established: the root commits, and whether git answered at all. */
     private record Probe(List<String> roots, boolean answered) {}
 

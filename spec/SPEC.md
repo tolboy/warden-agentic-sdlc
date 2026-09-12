@@ -314,7 +314,15 @@ warden run <task>           the whole loop; stops before a human
                             had in force (does not dispatch a planner)
                             --no-orca-gate does not mirror the pending decision
                             into Orca
-warden ledger               a table of runs: verdicts, cost, time, findings
+warden ledger               a table of runs: verdicts, cost, time, findings.
+                            Default is local `.warden/runs`. `--global` reads the
+                            home corpus from outside a repository, filtered by
+                            project identity (`--project-id`, or the identity
+                            already recorded). Omitting both reports measurements
+                            whose project identity is unknown. `--import PATH`
+                            copies selected local runs or archives through the
+                            same allowlist. Incomplete sources mark the report
+                            incomplete rather than stating exact spend.
 warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
                             changed files, the human decision. --text for the table
 warden status [run-id]      pending and resolved human decisions

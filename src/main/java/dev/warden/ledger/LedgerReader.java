@@ -1,7 +1,5 @@
 package dev.warden.ledger;
 
-import dev.warden.json.Json;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,6 +9,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,9 +34,8 @@ public final class LedgerReader {
      * writing role meets when the contract grants it no authority, and the two markers a
      * prepared run leaves behind.
      *
-     * This slice is contracted to leave `warden ledger` printing exactly what it printed
-     * without it - the same run verdicts, the same event counts, the same configuration
-     * totals. Filtering them once, here, is what keeps that true for every consumer below
+     * Filtering them once, here, is what keeps `warden ledger` printing the same run
+     * verdicts, event counts and configuration totals it printed before the corpus existed,
      * rather than for whichever tally someone remembered to exempt.
      */
     private static final Set<String> CORPUS_ONLY_EVENTS = Set.of(
@@ -60,11 +58,14 @@ public final class LedgerReader {
         Metrics metrics = new Metrics();
         long passed = 0;
         long failed = 0;
+        List<JsonlDiagnostics.Skip> skipped = new ArrayList<>();
         if (Files.isDirectory(runs)) {
             try (var directories = Files.list(runs)) {
                 for (Path run : directories.filter(Files::isDirectory).sorted(Comparator.comparing(Path::toString)).toList()) {
-                    List<Map<String, Object>> events =
-                            localView(readEvents(run.resolve("evidence.jsonl")));
+                    String label = ".warden/runs/" + run.getFileName() + "/evidence.jsonl";
+                    JsonlDiagnostics.Read read = JsonlDiagnostics.read(run.resolve("evidence.jsonl"), label);
+                    skipped.addAll(read.skipped());
+                    List<Map<String, Object>> events = localView(read.rows());
                     String verdict = "no_evidence";
                     for (Map<String, Object> event : events) {
                         if (event.get("ok") instanceof Boolean ok) verdict = ok ? "passed" : "failed";
@@ -91,16 +92,74 @@ public final class LedgerReader {
         summary.put("metrics", metrics.toMap());
         summary.put("future_dimensions", List.of("vendor", "model", "duration_ms", "cost_usd",
                 "fix_attempts", "review_findings", "human_decision"));
+        markIncomplete(summary, skipped);
         return summary;
     }
 
-    private List<Map<String, Object>> readEvents(Path path) throws IOException {
+    /**
+     * Aggregate the home corpus for one project identity. {@code projectId} blank or
+     * null selects measurements whose project identity is unknown — imported legacy
+     * evidence that never carried one. Never mints an identity, never constructs an
+     * {@link EvidenceLedger}, never recovers a journal, and never sums a local tree
+     * together with the copy of it that reached the home.
+     *
+     * Paid calls are counted by accounting unit: {@code vendor_attempt} is a call,
+     * {@code role_run} is a summary of those calls when a journal of attempts exists.
+     * A historical {@code role_run} that still carries {@code vendor_attempts} is
+     * expanded unless a journaled attempt covers that run by {@code run_instance_id},
+     * operator run id, or matching {@code vendor_attempt_id}. Missing identities do
+     * not establish coverage, and an id on only one representation does not prove
+     * two distinct calls. Nested attempts whose ids already appear in the journal
+     * are not counted again. Evidence whose accounting unit cannot be established is
+     * counted as unknown. A relationship that cannot be proved the same or distinct
+     * is flagged as {@code ambiguous_coverage} rather than merged.
+     *
+     * Incomplete imports are part of the report: {@code imports.jsonl} carries the
+     * source skip, and a later global read retains the file, offset, skip count and
+     * {@code incomplete} marker rather than treating the surviving segment rows as
+     * the whole story. A skip whose project identity could not be recovered applies
+     * to every identity: failure to recover it does not establish that the loss
+     * cannot affect the selected project.
+     */
+    public Map<String, Object> summarizeCorpus(Path home, String projectId) throws IOException {
+        boolean unknownIdentity = projectId == null || projectId.isBlank();
         List<Map<String, Object>> events = new ArrayList<>();
-        if (!Files.isRegularFile(path)) return events;
-        for (String line : Files.readAllLines(path)) {
-            if (!line.isBlank()) events.add(Json.parseObject(line));
+        List<JsonlDiagnostics.Skip> skipped = new ArrayList<>();
+        Path ledgerDir = home == null ? null : HomeCorpus.directory(home);
+        Path segments = ledgerDir == null ? null : ledgerDir.resolve(HomeCorpus.SEGMENTS);
+        if (segments != null && Files.isDirectory(segments)) {
+            try (var files = Files.list(segments)) {
+                List<Path> ordered = files.filter(path -> path.getFileName().toString().endsWith(".jsonl"))
+                        .sorted(Comparator.comparing(Path::toString))
+                        .toList();
+                for (Path file : ordered) {
+                    String label = HomeCorpus.SEGMENTS + "/" + file.getFileName();
+                    JsonlDiagnostics.Read read = JsonlDiagnostics.read(file, label);
+                    skipped.addAll(read.skipped());
+                    for (Map<String, Object> row : read.rows()) {
+                        if (matchesProject(row, projectId, unknownIdentity)) events.add(row);
+                    }
+                }
+            }
         }
-        return events;
+        if (ledgerDir != null) {
+            foldIncompleteImports(ledgerDir.resolve(CorpusImport.IMPORTS), projectId,
+                    unknownIdentity, skipped);
+        }
+        Metrics metrics = new Metrics();
+        metrics.acceptCorpus(events);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("schema_version", 1L);
+        summary.put("source", "corpus");
+        summary.put("project_id", unknownIdentity ? null : projectId);
+        summary.putAll(identityOf(events));
+        summary.put("outcomes", outcomesOf(events));
+        summary.put("metrics", metrics.toMap());
+        if (metrics.ambiguousCoverage > 0) {
+            summary.put("ambiguous_coverage", metrics.ambiguousCoverage);
+        }
+        markIncomplete(summary, skipped);
+        return summary;
     }
 
     private static final class Metrics {
@@ -130,26 +189,49 @@ public final class LedgerReader {
         private final Map<String, Long> decisionsByOutcome = new LinkedHashMap<>();
         private long humanWaitEvents;
         private final IntegerMetric humanWaitMillis = new IntegerMetric();
+        private long ambiguousCoverage;
 
         void accept(List<Map<String, Object>> events) {
+            acceptEvents(events, false);
+        }
+
+        /**
+         * Count paid calls by {@code accounting.counts_as_new_calls}. The enclosing
+         * {@code role_run} still contributes failovers, configuration and visual-role
+         * failures, but not a second set of calls or dollars — unless it is historical
+         * evidence whose attempts were never journaled as their own events.
+         */
+        void acceptCorpus(List<Map<String, Object>> events) {
+            acceptEvents(events, true);
+        }
+
+        void acceptEvents(List<Map<String, Object>> events, boolean corpus) {
             long explicitQuotaEvents = events.stream()
                     .filter(event -> "role_quota_exhausted".equals(text(event.get("type"))))
                     .count();
             quotaFailures += explicitQuotaEvents;
             long fallbackQuotaFailures = 0;
+            CoveredCalls covered = corpus ? CoveredCalls.of(events) : CoveredCalls.NONE;
 
             for (Map<String, Object> event : events) {
+                if (corpus && countsAsNewCall(event)) {
+                    acceptRoleAttempt(event, event, true);
+                }
                 String type = text(event.get("type"));
                 String code = text(event.get("code"));
                 if ("role_run".equals(type)) {
-                    acceptRoleRun(event);
+                    if (corpus) acceptCorpusRoleRun(event, covered);
+                    else acceptRoleRun(event);
                     if ("role_quota_exhausted".equals(code)) fallbackQuotaFailures++;
                     if (isConfigurationFailure(code)) configurationFailures++;
                     if ("visual_qa".equals(text(event.get("role")))
                             && Boolean.FALSE.equals(event.get("ok"))) visualRoleFailures++;
-                } else if (isConfigurationFailure(type) || isConfigurationFailure(code)) {
+                } else if (!"vendor_attempt".equals(type)
+                        && (isConfigurationFailure(type) || isConfigurationFailure(code))) {
                     // task_run repeats the final reason already recorded by the stage that
                     // failed. Counting it again would double every configuration failure.
+                    // vendor_attempt carries the same code as the enclosing role_run; the
+                    // local view hides it, and the corpus must not count it twice either.
                     if (!"task_run".equals(type)) configurationFailures++;
                 }
 
@@ -170,6 +252,53 @@ public final class LedgerReader {
             if (explicitQuotaEvents == 0) quotaFailures += fallbackQuotaFailures;
         }
 
+        /**
+         * Corpus accounting for a role summary. Modern journals already counted the
+         * attempts as {@code vendor_attempt} events. Historical evidence recorded the
+         * same attempts only on the enclosing {@code role_run}; expand those so they
+         * remain measurable, skipping nested attempts whose {@code vendor_attempt_id}
+         * is already in the journal. A role_run that is neither a journaled summary
+         * nor an explicit attempt list has no established accounting unit: observe it
+         * as unknown rather than inventing a call.
+         */
+        private void acceptCorpusRoleRun(Map<String, Object> event, CoveredCalls covered) {
+            if (shouldExpandHistoricalRoleRun(event, covered)) {
+                acceptExpandedRoleRun(event, covered);
+                return;
+            }
+            acceptRoleRunMeta(event);
+            if (accountingUnitUnknown(event, covered)) acceptUnknownAccounting();
+        }
+
+        @SuppressWarnings("unchecked")
+        private void acceptExpandedRoleRun(Map<String, Object> event, CoveredCalls covered) {
+            if (event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty()) {
+                boolean flagged = false;
+                for (int index = 0; index < attempts.size(); index++) {
+                    Object body = attempts.get(index);
+                    Map<String, Object> attempt = body instanceof Map<?, ?> map
+                            ? (Map<String, Object>) map : Map.of();
+                    if (covered.coversAttempt(attempt)) continue;
+                    if (!flagged && covered.ambiguousWith(attempt, event)) {
+                        ambiguousCoverage++;
+                        flagged = true;
+                    }
+                    acceptRoleAttempt(event, attempt, index == attempts.size() - 1);
+                }
+            } else {
+                acceptRoleAttempt(event, event, true);
+            }
+            acceptRoleRunMeta(event);
+        }
+
+        private void acceptUnknownAccounting() {
+            cost.accept(null);
+            durationMillis.accept(null);
+            inputTokens.accept(null);
+            outputTokens.accept(null);
+            totalTokens.accept(null);
+        }
+
         @SuppressWarnings("unchecked")
         private void acceptRoleRun(Map<String, Object> event) {
             if (event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty()) {
@@ -184,13 +313,21 @@ public final class LedgerReader {
                 // directly on role_run. Keep reading that format indefinitely.
                 acceptRoleAttempt(event, event, true);
             }
+            acceptRoleRunMeta(event);
+        }
 
+        private void acceptRoleRunMeta(Map<String, Object> event) {
             long transitions = 0;
             if (event.get("vendor_attempts") instanceof List<?> attempts && attempts.size() > 1) {
                 transitions = attempts.size() - 1L;
             }
             if (event.get("failed_over_from") instanceof List<?> prior) {
                 transitions = Math.max(transitions, prior.size());
+            }
+            if (event.get("accounting") instanceof Map<?, ?> accounting
+                    && accounting.get("vendor_attempt_count") instanceof Number count
+                    && count.longValue() > 1) {
+                transitions = Math.max(transitions, count.longValue() - 1);
             }
             if (transitions > 0) {
                 failoverRoleRuns++;
@@ -437,5 +574,384 @@ public final class LedgerReader {
 
     private static void increment(Map<String, Long> counts, String key) {
         counts.merge(key, 1L, Long::sum);
+    }
+
+    private static boolean countsAsNewCall(Map<String, Object> event) {
+        if (event.get("accounting") instanceof Map<?, ?> accounting) {
+            return Boolean.TRUE.equals(accounting.get("counts_as_new_calls"));
+        }
+        return false;
+    }
+
+    private static boolean hasRecordedAttempts(Map<String, Object> event) {
+        return event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty();
+    }
+
+    private static boolean shouldExpandHistoricalRoleRun(Map<String, Object> event,
+                                                         CoveredCalls covered) {
+        if (countsAsNewCall(event) || covered.coversRun(event)) return false;
+        return hasRecordedAttempts(event);
+    }
+
+    private static boolean accountingUnitUnknown(Map<String, Object> event, CoveredCalls covered) {
+        if (countsAsNewCall(event) || covered.coversRun(event) || covered.coversAttempt(event)
+                || hasRecordedAttempts(event)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static String attemptId(Map<String, Object> row) {
+        return nonBlank(firstText(row, "vendor_attempt_id"));
+    }
+
+    private static String nonBlank(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            String text = nonBlank(value);
+            if (text != null) return text;
+        }
+        return null;
+    }
+
+    private static boolean matchesProject(Map<String, Object> row, String projectId,
+                                          boolean unknownIdentity) {
+        String id = text(row.get("project_id"));
+        boolean rowUnknown = id == null || id.isBlank();
+        return unknownIdentity ? rowUnknown : projectId.equals(id);
+    }
+
+    /**
+     * Journaled {@code vendor_attempt} events, keyed so a historical {@code role_run}
+     * that recorded the same attempts only as a nested array can still be expanded
+     * without counting a modern journal twice. Coverage is by run instance, operator
+     * run, or {@code vendor_attempt_id}. Missing identities do not establish that one
+     * attempt covers another, and they do not establish that the two representations
+     * are distinct: an id on only one side is flagged as {@code ambiguous_coverage}
+     * rather than counted as two unrelated calls.
+     */
+    private record CoveredCalls(Set<String> instances, Set<String> operatorRuns,
+                                Set<String> attemptIds, List<JournalCall> journal) {
+        static final CoveredCalls NONE = new CoveredCalls(Set.of(), Set.of(), Set.of(), List.of());
+
+        private record JournalCall(String instance, String operator, String attemptId) {}
+
+        static CoveredCalls of(List<Map<String, Object>> events) {
+            Set<String> instances = new LinkedHashSet<>();
+            Set<String> operatorRuns = new LinkedHashSet<>();
+            Set<String> attemptIds = new LinkedHashSet<>();
+            List<JournalCall> journal = new ArrayList<>();
+            for (Map<String, Object> event : events) {
+                if (!countsAsNewCall(event)) continue;
+                String instance = nonBlank(text(event.get("run_instance_id")));
+                String operator = nonBlank(firstText(event, "operator_run_id", "run_id"));
+                String attempt = attemptId(event);
+                if (instance != null) instances.add(instance);
+                if (operator != null) operatorRuns.add(operator);
+                if (attempt != null) attemptIds.add(attempt);
+                journal.add(new JournalCall(instance, operator, attempt));
+            }
+            return new CoveredCalls(instances, operatorRuns, attemptIds, List.copyOf(journal));
+        }
+
+        boolean coversRun(Map<String, Object> event) {
+            String instance = text(event.get("run_instance_id"));
+            if (instance != null && !instance.isBlank()) return instances.contains(instance);
+            String operator = firstText(event, "operator_run_id", "run_id");
+            if (operator != null && !operator.isBlank()) return operatorRuns.contains(operator);
+            return false;
+        }
+
+        boolean coversAttempt(Map<String, Object> row) {
+            String id = attemptId(row);
+            return id != null && attemptIds.contains(id);
+        }
+
+        /**
+         * True when this nested attempt is neither the same as a journaled call nor
+         * provably a different one. Distinct {@code vendor_attempt_id} values still
+         * count separately; an id on only one representation does not.
+         */
+        boolean ambiguousWith(Map<String, Object> attempt, Map<String, Object> roleRun) {
+            if (journal.isEmpty()) return false;
+            if (coversAttempt(attempt) || coversRun(roleRun)) return false;
+            for (JournalCall call : journal) {
+                if (!distinctFrom(attempt, roleRun, call)) return true;
+            }
+            return false;
+        }
+
+        private static boolean distinctFrom(Map<String, Object> attempt, Map<String, Object> roleRun,
+                                            JournalCall call) {
+            String nestedId = attemptId(attempt);
+            if (nestedId != null && call.attemptId != null) return !nestedId.equals(call.attemptId);
+            String nestedInstance = firstNonBlank(text(attempt.get("run_instance_id")),
+                    text(roleRun.get("run_instance_id")));
+            if (nestedInstance != null && call.instance != null
+                    && !nestedInstance.equals(call.instance)) {
+                return true;
+            }
+            String nestedOperator = firstNonBlank(
+                    firstText(attempt, "operator_run_id", "run_id"),
+                    firstText(roleRun, "operator_run_id", "run_id"));
+            return nestedOperator != null && call.operator != null
+                    && !nestedOperator.equals(call.operator);
+        }
+    }
+
+    /**
+     * Incomplete imports live in {@code imports.jsonl}, not in the segment rows that
+     * survived. Fold their skips into this report when the import touched the identity
+     * being summarised — including when a skipped row's project identity could not be
+     * recovered, because that does not establish that the loss cannot affect this
+     * identity — so a later global read still withholds exact spend.
+     */
+    private static void foldIncompleteImports(Path importsFile, String projectId,
+                                              boolean unknownIdentity,
+                                              List<JsonlDiagnostics.Skip> skipped)
+            throws IOException {
+        JsonlDiagnostics.Read read = JsonlDiagnostics.read(importsFile, CorpusImport.IMPORTS);
+        skipped.addAll(read.skipped());
+        for (Map<String, Object> receipt : read.rows()) {
+            if (!incompleteReceipt(receipt)) continue;
+            if (!importAppliesTo(receipt, projectId, unknownIdentity)) continue;
+            int before = skipped.size();
+            addReceiptSkips(skipped, receipt);
+            if (skipped.size() == before) {
+                String name = text(receipt.get("source_name"));
+                skipped.add(new JsonlDiagnostics.Skip(
+                        name == null || name.isBlank() ? CorpusImport.IMPORTS : name,
+                        0L, "incomplete_import"));
+            }
+        }
+    }
+
+    private static boolean incompleteReceipt(Map<String, Object> receipt) {
+        if (Boolean.FALSE.equals(receipt.get("complete"))) return true;
+        Object skipped = receipt.get("skipped");
+        if (skipped instanceof Map<?, ?> map && map.get("count") instanceof Number count) {
+            return count.longValue() > 0;
+        }
+        return false;
+    }
+
+    private static boolean importAppliesTo(Map<String, Object> receipt, String projectId,
+                                           boolean unknownIdentity) {
+        Set<String> ids = projectIdsOf(receipt);
+        long unknownRows = unknownProjectRows(receipt);
+        if (unattributedSkipped(receipt, ids, unknownRows) > 0) return true;
+        if (unknownIdentity) return unknownRows > 0;
+        return projectId != null && ids.contains(projectId);
+    }
+
+    private static Set<String> projectIdsOf(Map<String, Object> receipt) {
+        Set<String> ids = new LinkedHashSet<>();
+        Object listed = receipt.get("project_ids");
+        if (listed instanceof List<?> list) {
+            for (Object item : list) {
+                String id = text(item);
+                if (id != null && !id.isBlank()) ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private static long unknownProjectRows(Map<String, Object> receipt) {
+        if (receipt.get("unknown_project_id") instanceof Number number) {
+            return number.longValue();
+        }
+        return 0L;
+    }
+
+    /**
+     * Skips whose project identity was not recovered cannot be shown not to belong
+     * to the selected project. Receipts written before this field existed look the
+     * same: incomplete, no surviving {@code project_ids}, no unknown-identity rows.
+     */
+    private static long unattributedSkipped(Map<String, Object> receipt, Set<String> ids,
+                                            long unknownRows) {
+        if (receipt.get("unattributed_skipped") instanceof Number number) {
+            return number.longValue();
+        }
+        if (incompleteReceipt(receipt) && ids.isEmpty() && unknownRows == 0) return 1L;
+        return 0L;
+    }
+
+    private static void addReceiptSkips(List<JsonlDiagnostics.Skip> skipped,
+                                        Map<String, Object> receipt) {
+        Object body = receipt.get("skipped");
+        if (!(body instanceof Map<?, ?> map)) return;
+        Object records = map.get("records");
+        if (!(records instanceof List<?> list)) return;
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> row)) continue;
+            Object file = row.get("file");
+            Object offset = row.get("offset");
+            Object reason = row.get("reason");
+            skipped.add(new JsonlDiagnostics.Skip(
+                    file == null ? "" : String.valueOf(file),
+                    offset instanceof Number number ? number.longValue() : 0L,
+                    reason == null ? "corrupt" : String.valueOf(reason)));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void markIncomplete(Map<String, Object> summary, List<JsonlDiagnostics.Skip> skipped) {
+        if (skipped == null || skipped.isEmpty()) return;
+        summary.put("incomplete", Boolean.TRUE);
+        summary.put("skipped", JsonlDiagnostics.skippedMap(skipped));
+        withholdExactSpend(summary);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void withholdExactSpend(Map<String, Object> summary) {
+        Object metrics = summary.get("metrics");
+        if (!(metrics instanceof Map<?, ?> metricsMap)) return;
+        Object telemetry = metricsMap.get("telemetry");
+        if (!(telemetry instanceof Map<?, ?> telemetryMap)) return;
+        Object cost = telemetryMap.get("cost_usd");
+        if (cost instanceof Map<?, ?>) {
+            ((Map<String, Object>) cost).put("total", null);
+        }
+    }
+
+    private static Map<String, Object> identityOf(List<Map<String, Object>> events) {
+        Map<String, Instance> byId = new LinkedHashMap<>();
+        long unknown = 0;
+        for (Map<String, Object> event : events) {
+            String id = text(event.get("run_instance_id"));
+            if (id == null || id.isBlank()) {
+                unknown++;
+                continue;
+            }
+            Instance instance = byId.computeIfAbsent(id, Instance::new);
+            instance.events++;
+            Object operator = event.get("operator_run_id");
+            if (operator == null) operator = event.get("run_id");
+            if (operator != null) instance.operatorRunId = String.valueOf(operator);
+            Object parent = event.get("parent_run_instance_id");
+            if (parent != null && !String.valueOf(parent).isBlank()) {
+                instance.parent = String.valueOf(parent);
+            }
+        }
+        Map<String, List<String>> members = new LinkedHashMap<>();
+        for (String id : byId.keySet()) {
+            String root = rootOf(id, byId);
+            members.computeIfAbsent(root, key -> new ArrayList<>()).add(id);
+        }
+        Map<String, Object> instances = new LinkedHashMap<>();
+        instances.put("count", (long) byId.size());
+        instances.put("unknown_count", unknown);
+        instances.put("ids", List.copyOf(byId.keySet()));
+
+        Map<String, Object> lineages = new LinkedHashMap<>();
+        lineages.put("count", (long) members.size());
+        lineages.put("roots", List.copyOf(members.keySet()));
+        lineages.put("members", members);
+
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("run_instances", instances);
+        identity.put("lineages", lineages);
+        return identity;
+    }
+
+    private static String rootOf(String id, Map<String, Instance> byId) {
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        String current = id;
+        while (current != null && byId.containsKey(current)) {
+            if (!seen.add(current)) break;
+            String parent = byId.get(current).parent;
+            if (parent == null || !byId.containsKey(parent)) return current;
+            current = parent;
+        }
+        return current;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> outcomesOf(List<Map<String, Object>> events) {
+        long roleKnown = 0;
+        long roleUnknown = 0;
+        long roleTrue = 0;
+        long roleFalse = 0;
+        long workflowKnown = 0;
+        long workflowUnknown = 0;
+        Map<String, Long> workflowBy = new LinkedHashMap<>();
+        long humanKnown = 0;
+        long humanUnknown = 0;
+        long humanTrue = 0;
+        long humanFalse = 0;
+        for (Map<String, Object> event : events) {
+            String type = text(event.get("type"));
+            Map<String, Object> outcomes = event.get("outcomes") instanceof Map<?, ?> map
+                    ? (Map<String, Object>) map : Map.of();
+            if ("role_run".equals(type)) {
+                Object ok = outcomes.get("role_ok");
+                if (ok == null) ok = event.get("ok");
+                if (ok instanceof Boolean value) {
+                    roleKnown++;
+                    if (value) roleTrue++;
+                    else roleFalse++;
+                } else {
+                    roleUnknown++;
+                }
+            }
+            if ("task_run".equals(type) || "task_dry_run".equals(type)) {
+                Object workflow = outcomes.get("workflow_outcome");
+                if (workflow == null) workflow = event.get("reason");
+                if (workflow == null) workflow = event.get("next_action");
+                if (workflow != null) {
+                    workflowKnown++;
+                    increment(workflowBy, String.valueOf(workflow));
+                } else {
+                    workflowUnknown++;
+                }
+            }
+            if ("human_decision".equals(type)) {
+                Object accept = outcomes.get("human_accept");
+                if (accept instanceof Boolean value) {
+                    humanKnown++;
+                    if (value) humanTrue++;
+                    else humanFalse++;
+                } else {
+                    String decision = text(event.get("decision"));
+                    if (decision == null) {
+                        humanUnknown++;
+                    } else {
+                        humanKnown++;
+                        boolean yes = "accept".equals(decision) || "approved".equals(decision);
+                        if (yes) humanTrue++;
+                        else humanFalse++;
+                    }
+                }
+            }
+        }
+        Map<String, Object> role = counts(roleKnown, roleUnknown);
+        role.put("true", roleTrue);
+        role.put("false", roleFalse);
+        Map<String, Object> workflow = counts(workflowKnown, workflowUnknown);
+        workflow.put("by_value", workflowBy);
+        Map<String, Object> human = counts(humanKnown, humanUnknown);
+        human.put("true", humanTrue);
+        human.put("false", humanFalse);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("role_ok", role);
+        result.put("workflow_outcome", workflow);
+        result.put("human_accept", human);
+        return result;
+    }
+
+    private static final class Instance {
+        final String id;
+        String operatorRunId;
+        String parent;
+        long events;
+
+        Instance(String id) {
+            this.id = id;
+        }
     }
 }

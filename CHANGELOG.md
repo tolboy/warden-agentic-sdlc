@@ -19,9 +19,17 @@ that exists in code but has never been run live says so.
   worker and a human decision are never blocked for analytics; the CLI reports
   `corpus_status` and whether the tree is safe to delete. The projection is an
   allowlist and carries no goal, prompt, vendor reply, finding text, argv or credentials.
-  Project identity is not the path. `warden ledger` is unchanged: local scope, same
-  fields, no new arguments. Import of surviving history and a `--global` reader are not
-  built here. The corpus is not safe to publish merely because it holds no text.
+  Project identity is not the path. `warden ledger` stays local by default, with the
+  same fields and numbers for a well-formed tree. `--global` reads the home corpus from
+  outside a repository, filtered by recorded project identity; omitting that filter
+  from outside a project reports imported measurements whose identity is unknown.
+  `--import PATH` copies selected local runs and archives through the same allowlist;
+  a copy or an overlapping archive does not change totals. A corrupt line, an
+  unsupported schema version or an incomplete import marks the report `incomplete`
+  rather than failing it, and an incomplete corpus does not print an exact total
+  spend. Historical `role_run.vendor_attempts` without a journaled attempt stay
+  measurable without double-counting a modern journal. The corpus is not safe to
+  publish merely because it holds no text.
 
 - A `planner` role. `warden do --prepare off|auto|always` (default `off`) can dispatch a
   read-only planner to turn an operator's goal into a contract Warden itself has validated,
@@ -66,6 +74,16 @@ that exists in code but has never been run live says so.
   things it must reject, including the pair of commits that adds a path and rewords it away.
 
 ### Fixed
+
+- An incomplete import whose skipped row never reached the segment still marks the
+  named project's `--global` report incomplete: unsupported-schema rows contribute
+  the `project_id` they carried, and a row that could not be parsed applies to every
+  identity rather than only the unknown-identity slice. A journaled `vendor_attempt`
+  without a run instance no longer suppresses unrelated historical nested attempts
+  in the same project; coverage is by run instance, operator run id or
+  `vendor_attempt_id`, and a relationship that cannot be proved is flagged rather
+  than merged — including when only the journal or only the nested attempt carries
+  a `vendor_attempt_id`.
 
 - The preparation reservation no longer mixes the planner's one-call bootstrap with the
   undeclared workflow chain. For a run that continues into the loop, `run.json` records

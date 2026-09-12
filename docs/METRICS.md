@@ -153,10 +153,22 @@ from the role with eyes.
 - **Unpriced cost.** See above. `unknown_count` is the answer, not an estimate.
 - **Time a person spent thinking.** `wait_millis` measures how long a decision sat pending,
   which is not the same thing and is not offered as if it were.
-- **Anything across projects.** `warden ledger` still reads one project's `.warden/runs`.
-  There is no `--global` flag in this slice and no second aggregator. A durable home
-  corpus is written at `<UserConfig.home>/ledger/` so a confirmed measurement survives
-  deletion of the project tree; it is not what `warden ledger` prints.
+- **Anything across projects, unless you ask.** Plain `warden ledger` still reads one
+  project's `.warden/runs` and prints the same fields it always has. `warden ledger --global`
+  reads `<UserConfig.home>/ledger/` from outside a repository, filtered by the recorded
+  project identity (`--project-id`, or the identity already recorded for the current
+  project). Omitting both, from outside a project, reports measurements whose project
+  identity is unknown — imported legacy evidence that never carried one, with that
+  absence left unknown rather than inferred. One aggregator serves both sources and
+  never sums a local tree together with the copy of it that reached the home. A paid
+  call is counted once: locally by expanding `role_run.vendor_attempts`; on the corpus
+  by `accounting.counts_as_new_calls`, except a historical `role_run` that still
+  carries `vendor_attempts` and has no journaled attempt covering that run by
+  `run_instance_id`, operator run id or `vendor_attempt_id`, which is expanded so
+  those attempts stay measurable. Missing identities do not establish coverage, and
+  an id on only one representation does not prove two distinct calls: that
+  relationship is flagged as `ambiguous_coverage` rather than merged. Evidence whose
+  accounting unit cannot be established is counted as unknown.
 
 ## What the home corpus records, and what stays unknown
 
@@ -186,5 +198,36 @@ Finding identity in the corpus comes from `findings` on the role event and from
 reopen links. Finding text does not enter.
 
 The corpus is not safe to publish because it holds no text. Identifiers and spend still
-describe an operator and a vendor account. Import of surviving history and a reader that
-works outside a repository are not built here.
+describe an operator and a vendor account.
+
+## `--global`, `--import`, and incomplete reports
+
+`warden ledger --global` does not load profiles, does not mint a project identity, and
+does not replay recovery. Physical run instances (`run_instance_id`) stay distinct from
+a lineage merged across `--continue`. Known and unknown counts survive into the output.
+Imported rows that never had a `project_id` are the `--global` report from outside a
+project without `--project-id`; a named `--project-id` does not absorb them.
+
+`warden ledger --import PATH` is the one explicit import of selected local runs and
+archives. It uses the same allowlist projector as the write path. Records that already
+carry an `event_id` are keyed by it. Records that do not — the committed demo evidence
+is this shape — get a deterministic provenance key: SHA-256 of a fixed material string
+of type, time, code, ok, seq, operator run id, run instance and role/stage when those
+fields were present. Absolute paths and raw fields never enter the key. Re-importing
+the same source, a copy of it at another path, or an archive that overlaps a source
+already imported leaves the totals unchanged. The same provenance key with a different
+content hash is an integrity conflict: flagged, not merged. Contracts, units, lineage,
+effort, cost and launch receipts the legacy evidence never had stay unknown. The import
+receipt records when it ran, the transform version (`measurement-projector-1`) and how
+complete the source was. A read never imports.
+
+A corrupt line, a truncated last line or an unsupported `schema_version` does not fail
+the report. The output names the file, the byte offset, a skip count and `incomplete`.
+An incomplete import is retained the same way: the receipt in `imports.jsonl` is part
+of the subsequent global report, even though the segments only contain rows that
+parsed. A skipped row whose JSON still parsed contributes its `project_id` to that
+receipt; a skipped row that could not be parsed applies to every identity, because
+failure to recover its project does not establish that the loss cannot affect the
+one being summarised. An incomplete corpus does not print an unconditional success
+rate or an exact total spend: `telemetry.cost_usd.total` is `null` even when some
+priced rows were readable.
