@@ -408,10 +408,10 @@ public final class DoCommand {
         // terminal nobody was necessarily watching. A planner turns one sentence into the
         // document every later verdict is measured against; the operator gets to see it.
         Workspace card = this.board.at(root);
-        if (dispatchPlanner) {
+        if (dispatchPlanner && !options.dryRun()) {
             card.note("planner compiled " + taskId + " to .warden/tasks/" + taskId
                     + ".yaml; no writer has been dispatched");
-            card.show(drafted.file(), "warden " + runId + " contract");
+            card.show(drafted.file(), runId, "warden " + runId + " contract");
         }
 
         // A worktree Warden made is empty of everything the project needs to check itself. Orca
@@ -428,7 +428,7 @@ public final class DoCommand {
         if (options.draftOnly()) {
             // Nothing is running and the next move is a person's, which is the one question
             // this board answers.
-            if (dispatchPlanner) card.state(Workspace.State.WAITING_FOR_HUMAN);
+            if (dispatchPlanner && !options.dryRun()) card.state(Workspace.State.WAITING_FOR_HUMAN);
             // The contract is where a run's whole meaning lives, and the drafter writes it
             // from one sentence. Every real task so far needed its browser scenarios written
             // by hand before it was worth paying anybody to satisfy them — and there was no

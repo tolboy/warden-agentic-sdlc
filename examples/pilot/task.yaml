@@ -1,0 +1,23 @@
+# Replace goal and bind scope/checks to the target project's existing named entries.
+# This template is for a non-visual task; do not remove required visual checks to fit it.
+version: 1
+id: pilot-task
+goal: Replace with the real task and its observable acceptance criteria before execution
+non_goals:
+  - Do not modify Warden, the frozen task contract, or the acceptance checker
+risk: medium
+scope: pilot-scope
+checks: pilot-acceptance
+authority:
+  workspace_write: true
+  network: false
+  land: false
+visual_qa:
+  required: false
+  scenarios: []
+budgets:
+  max_role_runs: 4
+  # Known-spend threshold only; choose an acceptable value for the actual profiles.
+  max_cost_usd: 10.0
+max_fix_attempts: 1
+timeout_minutes: 2

@@ -80,7 +80,7 @@ public interface Workspace {
      * Best-effort like the rest of this interface: a window that did not open is a window the
      * operator does not get, not a run that fails.
      */
-    default void show(java.nio.file.Path file, String title) { }
+    default void show(java.nio.file.Path file, String runId, String title) { }
 
     /**
      * The three states a Warden run can put a workspace in.

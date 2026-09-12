@@ -414,7 +414,8 @@ public final class PlannerTest implements Suite {
         dev.warden.run.Workspace.Source board = worktree -> new dev.warden.run.Workspace() {
             @Override public void note(String text) { shown.add("note: " + text); }
             @Override public void state(State state) { shown.add("state: " + state); }
-            @Override public void show(Path file, String title) {
+            @Override public void show(Path file, String runId, String title) {
+                check.eq("presentation belongs to the reserved run", "do-always", runId);
                 shown.add("show: " + title + " -> " + file.getFileName());
             }
         };
@@ -455,6 +456,12 @@ public final class PlannerTest implements Suite {
                 project.resolve(".warden/runs/do-always/run.json"), StandardCharsets.UTF_8);
         check.contains("the run marker carried that reservation", reservation, "paying_stages");
         check.contains("naming the planner before any vendor ran", reservation, "planner");
+        shown.clear();
+        DoCommand.Outcome dry = new DoCommand(new ProcessRunner(), narration::add, board, false).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-dry-existing",
+                        "HEAD", true, true, false, false, false, true, null, "always"), user);
+        check.that("preview of an existing compiled contract succeeds", dry.ok());
+        check.eq("preview opens no contract window and sets no waiting card", List.of(), shown);
         @SuppressWarnings("unchecked")
         Map<String, Object> artifact = (Map<String, Object>) Json.parse(Files.readString(
                 project.resolve(".warden/runs/do-always/artifacts/planner.json"),

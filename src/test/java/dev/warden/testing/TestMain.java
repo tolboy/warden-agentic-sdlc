@@ -39,6 +39,7 @@ public final class TestMain {
                 new dev.warden.LedgerTest(),
                 new dev.warden.HomeCorpusTest(),
                 new dev.warden.CorpusReaderTest(),
+                new dev.warden.PilotConfigTest(),
                 new dev.warden.ApprovalStoreTest(),
                 new dev.warden.StatusCommandTest(),
                 new dev.warden.InitializerTest()

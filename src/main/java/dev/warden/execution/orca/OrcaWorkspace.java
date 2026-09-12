@@ -242,23 +242,31 @@ public final class OrcaWorkspace implements Workspace {
     }
 
     @Override
-    public void show(Path file, String title) {
+    public void show(Path file, String runId, String title) {
         try {
             if (!Files.isRegularFile(file)) return;
-            Path script = file.getParent().resolve(
-                    windows() ? "show-" + file.getFileName() + ".ps1"
-                              : "show-" + file.getFileName() + ".sh");
-            Files.writeString(script, showScript(file, windows()));
             orca.invoke(worktree, TIMEOUT, List.of(
                     "terminal", "create",
                     "--worktree", selector,
                     "--title", title,
-                    "--command", (windows()
-                            ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "
-                            : "sh ") + relativeTo(script)));
+                    "--command", showCommand(worktree, file, runId, windows())));
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
         }
+    }
+
+    /** Keep UI helpers in run evidence, never beside the versioned task contract. */
+    public static String showCommand(Path worktree, Path file, String runId, boolean windows)
+            throws java.io.IOException {
+        if (runId == null || !runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) {
+            throw new IllegalArgumentException("invalid run id");
+        }
+        String relative = ".warden/runs/" + runId + "/show-contract." + (windows ? "ps1" : "sh");
+        Path script = worktree.resolve(relative);
+        Files.createDirectories(script.getParent());
+        Files.writeString(script, showScript(file, windows));
+        return (windows ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "
+                : "sh ") + relative;
     }
 
     /**
@@ -268,7 +276,8 @@ public final class OrcaWorkspace implements Workspace {
     public static String showScript(Path file, boolean windows) {
         String path = file.toAbsolutePath().toString();
         if (windows) {
-            return "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+            // Windows PowerShell 5.1 also needs a BOM to decode non-ASCII paths in the script.
+            return "\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
                     + "Get-Content -LiteralPath '" + path.replace("'", "''")
                     + "' -Encoding utf8\r\n";
         }
@@ -278,15 +287,6 @@ public final class OrcaWorkspace implements Workspace {
 
     private boolean windows() {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
-    }
-
-    /** A path Orca can be handed on a command line: relative to the worktree, forward slashes. */
-    private String relativeTo(Path script) {
-        Path base = worktree.toAbsolutePath().normalize();
-        Path target = script.toAbsolutePath().normalize();
-        return target.startsWith(base)
-                ? base.relativize(target).toString().replace('\\', '/')
-                : target.toString();
     }
 
     /**
@@ -302,7 +302,7 @@ public final class OrcaWorkspace implements Workspace {
     public static String followScript(Path narration, boolean windows) {
         String path = narration.toAbsolutePath().toString();
         if (windows) {
-            return "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+            return "\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
                     + "Get-Content -LiteralPath '" + path.replace("'", "''")
                     + "' -Wait -Tail 200 -Encoding utf8\r\n";
         }
