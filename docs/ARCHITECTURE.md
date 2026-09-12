@@ -518,6 +518,12 @@ which is why closing any of it leaves the loop running.
 | Workspace status column | `in-progress` / `in-review` / `completed` — three columns, because the card answers one question: is this waiting for me | `Workspace.state` |
 | Terminal tab (`--watch` only) | `warden <run-id> · implementer (grok-implement) 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person. The tab is short: profile, not vendor | `terminal create`, then `terminal rename` on every beat and every state change |
 | Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer (grok-implement / grok) still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
+| Terminal tab, the compiled contract | `warden <run-id> contract`, opened whenever a planner compiled one, and not gated on `--watch`. A planner turns one sentence into the document every later verdict is measured against, and the operator sees it before a writer is dispatched rather than as a path in a terminal they may not have been reading. With `--draft-only` the card also moves to the waiting column, because the next move is a person's | `Workspace.show` from `DoCommand`, printing the contract once |
+
+Both windows read the file as UTF-8 and set the console's output encoding to match. Warden
+writes its narration as UTF-8 and Windows PowerShell decodes with the ANSI code page unless it
+is told otherwise, so a line like "3 blocking finding(s) from reviewer" with an em dash in it
+reached the operator as mojibake in the window Warden had just opened for them.
 
 Every dispatch that can take minutes runs under a beat, including a fix round. A fix round is
 a second call to the same vendor, of the same length, after the operator has already waited

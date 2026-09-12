@@ -403,6 +403,17 @@ public final class DoCommand {
         }
         ConfigLoader.Loaded loaded = loader.load(root, taskId);
 
+        // A compiled contract is the most consequential thing a run produces before it spends
+        // anything, and until this was here the only trace of it on the board was a path in a
+        // terminal nobody was necessarily watching. A planner turns one sentence into the
+        // document every later verdict is measured against; the operator gets to see it.
+        Workspace card = this.board.at(root);
+        if (dispatchPlanner) {
+            card.note("planner compiled " + taskId + " to .warden/tasks/" + taskId
+                    + ".yaml; no writer has been dispatched");
+            card.show(drafted.file(), "warden " + runId + " contract");
+        }
+
         // A worktree Warden made is empty of everything the project needs to check itself. Orca
         // runs a repo's setup when Orca made the checkout; when git made it, this is the only
         // thing that will. Only on a fresh one: joining a worktree that already exists means
@@ -415,6 +426,9 @@ public final class DoCommand {
         }
 
         if (options.draftOnly()) {
+            // Nothing is running and the next move is a person's, which is the one question
+            // this board answers.
+            if (dispatchPlanner) card.state(Workspace.State.WAITING_FOR_HUMAN);
             // The contract is where a run's whole meaning lives, and the drafter writes it
             // from one sentence. Every real task so far needed its browser scenarios written
             // by hand before it was worth paying anybody to satisfy them — and there was no
@@ -476,7 +490,6 @@ public final class DoCommand {
             return runWithConductor(options, requested, root, placement, backend, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }
-        Workspace card = board.at(root);
         Path narration = root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
         if (watch && !options.dryRun()) card.watch(narration, runId);
         TaskLoop.Outcome loop;
