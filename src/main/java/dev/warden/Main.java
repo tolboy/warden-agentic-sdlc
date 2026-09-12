@@ -16,9 +16,11 @@ import dev.warden.execution.orca.OrcaClient;
 import dev.warden.execution.orca.OrcaDecisionGate;
 import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.json.Json;
-import dev.warden.ledger.LedgerReader;
-import dev.warden.ledger.RunReport;
+import dev.warden.ledger.CorpusImport;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.LedgerReader;
+import dev.warden.ledger.ProjectIdentity;
+import dev.warden.ledger.RunReport;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
 import dev.warden.run.DoCommand;
@@ -65,7 +67,7 @@ public final class Main {
                 case "do" -> doIntent(args);
                 case "doctor" -> doctor();
                 case "dashboard" -> dashboard(args);
-                case "ledger" -> ledger();
+                case "ledger" -> ledger(args);
                 case "report" -> report(args);
                 case "status" -> status(args);
                 case "approve" -> approve(args);
@@ -707,7 +709,57 @@ public final class Main {
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
     }
 
-    private static int ledger() throws Exception {
+    private static int ledger(String[] args) throws Exception {
+        boolean global = false;
+        String projectId = null;
+        List<Path> imports = new ArrayList<>();
+        for (int index = 1; index < args.length; index++) {
+            String arg = args[index];
+            switch (arg) {
+                case "--global" -> global = true;
+                case "--project-id" -> {
+                    if (index + 1 >= args.length) {
+                        throw new IllegalArgumentException("ledger --project-id needs a value");
+                    }
+                    projectId = args[++index];
+                }
+                case "--import" -> {
+                    if (index + 1 >= args.length) {
+                        throw new IllegalArgumentException("ledger --import needs a path");
+                    }
+                    imports.add(Path.of(args[++index]));
+                }
+                default -> throw new IllegalArgumentException("ledger: unknown argument '" + arg + "'");
+            }
+        }
+        if (!imports.isEmpty() && (global || projectId != null)) {
+            // Name the flag the operator actually typed. A message about `--global` sends
+            // someone who passed `--project-id` looking for an argument that is not there.
+            throw new IllegalArgumentException("ledger --import cannot be combined with "
+                    + (global ? "--global" : "--project-id"));
+        }
+        if (projectId != null && !global) {
+            throw new IllegalArgumentException("ledger --project-id is only valid with --global");
+        }
+        if (!imports.isEmpty()) {
+            System.out.println(Json.write(CorpusImport.run(UserConfig.defaultHome(), imports)));
+            return 0;
+        }
+        if (global) {
+            if (projectId == null || projectId.isBlank()) {
+                Optional<Path> found = new ConfigLoader().locateProjectRoot(Path.of("."));
+                if (found.isPresent()) {
+                    String recorded = ProjectIdentity.recorded(found.get());
+                    if (recorded != null && !recorded.isBlank()) projectId = recorded;
+                }
+            }
+            // Blank identity is a filter, not an error: it selects imported measurements
+            // that never carried a project_id. Inside a project the recorded identity
+            // still wins when the operator omitted --project-id.
+            System.out.println(Json.write(
+                    new LedgerReader().summarizeCorpus(UserConfig.defaultHome(), projectId)));
+            return 0;
+        }
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
         System.out.println(Json.write(new LedgerReader().summarize(root)));
         return 0;
@@ -977,6 +1029,21 @@ public final class Main {
                                                which keeps the verdicts already reached on
                                                this exact tree
                   warden ledger                aggregate local evidence and experiment dimensions
+                                               --global reads the home corpus from outside a
+                                               repository, filtered by recorded project identity
+                                               (--project-id ID, or the identity already recorded
+                                               for the current project). Omitting both, from
+                                               outside a project, reports measurements whose
+                                               project identity is unknown (legacy imports). A
+                                               corrupt line, unsupported schema version or
+                                               incomplete import marks the report incomplete
+                                               rather than failing it.
+                                               --import PATH copies selected local runs or
+                                               archives through the same allowlist; re-importing
+                                               a copy does not change totals. Legacy rows without
+                                               event_id use a provenance key; an ambiguous match
+                                               is flagged, not merged. Contracts, units, lineage
+                                               and cost the source never had stay unknown.
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,
                                                screenshots, changed files, human decision
