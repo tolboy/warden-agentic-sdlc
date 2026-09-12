@@ -230,14 +230,7 @@ public final class OrcaWorkspace implements Workspace {
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         String name = windows ? "follow.ps1" : "follow.sh";
         Path script = narration.getParent().resolve(name);
-        String path = narration.toAbsolutePath().toString();
-        if (windows) {
-            Files.writeString(script, "Get-Content -LiteralPath '"
-                    + path.replace("'", "''") + "' -Wait -Tail 200\r\n");
-        } else {
-            Files.writeString(script, "#!/bin/sh\ntail -n 200 -f '"
-                    + path.replace("'", "'\\''") + "'\nexec ${SHELL:-sh}\n");
-        }
+        Files.writeString(script, followScript(narration, windows));
         String relative = ".warden/runs/" + runId + "/" + name;
         // `-ExecutionPolicy Bypass` because the default policy refuses to load a .ps1 at all,
         // and the first window this opened said so instead of showing the run. It applies to
@@ -246,6 +239,75 @@ public final class OrcaWorkspace implements Workspace {
         return windows
                 ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File " + relative
                 : "sh " + relative;
+    }
+
+    @Override
+    public void show(Path file, String title) {
+        try {
+            if (!Files.isRegularFile(file)) return;
+            Path script = file.getParent().resolve(
+                    windows() ? "show-" + file.getFileName() + ".ps1"
+                              : "show-" + file.getFileName() + ".sh");
+            Files.writeString(script, showScript(file, windows()));
+            orca.invoke(worktree, TIMEOUT, List.of(
+                    "terminal", "create",
+                    "--worktree", selector,
+                    "--title", title,
+                    "--command", (windows()
+                            ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "
+                            : "sh ") + relativeTo(script)));
+        } catch (Exception notOurProblem) {
+            // A window that did not open is not a run that failed.
+        }
+    }
+
+    /**
+     * Print the file and stay. No `-Wait`: the contract is finished, and a window that keeps
+     * following a file nobody is writing looks like a run that has not started.
+     */
+    public static String showScript(Path file, boolean windows) {
+        String path = file.toAbsolutePath().toString();
+        if (windows) {
+            return "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+                    + "Get-Content -LiteralPath '" + path.replace("'", "''")
+                    + "' -Encoding utf8\r\n";
+        }
+        return "#!/bin/sh\ncat '" + path.replace("'", "'\\''")
+                + "'\nexec ${SHELL:-sh}\n";
+    }
+
+    private boolean windows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    /** A path Orca can be handed on a command line: relative to the worktree, forward slashes. */
+    private String relativeTo(Path script) {
+        Path base = worktree.toAbsolutePath().normalize();
+        Path target = script.toAbsolutePath().normalize();
+        return target.startsWith(base)
+                ? base.relativize(target).toString().replace('\\', '/')
+                : target.toString();
+    }
+
+    /**
+     * The script the followed window runs.
+     *
+     * `-Encoding utf8` is the whole point of this being a method. Warden writes the narration
+     * as UTF-8, and Windows PowerShell's `Get-Content` decodes with the ANSI code page unless
+     * told otherwise, so the em dash in a line like "3 blocking finding(s) from reviewer - see
+     * warden report" reached the operator as three mojibake characters in the window Warden
+     * itself had just opened for them. The console's own output encoding is set for the same
+     * reason: decoding the file correctly is not enough if the terminal then re-encodes it.
+     */
+    public static String followScript(Path narration, boolean windows) {
+        String path = narration.toAbsolutePath().toString();
+        if (windows) {
+            return "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+                    + "Get-Content -LiteralPath '" + path.replace("'", "''")
+                    + "' -Wait -Tail 200 -Encoding utf8\r\n";
+        }
+        return "#!/bin/sh\ntail -n 200 -f '" + path.replace("'", "'\\''")
+                + "'\nexec ${SHELL:-sh}\n";
     }
 
     private void set(List<String> fields) {

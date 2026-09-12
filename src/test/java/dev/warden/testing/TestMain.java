@@ -32,6 +32,7 @@ public final class TestMain {
                 new dev.warden.DashboardTest(),
                 new dev.warden.OrcaSettlementTest(),
                 new dev.warden.OrcaLifecycleTest(),
+                new dev.warden.OrcaWorkspaceTest(),
                 new dev.warden.OrcaRecoveryTest(),
                 new dev.warden.OrcaDecisionGateTest(),
                 new dev.warden.LocalHttpExecutorTest(),
