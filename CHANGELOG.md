@@ -9,7 +9,24 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Fixed
+
+- Global ledger coverage now matches individual vendor attempt IDs. A journaled call
+  no longer suppresses unrelated calls sharing a run instance or operator label.
+  Missing attempt identity remains ambiguous rather than inferred from run identity.
+- Import conflicts and delivery failures persist an incomplete receipt and withhold
+  exact global spend. Successful replay of the same source reconciles failed delivery;
+  older contradictory receipts remain visible. Unsuccessful imports exit nonzero.
+- Contract-window helper scripts stay in run evidence instead of modifying the task
+  directory. Windows helpers include a UTF-8 BOM for PowerShell 5.1 paths, and dry
+  runs do not open contract windows or mark the card as waiting.
+
 ### Added
+
+- `examples/pilot/`: opt-in policy, task template and measurement protocol for one
+  observed external trial with a fixed writer, independent reviewer and one repair.
+  Parser/CallPlan/dry-run verification spends no calls. No automatic continuation,
+  overall deadline, strict money cap or live external result is claimed.
 
 - A durable home measurement corpus at `<UserConfig.home>/ledger/`. Every existing evidence
   producer writes through one `EvidenceLedger.append`: local evidence first, then an

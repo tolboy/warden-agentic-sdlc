@@ -68,6 +68,21 @@ public interface Workspace {
     default void watch(java.nio.file.Path narration, String runId) { }
 
     /**
+     * Show a finished file on this board, once, and leave it on screen.
+     *
+     * {@link #watch} follows something that is still being written; this is for something that
+     * is already true and has to be read before the next thing happens. The compiled contract
+     * is the case that asked for it. A planner turns one sentence into the document the whole
+     * run is then judged against, and until this existed the only trace of that on the board
+     * was a path in a terminal the operator may not have been looking at - which makes the
+     * most consequential artifact of a run the least visible one.
+     *
+     * Best-effort like the rest of this interface: a window that did not open is a window the
+     * operator does not get, not a run that fails.
+     */
+    default void show(java.nio.file.Path file, String runId, String title) { }
+
+    /**
      * The three states a Warden run can put a workspace in.
      *
      * Deliberately not one per stage. The board answers one question — is this waiting for me

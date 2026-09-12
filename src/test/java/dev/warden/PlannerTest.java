@@ -408,7 +408,18 @@ public final class PlannerTest implements Suite {
         scaffoldProject(project);
         UserConfig user = UserConfig.load(home);
         List<String> narration = new ArrayList<>();
-        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration::add).run(
+        // What the board was asked to show. A compiled contract that only exists as a path in
+        // a terminal is the run's most consequential artifact and its least visible one.
+        List<String> shown = new ArrayList<>();
+        dev.warden.run.Workspace.Source board = worktree -> new dev.warden.run.Workspace() {
+            @Override public void note(String text) { shown.add("note: " + text); }
+            @Override public void state(State state) { shown.add("state: " + state); }
+            @Override public void show(Path file, String runId, String title) {
+                check.eq("presentation belongs to the reserved run", "do-always", runId);
+                shown.add("show: " + title + " -> " + file.getFileName());
+            }
+        };
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration::add, board, false).run(
                 new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-always",
                         "HEAD", true, false, false, false, false, true, null, "always"),
                 user);
@@ -423,6 +434,13 @@ public final class PlannerTest implements Suite {
         check.that("and does not print the placeholder an operator would not join",
                 !printed.contains("--run-id <id>"));
         check.eq("and reports always", "always", outcome.report().get("prepare"));
+        String board_ = String.join(" | ", shown);
+        check.contains("the board is shown the contract the planner compiled", board_,
+                "show: warden do-always contract -> hello.yaml");
+        check.contains("the card says where it is and that nothing was dispatched", board_,
+                "no writer has been dispatched");
+        check.contains("and that the next move is a person's", board_,
+                "state: WAITING_FOR_HUMAN");
         check.that("and writes the compiled contract",
                 Files.isRegularFile(project.resolve(".warden/tasks/hello.yaml")));
         check.that("and never dispatches the implementer",
@@ -438,6 +456,12 @@ public final class PlannerTest implements Suite {
                 project.resolve(".warden/runs/do-always/run.json"), StandardCharsets.UTF_8);
         check.contains("the run marker carried that reservation", reservation, "paying_stages");
         check.contains("naming the planner before any vendor ran", reservation, "planner");
+        shown.clear();
+        DoCommand.Outcome dry = new DoCommand(new ProcessRunner(), narration::add, board, false).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-dry-existing",
+                        "HEAD", true, true, false, false, false, true, null, "always"), user);
+        check.that("preview of an existing compiled contract succeeds", dry.ok());
+        check.eq("preview opens no contract window and sets no waiting card", List.of(), shown);
         @SuppressWarnings("unchecked")
         Map<String, Object> artifact = (Map<String, Object>) Json.parse(Files.readString(
                 project.resolve(".warden/runs/do-always/artifacts/planner.json"),

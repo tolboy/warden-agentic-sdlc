@@ -742,8 +742,9 @@ public final class Main {
             throw new IllegalArgumentException("ledger --project-id is only valid with --global");
         }
         if (!imports.isEmpty()) {
-            System.out.println(Json.write(CorpusImport.run(UserConfig.defaultHome(), imports)));
-            return 0;
+            Map<String, Object> result = CorpusImport.run(UserConfig.defaultHome(), imports);
+            System.out.println(Json.write(result));
+            return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
         }
         if (global) {
             if (projectId == null || projectId.isBlank()) {

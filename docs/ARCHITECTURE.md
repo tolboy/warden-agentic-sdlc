@@ -61,8 +61,9 @@ from outside a project reports measurements whose project identity is unknown
 both sources and never sums them. Paid calls are counted once: the local view still
 hides `vendor_attempt` and expands `role_run.vendor_attempts`; the corpus counts
 `accounting.counts_as_new_calls`, and expands a historical `role_run.vendor_attempts`
-only when no journaled attempt covers that run by run instance, operator run id or
-`vendor_attempt_id`. Missing identities do not establish coverage, and an id on only
+attempt by attempt, suppressing only a matching `vendor_attempt_id`. Sharing a run
+instance or operator run label does not cover an entire summary. Missing identities
+do not establish coverage, and an id on only
 one representation does not prove two distinct calls: that relationship is flagged as
 `ambiguous_coverage` rather than merged. A corrupt line, an
 unsupported schema version or an incomplete import yields the file, the byte offset,
@@ -518,6 +519,17 @@ which is why closing any of it leaves the loop running.
 | Workspace status column | `in-progress` / `in-review` / `completed` — three columns, because the card answers one question: is this waiting for me | `Workspace.state` |
 | Terminal tab (`--watch` only) | `warden <run-id> · implementer (grok-implement) 12m00s` while a role runs, `warden <run-id> - NEEDS YOU` when the loop stops for a person. The tab is short: profile, not vendor | `terminal create`, then `terminal rename` on every beat and every state change |
 | Terminal contents (`--watch` only) | The narration, followed live from `.warden/runs/<id>/narration.log`, including `... 12m00s   implementer (grok-implement / grok) still working` once a minute | `Progress.toFile`, tailed by the script Warden writes beside it |
+| Terminal tab, the compiled contract | `warden <run-id> contract`, opened whenever a planner compiled one, and not gated on `--watch`. A planner turns one sentence into the document every later verdict is measured against, and the operator sees it before a writer is dispatched rather than as a path in a terminal they may not have been reading. With `--draft-only` the card also moves to the waiting column, because the next move is a person's | `Workspace.show` from `DoCommand`, printing the contract once |
+
+Both windows read the file as UTF-8 and set the console's output encoding to match. Warden
+writes the Windows helper scripts with a UTF-8 BOM so PowerShell 5.1 also decodes
+non-ASCII paths inside the script correctly. The contract helper lives under
+`.warden/runs/<id>/show-contract.ps1` (or `.sh`), never beside the versioned task.
+Dry runs do not open a contract window or move its card to waiting. Showing a contract
+does not itself wait for approval; use `--draft-only` to stop before execution.
+Warden writes its narration as UTF-8 and Windows PowerShell decodes with the ANSI code page unless it
+is told otherwise, so a line like "3 blocking finding(s) from reviewer" with an em dash in it
+reached the operator as mojibake in the window Warden had just opened for them.
 
 Every dispatch that can take minutes runs under a beat, including a fix round. A fix round is
 a second call to the same vendor, of the same length, after the operator has already waited
