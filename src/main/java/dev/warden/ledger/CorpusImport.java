@@ -56,11 +56,34 @@ public final class CorpusImport {
             }
             results.add(importOne(home, source.toAbsolutePath().normalize()));
         }
+        // An operator imports an archive in order to delete it afterwards. Telling them the
+        // history was saved when every row failed to deliver is the one answer this command
+        // must never give, so `ok` is derived from the receipts rather than asserted.
+        boolean delivered = true;
+        for (Map<String, Object> receipt : results) {
+            if (number(receipt.get("failed")) > 0) delivered = false;
+            if (!Boolean.TRUE.equals(receipt.get("complete"))) delivered = false;
+            if (number(receipt.get("delivered")) == 0 && number(receipt.get("duplicates")) == 0
+                    && number(receipt.get("read")) > 0) {
+                // Rows were read and none of them reached the corpus. A source that was
+                // already there in full is the `duplicates` case and is a real success.
+                delivered = false;
+            }
+            if (number(receipt.get("files")) == 0) {
+                // The named source held no evidence at all, which is not an import anyone
+                // should read as done before deleting the thing they named.
+                delivered = false;
+            }
+        }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("ok", true);
+        body.put("ok", delivered);
         body.put("transform_version", TRANSFORM_VERSION);
         body.put("imports", results);
         return body;
+    }
+
+    private static long number(Object value) {
+        return value instanceof Number n ? n.longValue() : 0L;
     }
 
     /**

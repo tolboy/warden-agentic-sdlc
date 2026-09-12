@@ -733,7 +733,10 @@ public final class Main {
             }
         }
         if (!imports.isEmpty() && (global || projectId != null)) {
-            throw new IllegalArgumentException("ledger --import cannot be combined with --global");
+            // Name the flag the operator actually typed. A message about `--global` sends
+            // someone who passed `--project-id` looking for an argument that is not there.
+            throw new IllegalArgumentException("ledger --import cannot be combined with "
+                    + (global ? "--global" : "--project-id"));
         }
         if (projectId != null && !global) {
             throw new IllegalArgumentException("ledger --project-id is only valid with --global");
