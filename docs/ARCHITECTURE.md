@@ -311,6 +311,14 @@ clean-pass cost and every repair branch costed under both floors, and `--dry-run
 `repair_allowed_under_cap` describes permission under the selected reserve mode. The
 calls already spent reaching the branch are counted once, without counting its suffix twice.
 
+The same preview names the first thing that would stop a real run before it spends: a tree
+already dirty outside the task's scope, a browser scenario with no assertion, or a role that
+no profile can fill. It still finishes as `dry_run`, because it has no candidate to protect,
+but it sets `would_stop` to the reason the real run would stop with and `resolution` to why —
+for a role, the profiles the resolver refused and its reason for each. A preview that reports
+`ok` while the roster cannot be resolved is a preview the operator trusts right up to the
+live run that dispatches nothing.
+
 The `partial` floor is deliberately not the bare cost of the repair. A machine gate failing
 before the first review costs exactly one call to repair — the gate re-runs for free and no
 judgement has been given yet to re-establish — so reserving that would let a run pay an

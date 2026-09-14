@@ -1859,7 +1859,11 @@ public final class TaskLoop {
                 // about the terms this verdict was reached under.
                 stampRouting(stage);
             }
-            if (dryRun || outcome == null) return outcome;
+            if (dryRun) {
+                if (outcome != null && !outcome.ok()) previewStop(stage, outcome);
+                return outcome;
+            }
+            if (outcome == null) return outcome;
             vendors.putIfAbsent(role, outcome.vendor());
             // The tree this role just judged, on the row itself, so a later run can prove the
             // verdict is about the candidate it is being spent on rather than about whatever
@@ -1870,6 +1874,28 @@ public final class TaskLoop {
             // thing it is about to be believed for.
             requireUnchangedContract();
             return outcome;
+        }
+
+        /**
+         * A preview does not stop for a role nobody can fill, because it has no candidate to
+         * protect, but it has to say so.
+         *
+         * Measured on the pilot template: both roles came back `role_unresolved`, one profile
+         * unverified and one whose executable was not on the path, and the preview still
+         * finished `ok`. The refusal was in the steps for anyone who read them, and otherwise
+         * in a live run that dispatched nobody. The reason recorded is the one the real run
+         * stops with, and the first one wins, as it would there.
+         */
+        private void previewStop(Workflow.Stage stage, RoleRunner.Outcome outcome) {
+            if (summary.get("would_stop") != null) return;
+            summary.put("would_stop", terminalReason(stage, outcome));
+            StringBuilder why = new StringBuilder("stage " + stage.name() + ": " + outcome.code());
+            if (outcome.rejected() != null && !outcome.rejected().isEmpty()) {
+                why.append(", refused profiles ").append(outcome.rejected());
+            }
+            Object message = outcome.details() == null ? null : outcome.details().get("message");
+            if (message != null) why.append(". ").append(message);
+            summary.put("resolution", why.toString());
         }
 
         /**

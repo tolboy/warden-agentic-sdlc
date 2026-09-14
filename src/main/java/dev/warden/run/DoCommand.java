@@ -407,8 +407,10 @@ public final class DoCommand {
         // anything, and until this was here the only trace of it on the board was a path in a
         // terminal nobody was necessarily watching. A planner turns one sentence into the
         // document every later verdict is measured against; the operator gets to see it.
-        Workspace card = this.board.at(root);
-        if (dispatchPlanner && !options.dryRun()) {
+        // Resolved only when there is something to put on it. Finding the board asks Orca twice,
+        // and a preview, a hand-drafted contract or a Conductor launch has nothing to say here.
+        Workspace card = dispatchPlanner && !options.dryRun() ? this.board.at(root) : null;
+        if (card != null) {
             card.note("planner compiled " + taskId + " to .warden/tasks/" + taskId
                     + ".yaml; no writer has been dispatched");
             card.show(drafted.file(), runId, "warden " + runId + " contract");
@@ -428,7 +430,7 @@ public final class DoCommand {
         if (options.draftOnly()) {
             // Nothing is running and the next move is a person's, which is the one question
             // this board answers.
-            if (dispatchPlanner && !options.dryRun()) card.state(Workspace.State.WAITING_FOR_HUMAN);
+            if (card != null) card.state(Workspace.State.WAITING_FOR_HUMAN);
             // The contract is where a run's whole meaning lives, and the drafter writes it
             // from one sentence. Every real task so far needed its browser scenarios written
             // by hand before it was worth paying anybody to satisfy them — and there was no
@@ -490,6 +492,7 @@ public final class DoCommand {
             return runWithConductor(options, requested, root, placement, backend, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }
+        if (card == null) card = board.at(root);
         Path narration = root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
         if (watch && !options.dryRun()) card.watch(narration, runId);
         TaskLoop.Outcome loop;

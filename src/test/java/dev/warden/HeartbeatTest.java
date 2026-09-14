@@ -155,6 +155,26 @@ public final class HeartbeatTest implements Suite {
         });
         guarded.working("implementer", 60_000L);
         check.that("the guard at the seam covers the beat as well as the card", true);
+
+        // A default the guard does not forward is not unguarded, it is gone: the wrapper
+        // inherits the interface's empty body, and the contract window never opens.
+        List<String> shown = new CopyOnWriteArrayList<>();
+        Workspace.guarded(new Workspace() {
+            @Override public void note(String text) { }
+            @Override public void state(State state) { }
+            @Override public void show(java.nio.file.Path file, String runId, String title) {
+                shown.add(runId + " " + title);
+            }
+        }).show(java.nio.file.Path.of("hello.yaml"), "r1", "warden r1 contract");
+        check.eq("the guard forwards show to the board", List.of("r1 warden r1 contract"), shown);
+        Workspace.guarded(new Workspace() {
+            @Override public void note(String text) { }
+            @Override public void state(State state) { }
+            @Override public void show(java.nio.file.Path file, String runId, String title) {
+                throw new IllegalStateException("orca died");
+            }
+        }).show(java.nio.file.Path.of("hello.yaml"), "r1", "warden r1 contract");
+        check.that("and a show that throws does not reach the run", true);
     }
 
     private record Beat(String who, long millis) {}

@@ -111,6 +111,10 @@ public interface Workspace {
      * future implementation can be trusted to remember. A failed update is not retried and not
      * reported: the next checkpoint supersedes it, and the ledger — which is the record — never
      * went through here at all.
+     *
+     * Every method is forwarded, the defaults included. A default left out of this list is not
+     * unguarded, it is gone: the wrapper inherits the interface's empty body, so the call
+     * succeeds and nothing reaches the board.
      */
     static Workspace guarded(Workspace board) {
         if (board == NONE) return NONE;
@@ -129,6 +133,10 @@ public interface Workspace {
 
             @Override public void watch(java.nio.file.Path narration, String runId) {
                 try { board.watch(narration, runId); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void show(java.nio.file.Path file, String runId, String title) {
+                try { board.show(file, runId, title); } catch (RuntimeException | Error notOurProblem) { }
             }
         };
     }

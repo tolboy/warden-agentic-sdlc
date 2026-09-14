@@ -20,4 +20,6 @@ budgets:
   # Known-spend threshold only; choose an acceptable value for the actual profiles.
   max_cost_usd: 10.0
 max_fix_attempts: 1
-timeout_minutes: 2
+# Shared by every command of one gate run (the baseline, then each machine gate), not a
+# workflow deadline. Keep it above the slowest measured baseline run of the target project.
+timeout_minutes: 30

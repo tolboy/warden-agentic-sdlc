@@ -16,19 +16,25 @@ the full P3/P4 roadmap. No target project or paid run is selected by these files
 3. Copy two already validated profiles and their required resources into that home.
    Rename their files and `profile` fields to `pilot-implement` and `pilot-review`.
    Writer: `role: implementer`, writable. Reviewer: `role: reviewer`, read-only,
-   different vendor. Pin the actual model/effort and set each profile's existing
-   `limits.wall_clock_minutes: 8` (or another explicitly recorded limit).
-   Keep provider-specific flags and prompt delivery from the validated profiles;
-   this template does not infer command-line compatibility from a model name.
+   different vendor. Pin the actual model/effort. Keep each profile's
+   `limits.wall_clock_minutes` as validated and record it; do not tighten it for this
+   trial. The run analysed in §1 of the adaptive plan measured single calls of 9.7 to
+   21.9 minutes, and a limit below that turns the pilot into a timeout test.
+   Keep provider-specific flags, prompt delivery and `verification.verified_on` from the
+   validated profiles: the resolver refuses a profile without it. This template does not
+   infer command-line compatibility from a model name.
 4. Install this `policy.yaml` in the pilot home. It has a singleton writer roster,
    independent review even at low risk, `failover.on_quota_exhausted: stop`, and
    `budget.repair_reserve: full`. No profile rotation or automatic writer replacement.
 5. Adapt `task.yaml` into the target's `.warden/tasks/pilot-task.yaml`. Replace the
    placeholder goal. Bind `pilot-scope` and `pilot-acceptance` to real named entries
    in that project's `project.yaml`, or change those selectors to its existing names.
-   Keep `max_fix_attempts: 1`. Set the known-spend threshold consciously. Review the
-   permissions and actual acceptance commands; `git diff --check` alone is not a
-   functional acceptance test. Commit the target's reviewed configuration as baseline.
+   Keep `max_fix_attempts: 1`. Keep `timeout_minutes` above the slowest measured baseline
+   run of the target: it is shared by every command of one gate run, and a baseline that
+   outlasts it stops the trial before the first call. Set the known-spend threshold
+   consciously. Review the permissions and actual acceptance commands; `git diff --check`
+   alone is not a functional acceptance test. Commit the target's reviewed configuration
+   as baseline.
 
 From the target checkout, with the pilot home selected:
 
@@ -37,7 +43,13 @@ warden validate pilot-task
 warden run pilot-task --run-id pilot-preview --dry-run
 ```
 
-Inspect `budget_plan` and the resolved roster before spending. This exact three-stage
+The preview must resolve both roles to the pilot profiles and must not print
+`a real run would stop here`. A `would_stop` field in its report means the live run
+would stop before its first call; `resolution` says why, including each refused profile
+and the reason, such as `profile_unverified` or `executable_not_found`. A dry run
+reserves its run ID, so the live run uses a different one.
+
+Inspect `budget_plan` before spending. This exact three-stage
 workflow needs two calls for implement/review and four with a review repair/recheck.
 Gates consume time but no vendor calls. The four-call cap is not suitable for adding
 planner, visual roles, or another reviewer without recalculating the plan.
@@ -47,10 +59,13 @@ timeouts do not provide an overall deadline.
 
 ## Freeze and execute later
 
-Record Warden commit, target base commit, task/policy/profile/prompt/schema hashes,
-requested model/effort/limits, acceptance and the observation protocol before launch.
-For this experiment use the reviewed contract directly (`warden run`); do not buy a
-planner call. After these checks, the live command is:
+Record the Warden commit, the target base commit and the observation protocol before
+launch. The preview's evidence in `.warden/runs/pilot-preview/` holds the rest: its
+`task-run.json` carries the contract and acceptance hashes and the `budget_plan`, and each
+role's dry-run report carries the resolved profile's `role_contract` and
+`measurement_context` — model, effort, limits, grants, prompt and schema hashes. Keep that
+directory with the trial record. For this experiment use the reviewed contract directly
+(`warden run`); do not buy a planner call. After these checks, the live command is:
 
 ```text
 warden run pilot-task --run-id pilot-01
@@ -67,7 +82,9 @@ trial; retain the evidence and count troubleshooting time before planning anothe
 
 Inspect the finished candidate against the same acceptance used for the baseline.
 Human accept remains bound to that candidate; a manual code change requires fresh
-verification. Accept does not merge. Use `warden report pilot-01 --text`,
+verification. Accept does not merge. On Windows, write the decision note in ASCII or
+pass it with `--note-file <utf-8 file>`: a non-ASCII `--note` reaches the JVM as question
+marks, and a recorded decision cannot be recorded again. Use `warden report pilot-01 --text`,
 `warden ledger` and `warden ledger --global` to preserve the outcome. For imports,
 check both exit status and structured `ok`/`complete`, and keep sources while the
 global report says `incomplete`. A successful explicit re-import of identical source
@@ -81,7 +98,8 @@ possible, label differences, and alternate order on subsequent tasks to reduce t
 effect of the operator learning the answer. The first task establishes feasibility;
 another 3–5 tasks can provide an initial signal, not statistical proof.
 
-Record these fields manually alongside automatic evidence:
+Record these fields manually alongside automatic evidence, one copy of
+[`observations.md`](observations.md) per trial:
 
 | Field | Meaning |
 |---|---|

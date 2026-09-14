@@ -20,13 +20,26 @@ that exists in code but has never been run live says so.
 - Contract-window helper scripts stay in run evidence instead of modifying the task
   directory. Windows helpers include a UTF-8 BOM for PowerShell 5.1 paths, and dry
   runs do not open contract windows or mark the card as waiting.
+- `--dry-run` names a role no profile can fill. The preview finished `ok` with
+  `role_unresolved` left inside its steps, while the real run would stop before its first
+  call; it now sets `would_stop` to the reason the real run stops with, and `resolution`
+  to the refused profiles and why each was refused.
+- `Workspace.guarded` forwards `show`. The wrapper inherited the interface's empty default,
+  so a caller holding a guarded board would have lost the contract window without an error;
+  `warden do` happened to hold the unguarded one.
+- `warden do` resolves the Orca board only when it has something to write to it. A preview,
+  a hand-drafted contract or a Conductor launch no longer asks Orca twice for nothing.
+- The pilot template's `timeout_minutes` was 2. It is shared by every command of one gate
+  run, so a real baseline would have stopped the trial before its first call; it is 30, and
+  the README says to keep validated profile wall clocks rather than tighten them.
 
 ### Added
 
-- `examples/pilot/`: opt-in policy, task template and measurement protocol for one
-  observed external trial with a fixed writer, independent reviewer and one repair.
-  Parser/CallPlan/dry-run verification spends no calls. No automatic continuation,
-  overall deadline, strict money cap or live external result is claimed.
+- `examples/pilot/`: opt-in policy, task template, measurement protocol and a per-trial
+  observation sheet for one observed external trial with a fixed writer, independent
+  reviewer and one repair. The parser, CallPlan and dry-run path are verified with a roster
+  that resolves, and with one that does not. No automatic continuation, overall deadline,
+  strict money cap or live external result is claimed.
 
 - A durable home measurement corpus at `<UserConfig.home>/ledger/`. Every existing evidence
   producer writes through one `EvidenceLedger.append`: local evidence first, then an
