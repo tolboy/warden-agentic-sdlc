@@ -72,6 +72,13 @@ public final class JsonlDiagnostics {
             skipped.add(new Skip(label, 0L, "unreadable"));
             return new Read(rows, skipped);
         }
+        return readBytes(bytes, label);
+    }
+
+    /** Parse the same byte snapshot the importer fingerprints for later reconciliation. */
+    static Read readBytes(byte[] bytes, String label) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<Skip> skipped = new ArrayList<>();
         int index = 0;
         while (index < bytes.length) {
             int start = index;

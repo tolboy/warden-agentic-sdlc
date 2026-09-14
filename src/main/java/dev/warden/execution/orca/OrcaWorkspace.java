@@ -230,14 +230,7 @@ public final class OrcaWorkspace implements Workspace {
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         String name = windows ? "follow.ps1" : "follow.sh";
         Path script = narration.getParent().resolve(name);
-        String path = narration.toAbsolutePath().toString();
-        if (windows) {
-            Files.writeString(script, "Get-Content -LiteralPath '"
-                    + path.replace("'", "''") + "' -Wait -Tail 200\r\n");
-        } else {
-            Files.writeString(script, "#!/bin/sh\ntail -n 200 -f '"
-                    + path.replace("'", "'\\''") + "'\nexec ${SHELL:-sh}\n");
-        }
+        Files.writeString(script, followScript(narration, windows));
         String relative = ".warden/runs/" + runId + "/" + name;
         // `-ExecutionPolicy Bypass` because the default policy refuses to load a .ps1 at all,
         // and the first window this opened said so instead of showing the run. It applies to
@@ -246,6 +239,75 @@ public final class OrcaWorkspace implements Workspace {
         return windows
                 ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File " + relative
                 : "sh " + relative;
+    }
+
+    @Override
+    public void show(Path file, String runId, String title) {
+        try {
+            if (!Files.isRegularFile(file)) return;
+            orca.invoke(worktree, TIMEOUT, List.of(
+                    "terminal", "create",
+                    "--worktree", selector,
+                    "--title", title,
+                    "--command", showCommand(worktree, file, runId, windows())));
+        } catch (Exception notOurProblem) {
+            // A window that did not open is not a run that failed.
+        }
+    }
+
+    /** Keep UI helpers in run evidence, never beside the versioned task contract. */
+    public static String showCommand(Path worktree, Path file, String runId, boolean windows)
+            throws java.io.IOException {
+        if (runId == null || !runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) {
+            throw new IllegalArgumentException("invalid run id");
+        }
+        String relative = ".warden/runs/" + runId + "/show-contract." + (windows ? "ps1" : "sh");
+        Path script = worktree.resolve(relative);
+        Files.createDirectories(script.getParent());
+        Files.writeString(script, showScript(file, windows));
+        return (windows ? "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "
+                : "sh ") + relative;
+    }
+
+    /**
+     * Print the file and stay. No `-Wait`: the contract is finished, and a window that keeps
+     * following a file nobody is writing looks like a run that has not started.
+     */
+    public static String showScript(Path file, boolean windows) {
+        String path = file.toAbsolutePath().toString();
+        if (windows) {
+            // Windows PowerShell 5.1 also needs a BOM to decode non-ASCII paths in the script.
+            return "\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+                    + "Get-Content -LiteralPath '" + path.replace("'", "''")
+                    + "' -Encoding utf8\r\n";
+        }
+        return "#!/bin/sh\ncat '" + path.replace("'", "'\\''")
+                + "'\nexec ${SHELL:-sh}\n";
+    }
+
+    private boolean windows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    /**
+     * The script the followed window runs.
+     *
+     * `-Encoding utf8` is the whole point of this being a method. Warden writes the narration
+     * as UTF-8, and Windows PowerShell's `Get-Content` decodes with the ANSI code page unless
+     * told otherwise, so the em dash in a line like "3 blocking finding(s) from reviewer - see
+     * warden report" reached the operator as three mojibake characters in the window Warden
+     * itself had just opened for them. The console's own output encoding is set for the same
+     * reason: decoding the file correctly is not enough if the terminal then re-encodes it.
+     */
+    public static String followScript(Path narration, boolean windows) {
+        String path = narration.toAbsolutePath().toString();
+        if (windows) {
+            return "\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n"
+                    + "Get-Content -LiteralPath '" + path.replace("'", "''")
+                    + "' -Wait -Tail 200 -Encoding utf8\r\n";
+        }
+        return "#!/bin/sh\ntail -n 200 -f '" + path.replace("'", "'\\''")
+                + "'\nexec ${SHELL:-sh}\n";
     }
 
     private void set(List<String> fields) {

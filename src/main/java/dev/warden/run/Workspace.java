@@ -68,6 +68,21 @@ public interface Workspace {
     default void watch(java.nio.file.Path narration, String runId) { }
 
     /**
+     * Show a finished file on this board, once, and leave it on screen.
+     *
+     * {@link #watch} follows something that is still being written; this is for something that
+     * is already true and has to be read before the next thing happens. The compiled contract
+     * is the case that asked for it. A planner turns one sentence into the document the whole
+     * run is then judged against, and until this existed the only trace of that on the board
+     * was a path in a terminal the operator may not have been looking at - which makes the
+     * most consequential artifact of a run the least visible one.
+     *
+     * Best-effort like the rest of this interface: a window that did not open is a window the
+     * operator does not get, not a run that fails.
+     */
+    default void show(java.nio.file.Path file, String runId, String title) { }
+
+    /**
      * The three states a Warden run can put a workspace in.
      *
      * Deliberately not one per stage. The board answers one question — is this waiting for me
@@ -96,6 +111,10 @@ public interface Workspace {
      * future implementation can be trusted to remember. A failed update is not retried and not
      * reported: the next checkpoint supersedes it, and the ledger — which is the record — never
      * went through here at all.
+     *
+     * Every method is forwarded, the defaults included. A default left out of this list is not
+     * unguarded, it is gone: the wrapper inherits the interface's empty body, so the call
+     * succeeds and nothing reaches the board.
      */
     static Workspace guarded(Workspace board) {
         if (board == NONE) return NONE;
@@ -114,6 +133,10 @@ public interface Workspace {
 
             @Override public void watch(java.nio.file.Path narration, String runId) {
                 try { board.watch(narration, runId); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void show(java.nio.file.Path file, String runId, String title) {
+                try { board.show(file, runId, title); } catch (RuntimeException | Error notOurProblem) { }
             }
         };
     }

@@ -1,0 +1,32 @@
+# Opt-in configuration for one observed, non-visual pilot. See README.md first.
+version: 1
+roles:
+  implementer:
+    profiles: [pilot-implement]
+    strategy: first
+  reviewer:
+    profiles: [pilot-review]
+    strategy: first
+    require_independent_vendor: true
+review:
+  required_for_risk: [low, medium, high]
+failover:
+  on_quota_exhausted: stop
+budget:
+  repair_reserve: full
+workflow:
+  stages:
+    - stage: implement
+      run: role
+      role: implementer
+      on_fail: stop
+    - stage: gates
+      run: machine_gates
+      on_fail: fix
+      recheck_after_fix: true
+    - stage: review
+      run: role
+      role: reviewer
+      on_fail: stop
+      on_findings: fix
+      recheck_after_fix: true

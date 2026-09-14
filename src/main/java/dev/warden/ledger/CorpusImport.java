@@ -62,6 +62,7 @@ public final class CorpusImport {
         boolean delivered = true;
         for (Map<String, Object> receipt : results) {
             if (number(receipt.get("failed")) > 0) delivered = false;
+            if (number(receipt.get("conflicts")) > 0) delivered = false;
             if (!Boolean.TRUE.equals(receipt.get("complete"))) delivered = false;
             if (number(receipt.get("delivered")) == 0 && number(receipt.get("duplicates")) == 0
                     && number(receipt.get("read")) > 0) {
@@ -128,13 +129,20 @@ public final class CorpusImport {
         StringBuilder fingerprint = new StringBuilder();
         for (Path file : files) {
             fingerprint.append(file.getFileName()).append('\0');
-            if (Files.isRegularFile(file)) {
-                fingerprint.append(ProjectIdentity.sha256(
-                        new String(Files.readAllBytes(file), java.nio.charset.StandardCharsets.ISO_8859_1)));
+            String label = label(source, file);
+            JsonlDiagnostics.Read parsed;
+            try {
+                byte[] bytes = Files.readAllBytes(file);
+                fingerprint.append(ProjectIdentity.sha256(new String(bytes,
+                        java.nio.charset.StandardCharsets.ISO_8859_1)));
+                parsed = JsonlDiagnostics.readBytes(bytes, label);
+            } catch (IOException unreadable) {
+                // A vanished/unreadable file is loss, not an empty successful source.
+                fingerprint.append("unreadable");
+                parsed = new JsonlDiagnostics.Read(List.of(),
+                        List.of(new JsonlDiagnostics.Skip(label, 0L, "unreadable")));
             }
             fingerprint.append('\n');
-            String label = label(source, file);
-            JsonlDiagnostics.Read parsed = JsonlDiagnostics.read(file, label);
             skipped.addAll(parsed.skipped());
             for (JsonlDiagnostics.Skip skip : parsed.skipped()) {
                 if (skip.identityRecovered()) {
@@ -164,7 +172,7 @@ public final class CorpusImport {
         receipt.put("source_name", source.getFileName() == null ? "" : source.getFileName().toString());
         receipt.put("source_kind", kind(source, files));
         receipt.put("source_fingerprint", ProjectIdentity.sha256(fingerprint.toString()));
-        receipt.put("complete", skipped.isEmpty());
+        receipt.put("complete", skipped.isEmpty() && failed == 0 && conflicts == 0);
         receipt.put("files", (long) files.size());
         receipt.put("read", read);
         receipt.put("legacy", legacy);

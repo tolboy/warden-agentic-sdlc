@@ -163,9 +163,9 @@ from the role with eyes.
   never sums a local tree together with the copy of it that reached the home. A paid
   call is counted once: locally by expanding `role_run.vendor_attempts`; on the corpus
   by `accounting.counts_as_new_calls`, except a historical `role_run` that still
-  carries `vendor_attempts` and has no journaled attempt covering that run by
-  `run_instance_id`, operator run id or `vendor_attempt_id`, which is expanded so
-  those attempts stay measurable. Missing identities do not establish coverage, and
+  carries `vendor_attempts`, which is expanded attempt by attempt, skipping only
+  matching journaled `vendor_attempt_id` values. A shared run instance or operator
+  label does not establish coverage of all attempts. Missing identities do not establish coverage, and
   an id on only one representation does not prove two distinct calls: that
   relationship is flagged as `ambiguous_coverage` rather than merged. Evidence whose
   accounting unit cannot be established is counted as unknown.
@@ -220,6 +220,15 @@ content hash is an integrity conflict: flagged, not merged. Contracts, units, li
 effort, cost and launch receipts the legacy evidence never had stay unknown. The import
 receipt records when it ran, the transform version (`measurement-projector-1`) and how
 complete the source was. A read never imports.
+
+Import returns a nonzero exit status and `ok:false` on incomplete input, failed
+delivery, unresolved conflicts or a source holding no evidence. Duplicate-only
+re-import is success. `complete` includes both parsing and delivery; the reader also
+recognizes older receipts whose `complete:true` contradicted nonzero `failed` or
+`conflicts`. These receipts keep the affected report incomplete. An explicit successful
+re-import with the same source fingerprint and transform version reconciles prior
+failed delivery; a changed source cannot clear the earlier loss. Unresolved conflicts
+remain incomplete until the exact source can be reconciled successfully.
 
 A corrupt line, a truncated last line or an unsupported `schema_version` does not fail
 the report. The output names the file, the byte offset, a skip count and `incomplete`.

@@ -37,6 +37,8 @@ public final class CorpusReaderTest implements Suite {
             group6LegacyImport(check, sandbox);
             group9Corruption(check, sandbox);
             group10Regression(check, sandbox);
+            attemptCoverageRegression(check, sandbox);
+            importDeliveryRegression(check, sandbox);
         } finally {
             try {
                 deleteTree(sandbox);
@@ -56,6 +58,8 @@ public final class CorpusReaderTest implements Suite {
                 false, "role_quota_exhausted", 50L, 0.25, 3L);
         Map<String, Object> attemptOk = attempt("codex", "openai", "gpt-test",
                 true, "ok", 100L, 0.5, 30L);
+        attemptFail.put("vendor_attempt_id", "alpha-fail");
+        attemptOk.put("vendor_attempt_id", "alpha-ok");
         first.append("vendor_attempt", attemptFail);
         first.append("vendor_attempt", attemptOk);
         Map<String, Object> role = new LinkedHashMap<>(attemptOk);
@@ -68,6 +72,8 @@ public final class CorpusReaderTest implements Suite {
         check.that("the write path recorded a project identity", projectId != null && !projectId.isBlank());
 
         EvidenceLedger continued = new EvidenceLedger(project, "beta", home).bindParent(instanceA);
+        attemptOk = new LinkedHashMap<>(attemptOk);
+        attemptOk.put("vendor_attempt_id", "beta-ok");
         continued.append("vendor_attempt", attemptOk);
         Map<String, Object> continuedRole = new LinkedHashMap<>(attemptOk);
         continuedRole.put("vendor_attempts", List.of(attemptOk));
@@ -843,6 +849,126 @@ public final class CorpusReaderTest implements Suite {
         new LedgerReader().summarizeCorpus(pendingHome, "no-such-project");
         check.eq("a global read does not recover a journal", outboxSize, Files.size(outbox));
         check.eq("and does not deliver it", 0, HomeCorpus.records(pendingHome).size());
+    }
+
+    private void attemptCoverageRegression(Check check, Path sandbox) throws Exception {
+        Path home = sandbox.resolve("coverage-home");
+        Map<String, Object> journal = pricedEvent("journal-A", "A", 1.0);
+        Map<String, Object> role = new LinkedHashMap<>(Map.of(
+                "event_id", "summary-B", "project_id", "P", "run_instance_id", "R",
+                "operator_run_id", "same-label", "type", "role_run", "role", "reviewer"));
+        role.put("vendor_attempts", List.of(Map.of("vendor_attempt_id", "A", "cost_usd", 1.0),
+                Map.of("vendor_attempt_id", "B", "cost_usd", 3.0)));
+        Path source = sandbox.resolve("coverage.jsonl");
+        Files.writeString(source, Json.write(journal) + "\n" + Json.write(role) + "\n");
+        CorpusImport.run(home, source);
+        Map<String, Object> report = new LedgerReader().summarizeCorpus(home, "P");
+        check.eq("partial journal suppresses A only, not distinct B in the same run", 2L, calls(report));
+        check.eq("partial journal preserves the known price of B", 4.0, spend(report));
+        check.that("distinct IDs establish complete coverage", !report.containsKey("incomplete"));
+
+        // The operator label is not an instance identity. An old summary with no instance
+        // must not be covered by a later journal just because both were called same-label.
+        role.remove("run_instance_id");
+        role.put("event_id", "legacy-summary");
+        role.put("vendor_attempts", List.of(Map.of("vendor_attempt_id", "B", "cost_usd", 3.0)));
+        Path legacyHome = sandbox.resolve("coverage-legacy-home");
+        Files.writeString(source, Json.write(journal) + "\n" + Json.write(role) + "\n");
+        CorpusImport.run(legacyHome, source);
+        check.eq("reused operator label does not suppress a different attempt", 4.0,
+                spend(new LedgerReader().summarizeCorpus(legacyHome, "P")));
+
+        role.put("run_instance_id", "R");
+        role.put("vendor_attempts", List.of(Map.of("cost_usd", 3.0)));
+        Path ambiguousHome = sandbox.resolve("coverage-ambiguous-home");
+        Files.writeString(source, Json.write(journal) + "\n" + Json.write(role) + "\n");
+        CorpusImport.run(ambiguousHome, source);
+        report = new LedgerReader().summarizeCorpus(ambiguousHome, "P");
+        check.eq("same run does not prove the identity of an anonymous attempt", true, report.get("incomplete"));
+        check.eq("ambiguous attempt withholds exact spend", null, spend(report));
+        check.eq("ambiguous attempt is not counted as another known call", 1L, calls(report));
+    }
+
+    private void importDeliveryRegression(Check check, Path sandbox) throws Exception {
+        Path home = sandbox.resolve("delivery-home");
+        Path source = sandbox.resolve("delivery.jsonl");
+        Files.writeString(source, Json.write(pricedEvent("e1", "A", 1.0)) + "\n");
+        CorpusImport.run(home, source);
+        Files.writeString(source, Json.write(pricedEvent("e1", "A", 9.0)) + "\n"
+                + Json.write(pricedEvent("e2", "B", 2.0)) + "\n");
+        Map<String, Object> result = CorpusImport.run(home, source);
+        check.eq("mixed successful and conflicted import is unsuccessful", false, result.get("ok"));
+        check.eq("delivery conflict persists incomplete receipt", false, firstImport(result).get("complete"));
+        check.eq("one non-conflicting row was still delivered", 1L, firstImport(result).get("delivered"));
+        Map<String, Object> report = new LedgerReader().summarizeCorpus(home, "P");
+        check.eq("conflict remains visible after import returns", true, report.get("incomplete"));
+        check.eq("conflict withholds exact corpus spend", null, spend(report));
+        check.that("conflict for P does not taint unrelated Q",
+                !new LedgerReader().summarizeCorpus(home, "Q").containsKey("incomplete"));
+        check.eq("re-importing unresolved conflict still fails", false, CorpusImport.run(home, source).get("ok"));
+
+        Path failedHome = sandbox.resolve("failed-delivery-home");
+        Path blocked = failedHome.resolve("ledger/segments");
+        Files.createDirectories(blocked.getParent());
+        Files.writeString(blocked, "not a directory");
+        Files.writeString(source, Json.write(pricedEvent("f1", "F", 5.0)) + "\n");
+        result = CorpusImport.run(failedHome, source);
+        check.eq("delivery failure makes import fail", false, result.get("ok"));
+        check.eq("delivery failure persists incomplete receipt", false, firstImport(result).get("complete"));
+        check.eq("failed delivery is counted", 1L, firstImport(result).get("failed"));
+        check.eq("reader retains failed delivery for named project", true,
+                new LedgerReader().summarizeCorpus(failedHome, "P").get("incomplete"));
+        Files.delete(blocked);
+        result = CorpusImport.run(failedHome, source);
+        check.eq("explicit replay of the same source delivers successfully", true, result.get("ok"));
+        report = new LedgerReader().summarizeCorpus(failedHome, "P");
+        check.that("successful same-source replay reconciles completeness", !report.containsKey("incomplete"));
+        check.eq("reconciliation restores measured spend", 5.0, spend(report));
+        check.eq("duplicate replay is successful", true, CorpusImport.run(failedHome, source).get("ok"));
+        check.eq("duplicate replay cannot increase calls", 1L,
+                calls(new LedgerReader().summarizeCorpus(failedHome, "P")));
+
+        // Compatibility with receipts emitted before complete included delivery results.
+        for (String lost : List.of("failed", "conflicts")) {
+            Path oldHome = sandbox.resolve("old-" + lost);
+            Files.createDirectories(oldHome.resolve("ledger"));
+            Files.writeString(oldHome.resolve("ledger/imports.jsonl"), Json.write(Map.of(
+                    "complete", true, lost, 1L, "project_ids", List.of("P"))) + "\n");
+            check.eq("legacy complete:true cannot hide " + lost, true,
+                    new LedgerReader().summarizeCorpus(oldHome, "P").get("incomplete"));
+        }
+
+        Path empty = sandbox.resolve("empty-import");
+        Files.createDirectories(empty);
+        ProcessRunnerResult bad = cli(sandbox, home, "ledger", "--import", empty.toString());
+        check.eq("unsuccessful import exits 1", 1, bad.exit);
+        check.eq("and prints a structured unsuccessful result", false, Json.parseObject(bad.stdout).get("ok"));
+        ProcessRunnerResult good = cli(sandbox, failedHome, "ledger", "--import", source.toString());
+        check.eq("already-delivered import exits 0", 0, good.exit);
+        ProcessRunnerResult conflict = cli(sandbox, home, "ledger", "--import",
+                writeConflictSource(sandbox).toString());
+        check.eq("mixed conflict import exits 1", 1, conflict.exit);
+    }
+
+    private static Path writeConflictSource(Path sandbox) throws Exception {
+        Path source = sandbox.resolve("cli-conflict.jsonl");
+        Files.writeString(source, Json.write(pricedEvent("e1", "A", 9.0)) + "\n"
+                + Json.write(pricedEvent("e3", "C", 2.0)) + "\n");
+        return source;
+    }
+
+    private static Map<String, Object> pricedEvent(String event, String attempt, double cost) {
+        return Map.of("event_id", event, "vendor_attempt_id", attempt, "cost_usd", cost,
+                "type", "vendor_attempt", "project_id", "P", "run_instance_id", "R",
+                "operator_run_id", "same-label", "role", "implementer");
+    }
+
+    private static Object spend(Map<String, Object> report) {
+        return object(object(object(report.get("metrics")).get("telemetry")).get("cost_usd")).get("total");
+    }
+
+    private static long calls(Map<String, Object> report) {
+        return number(object(object(report.get("metrics")).get("role_runs")).get("total"));
     }
 
     private static Map<String, Object> attempt(String profile, String vendor, String model,

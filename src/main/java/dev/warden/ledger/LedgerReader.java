@@ -106,8 +106,8 @@ public final class LedgerReader {
      * Paid calls are counted by accounting unit: {@code vendor_attempt} is a call,
      * {@code role_run} is a summary of those calls when a journal of attempts exists.
      * A historical {@code role_run} that still carries {@code vendor_attempts} is
-     * expanded unless a journaled attempt covers that run by {@code run_instance_id},
-     * operator run id, or matching {@code vendor_attempt_id}. Missing identities do
+     * expanded attempt by attempt, skipping matching {@code vendor_attempt_id} values.
+     * Run identity alone never covers all the calls in a summary. Missing identities do
      * not establish coverage, and an id on only one representation does not prove
      * two distinct calls. Nested attempts whose ids already appear in the journal
      * are not counted again. Evidence whose accounting unit cannot be established is
@@ -267,7 +267,7 @@ public final class LedgerReader {
          * as unknown rather than inventing a call.
          */
         private void acceptCorpusRoleRun(Map<String, Object> event, CoveredCalls covered) {
-            if (shouldExpandHistoricalRoleRun(event, covered)) {
+            if (shouldExpandHistoricalRoleRun(event)) {
                 acceptExpandedRoleRun(event, covered);
                 return;
             }
@@ -601,14 +601,13 @@ public final class LedgerReader {
         return event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty();
     }
 
-    private static boolean shouldExpandHistoricalRoleRun(Map<String, Object> event,
-                                                         CoveredCalls covered) {
-        if (countsAsNewCall(event) || covered.coversRun(event)) return false;
+    private static boolean shouldExpandHistoricalRoleRun(Map<String, Object> event) {
+        if (countsAsNewCall(event)) return false;
         return hasRecordedAttempts(event);
     }
 
     private static boolean accountingUnitUnknown(Map<String, Object> event, CoveredCalls covered) {
-        if (countsAsNewCall(event) || covered.coversRun(event) || covered.coversAttempt(event)
+        if (countsAsNewCall(event) || covered.coversAttempt(event)
                 || hasRecordedAttempts(event)) {
             return false;
         }
@@ -642,21 +641,19 @@ public final class LedgerReader {
     /**
      * Journaled {@code vendor_attempt} events, keyed so a historical {@code role_run}
      * that recorded the same attempts only as a nested array can still be expanded
-     * without counting a modern journal twice. Coverage is by run instance, operator
-     * run, or {@code vendor_attempt_id}. Missing identities do not establish that one
-     * attempt covers another, and they do not establish that the two representations
+     * without counting a modern journal twice. Coverage requires matching
+     * {@code vendor_attempt_id}. Distinct run identities can establish separate calls,
+     * but a shared run identity cannot establish coverage. Missing identities do not
+     * establish that one attempt covers another, or that the two representations
      * are distinct: an id on only one side is flagged as {@code ambiguous_coverage}
      * rather than counted as two unrelated calls.
      */
-    private record CoveredCalls(Set<String> instances, Set<String> operatorRuns,
-                                Set<String> attemptIds, List<JournalCall> journal) {
-        static final CoveredCalls NONE = new CoveredCalls(Set.of(), Set.of(), Set.of(), List.of());
+    private record CoveredCalls(Set<String> attemptIds, List<JournalCall> journal) {
+        static final CoveredCalls NONE = new CoveredCalls(Set.of(), List.of());
 
         private record JournalCall(String instance, String operator, String attemptId) {}
 
         static CoveredCalls of(List<Map<String, Object>> events) {
-            Set<String> instances = new LinkedHashSet<>();
-            Set<String> operatorRuns = new LinkedHashSet<>();
             Set<String> attemptIds = new LinkedHashSet<>();
             List<JournalCall> journal = new ArrayList<>();
             for (Map<String, Object> event : events) {
@@ -664,20 +661,10 @@ public final class LedgerReader {
                 String instance = nonBlank(text(event.get("run_instance_id")));
                 String operator = nonBlank(firstText(event, "operator_run_id", "run_id"));
                 String attempt = attemptId(event);
-                if (instance != null) instances.add(instance);
-                if (operator != null) operatorRuns.add(operator);
                 if (attempt != null) attemptIds.add(attempt);
                 journal.add(new JournalCall(instance, operator, attempt));
             }
-            return new CoveredCalls(instances, operatorRuns, attemptIds, List.copyOf(journal));
-        }
-
-        boolean coversRun(Map<String, Object> event) {
-            String instance = text(event.get("run_instance_id"));
-            if (instance != null && !instance.isBlank()) return instances.contains(instance);
-            String operator = firstText(event, "operator_run_id", "run_id");
-            if (operator != null && !operator.isBlank()) return operatorRuns.contains(operator);
-            return false;
+            return new CoveredCalls(attemptIds, List.copyOf(journal));
         }
 
         boolean coversAttempt(Map<String, Object> row) {
@@ -692,7 +679,7 @@ public final class LedgerReader {
          */
         boolean ambiguousWith(Map<String, Object> attempt, Map<String, Object> roleRun) {
             if (journal.isEmpty()) return false;
-            if (coversAttempt(attempt) || coversRun(roleRun)) return false;
+            if (coversAttempt(attempt)) return false;
             for (JournalCall call : journal) {
                 if (!distinctFrom(attempt, roleRun, call)) return true;
             }
@@ -705,9 +692,8 @@ public final class LedgerReader {
             if (nestedId != null && call.attemptId != null) return !nestedId.equals(call.attemptId);
             String nestedInstance = firstNonBlank(text(attempt.get("run_instance_id")),
                     text(roleRun.get("run_instance_id")));
-            if (nestedInstance != null && call.instance != null
-                    && !nestedInstance.equals(call.instance)) {
-                return true;
+            if (nestedInstance != null && call.instance != null) {
+                return !nestedInstance.equals(call.instance);
             }
             String nestedOperator = firstNonBlank(
                     firstText(attempt, "operator_run_id", "run_id"),
@@ -730,7 +716,18 @@ public final class LedgerReader {
             throws IOException {
         JsonlDiagnostics.Read read = JsonlDiagnostics.read(importsFile, CorpusImport.IMPORTS);
         skipped.addAll(read.skipped());
+        // An explicit successful re-import of exactly the same bytes reconciles a failed
+        // delivery. Different source content (or an unknown fingerprint) cannot erase loss.
+        Map<String, Map<String, Object>> latest = new LinkedHashMap<>();
+        long anonymous = 0;
         for (Map<String, Object> receipt : read.rows()) {
+            String fingerprint = nonBlank(text(receipt.get("source_fingerprint")));
+            String transform = nonBlank(text(receipt.get("transform_version")));
+            String key = fingerprint == null || transform == null
+                    ? "unknown:" + anonymous++ : transform + ":" + fingerprint;
+            latest.put(key, receipt);
+        }
+        for (Map<String, Object> receipt : latest.values()) {
             if (!incompleteReceipt(receipt)) continue;
             if (!importAppliesTo(receipt, projectId, unknownIdentity)) continue;
             int before = skipped.size();
@@ -746,6 +743,10 @@ public final class LedgerReader {
 
     private static boolean incompleteReceipt(Map<String, Object> receipt) {
         if (Boolean.FALSE.equals(receipt.get("complete"))) return true;
+        // Older importers wrote complete:true even when delivery lost rows.
+        for (String field : List.of("failed", "conflicts")) {
+            if (receipt.get(field) instanceof Number count && count.longValue() > 0) return true;
+        }
         Object skipped = receipt.get("skipped");
         if (skipped instanceof Map<?, ?> map && map.get("count") instanceof Number count) {
             return count.longValue() > 0;
