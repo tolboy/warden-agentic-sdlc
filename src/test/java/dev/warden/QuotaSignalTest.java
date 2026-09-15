@@ -34,6 +34,18 @@ public final class QuotaSignalTest implements Suite {
             credits or try again at 9:21 PM."}}
             """;
 
+    /**
+     * A Claude Code CLI call stopped by the operator's session limit, 2026-09-15. The whole of
+     * stdout was this one envelope, with the timing and usage fields removed; stderr was empty.
+     * Its type is {@code result} and its subtype is {@code success}, so the only structured
+     * sign of failure is {@code is_error} and the HTTP status. Three runs recorded this as
+     * {@code role_command_failed}, and a retry re-bought every reading it had already paid for.
+     */
+    private static final String CLAUDE_SESSION_LIMIT =
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,"
+                    + "\"num_turns\":8,\"result\":\"You've hit your session limit \\u00b7 resets 10:50am "
+                    + "(America/New_York)\"}";
+
     /** What Codex actually put on stderr during that run: nothing about the quota. */
     private static final String CODEX_STDERR = """
             Reading additional input from stdin...
@@ -81,7 +93,33 @@ public final class QuotaSignalTest implements Suite {
                         .matched());
         check.that("a bare mention of the word quota decides nothing, even on stderr",
                 !QuotaSignal.detect(List.of(), "", "recomputing the disk quota table").matched());
+        claudeEnvelopeChecks(check);
         turnCeilingChecks(check);
+    }
+
+    /**
+     * Claude reports failure inside a result envelope rather than as an error event. The same
+     * envelope carries the model's answer under {@code result} when the call succeeded, so the
+     * key may only be read when the vendor itself flagged the envelope as an error.
+     */
+    private void claudeEnvelopeChecks(Check check) {
+        QuotaSignal.Detection claude = QuotaSignal.detect(List.of(), CLAUDE_SESSION_LIMIT, "");
+        check.that("a Claude session limit is recognised", claude.matched());
+        check.eq("from the envelope the vendor flagged as an error",
+                "structured_error_event", claude.detectedBy());
+        check.eq("by its own wording", "session limit", claude.signature());
+        check.contains("with the reset time kept verbatim", claude.evidence(), "resets 10:50am");
+
+        String answerAboutLimits = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+                + "\"result\":\"{\\\"verdict\\\":\\\"fail\\\",\\\"summary\\\":\\\"The client ignores the "
+                + "session limit and the usage limit replies\\\"}\"}";
+        check.that("a successful answer that discusses limits is not a refusal",
+                !QuotaSignal.detect(List.of(), answerAboutLimits, "").matched());
+
+        String turnCeiling = "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,"
+                + "\"num_turns\":40}";
+        check.that("an error envelope with no quota wording stays an ordinary failure",
+                !QuotaSignal.detect(List.of(), turnCeiling, "").matched());
     }
 
     /**

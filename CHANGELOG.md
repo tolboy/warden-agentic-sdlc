@@ -15,6 +15,12 @@ that exists in code but has never been run live says so.
   it, so a run started from a target repository could not find `scripts/visual-qa.mjs` and
   stopped `visual_qa_unavailable` after its reviews had already been paid for. `warden.cmd`
   always set it. Found on the first external trial, 2026-09-15.
+- A Claude session limit is recognised as an exhausted subscription. The Claude CLI reports it
+  as a `result` envelope with `is_error: true` and HTTP 429, which the matcher did not read,
+  and "session limit" was not a known wording; three calls on that trial were recorded as
+  `role_command_failed`. The `result` key is read only when the vendor flags the envelope as
+  an error, so an answer that merely discusses limits is not misread. Suite-covered; not yet
+  observed on a live run since the fix.
 - Global ledger coverage now matches individual vendor attempt IDs. A journaled call
   no longer suppresses unrelated calls sharing a run instance or operator label.
   Missing attempt identity remains ambiguous rather than inferred from run identity.

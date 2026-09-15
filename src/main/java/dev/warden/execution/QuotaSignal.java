@@ -68,12 +68,14 @@ public final class QuotaSignal {
     /**
      * Phrases that mean "the subscription is spent", lowercase.
      *
-     * "usage limit" comes from the Codex transcript above. The rest are the conventional
-     * wordings for the same condition. They are deliberately phrases and not single words:
-     * the bare word "quota" appears in ordinary prose about quotas, including this file.
+     * "usage limit" comes from the Codex transcript above, and "session limit" from the Claude
+     * CLI's HTTP 429 envelope. The rest are the conventional wordings for the same condition.
+     * They are deliberately phrases and not single words: the bare word "quota" appears in
+     * ordinary prose about quotas, including this file.
      */
     public static final List<String> DEFAULT_SIGNATURES = List.of(
             "usage limit",
+            "session limit",
             "rate limit",
             "rate_limit",
             "quota exceeded",
@@ -171,12 +173,19 @@ public final class QuotaSignal {
         String type = object.get("type") instanceof String name ? name.toLowerCase(Locale.ROOT) : "";
         // A present-but-null `error` is the shape of a success envelope, not of a failure.
         // Treating it as error-shaped would hand the model's own answer to the matcher.
-        boolean errorShaped = object.get("error") != null || type.contains("error") || type.endsWith("failed");
+        // Claude does not emit an error event: a refused call is a `result` envelope, subtype
+        // `success`, with `is_error: true` and the vendor's sentence under `result`. That key
+        // holds the model's own answer whenever the call succeeded, so it is read only when
+        // the vendor itself flagged the envelope.
+        boolean flaggedByVendor = Boolean.TRUE.equals(object.get("is_error"));
+        boolean errorShaped = flaggedByVendor || object.get("error") != null
+                || type.contains("error") || type.endsWith("failed");
         if (errorShaped) {
             for (String key : MESSAGE_KEYS) {
                 if (object.get(key) instanceof String text) into.add(text);
             }
         }
+        if (flaggedByVendor && object.get("result") instanceof String text) into.add(text);
         Object nested = object.get("error");
         if (nested instanceof Map<?, ?> map) {
             collectErrorMessages((Map<String, Object>) map, into, depth + 1);
