@@ -1,5 +1,9 @@
 #!/usr/bin/env sh
+# Exported, not only assigned. Run from inside another repository, Warden finds
+# scripts/visual-qa.mjs through WARDEN_HOME; warden.cmd always passed it on, and this launcher
+# let the JVM start without it, so the browser harness was "not found" in every target worktree.
 WARDEN_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+export WARDEN_HOME
 WARDEN_CLASSES="$WARDEN_HOME/out/classes"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) WARDEN_CLASSES="$(cygpath -w "$WARDEN_CLASSES")" ;;

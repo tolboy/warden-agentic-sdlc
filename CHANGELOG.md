@@ -11,6 +11,10 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `bin/warden` exports `WARDEN_HOME`. The POSIX launcher computed the home and never exported
+  it, so a run started from a target repository could not find `scripts/visual-qa.mjs` and
+  stopped `visual_qa_unavailable` after its reviews had already been paid for. `warden.cmd`
+  always set it. Found on the first external trial, 2026-09-15.
 - Global ledger coverage now matches individual vendor attempt IDs. A journaled call
   no longer suppresses unrelated calls sharing a run instance or operator label.
   Missing attempt identity remains ambiguous rather than inferred from run identity.
