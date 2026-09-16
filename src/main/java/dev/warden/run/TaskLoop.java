@@ -352,6 +352,32 @@ public final class TaskLoop {
         return details != null && "max_elapsed_minutes".equals(details.get("wall_clock_capped_by"));
     }
 
+    /**
+     * The chain block for a run that failed before the loop could start.
+     *
+     * A `warden run --continue A` that fails validation is still a link in A's chain, and a
+     * run that later continues it must inherit A's spend. Without this a configuration typo
+     * between two continuations reset the task's call ceiling: the review of this change
+     * reproduced a second implementer dispatch under `max_role_runs: 1`. The failed run spent
+     * nothing, so the block is A's chain with this run appended. A continuation that would
+     * not carry verdicts — a rejection — starts afresh, exactly as the loop decides.
+     */
+    public static Map<String, Object> chainForPreflightFailure(Path root, String priorRunId,
+                                                               boolean inherits, String runId) {
+        Chain earlier = priorRunId != null && inherits ? Chain.after(root, priorRunId) : Chain.NONE;
+        List<String> runs = new ArrayList<>(earlier.runs());
+        runs.add(runId);
+        Map<String, Object> chain = new LinkedHashMap<>();
+        chain.put("runs", runs);
+        chain.put("role_runs", earlier.roleRuns());
+        chain.put("cost_usd", earlier.costUsd());
+        chain.put("unpriced_calls", earlier.unpricedCalls());
+        chain.put("fix_attempts", earlier.fixAttempts());
+        chain.put("elapsed_seconds", earlier.elapsedSeconds());
+        chain.put("elapsed_known", earlier.elapsedKnown());
+        return chain;
+    }
+
     /** True when a role outcome code is about the call, not about the candidate. */
     public static boolean isInfrastructureFailure(String roleCode) {
         return roleCode != null && INFRASTRUCTURE_REASONS.containsKey(roleCode);

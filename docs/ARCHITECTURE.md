@@ -367,6 +367,7 @@ and a stopped task could be continued into as many calls as the operator had pat
 | `retry` (a failure) or `switch` (a failover) | Inherits: calls, reported cost, unpriced calls, fix rounds and execution time, read from the prior run's `chain` block, or from its own totals when it predates the block (its execution time is then `elapsed_known: false`, not guessed) |
 | `reject` (a rejection note) | Starts a new chain. A person asked for different work, and the note is the only thing carried |
 | no `--continue` | Starts a new chain and carries nothing |
+| a `--continue` that fails before the loop starts | Still a link: `run_preflight_failed` records `continued_from` and the chain it would have joined, with nothing of its own added, so the run that continues it next inherits the spend. A configuration error between two continuations used to reset the ceiling |
 
 The ceilings compare the chain's totals; `role_runs`, `total_cost_usd` and `attempts_used`
 stay the run's own, because the corpus sums runs and would otherwise count a chain twice. The
@@ -569,7 +570,11 @@ reported `budget_exhausted` and nothing else.
   summary when it is there. A `contract_gap` names the task file, the acceptance currently
   in force, the reviewer's suggestion and the `acceptance_sha256` consequence: editing the
   acceptance invalidates every verdict of this run, so the next run is a new run, not a
-  `--continue`.
+  `--continue`. Only a `contract_gap` finding proposes an acceptance edit, and only with its
+  own suggestion; blockers of the other non-product categories — missing access, an
+  unavailable provider, spent quota, a tooling failure, a disagreement — are
+  `resolve_blockers`, which lists them and edits nothing. The preview command takes a
+  generated id, because a dry run reserves the id it runs under.
 
 Neither of the first two implies the other, and a run can legitimately be a pass on one and a
 no on the other.

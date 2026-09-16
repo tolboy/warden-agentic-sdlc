@@ -42,8 +42,8 @@ public final class NextStep {
         step.put("commands", commands(kind, summary, runId, taskId, findings));
         step.put("edits", edits(kind, reason, summary, taskFile, acceptance, findings));
         step.put("consequences", consequences(kind, summary));
-        step.put("findings", "fix_contract".equals(kind) || "repair_or_retry".equals(kind)
-                ? findings : List.of());
+        step.put("findings", "fix_contract".equals(kind) || "resolve_blockers".equals(kind)
+                || "repair_or_retry".equals(kind) ? findings : List.of());
         return step;
     }
 
@@ -101,8 +101,7 @@ public final class NextStep {
             case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
                     "prompt_undeliverable", "turn_ceiling_reached" -> "retry_infrastructure";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
-            case "blocking_findings_remain" ->
-                    everyOpenBlockerNonactionable(summary) ? "fix_contract" : "repair_or_retry";
+            case "blocking_findings_remain" -> blockingKind(summary);
             case "baseline_failed" -> "fix_baseline";
             case "preflight_outside_scope" -> "fix_scope";
             case "contract_mutated" -> "restore_contract";
@@ -111,30 +110,40 @@ public final class NextStep {
         };
     }
 
-    private static boolean everyOpenBlockerNonactionable(Map<String, Object> summary) {
+    /**
+     * What remaining blockers ask of a person, by category.
+     *
+     * A product defect is the implementer's, so any one of them makes this a repair. Of the
+     * rest, only a contract gap says the acceptance is wrong. An unavailable provider, spent
+     * quota, missing access, tooling failure or a disagreement between readers does not, and
+     * routing them to an acceptance edit told the operator to replace `npm test` with "Restart
+     * the test provider" — found by the review of this change.
+     */
+    private static String blockingKind(Map<String, Object> summary) {
         List<Map<String, Object>> open = openBlockingFindings(summary);
-        if (!open.isEmpty()) {
-            for (Map<String, Object> finding : open) {
-                if (actionable(finding)) return false;
-            }
-            return true;
+        if (open.isEmpty()) {
+            // An older summary names the ids but not their categories.
+            return summary.get("nonactionable_blocking_ids") instanceof List<?> leftover
+                    && !leftover.isEmpty() ? "resolve_blockers" : "repair_or_retry";
         }
-        return summary.get("nonactionable_blocking_ids") instanceof List<?> leftover
-                && !leftover.isEmpty();
+        boolean contractGap = false;
+        for (Map<String, Object> finding : open) {
+            String category = categoryOf(finding);
+            if ("product_defect".equals(category)) return "repair_or_retry";
+            if ("contract_gap".equals(category)) contractGap = true;
+        }
+        return contractGap ? "fix_contract" : "resolve_blockers";
     }
 
     /**
-     * A P1 the implementer can close by editing the candidate. Matches
-     * {@link Findings.Finding#repairable()}: only {@code product_defect}, and an absent or
-     * unrecognised category is that default.
+     * The category a finding routes by. Matches {@link Findings.Finding#repairable()}: an
+     * absent or unrecognised category is the default, {@code product_defect}.
      */
-    private static boolean actionable(Map<String, Object> finding) {
+    private static String categoryOf(Map<String, Object> finding) {
         Object raw = finding.get("category");
         String category = raw == null ? "" : String.valueOf(raw);
-        if (category.isBlank() || !Findings.CATEGORIES.contains(category)) {
-            category = Findings.DEFAULT_CATEGORY;
-        }
-        return "product_defect".equals(category);
+        return category.isBlank() || !Findings.CATEGORIES.contains(category)
+                ? Findings.DEFAULT_CATEGORY : category;
     }
 
     private static String sentence(String kind, String reason, Map<String, Object> summary,
@@ -168,6 +177,11 @@ public final class NextStep {
                     "Retry the infrastructure failure on run " + runId
                             + "; the verdicts already reached on this tree are kept.";
             case "fix_contract" -> contractSentence(reason, taskFile, acceptance, summary, findings);
+            case "resolve_blockers" ->
+                    "The open P1s are not the implementer's to close ("
+                            + String.join(", ", categoriesOf(findings)) + "): grant the access, "
+                            + "restore the provider or tooling, or settle the disagreement each "
+                            + "names, then start a new run. The acceptance is not in question.";
             case "fix_baseline" ->
                     "The project's own checks were already failing; fix that breakage, or change "
                             + "the baseline contract deliberately, then start a new run.";
@@ -196,7 +210,7 @@ public final class NextStep {
         if (!acceptance.isEmpty()) {
             sentence.append(" (currently: ").append(String.join("; ", acceptance)).append(')');
         }
-        String suggestion = firstSuggestion(findings);
+        String suggestion = contractSuggestion(findings);
         if (!suggestion.isBlank()) {
             sentence.append("; the reviewer suggested ").append(suggestion);
         } else if ("reproduction_passed_before_change".equals(reason)) {
@@ -228,13 +242,16 @@ public final class NextStep {
             case "confirm_failover" -> List.of(
                     "warden approve " + runId + " --decision switch",
                     "warden run " + taskId + " --continue " + runId);
-            case "fix_contract", "fix_baseline", "fix_scope", "restore_contract" -> {
+            case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
+                    "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
                 commands.add("warden approve " + runId + " --decision " + closeOption(summary)
                         + " --note \"" + note(kind, findings) + "\"");
                 if (!taskId.isBlank()) {
                     commands.add("warden validate " + taskId);
-                    commands.add("warden run " + taskId + " --dry-run --run-id " + newId);
+                    // A preview reserves the id it runs under, so it takes a generated one
+                    // and leaves the named id to the live run.
+                    commands.add("warden run " + taskId + " --dry-run");
                     commands.add("warden run " + taskId + " --run-id " + newId);
                 }
                 yield List.copyOf(commands);
@@ -267,7 +284,7 @@ public final class NextStep {
                             : " — " + summary.get("budget_stop"))));
             case "retry_infrastructure" -> profileEdits(reason);
             case "fix_contract" -> {
-                String suggestion = firstSuggestion(findings);
+                String suggestion = contractSuggestion(findings);
                 String current = acceptance.isEmpty() ? "the acceptance commands currently in force"
                         : "current acceptance: " + String.join("; ", acceptance);
                 String change = suggestion.isBlank()
@@ -328,6 +345,10 @@ public final class NextStep {
             case "fix_baseline", "fix_scope", "restore_contract" -> List.of(
                     "What the work is judged by changes, so no verdict of this run can be reused; "
                             + "start a new run rather than --continue.");
+            case "resolve_blockers" -> List.of(
+                    "The findings stay on this run's record. A new run reads the tree again, "
+                            + "because a blocker is a verdict and a continuation reuses nothing "
+                            + "after one.");
             case "repair_or_retry" -> List.of(
                     "A repair that changes the candidate invalidates judging stages that read the "
                             + "previous tree; a retry of the same tree keeps the verdicts already paid for.",
@@ -357,7 +378,7 @@ public final class NextStep {
     }
 
     private static String note(String kind, List<Map<String, Object>> findings) {
-        String suggestion = firstSuggestion(findings);
+        String suggestion = "fix_contract".equals(kind) ? contractSuggestion(findings) : "";
         if (!suggestion.isBlank()) return sanitizeNote(suggestion);
         if (!findings.isEmpty() && findings.get(0).get("message") != null) {
             return sanitizeNote(String.valueOf(findings.get(0).get("message")));
@@ -445,12 +466,23 @@ public final class NextStep {
         return row;
     }
 
-    private static String firstSuggestion(List<Map<String, Object>> findings) {
+    /** The first suggestion a contract-gap finding makes; nobody else's is an acceptance edit. */
+    private static String contractSuggestion(List<Map<String, Object>> findings) {
         for (Map<String, Object> finding : findings) {
+            if (!"contract_gap".equals(categoryOf(finding))) continue;
             Object suggestion = finding.get("suggestion");
             if (suggestion instanceof String text && !text.isBlank()) return text;
         }
         return "";
+    }
+
+    private static List<String> categoriesOf(List<Map<String, Object>> findings) {
+        List<String> categories = new ArrayList<>();
+        for (Map<String, Object> finding : findings) {
+            String category = categoryOf(finding);
+            if (!categories.contains(category)) categories.add(category);
+        }
+        return categories.isEmpty() ? List.of("category not recorded") : categories;
     }
 
     private static Map<String, Object> edit(String file, String change) {

@@ -140,7 +140,8 @@ The first four bound the **chain**, not one run: a `warden run --continue` answe
 or `switch` starts from what the runs before it spent — calls, reported cost, unpriced calls,
 fix rounds and execution time — and the summary's `chain` block records the running totals.
 A continuation after a rejection, and any run without `--continue`, starts a chain of its
-own. Raising a limit is an edit to this file; budgets are not part of `acceptance_sha256`, so
+own. A continuation that fails validation before the loop starts still records the chain it
+continued, so the run after it inherits that spend. Raising a limit is an edit to this file; budgets are not part of `acceptance_sha256`, so
 the verdicts already reached survive it. Execution time is the sum of each run's own
 duration: the time a stopped run spends waiting for a person is not counted. No vendor call
 starts with less than a minute left, and each call's wall clock is lowered to what is left, so

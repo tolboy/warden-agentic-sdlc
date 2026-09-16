@@ -24,6 +24,7 @@ public final class NextStepTest implements Suite {
         contractGapNamesTheAcceptance(check);
         contractGapReadsAcceptanceFromTheTaskFile(check);
         repairOrRetryForAProductDefect(check);
+        blockersThatAreNotTheContract(check);
         reportRendersTheBlockAndFallsBack(check);
     }
 
@@ -121,8 +122,12 @@ public final class NextStepTest implements Suite {
                 "warden approve gap-review-2 --decision abort");
         check.contains("validates the task", String.valueOf(step.get("commands")),
                 "warden validate hello");
-        check.contains("dry-runs a new id", String.valueOf(step.get("commands")),
-                "warden run hello --dry-run --run-id gap-review-2-next");
+        @SuppressWarnings("unchecked")
+        List<String> commandList = (List<String>) step.get("commands");
+        check.that("previews under a generated id", commandList.contains("warden run hello --dry-run"));
+        check.that("so the preview never reserves the id the live run needs",
+                commandList.stream().noneMatch(command -> command.contains("--dry-run")
+                        && command.contains("gap-review-2-next")));
         check.contains("starts a new run, not a continue", String.valueOf(step.get("commands")),
                 "warden run hello --run-id gap-review-2-next");
         check.that("does not offer --continue, which would expect reuse",
@@ -172,6 +177,47 @@ public final class NextStepTest implements Suite {
         } finally {
             deleteTree(root);
         }
+    }
+
+    /**
+     * Only a contract gap is an acceptance edit. Found by the review of this change: an open
+     * `provider_unavailable` P1 told the operator to replace `npm test` with its suggestion.
+     */
+    private void blockersThatAreNotTheContract(Check check) {
+        Map<String, Object> summary = summary("down-1", "hello");
+        summary.put("acceptance_commands", List.of("npm test"));
+        summary.put("nonactionable_blocking_ids", List.of("provider-down"));
+        summary.put("decision_options", List.of("retry", "abort"));
+        summary.put("finding_history", List.of(Map.of(
+                "stage", "review",
+                "findings", List.of(finding("provider-down", "provider_unavailable",
+                        "Restart the test provider")))));
+        Map<String, Object> step = NextStep.of("blocking_findings_remain", summary, null);
+        check.eq("an unavailable provider is not a contract gap", "resolve_blockers", step.get("kind"));
+        check.that("and proposes no acceptance edit",
+                !String.valueOf(step.get("edits")).contains("npm test")
+                        && !String.valueOf(step).contains("replace current acceptance"));
+        check.contains("it names the category that blocks", String.valueOf(step.get("summary")),
+                "provider_unavailable");
+        check.contains("still lists the finding with its suggestion",
+                String.valueOf(step.get("findings")), "Restart the test provider");
+        check.contains("and closes the run before a new one",
+                String.valueOf(step.get("commands")), "warden approve down-1 --decision abort");
+
+        Map<String, Object> mixed = summary("mixed-1", "hello");
+        mixed.put("acceptance_commands", List.of("npm test"));
+        mixed.put("finding_history", List.of(Map.of(
+                "stage", "review",
+                "findings", List.of(
+                        finding("provider-down", "provider_unavailable", "Restart the test provider"),
+                        finding("weak-check", "contract_gap", "assert the exact refusal text")))));
+        Map<String, Object> both = NextStep.of("blocking_findings_remain", mixed, null);
+        check.eq("a contract gap beside other blockers is still fix_contract", "fix_contract",
+                both.get("kind"));
+        check.contains("and the acceptance edit is the contract gap's suggestion",
+                String.valueOf(both.get("edits")), "assert the exact refusal text");
+        check.that("never another category's",
+                !String.valueOf(both.get("edits")).contains("Restart the test provider"));
     }
 
     private void repairOrRetryForAProductDefect(Check check) {

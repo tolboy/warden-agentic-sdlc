@@ -420,7 +420,7 @@ public final class Main {
             System.out.println(Json.write(result));
             return 1;
         } catch (Exception preflight) {
-            return recordPreflightFailure(args[1], runId, preflight);
+            return recordPreflightFailure(args[1], runId, continueFrom, preflight);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
@@ -562,11 +562,29 @@ public final class Main {
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */
-    private static int recordPreflightFailure(String taskSelector, String runId, Exception failure)
+    private static int recordPreflightFailure(String taskSelector, String runId,
+                                              String continueFrom, Exception failure)
             throws Exception {
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
-        UserConfig user = UserConfig.load();
+        Map<String, Object> result = recordPreflightFailure(root, UserConfig.load(), taskSelector,
+                runId, continueFrom, failure);
+        System.out.println(Json.write(result));
+        return 1;
+    }
+
+    /** Package-visible so the loop suite can fail a continuation before it starts. */
+    static Map<String, Object> recordPreflightFailure(Path root, UserConfig user,
+                                                      String taskSelector, String runId,
+                                                      String continueFrom, Exception failure)
+            throws Exception {
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
+        if (continueFrom != null) {
+            try {
+                ledger.bindParent(EvidenceLedger.runInstanceIdOf(root, continueFrom));
+            } catch (Exception unknownParent) {
+                // Lineage stays unknown; the chain below still carries the spend.
+            }
+        }
         ledger.reserveWorkflowRun(taskSelector);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("run_id", runId);
@@ -577,6 +595,19 @@ public final class Main {
         summary.put("error", Map.of(
                 "type", failure.getClass().getName(),
                 "message", String.valueOf(failure.getMessage())));
+        if (continueFrom != null) {
+            // The run never started, but it was a continuation, and the next one reads its
+            // chain from here. When the recorded decision cannot even be read, the earlier
+            // spend is counted rather than dropped.
+            summary.put("continued_from", continueFrom);
+            boolean inherits = true;
+            try {
+                inherits = continuation(root, continueFrom).continuation().reuseJudgements();
+            } catch (Exception unreadable) {
+                inherits = true;
+            }
+            summary.put("chain", TaskLoop.chainForPreflightFailure(root, continueFrom, inherits, runId));
+        }
         Path file = ledger.writeReport("task-run", summary);
         ApprovalStore store = new ApprovalStore(root);
         HumanDecision decision = store.createFailure(runId, taskSelector,
@@ -606,8 +637,7 @@ public final class Main {
         result.put("decision_updated_at", summary.get("decision_updated_at"));
         result.putAll(ledger.corpusVisibility());
         result.put("message", String.valueOf(failure.getMessage()));
-        System.out.println(Json.write(result));
-        return 1;
+        return result;
     }
 
     /**

@@ -40,6 +40,13 @@ that exists in code but has never been run live says so.
   count are no longer lost; and an Orca worker that reports failure or escalates stops as
   `role_orca_reported_failure` rather than as an endpoint failure a continuation would carry
   verdicts past.
+- Found by the review of the pull request: a `--continue` that failed validation wrote a
+  summary with no `chain`, so the run continuing it started from zero and could dispatch past
+  the task's call ceiling; it now records `continued_from` and the chain it joined. The next
+  step no longer previews under the id its live run needs (a dry run reserves it), proposes an
+  acceptance edit only for a `contract_gap` finding (other non-product blockers are
+  `resolve_blockers`), and `pilot prepare` no longer reads a JSON Schema `$ref` fragment such
+  as `#/$defs/text` as a file path.
 - `warden pilot prepare` no longer interpolates a profile command into `sh -c` on POSIX.
   Presence is a filesystem PATH walk (Windows still uses `where.exe` as argv), so a value
   such as `git; touch marker` cannot run during offline preparation. Live `run`/`role`

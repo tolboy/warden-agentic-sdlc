@@ -414,8 +414,18 @@ public final class PilotPrepareCommand {
                 unresolved.add("external schema $ref left unresolved: " + ref);
                 continue;
             }
-            Path nested = sourceFile.getParent().resolve(ref).normalize();
-            copyRelative(sourceHome, destHome, ref, nested, copiedResources, unresolved, issues, depth);
+            // A $ref is a URI reference. Its fragment names a place inside a document, not a
+            // file: `#/$defs/text` stays in the same file, and `defs.json#/$defs/text` needs
+            // only `defs.json`. Resolving the whole string as a path refused a valid schema.
+            int fragment = ref.indexOf('#');
+            String file = fragment < 0 ? ref : ref.substring(0, fragment);
+            if (file.isBlank()) continue;
+            if (file.matches("[A-Za-z][A-Za-z0-9+.-]+:.*")) {
+                unresolved.add("schema $ref with a URI scheme left unresolved: " + ref);
+                continue;
+            }
+            Path nested = sourceFile.getParent().resolve(file).normalize();
+            copyRelative(sourceHome, destHome, file, nested, copiedResources, unresolved, issues, depth);
         }
     }
 

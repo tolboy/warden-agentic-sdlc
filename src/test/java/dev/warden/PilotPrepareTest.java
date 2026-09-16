@@ -419,9 +419,14 @@ public final class PilotPrepareTest implements Suite {
         Files.createDirectories(home.resolve("schemas"));
         Files.writeString(home.resolve("prompts/nested/writer.md"), "# writer\n");
         Files.writeString(home.resolve("prompts/reviewer.md"), "# reviewer\n");
+        // A $ref with a fragment, and a document-local one: both are valid JSON Schema, and
+        // neither names a file of its own. Found by the review of this change.
         Files.writeString(home.resolve("schemas/implementer.json"),
-                "{\"title\":\"implementer\",\"$ref\":\"implementer-defs.json\"}\n");
-        Files.writeString(home.resolve("schemas/implementer-defs.json"), "{\"type\":\"object\"}\n");
+                "{\"title\":\"implementer\",\"$ref\":\"implementer-defs.json#/$defs/thing\","
+                        + "\"properties\":{\"summary\":{\"$ref\":\"#/$defs/text\"}},"
+                        + "\"$defs\":{\"text\":{\"type\":\"string\"}}}\n");
+        Files.writeString(home.resolve("schemas/implementer-defs.json"),
+                "{\"$defs\":{\"thing\":{\"type\":\"object\"}}}\n");
         Files.writeString(home.resolve("schemas/reviewer.json"), "{\"title\":\"reviewer\"}\n");
         String prompt = escapePrompt ? "../outside.md" : "prompts/nested/writer.md";
         if (escapePrompt) {

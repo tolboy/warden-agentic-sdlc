@@ -1453,6 +1453,32 @@ public final class TaskLoopTest implements Suite {
         check.eq("and to the chain", 1L,
                 ((Map<String, Object>) spentThenLate.summaryReport().get("chain")).get("unpriced_calls"));
 
+        // A continuation that fails before the loop starts is still a link in the chain. Found by
+        // the review of this change: a configuration error between two continuations reset the
+        // call ceiling, and a second implementer ran under `max_role_runs: 1`.
+        Path broken = newProject(sandbox, "chain-preflight", "medium", 1);
+        writeProfiles(home, sandbox, "chain-preflight", 1, 1);
+        TaskLoop.Outcome onlyCall = loop(broken, home, "cpa");
+        check.eq("the first run spends its only call", 1L, onlyCall.summaryReport().get("role_runs"));
+        retry(broken, "cpa");
+        Map<String, Object> refused = Main.recordPreflightFailure(broken, UserConfig.load(home),
+                "hello", "cpb", "cpa", new IllegalArgumentException("unknown key 'budget'"));
+        check.eq("a continuation that fails validation is recorded", "run_preflight_failed",
+                refused.get("reason"));
+        Map<String, Object> refusedSummary = readJson(broken.resolve(".warden/runs/cpb/task-run.json"));
+        check.eq("with the run it continued", "cpa", refusedSummary.get("continued_from"));
+        check.eq("and the spend of the chain it joined", 1L,
+                refusedSummary.get("chain") instanceof Map<?, ?> joined ? joined.get("role_runs") : null);
+        retry(broken, "cpb");
+        TaskLoop.Outcome afterRefusal = continued(broken, home, "cpc", "cpb");
+        check.eq("the run after it still meets the chain's ceiling", "budget_exhausted",
+                afterRefusal.reason());
+        check.eq("without dispatching anyone", 0L, afterRefusal.summaryReport().get("role_runs"));
+        check.eq("so the implementer ran once in all", "1",
+                Files.readString(sandbox.resolve("chain-preflight-impl.count")).strip());
+        check.eq("and the chain names all three runs", List.of("cpa", "cpb", "cpc"),
+                ((Map<String, Object>) afterRefusal.summaryReport().get("chain")).get("runs"));
+
         writeProfiles(home, sandbox, "chain-restore", 1, 1);
     }
 
