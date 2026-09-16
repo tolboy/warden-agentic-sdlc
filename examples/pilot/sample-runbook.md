@@ -10,8 +10,9 @@ It does not execute baseline, acceptance or reproduction commands, call a vendor
 `warden run` / `do` / `role`, create worktrees, or modify the target checkout or global home.
 
 This is one P2 slice: deterministic offline preparation from an explicit JSON spec. It does
-not close all of P2 or P2PLAN-17. P3 durable repair-across-resume and P4 strict money or
-deadline are not implemented.
+not close all of P2 or P2PLAN-17. The task's call, cost and repair limits bound every
+`--continue` of this trial, and `budgets.max_elapsed_minutes`, when declared, bounds its
+execution time; a strict money cap does not exist, because a Codex call reports no price.
 
 ## Install the target contract
 

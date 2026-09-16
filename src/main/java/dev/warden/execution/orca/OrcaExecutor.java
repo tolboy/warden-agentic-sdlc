@@ -546,8 +546,13 @@ public final class OrcaExecutor implements RoleExecutor {
             Result quota = quotaFailure(profile, raw, transcript == null ? "" : transcript.stderr(),
                     duration, evidence);
             if (quota != null) return quota;
-            evidence.put("failure", "role_command_failed");
-            return fail("role_command_failed", evidence, duration, raw);
+            // The agent itself reported failure or asked for a person, through worker_done.
+            // That is its own account of the work, like a direct vendor's `status: failed`,
+            // not an endpoint that broke: it stays a stop for a person and never lets a
+            // continuation carry verdicts past it, as `role_command_failed` now would.
+            evidence.put("failure", "role_orca_reported_failure");
+            evidence.put("settlement_kind", settlement.kind().name().toLowerCase(java.util.Locale.ROOT));
+            return fail("role_orca_reported_failure", evidence, duration, raw);
         }
         if (settlement.kind() != OrcaSettlement.Kind.COMPLETED) {
             evidence.put("failure", remaining(deadline).isZero() || remaining(deadline).isNegative()

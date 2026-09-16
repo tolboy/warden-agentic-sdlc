@@ -133,6 +133,15 @@ public final class QuotaSignalTest implements Suite {
                 QuotaSignal.detect(List.of(), CODEX_TRANSCRIPT, "HTTP 429 Too Many Requests").kind());
         check.eq("the Claude session-limit envelope stays a spent subscription", "quota_exhausted",
                 QuotaSignal.detect(List.of(), CLAUDE_SESSION_LIMIT, "").kind());
+        // The reverse pairing, found by the independent review: a generic 429 in the event
+        // stream and the reason for it on stderr. The kind is decided across both sources.
+        QuotaSignal.Detection reasonOnStderr = QuotaSignal.detect(List.of(),
+                "{\"type\":\"error\",\"message\":\"429 Too Many Requests\"}",
+                "usage limit reached; resets tomorrow");
+        check.eq("a spent plan on stderr outranks a rate limit in the event stream",
+                "quota_exhausted", reasonOnStderr.kind());
+        check.eq("and is labelled by the source that named it", "stderr_text",
+                reasonOnStderr.detectedBy());
 
         String house = "{\"type\":\"error\",\"message\":\"plan allowance spent for this window\"}";
         check.eq("a profile's own wording names a spent plan", "quota_exhausted",

@@ -33,7 +33,13 @@ that exists in code but has never been run live says so.
   `rate_limited` without dropping the profile or offering a replacement vendor. A spent-plan
   phrase still wins when both appear, so Claude's session-limit envelope stays a quota stop.
   Measured only offline, against recorded and synthetic transcripts.
-
+- Found by the independent review of the three items above, before merge: a spent-plan phrase
+  on stderr now outranks a rate-limit phrase in the event stream; an Orca call the chain
+  deadline cut short stops as `budget_exhausted` like a direct one; a failover the budget
+  cannot afford returns the spent call instead of throwing past it, so its cost and unpriced
+  count are no longer lost; and an Orca worker that reports failure or escalates stops as
+  `role_orca_reported_failure` rather than as an endpoint failure a continuation would carry
+  verdicts past.
 - `warden pilot prepare` no longer interpolates a profile command into `sh -c` on POSIX.
   Presence is a filesystem PATH walk (Windows still uses `where.exe` as argv), so a value
   such as `git; touch marker` cannot run during offline preparation. Live `run`/`role`
@@ -86,7 +92,8 @@ that exists in code but has never been run live says so.
   previews the checks. A task without `reproduce` keeps its acceptance hash.
 - `warden pilot prepare` validates reproduction membership in acceptance, writes `reproduce`
   into the task, and reports `enforced_by_warden_run`; omission explicitly leaves acceptance
-  strength unchecked. This is fixture-tested and makes no live-pilot claim.
+  strength unchecked. This is fixture-tested and makes no live-pilot claim. An optional
+  `budgets.max_elapsed_minutes` in the spec is written into the task.
 - Reviewer findings carry a vendor `suggestion` when one was supplied, omitted otherwise.
   It is not part of finding identity, derivation, registry comparisons or any hash.
 - A structured `next_step` beside `safe_next_step` on a stop and on `ready_for_human`: kind,

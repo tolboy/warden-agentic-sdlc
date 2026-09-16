@@ -92,6 +92,22 @@ public final class PilotPrepareTest implements Suite {
                 loaded.resolved().acceptanceCommands().contains(marker.toString()));
         check.eq("one repair", 1L, loaded.resolved().maxFixAttempts());
         check.eq("four-call cap", 4L, loaded.resolved().budget().maxRoleRuns());
+        check.eq("no execution deadline is invented when the spec declares none", null,
+                loaded.resolved().budget().maxElapsedMinutes());
+        Map<String, Object> deadlineSpec = validSpec(target, sourceHome, "goal",
+                List.of("git diff --check"), List.of(marker.toString()), marker.toString(), 4, 1);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> deadlineBudgets = (Map<String, Object>)
+                ((Map<String, Object>) deadlineSpec.get("task")).get("budgets");
+        deadlineBudgets.put("max_elapsed_minutes", 120L);
+        Path deadlineFile = sandbox.resolve("deadline-spec.json");
+        Files.writeString(deadlineFile, Json.writePretty(deadlineSpec), StandardCharsets.UTF_8);
+        Path deadlineOutput = sandbox.resolve("deadline-bundle");
+        check.that("a declared deadline prepares", new PilotPrepareCommand().run(new String[] {
+                "pilot", "prepare", "--spec", deadlineFile.toString(), "--output", deadlineOutput.toString()
+        }).ok());
+        check.eq("and is written into the task", 120L, new ConfigLoader()
+                .load(deadlineOutput.resolve("target"), "pilot-task").resolved().budget().maxElapsedMinutes());
 
         UserConfig user = UserConfig.load(output.resolve("config"));
         check.that("isolated home loads the remapped writer",

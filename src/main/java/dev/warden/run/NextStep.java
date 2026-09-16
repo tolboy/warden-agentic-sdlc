@@ -90,9 +90,12 @@ public final class NextStep {
         if (reason == null) return "read_report";
         return switch (reason) {
             case "ready_for_human" -> "accept_or_reject";
-            case "budget_exhausted", "budget_insufficient_to_finish" ->
-                    "max_cost_usd".equals(summary.get("budget_limit_hit"))
-                            ? "raise_cost_budget" : "raise_call_budget";
+            case "budget_exhausted", "budget_insufficient_to_finish" -> switch (
+                    String.valueOf(summary.get("budget_limit_hit"))) {
+                case "max_cost_usd" -> "raise_cost_budget";
+                case "max_elapsed_minutes" -> "raise_time_budget";
+                default -> "raise_call_budget";
+            };
             case "quota_exhausted", "rate_limited" -> "wait_or_add_vendor";
             case "failover_requires_confirmation" -> "confirm_failover";
             case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
@@ -149,8 +152,14 @@ public final class NextStep {
             case "raise_cost_budget" ->
                     "Raise budgets.max_cost_usd in " + taskFile
                             + ", then retry this run so the verdicts already paid for are kept.";
-            case "wait_or_add_vendor" ->
-                    "Wait for the quota window named in the vendor message, or add a profile "
+            case "raise_time_budget" ->
+                    "Raise budgets.max_elapsed_minutes in " + taskFile + " above the "
+                            + elapsedMinutes(summary) + " minute(s) this chain has used, then "
+                            + "retry this run so the verdicts already paid for are kept.";
+            case "wait_or_add_vendor" -> "rate_limited".equals(reason)
+                    ? "The vendor asked to slow down; wait a few minutes, then retry run "
+                            + runId + ". Its subscription is not known to be spent."
+                    : "Wait for the quota window named in the vendor message, or add a profile "
                             + "from another vendor, then retry run " + runId + ".";
             case "confirm_failover" ->
                     "Confirm the vendor substitution for run " + runId
@@ -213,8 +222,9 @@ public final class NextStep {
             case "accept_or_reject" -> List.of(
                     "warden approve " + runId + " --decision accept",
                     "warden approve " + runId + " --decision reject");
-            case "raise_call_budget", "raise_cost_budget", "wait_or_add_vendor",
-                    "retry_infrastructure", "restore_ledger" -> carryOn(runId, taskId);
+            case "raise_call_budget", "raise_cost_budget", "raise_time_budget",
+                    "wait_or_add_vendor", "retry_infrastructure", "restore_ledger" ->
+                    carryOn(runId, taskId);
             case "confirm_failover" -> List.of(
                     "warden approve " + runId + " --decision switch",
                     "warden run " + taskId + " --continue " + runId);
@@ -251,6 +261,10 @@ public final class NextStep {
                     "raise budgets.max_cost_usd"
                             + (summary.get("budget_stop") == null ? ""
                             : " — " + summary.get("budget_stop"))));
+            case "raise_time_budget" -> List.of(edit(taskFile,
+                    "raise budgets.max_elapsed_minutes above " + elapsedMinutes(summary)
+                            + (summary.get("budget_stop") == null ? ""
+                            : " — " + summary.get("budget_stop"))));
             case "retry_infrastructure" -> profileEdits(reason);
             case "fix_contract" -> {
                 String suggestion = firstSuggestion(findings);
@@ -274,7 +288,8 @@ public final class NextStep {
     private static List<Map<String, Object>> profileEdits(String reason) {
         String change = switch (reason) {
             case "role_timed_out" ->
-                    "raise the profile's timeout_minutes (the wall clock that bound this call)";
+                    "raise limits.wall_clock_minutes on the profile (the wall clock that bound "
+                            + "this call), or narrow the task";
             case "turn_ceiling_reached" ->
                     "raise the profile's turn / max-turns limit";
             default ->
@@ -287,9 +302,9 @@ public final class NextStep {
         return switch (kind) {
             case "accept_or_reject" -> List.of(
                     "Nothing is landed either way; landing is a separate operator step.");
-            case "raise_call_budget", "raise_cost_budget" -> {
+            case "raise_call_budget", "raise_cost_budget", "raise_time_budget" -> {
                 List<String> rows = new ArrayList<>();
-                rows.add("Neither ceiling is part of what the work is judged by, so the verdicts "
+                rows.add("No budget is part of what the work is judged by, so the verdicts "
                         + "this run already reached on this tree are kept rather than paid for "
                         + "a second time.");
                 if ("raise_cost_budget".equals(kind) && summary.get("unpriced_calls") != null) {
@@ -315,7 +330,9 @@ public final class NextStep {
                             + "start a new run rather than --continue.");
             case "repair_or_retry" -> List.of(
                     "A repair that changes the candidate invalidates judging stages that read the "
-                            + "previous tree; a retry of the same tree keeps the verdicts already paid for.");
+                            + "previous tree; a retry of the same tree keeps the verdicts already paid for.",
+                    "A retry continues this run's chain: the calls and fix rounds it has used "
+                            + "still count against the task's limits.");
             default -> List.of();
         };
     }
@@ -355,19 +372,31 @@ public final class NextStep {
         return stripped.length() <= 120 ? stripped : stripped.substring(0, 117) + "...";
     }
 
+    /** Named after the stopped run, so the pair reads together in `warden ledger`. */
     private static String newRunId(String taskId, String runId) {
-        String candidate = taskId.isBlank() ? "next" : taskId + "-next";
-        return candidate.equals(runId) ? candidate + "-2" : candidate;
+        if (runId.isBlank()) return taskId.isBlank() ? "next" : taskId + "-next";
+        return runId + "-next";
     }
 
     private static String callFloor(Map<String, Object> summary) {
         Object reserve = summary.get("budget_reserve");
+        Object spentByChain = summary.get("chain") instanceof Map<?, ?> chain
+                ? chain.get("role_runs") : summary.get("role_runs");
         if (reserve instanceof Map<?, ?> map
                 && map.get("calls_needed_to_repair_and_finish") instanceof Number needed
-                && summary.get("role_runs") instanceof Number spent) {
+                && spentByChain instanceof Number spent) {
             return String.valueOf(spent.longValue() + needed.longValue());
         }
         return "";
+    }
+
+    /** Whole minutes of execution the chain has used, rounded up. */
+    private static long elapsedMinutes(Map<String, Object> summary) {
+        if (summary.get("chain") instanceof Map<?, ?> chain
+                && chain.get("elapsed_seconds") instanceof Number seconds) {
+            return (seconds.longValue() + 59) / 60;
+        }
+        return 0L;
     }
 
     private static List<String> acceptanceCommands(Map<String, Object> summary, Path root,

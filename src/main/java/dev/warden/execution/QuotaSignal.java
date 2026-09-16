@@ -161,18 +161,20 @@ public final class QuotaSignal {
 
         List<String> structured = structuredErrorMessages(stdout);
         structured.addAll(structuredErrorMessages(stderr));
-        Detection inEvents = match(quota, RATE_LIMIT_SIGNATURES, structured, "structured_error_event");
-        if (inEvents.matched()) return inEvents;
-
-        // Only reached when the vendor said nothing machine-readable about the failure. stdout
-        // is deliberately not consulted here — see the note on false negatives above.
-        return match(quota, RATE_LIMIT_SIGNATURES, lines(stderr), "stderr_text");
-    }
-
-    private static Detection match(List<String> quota, List<String> rate, List<String> candidates,
-                                   String detectedBy) {
-        Detection spent = match(quota, candidates, detectedBy, QUOTA_EXHAUSTED);
-        return spent.matched() ? spent : match(rate, candidates, detectedBy, RATE_LIMITED);
+        // stderr is consulted only as text, and stdout never is — see the note on false
+        // negatives above. The kind is decided across both sources before the source is: a
+        // spent plan named anywhere outranks a rate limit named anywhere, because a CLI may put
+        // a generic 429 in its event stream and the reason for it on stderr. Within a kind, the
+        // structured event is the stronger evidence and is the one recorded.
+        List<String> text = lines(stderr);
+        for (Detection found : List.of(
+                match(quota, structured, "structured_error_event", QUOTA_EXHAUSTED),
+                match(quota, text, "stderr_text", QUOTA_EXHAUSTED),
+                match(RATE_LIMIT_SIGNATURES, structured, "structured_error_event", RATE_LIMITED),
+                match(RATE_LIMIT_SIGNATURES, text, "stderr_text", RATE_LIMITED))) {
+            if (found.matched()) return found;
+        }
+        return Detection.NONE;
     }
 
     private static Detection match(List<String> signatures, List<String> candidates, String detectedBy,

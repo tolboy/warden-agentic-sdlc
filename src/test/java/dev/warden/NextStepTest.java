@@ -38,6 +38,26 @@ public final class NextStepTest implements Suite {
                 kind("budget_exhausted", money));
         check.eq("insufficient is the same two ceilings", "raise_call_budget",
                 kind("budget_insufficient_to_finish", summary("run-1", "hello")));
+        Map<String, Object> late = summary("run-1", "hello");
+        late.put("budget_limit_hit", "max_elapsed_minutes");
+        late.put("chain", Map.of("elapsed_seconds", 125L, "role_runs", 3L));
+        check.eq("the execution deadline is its own ceiling", "raise_time_budget",
+                kind("budget_exhausted", late));
+        Map<String, Object> lateStep = NextStep.of("budget_exhausted", late, null);
+        check.contains("and names the key and the minutes the chain used",
+                String.valueOf(lateStep.get("edits")), "max_elapsed_minutes above 3");
+        check.contains("then continues the same chain", String.valueOf(lateStep.get("commands")),
+                "warden run hello --continue run-1");
+        Map<String, Object> capped = summary("run-1", "hello");
+        capped.put("role_runs", 1L);
+        capped.put("chain", Map.of("role_runs", 3L));
+        capped.put("budget_reserve", Map.of("calls_needed_to_repair_and_finish", 2L));
+        check.contains("a call floor counts the chain's calls, not the run's",
+                String.valueOf(NextStep.of("budget_insufficient_to_finish", capped, null).get("edits")),
+                "at least 5");
+        check.contains("a timeout names the profile's wall clock, not the gate timeout",
+                String.valueOf(NextStep.of("role_timed_out", summary("run-1", "hello"), null)
+                        .get("edits")), "limits.wall_clock_minutes");
         check.eq("quota", "wait_or_add_vendor",
                 kind("quota_exhausted", summary("run-1", "hello")));
         check.eq("rate limit", "wait_or_add_vendor",
@@ -102,9 +122,9 @@ public final class NextStepTest implements Suite {
         check.contains("validates the task", String.valueOf(step.get("commands")),
                 "warden validate hello");
         check.contains("dry-runs a new id", String.valueOf(step.get("commands")),
-                "warden run hello --dry-run --run-id hello-next");
+                "warden run hello --dry-run --run-id gap-review-2-next");
         check.contains("starts a new run, not a continue", String.valueOf(step.get("commands")),
-                "warden run hello --run-id hello-next");
+                "warden run hello --run-id gap-review-2-next");
         check.that("does not offer --continue, which would expect reuse",
                 !String.valueOf(step.get("commands")).contains("--continue"));
         check.contains("the consequence is that verdicts cannot be reused",

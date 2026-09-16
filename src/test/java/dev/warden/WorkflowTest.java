@@ -266,8 +266,22 @@ public final class WorkflowTest implements Suite {
             check.eq(code + " is an infrastructure failure", true,
                     dev.warden.run.TaskLoop.isInfrastructureFailure(code));
         }
+        // An Orca worker that reported failure or escalated gave its own account of the work.
+        check.that("an Orca worker's own failure report stops for a person",
+                dev.warden.run.TaskLoop.roleFailureRequiresOperator("role_orca_reported_failure"));
+        java.util.Map<String, Object> capped = java.util.Map.of(
+                "wall_clock_capped_by", "max_elapsed_minutes", "wall_clock_minutes", 1L);
+        check.that("a direct call cut short by the chain deadline is the deadline",
+                dev.warden.run.TaskLoop.timedOutUnderDeadline("role_timeout", capped));
+        check.that("and so is an Orca call",
+                dev.warden.run.TaskLoop.timedOutUnderDeadline("role_orca_timeout", capped));
+        check.that("but not a timeout on the profile's own wall clock",
+                !dev.warden.run.TaskLoop.timedOutUnderDeadline("role_orca_timeout",
+                        java.util.Map.of("wall_clock_minutes", 45L)));
+        check.that("nor a lowered call that failed for another reason",
+                !dev.warden.run.TaskLoop.timedOutUnderDeadline("role_command_failed", capped));
         for (String code : List.of("role_reported_blocked", "role_violated_read_only",
-                "role_unresolved", "ok")) {
+                "role_unresolved", "role_orca_reported_failure", "ok")) {
             check.eq(code + " is not classified as infrastructure", false,
                     dev.warden.run.TaskLoop.isInfrastructureFailure(code));
         }

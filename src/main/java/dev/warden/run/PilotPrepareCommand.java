@@ -488,6 +488,9 @@ public final class PilotPrepareCommand {
         yaml.append("budgets:\n");
         yaml.append("  max_role_runs: ").append(spec.maxRoleRuns()).append('\n');
         yaml.append("  max_cost_usd: ").append(spec.maxCostUsd()).append('\n');
+        if (spec.maxElapsedMinutes() != null) {
+            yaml.append("  max_elapsed_minutes: ").append(spec.maxElapsedMinutes()).append('\n');
+        }
         yaml.append("max_fix_attempts: ").append(spec.maxFixAttempts()).append('\n');
         yaml.append("timeout_minutes: ").append(spec.timeoutMinutes()).append('\n');
         Files.writeString(file, yaml.toString(), StandardCharsets.UTF_8);
@@ -666,6 +669,7 @@ public final class PilotPrepareCommand {
         declarations.put("reproduction_command", spec.reproductionCommand());
         declarations.put("max_role_runs", spec.maxRoleRuns());
         declarations.put("max_cost_usd", spec.maxCostUsd());
+        declarations.put("max_elapsed_minutes", spec.maxElapsedMinutes());
         declarations.put("max_fix_attempts", spec.maxFixAttempts());
         declarations.put("timeout_minutes", spec.timeoutMinutes());
         declarations.put("source_implementer_profile", spec.implementerProfile());
@@ -708,8 +712,12 @@ public final class PilotPrepareCommand {
         notProven.put("runtime_authentication", "not_proven");
         notProven.put("quota", "not_proven");
         notProven.put("live_readiness", "not_proven");
-        notProven.put("p3_durable_repair_limit", "not_implemented");
-        notProven.put("p4_strict_money_or_deadline", "not_implemented");
+        // Both limits exist in Warden now; what preparation cannot prove is that a live
+        // trial honours them. A strict money cap still does not exist.
+        notProven.put("chain_limits_across_continuations", "not_run");
+        notProven.put("execution_deadline", spec.maxElapsedMinutes() == null
+                ? "not_declared" : "not_run");
+        notProven.put("p4_strict_money_cap", "not_implemented");
 
         String installTo = spec.targetRoot().resolve(".warden").toString().replace('\\', '/');
         Map<String, Object> preview = new LinkedHashMap<>();
@@ -794,8 +802,10 @@ public final class PilotPrepareCommand {
                 process global Warden home.
 
                 Delivered P2 slice: deterministic offline preparation from an explicit operator
-                spec. This does **not** close all of P2 or P2PLAN-17. P3 durable repair-across-resume
-                and P4 strict money/deadline are not implemented.
+                spec. This does **not** close all of P2 or P2PLAN-17. The task's call, cost and
+                repair limits bound every `--continue` of this trial, and
+                `budgets.max_elapsed_minutes`, when declared, bounds its execution time; a strict
+                money cap does not exist, because a Codex call reports no price.
 
                 ## Install the target contract
 

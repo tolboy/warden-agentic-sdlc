@@ -339,6 +339,19 @@ public final class TaskLoop {
             "quota_exhausted", "quota",
             "turn_ceiling_reached", "turn_ceiling");
 
+    /**
+     * Whether a call timed out on a wall clock the chain deadline had lowered.
+     *
+     * Both runners say it their own way: the direct runner as `role_timeout` after it killed
+     * the process tree, Orca as `role_orca_timeout`, whose worker may still need settling. The
+     * deadline is the cause either way, and naming the profile's limit instead would send the
+     * operator to a number that was never binding.
+     */
+    public static boolean timedOutUnderDeadline(String roleCode, Map<String, Object> details) {
+        if (!"role_timeout".equals(roleCode) && !"role_orca_timeout".equals(roleCode)) return false;
+        return details != null && "max_elapsed_minutes".equals(details.get("wall_clock_capped_by"));
+    }
+
     /** True when a role outcome code is about the call, not about the candidate. */
     public static boolean isInfrastructureFailure(String roleCode) {
         return roleCode != null && INFRASTRUCTURE_REASONS.containsKey(roleCode);
@@ -417,6 +430,11 @@ public final class TaskLoop {
             @Override public void requireDispatch() { budget.requireRoleRun(); }
 
             @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            // Asked before a failover dispatch. Answering no makes the role return the spent
+            // call as its outcome, so the loop still charges it; throwing from the next
+            // dispatch instead lost that call's cost and its unpriced count.
+            @Override public boolean hasRoom() { return budget.hasRoom(); }
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
@@ -461,6 +479,7 @@ public final class TaskLoop {
         summary.put("visual_qa_role", visualRoleConfigured);
         summary.put("baseline_required", !task.baselineCommands().isEmpty());
         summary.put("baseline_commands", task.baselineCommands());
+        summary.put("acceptance_commands", task.acceptanceCommands());
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
@@ -2418,12 +2437,15 @@ public final class TaskLoop {
          * a profile limit that was never the binding one.
          */
         private void requireDeadlineNotTheCause(RoleRunner.Outcome role) {
-            if (!"role_timeout".equals(role.code()) || role.details() == null) return;
-            if (!"max_elapsed_minutes".equals(role.details().get("wall_clock_capped_by"))) return;
+            if (!timedOutUnderDeadline(role.code(), role.details())) return;
             throw new Budget.ExceededException("max_elapsed_minutes", "max_elapsed_minutes of "
                     + (budget.maxElapsedSeconds() / 60) + " reached: a " + role.profile()
                     + " call was cut to the " + role.details().get("wall_clock_minutes")
-                    + " minute(s) the chain had left, and used them");
+                    + " minute(s) the chain had left, and used them"
+                    + ("role_orca_timeout".equals(role.code())
+                        ? "; its Orca worker must be settled before a continuation dispatches, "
+                          + "and Orca's own lifecycle check refuses one until it is"
+                        : ""));
         }
 
         private String terminalReason(Workflow.Stage stage, Object outcome) {
@@ -2525,6 +2547,13 @@ public final class TaskLoop {
         java.time.Duration wallClockCap() {
             if (maxElapsedSeconds == null) return null;
             return java.time.Duration.ofSeconds(Math.max(0, maxElapsedSeconds - elapsedSeconds()));
+        }
+
+        /** Whether {@link #requireRoleRun} would admit another call right now. */
+        boolean hasRoom() {
+            if (maxRuns > 0 && chainRuns() >= maxRuns) return false;
+            if (maxCost > 0 && chainSpent() >= maxCost) return false;
+            return !deadlinePassed();
         }
 
         boolean deadlinePassed() {

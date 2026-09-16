@@ -1430,6 +1430,29 @@ public final class TaskLoopTest implements Suite {
         check.eq("a rejection's continuation is a chain of its own", List.of("cj2"),
                 ((Map<String, Object>) fresh.summaryReport().get("chain")).get("runs"));
 
+        // A failover the deadline cannot afford. The spent call is still charged; it used to be
+        // lost when the refusal was thrown from the dispatch that would have followed it.
+        Path spentLate = newProject(sandbox, "chain-failover-late", "medium", 20);
+        editTask(spentLate, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  max_elapsed_minutes: 1");
+        writeProfiles(home, sandbox, "chain-failover-late", 1, 1);
+        writeQuotaProfile(home, sandbox, "chain-failover-late");
+        policy(home, "loop-review", "loop-spent, loop-impl", "auto");
+        java.util.concurrent.atomic.AtomicLong lateNanos = new java.util.concurrent.atomic.AtomicLong();
+        dev.warden.run.Progress lateCalls = line -> {
+            if (line.contains("dispatching, up to")) lateNanos.addAndGet(50_000_000_000L);
+        };
+        TaskLoop.Outcome spentThenLate = new TaskLoop(new ProcessRunner())
+                .withProgress(lateCalls).withClock(lateNanos::get)
+                .run(new ConfigLoader().load(spentLate, "hello"), UserConfig.load(home), "cf1", false);
+        check.eq("a failover the deadline refuses stops on the spent plan", "quota_exhausted",
+                spentThenLate.reason());
+        check.eq("with the spent call charged to the run", 1L,
+                spentThenLate.summaryReport().get("role_runs"));
+        check.eq("including the price it never reported", 1L,
+                spentThenLate.summaryReport().get("unpriced_calls"));
+        check.eq("and to the chain", 1L,
+                ((Map<String, Object>) spentThenLate.summaryReport().get("chain")).get("unpriced_calls"));
+
         writeProfiles(home, sandbox, "chain-restore", 1, 1);
     }
 

@@ -24,6 +24,7 @@ public record PilotPrepareSpec(
         long maxFixAttempts,
         long maxRoleRuns,
         double maxCostUsd,
+        Long maxElapsedMinutes,
         String project,
         Path targetRoot,
         String base,
@@ -46,7 +47,8 @@ public record PilotPrepareSpec(
     private static final Set<String> TASK_KEYS = Set.of(
             "id", "goal", "non_goals", "risk", "scope", "timeout_minutes", "max_fix_attempts",
             "budgets");
-    private static final Set<String> BUDGET_KEYS = Set.of("max_role_runs", "max_cost_usd");
+    private static final Set<String> BUDGET_KEYS =
+            Set.of("max_role_runs", "max_cost_usd", "max_elapsed_minutes");
     private static final Set<String> TARGET_KEYS = Set.of("project", "root", "base");
     private static final Set<String> CHECK_KEYS = Set.of("baseline", "acceptance");
     private static final Set<String> REPRODUCTION_KEYS = Set.of("command");
@@ -91,6 +93,9 @@ public record PilotPrepareSpec(
         Values budgets = task.optMap("budgets").rejectUnknownKeys(BUDGET_KEYS);
         long maxRoleRuns = budgets.optInt("max_role_runs", 4, 1, 50);
         double maxCostUsd = budgets.optDouble("max_cost_usd", 10.0, 0.0, 10000.0);
+        // Optional: a trial without it has no execution deadline, which the runbook says.
+        Long maxElapsedMinutes = budgets.has("max_elapsed_minutes")
+                ? budgets.optInt("max_elapsed_minutes", 60, 1, 1440) : null;
 
         if (!root.has("target")) root.collector().add("target is required");
         Values target = root.optMap("target").rejectUnknownKeys(TARGET_KEYS);
@@ -150,6 +155,7 @@ public record PilotPrepareSpec(
                 maxFixAttempts,
                 maxRoleRuns,
                 maxCostUsd,
+                maxElapsedMinutes,
                 project,
                 expandUserPath(targetRootRaw),
                 base,

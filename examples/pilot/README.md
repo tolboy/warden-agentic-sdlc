@@ -98,8 +98,10 @@ workflow needs two calls for implement/review and four with a review repair/rech
 Gates consume time but no vendor calls. The four-call cap is not suitable for adding
 planner, visual roles, or another reviewer without recalculating the plan.
 `timeout_minutes` in the task bounds a gate, not the workflow. The monetary threshold
-covers known spend only; unpriced calls and the last call can exceed it. Per-call
-timeouts do not provide an overall deadline.
+covers known spend only; unpriced calls and the last call can exceed it. An overall
+execution deadline is `budgets.max_elapsed_minutes`, optional in the prepare spec: no call
+starts with under a minute left, each call's wall clock is lowered to what is left, and time
+spent waiting for a person is not counted.
 
 ## Freeze and execute later
 
@@ -118,8 +120,9 @@ warden run pilot-task --run-id pilot-01
 This is an **observed single-run experiment**. One ordinary repair of the target code
 is allowed. Any stop is an experimental outcome: do not use `--continue`, retry, a new
 run ID, a new writer or a larger budget to make the same trial look successful.
-These are experiment rules, not newly implemented CLI prohibitions. P3's durable
-repair counter across continuations and P4's execution deadline remain deferred.
+These are experiment rules, not CLI prohibitions. Warden itself now counts a `retry` or
+`switch` continuation against the same call, cost and repair limits and the same
+`max_elapsed_minutes`, so a continuation cannot quietly buy a second allowance either.
 If the operator must stop a slow run, record the intervention and settle the worker
 before starting anything else. A required Warden patch means this version failed the
 trial; retain the evidence and count troubleshooting time before planning another trial.
