@@ -24,6 +24,8 @@ import dev.warden.ledger.RunReport;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
 import dev.warden.run.DoCommand;
+import dev.warden.run.NextStep;
+import dev.warden.run.PilotPrepareCommand;
 import dev.warden.run.Preparation;
 import dev.warden.run.TaskLoop;
 
@@ -72,6 +74,7 @@ public final class Main {
                 case "status" -> status(args);
                 case "approve" -> approve(args);
                 case "land" -> land(args);
+                case "pilot" -> pilot(args);
                 default -> {
                     System.err.println("warden: unknown command '" + args[0] + "'");
                     usage();
@@ -134,6 +137,20 @@ public final class Main {
             new java.util.concurrent.CountDownLatch(1).await();
         }
         return 0;
+    }
+
+    /**
+     * Offline external-pilot preparation. Writes a reviewable bundle; never runs the target,
+     * never calls a vendor, never edits the target checkout or the global home.
+     */
+    private static int pilot(String[] args) {
+        if (args.length < 2 || args[1].equals("--help") || args[1].equals("-h")) {
+            usage();
+            return args.length < 2 ? 2 : 0;
+        }
+        PilotPrepareCommand.Outcome outcome = new PilotPrepareCommand().run(args);
+        System.out.println(Json.write(outcome.report()));
+        return outcome.exitCode();
     }
 
     private static int init(String[] args) throws Exception {
@@ -366,9 +383,12 @@ public final class Main {
         boolean dryRun = hasFlag(args, "--dry-run");
         String continueFrom = option(args, "--continue", null);
         String prepare = option(args, "--prepare", null);
+        Integer waitForGate = optionalMinutes(args, "--wait-for-gate");
         TaskLoop.Outcome outcome;
+        Path root = null;
         try {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
+            root = loaded.root();
             UserConfig user = UserConfig.load();
             Carried carried = continuation(loaded.root(), continueFrom);
             dev.warden.run.Workspace card = board(args).at(loaded.root());
@@ -400,7 +420,7 @@ public final class Main {
             System.out.println(Json.write(result));
             return 1;
         } catch (Exception preflight) {
-            return recordPreflightFailure(args[1], runId, preflight);
+            return recordPreflightFailure(args[1], runId, continueFrom, preflight);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", outcome.ok());
@@ -422,8 +442,23 @@ public final class Main {
             if (value != null) result.put(key, value);
         }
         result.put("report_path", writeRunReport(Path.of("."), runId));
+        if (waitForGate != null) {
+            // Import only. The wait never starts, retries or continues a run; a missing
+            // gate is said, not treated as an answer.
+            if (dryRun) {
+                result.put("gate_wait", skippedGateWait("dry_run"));
+            } else if (root != null) {
+                result.putAll(waitForPublishedGate(root, runId, outcome.summaryReport(),
+                        waitForGate, ApproveEnv.realtime()));
+            }
+        }
         System.out.println(Json.write(result));
-        return outcome.ok() ? 0 : 1;
+        int exit = outcome.ok() ? 0 : 1;
+        if (result.get("gate_import") instanceof Map<?, ?> imported
+                && Boolean.FALSE.equals(imported.get("ok"))) {
+            exit = 1;
+        }
+        return exit;
     }
 
     /**
@@ -465,9 +500,10 @@ public final class Main {
      * one role, to one named profile.
      */
     /** Both things a recorded decision can carry forward: an authorised swap, or a rejection. */
-    private record Carried(Map<String, String> failover, TaskLoop.Continuation continuation) {}
+    /** Package-visible so the loop suite can drive a recorded decision into a run. */
+    record Carried(Map<String, String> failover, TaskLoop.Continuation continuation) {}
 
-    private static Carried continuation(Path root, String priorRunId) throws Exception {
+    static Carried continuation(Path root, String priorRunId) throws Exception {
         if (priorRunId == null) return new Carried(Map.of(), TaskLoop.Continuation.NONE);
         HumanDecision decision = new ApprovalStore(root).read(priorRunId);
         // A rejection is feedback, not an authorisation: it grants nothing, it only tells the
@@ -515,16 +551,40 @@ public final class Main {
             throw new IllegalArgumentException("--continue " + priorRunId
                     + ": the recorded failover names no role and profile");
         }
+        // A spent subscription is not a verdict, so the switch keeps what was already judged.
+        // It used to carry nothing: run p2-planner-3 paid its writer thirty minutes to redo a
+        // candidate it had already written, and both readers again, because the only thing
+        // that changed was who would read next. TaskLoop still re-checks the tree, the
+        // acceptance and each stage's roster; the stage whose vendor ran out has no passing
+        // row and is dispatched to the profile the person just chose.
         return new Carried(Map.of(String.valueOf(role), String.valueOf(profile)),
-                new TaskLoop.Continuation(priorRunId, null, false));
+                new TaskLoop.Continuation(priorRunId, null, true));
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */
-    private static int recordPreflightFailure(String taskSelector, String runId, Exception failure)
+    private static int recordPreflightFailure(String taskSelector, String runId,
+                                              String continueFrom, Exception failure)
             throws Exception {
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
-        UserConfig user = UserConfig.load();
+        Map<String, Object> result = recordPreflightFailure(root, UserConfig.load(), taskSelector,
+                runId, continueFrom, failure);
+        System.out.println(Json.write(result));
+        return 1;
+    }
+
+    /** Package-visible so the loop suite can fail a continuation before it starts. */
+    static Map<String, Object> recordPreflightFailure(Path root, UserConfig user,
+                                                      String taskSelector, String runId,
+                                                      String continueFrom, Exception failure)
+            throws Exception {
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
+        if (continueFrom != null) {
+            try {
+                ledger.bindParent(EvidenceLedger.runInstanceIdOf(root, continueFrom));
+            } catch (Exception unknownParent) {
+                // Lineage stays unknown; the chain below still carries the spend.
+            }
+        }
         ledger.reserveWorkflowRun(taskSelector);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("run_id", runId);
@@ -535,6 +595,19 @@ public final class Main {
         summary.put("error", Map.of(
                 "type", failure.getClass().getName(),
                 "message", String.valueOf(failure.getMessage())));
+        if (continueFrom != null) {
+            // The run never started, but it was a continuation, and the next one reads its
+            // chain from here. When the recorded decision cannot even be read, the earlier
+            // spend is counted rather than dropped.
+            summary.put("continued_from", continueFrom);
+            boolean inherits = true;
+            try {
+                inherits = continuation(root, continueFrom).continuation().reuseJudgements();
+            } catch (Exception unreadable) {
+                inherits = true;
+            }
+            summary.put("chain", TaskLoop.chainForPreflightFailure(root, continueFrom, inherits, runId));
+        }
         Path file = ledger.writeReport("task-run", summary);
         ApprovalStore store = new ApprovalStore(root);
         HumanDecision decision = store.createFailure(runId, taskSelector,
@@ -564,8 +637,7 @@ public final class Main {
         result.put("decision_updated_at", summary.get("decision_updated_at"));
         result.putAll(ledger.corpusVisibility());
         result.put("message", String.valueOf(failure.getMessage()));
-        System.out.println(Json.write(result));
-        return 1;
+        return result;
     }
 
     /**
@@ -778,6 +850,59 @@ public final class Main {
      * deploys; it only closes the durable gate for a separate operator-owned landing step.
      */
     private static int approve(String[] args) throws Exception {
+        ApproveOutcome outcome = approveDecision(Path.of("."), args, ApproveEnv.realtime());
+        System.out.println(Json.write(outcome.report()));
+        return outcome.ok() ? 0 : 1;
+    }
+
+    /**
+     * Clock, sleep and gate reader for {@code --from-orca --wait-minutes}. Production uses
+     * the wall clock and a real Orca read; tests inject all three so a wait is a sequence
+     * of polls, not a sleep.
+     */
+    static final class ApproveEnv {
+        @FunctionalInterface
+        interface Clock { long nowMillis(); }
+
+        @FunctionalInterface
+        interface Sleeper { void sleep(long millis) throws InterruptedException; }
+
+        @FunctionalInterface
+        interface Gates { OrcaDecisionGate.Answer read(Path root, OrcaLifecycle.Gate gate) throws Exception; }
+
+        final Clock clock;
+        final Sleeper sleeper;
+        final Gates gates;
+        /** Null means {@link UserConfig#load()}; tests pass an isolated home. */
+        final Path configHome;
+
+        ApproveEnv(Clock clock, Sleeper sleeper, Gates gates) {
+            this(clock, sleeper, gates, null);
+        }
+
+        ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome) {
+            this.clock = clock;
+            this.sleeper = sleeper;
+            this.gates = gates;
+            this.configHome = configHome;
+        }
+
+        UserConfig user() throws java.io.IOException {
+            return configHome == null ? UserConfig.load() : UserConfig.load(configHome);
+        }
+
+        static ApproveEnv realtime() {
+            return new ApproveEnv(
+                    System::currentTimeMillis,
+                    millis -> Thread.sleep(millis),
+                    (root, gate) -> new OrcaDecisionGate(new ProcessRunner()).read(root, gate),
+                    null);
+        }
+    }
+
+    record ApproveOutcome(boolean ok, Map<String, Object> report) {}
+
+    static ApproveOutcome approveDecision(Path start, String[] args, ApproveEnv env) throws Exception {
         if (args.length < 2) {
             throw new IllegalArgumentException(
                     "approve requires a run id and either --decision or --from-orca");
@@ -785,11 +910,15 @@ public final class Main {
         String runId = args[1];
         boolean fromOrca = hasFlag(args, "--from-orca");
         String choice = option(args, "--decision", null);
+        Integer waitMinutes = optionalMinutes(args, "--wait-minutes");
         if (choice == null && !fromOrca) {
             throw new IllegalArgumentException("approve requires --decision <choice> or --from-orca");
         }
         if (choice != null && fromOrca) {
             throw new IllegalArgumentException("approve takes --decision or --from-orca, not both");
+        }
+        if (waitMinutes != null && !fromOrca) {
+            throw new IllegalArgumentException("--wait-minutes is only valid with --from-orca");
         }
         String actor = option(args, "--actor", fromOrca ? null
                 : System.getProperty("user.name", "human"));
@@ -797,13 +926,11 @@ public final class Main {
         String noteFile = option(args, "--note-file", null);
         if (noteFile != null) note = java.nio.file.Files.readString(Path.of(noteFile));
 
-        Path start = Path.of(".");
         Optional<Path> found = new ConfigLoader().locateProjectRoot(start);
         if (found.isEmpty()) {
             Map<String, Object> result = new LinkedHashMap<>(StatusCommand.notAWardenProject(start));
             result.put("lands", false);
-            System.out.println(Json.write(result));
-            return 1;
+            return new ApproveOutcome(false, result);
         }
         Path root = found.get();
         ApprovalStore store = new ApprovalStore(root);
@@ -811,52 +938,17 @@ public final class Main {
             HumanDecision pending = store.read(runId);
             Map<String, Object> gateReport = null;
             if (fromOrca) {
-                OrcaLifecycle.Gate gate;
-                try {
-                    gate = new OrcaLifecycle(root, runId).read().gate();
-                } catch (java.io.IOException unreadable) {
-                    // A record Warden cannot read is not a record that says no gate exists.
-                    throw new ApprovalException("orca_lifecycle_unreadable",
-                            "cannot read the Orca record for run " + runId + ": "
-                                    + unreadable.getMessage());
+                if (pending.state() != HumanDecision.State.PENDING) {
+                    throw new ApprovalException("duplicate_decision",
+                            "run " + runId + " is already resolved");
                 }
-                if (gate == null) {
-                    throw new ApprovalException("no_orca_gate",
-                            "run " + runId + " never published a decision gate to Orca");
-                }
-                // The version token. A gate answers the question it was published about; if the
-                // pending decision has moved since, the answer is about something else.
-                if (!gate.decisionUpdatedAt().equals(pending.updatedAt().toString())) {
-                    throw new ApprovalException("stale_decision",
-                            "gate " + gate.gateId() + " was published for an older version of run "
-                                    + runId);
-                }
-                OrcaDecisionGate bridge = new OrcaDecisionGate(new ProcessRunner());
-                OrcaDecisionGate.Answer answer = bridge.read(root, gate);
-                if (answer == null) {
-                    throw new ApprovalException("gate_unreadable",
-                            "Orca did not return gate " + gate.gateId());
-                }
-                if (!answer.resolved()) {
-                    throw new ApprovalException("gate_pending",
-                            "gate " + gate.gateId() + " has not been answered yet");
-                }
-                choice = OrcaDecisionGate.choose(answer.resolution(), pending.options());
-                if (choice == null) {
-                    // Orca accepts free text as a resolution. Warden accepts one of its own
-                    // options and nothing else, because guessing what a sentence meant is the
-                    // judgement being delegated in the first place.
-                    throw new ApprovalException("gate_resolution_unmapped",
-                            "gate " + gate.gateId() + " was resolved as "
-                                    + Json.write(answer.resolution()) + ", which is not one of "
-                                    + pending.options());
-                }
-                if (actor == null) actor = "orca-gate:" + gate.gateId();
-                gateReport = new LinkedHashMap<>();
-                gateReport.put("gate_id", gate.gateId());
-                gateReport.put("task_id", gate.taskId());
-                gateReport.put("orca_run_id", gate.orcaRunId());
-                gateReport.put("resolution", answer.resolution());
+                GatePoll poll = pollGate(root, runId, store, env, waitMinutes);
+                if (poll.timeout() != null) return new ApproveOutcome(false, poll.timeout());
+                MappedGate mapped = poll.mapped();
+                choice = mapped.choice();
+                pending = mapped.pending();
+                if (actor == null) actor = "orca-gate:" + mapped.gate().gateId();
+                gateReport = mapped.gateReport();
             }
             String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
 
@@ -893,7 +985,7 @@ public final class Main {
             recorded.put("wait_millis", waitMillis);
             recorded.put("updated_at", resolved.updatedAt().toString());
             recorded.put("lands", false);
-            UserConfig user = UserConfig.load();
+            UserConfig user = env.user();
             EvidenceLedger decisionLedger = new EvidenceLedger(root, runId, user.home());
             decisionLedger.append("human_decision", recorded);
             // The card stops asking. `accept` and `abort` close the run; every other decision
@@ -919,8 +1011,7 @@ public final class Main {
                     : "retry".equals(choice)
                         ? "start a new run id after addressing the recorded blocker"
                         : "no changes were landed");
-            System.out.println(Json.write(result));
-            return 0;
+            return new ApproveOutcome(true, result);
         } catch (ApprovalException failure) {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
@@ -928,9 +1019,184 @@ public final class Main {
             result.put("message", failure.getMessage());
             result.put("project", root.toString());
             result.put("lands", false);
-            System.out.println(Json.write(result));
-            return 1;
+            return new ApproveOutcome(false, result);
         }
+    }
+
+    record MappedGate(HumanDecision pending, OrcaLifecycle.Gate gate,
+                      OrcaDecisionGate.Answer answer, String choice,
+                      Map<String, Object> gateReport) {}
+
+    record GatePoll(MappedGate mapped, Map<String, Object> timeout) {}
+
+    /**
+     * Read the published gate and map its free-text resolution onto one of Warden's
+     * options. {@code gate_pending} and {@code gate_unreadable} wait, with 5 s then
+     * ×1.5 capped at 10 s, until {@code waitMinutes}; everything else fails on the
+     * first poll, as a plain {@code --from-orca} already did.
+     */
+    static GatePoll pollGate(Path root, String runId, ApprovalStore store, ApproveEnv env,
+                             Integer waitMinutes) throws Exception {
+        long start = env.clock.nowMillis();
+        long deadline = waitMinutes == null ? start : start + waitMinutes.longValue() * 60_000L;
+        long delayMs = 5_000L;
+        int polls = 0;
+        ApprovalException last = null;
+        while (true) {
+            polls++;
+            try {
+                return new GatePoll(readMappedGate(root, runId, store, env), null);
+            } catch (ApprovalException failure) {
+                if (!"gate_pending".equals(failure.code()) && !"gate_unreadable".equals(failure.code())) {
+                    throw failure;
+                }
+                last = failure;
+            }
+            long now = env.clock.nowMillis();
+            if (waitMinutes == null) throw last;
+            if (now >= deadline) {
+                return new GatePoll(null, gateTimeout(root, runId, store, start, now, polls, last));
+            }
+            long remaining = deadline - now;
+            long sleep = Math.min(delayMs, remaining);
+            if (sleep <= 0) {
+                return new GatePoll(null, gateTimeout(root, runId, store, start, now, polls, last));
+            }
+            try {
+                env.sleeper.sleep(sleep);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return new GatePoll(null, gateTimeout(root, runId, store, start,
+                        env.clock.nowMillis(), polls, last));
+            }
+            delayMs = Math.min(Math.round(delayMs * 1.5d), 10_000L);
+        }
+    }
+
+    /**
+     * One attempt: lifecycle, version token, Orca read, option mapping. The candidate
+     * fingerprint and the store's duplicate protection still run on the answer that is
+     * finally imported, not here.
+     */
+    static MappedGate readMappedGate(Path root, String runId, ApprovalStore store, ApproveEnv env)
+            throws Exception {
+        HumanDecision pending = store.read(runId);
+        if (pending.state() != HumanDecision.State.PENDING) {
+            throw new ApprovalException("duplicate_decision",
+                    "run " + runId + " is already resolved");
+        }
+        OrcaLifecycle.Gate gate;
+        try {
+            gate = new OrcaLifecycle(root, runId).read().gate();
+        } catch (java.io.IOException unreadable) {
+            // A record Warden cannot read is not a record that says no gate exists.
+            throw new ApprovalException("orca_lifecycle_unreadable",
+                    "cannot read the Orca record for run " + runId + ": "
+                            + unreadable.getMessage());
+        }
+        if (gate == null) {
+            throw new ApprovalException("no_orca_gate",
+                    "run " + runId + " never published a decision gate to Orca");
+        }
+        // The version token. A gate answers the question it was published about; if the
+        // pending decision has moved since, the answer is about something else.
+        if (!gate.decisionUpdatedAt().equals(pending.updatedAt().toString())) {
+            throw new ApprovalException("stale_decision",
+                    "gate " + gate.gateId() + " was published for an older version of run "
+                            + runId);
+        }
+        OrcaDecisionGate.Answer answer = env.gates.read(root, gate);
+        if (answer == null) {
+            throw new ApprovalException("gate_unreadable",
+                    "Orca did not return gate " + gate.gateId());
+        }
+        if (!answer.resolved()) {
+            throw new ApprovalException("gate_pending",
+                    "gate " + gate.gateId() + " has not been answered yet");
+        }
+        String choice = OrcaDecisionGate.choose(answer.resolution(), pending.options());
+        if (choice == null) {
+            // Orca accepts free text as a resolution. Warden accepts one of its own
+            // options and nothing else, because guessing what a sentence meant is the
+            // judgement being delegated in the first place.
+            throw new ApprovalException("gate_resolution_unmapped",
+                    "gate " + gate.gateId() + " was resolved as "
+                            + Json.write(answer.resolution()) + ", which is not one of "
+                            + pending.options());
+        }
+        Map<String, Object> gateReport = new LinkedHashMap<>();
+        gateReport.put("gate_id", gate.gateId());
+        gateReport.put("task_id", gate.taskId());
+        gateReport.put("orca_run_id", gate.orcaRunId());
+        gateReport.put("resolution", answer.resolution());
+        return new MappedGate(pending, gate, answer, choice, gateReport);
+    }
+
+    private static Map<String, Object> gateTimeout(Path root, String runId, ApprovalStore store,
+                                                   long startMillis, long nowMillis, int polls,
+                                                   ApprovalException last) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", false);
+        result.put("code", "gate_pending");
+        result.put("waited_seconds", Math.max(0L, (nowMillis - startMillis) / 1000L));
+        result.put("polls", (long) polls);
+        result.put("last_error", last == null ? "gate_pending" : last.getMessage());
+        result.put("next_step", timeoutNextStep(root, runId, store));
+        result.put("project", root.toString());
+        result.put("lands", false);
+        result.put("message", "no answer is never accept or reject; the decision was not changed");
+        return result;
+    }
+
+    private static Object timeoutNextStep(Path root, String runId, ApprovalStore store) {
+        try {
+            HumanDecision pending = store.read(runId);
+            Path summary = Path.of(pending.summaryPath());
+            if (!summary.isAbsolute()) summary = root.resolve(summary);
+            if (java.nio.file.Files.isRegularFile(summary)) {
+                Map<String, Object> body = Json.parseObject(java.nio.file.Files.readString(summary));
+                if (body.get("next_step") != null) return body.get("next_step");
+                Object reason = body.get("reason");
+                if (reason instanceof String text) return NextStep.of(text, body, root);
+            }
+        } catch (Exception ignored) {
+            // A timeout still has to name a next step even if the summary cannot be read.
+        }
+        return "warden approve " + runId + " --from-orca --wait-minutes <N>";
+    }
+
+    /**
+     * Thin wrapper around the same waiter {@code warden run --wait-for-gate} uses. Never
+     * starts a run: it imports one published gate or says why the wait was skipped.
+     */
+    static Map<String, Object> waitForPublishedGate(Path root, String runId,
+                                                    Map<String, Object> summary, int waitMinutes,
+                                                    ApproveEnv env) throws Exception {
+        Object published = summary == null ? null : summary.get("orca_gate");
+        if (!(published instanceof Map<?, ?> gate) || !Boolean.TRUE.equals(gate.get("published"))) {
+            String why;
+            if (!(published instanceof Map<?, ?> map)) why = "no_orca_gate";
+            else if (map.get("reason") != null) why = String.valueOf(map.get("reason"));
+            else why = "gate_not_published";
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("gate_wait", skippedGateWait(why));
+            return result;
+        }
+        ApproveOutcome imported = approveDecision(root,
+                new String[] {"approve", runId, "--from-orca", "--wait-minutes",
+                        Integer.toString(waitMinutes)},
+                env);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("gate_import", imported.report());
+        return result;
+    }
+
+    private static Map<String, Object> skippedGateWait(String reason) {
+        Map<String, Object> skip = new LinkedHashMap<>();
+        skip.put("skipped", true);
+        skip.put("reason", reason);
+        skip.put("detail", "the wait imports one Orca gate answer and never starts a run");
+        return skip;
     }
 
     /**
@@ -977,6 +1243,22 @@ public final class Main {
         return fallback;
     }
 
+    /** {@code 1..1440} minutes, or null when the flag is absent. */
+    static Integer optionalMinutes(String[] args, String flag) {
+        String raw = option(args, flag, null);
+        if (raw == null) return null;
+        int minutes;
+        try {
+            minutes = Integer.parseInt(raw);
+        } catch (NumberFormatException notANumber) {
+            throw new IllegalArgumentException(flag + " must be an integer 1..1440");
+        }
+        if (minutes < 1 || minutes > 1440) {
+            throw new IllegalArgumentException(flag + " must be 1..1440 minutes");
+        }
+        return minutes;
+    }
+
     private static String loadedDefaultRunId() {
         return "run-" + Long.toUnsignedString(System.currentTimeMillis(), 36)
                 + "-" + UUID.randomUUID().toString().substring(0, 8);
@@ -996,6 +1278,14 @@ public final class Main {
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
                   warden init [--base-ref REF] create a conservative project starter config
+                  warden pilot prepare --spec FILE --output DIR
+                                           write a self-contained offline pilot bundle from
+                                           an explicit JSON spec: target project/task YAML,
+                                           isolated config home with two selected profiles,
+                                           observation sheet and operator runbook. Never
+                                           overwrites DIR, never edits the target checkout
+                                           or global home, never runs checks or vendors.
+                                           Does not close all of P2 or implement P3/P4.
                   warden validate <task>       validate and resolve the project task contract
                   warden gates <task>          preflight and machine gates only; spends nothing
                   warden visual-qa <task>      launch preview, screenshot, assert control visibility
@@ -1018,6 +1308,11 @@ public final class Main {
                   warden run <task>            the bounded loop; stops at the human gate
                                                --no-orca-gate does not mirror the pending
                                                decision into Orca as a decision gate
+                                               --wait-for-gate N  after the loop, wait up to
+                                               N minutes (1..1440) for the published Orca
+                                               gate and import the answer; never starts,
+                                               retries or continues a run. Skipped when no
+                                               gate was published
                                                --prepare off|auto|always records the mode
                                                `warden do` had in force, so a skipped auto
                                                is not written as off. Does not dispatch a
@@ -1060,7 +1355,12 @@ public final class Main {
                                                machine or a phone. The gate is a doorbell:
                                                the answer must be one of Warden's own options,
                                                the pending decision must not have moved, and an
-                                               acceptance still needs the same fingerprint
+                                               acceptance still needs the same fingerprint.
+                                               --wait-minutes N  poll up to N minutes (1..1440)
+                                               while the gate is pending or unreadable, with
+                                               5s then x1.5 capped at 10s backoff. Imports
+                                               one answer and exits; never starts a run. No
+                                               answer is never accept or reject
                   warden land <run-id>         plan the commit, branch and request for an
                                                accepted run; --commit/--push/--pull-request
                                                carry it out. Merges nothing

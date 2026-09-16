@@ -120,6 +120,8 @@ public final class TaskLoop {
     private final Workspace workspace;
     private final boolean orcaGate;
     private final Preparation preparation;
+    /** Nanoseconds, as {@link System#nanoTime}; replaced only by the suite. */
+    private java.util.function.LongSupplier clock = System::nanoTime;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (VisualCheck) null);
@@ -135,7 +137,24 @@ public final class TaskLoop {
      * would be ambiguous at every call site and a lambda could silently pick the wrong one.
      */
     public TaskLoop withProgress(Progress narration) {
-        return new TaskLoop(processes, visualCheck, narration, workspace, orcaGate, preparation);
+        return keepClock(new TaskLoop(processes, visualCheck, narration, workspace, orcaGate,
+                preparation));
+    }
+
+    /**
+     * The same loop, timed by another clock. A chain deadline is measured in minutes, and the
+     * suite cannot wait that long for one to pass.
+     */
+    public TaskLoop withClock(java.util.function.LongSupplier nanos) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation));
+        copy.clock = nanos;
+        return copy;
+    }
+
+    private TaskLoop keepClock(TaskLoop copy) {
+        copy.clock = clock;
+        return copy;
     }
 
     /**
@@ -144,8 +163,8 @@ public final class TaskLoop {
      * only what a person would act on goes to the card.
      */
     public TaskLoop withWorkspace(Workspace board) {
-        return new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board), orcaGate,
-                preparation);
+        return keepClock(new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board),
+                orcaGate, preparation));
     }
 
     /**
@@ -158,12 +177,13 @@ public final class TaskLoop {
      * see {@link dev.warden.execution.orca.OrcaDecisionGate}.
      */
     public TaskLoop withOrcaGate(boolean publish) {
-        return new TaskLoop(processes, visualCheck, progress, workspace, publish, preparation);
+        return keepClock(new TaskLoop(processes, visualCheck, progress, workspace, publish,
+                preparation));
     }
 
     public TaskLoop withPreparation(Preparation preparation) {
-        return new TaskLoop(processes, visualCheck, progress, workspace, orcaGate,
-                preparation == null ? Preparation.NONE : preparation);
+        return keepClock(new TaskLoop(processes, visualCheck, progress, workspace, orcaGate,
+                preparation == null ? Preparation.NONE : preparation));
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
@@ -254,7 +274,114 @@ public final class TaskLoop {
             // promises never to charge: recovery replays delivery, not execution. The
             // fingerprint and acceptance checks below still apply, so a run that had already
             // moved the tree before the corpus refused declines reuse on its own.
-            "ledger_unavailable");
+            "ledger_unavailable",
+            // Every stop a vendor's endpoint caused rather than its reading of the diff. See
+            // INFRASTRUCTURE_REASONS for how each is reached and why none of them is a verdict.
+            // `quota_exhausted` was missing for longer than the others, and its own next step
+            // told the operator to wait and continue: the continuation then declined every
+            // verdict because the stop was "about the work", and paid for all of them again.
+            "quota_exhausted",
+            "rate_limited",
+            "failover_requires_confirmation",
+            "role_timed_out",
+            "vendor_call_failed",
+            "vendor_protocol_failed",
+            "prompt_undeliverable");
+
+    /**
+     * Role outcome codes that describe the call rather than the candidate, and the stop reason
+     * each one becomes.
+     *
+     * They all used to become `<role>_failed`, which reads as "the reviewer objected" and is
+     * treated as a verdict by every continuation. Measured on the first external trial: a
+     * reviewer killed by the operator's session limit was recorded as `reviewer_failed`, the
+     * retry declined the first reader's clean pass as if it had been overruled, and a second
+     * paid Codex reading reached the same conclusion about the same bytes.
+     *
+     * None of them is a verdict, and none of them is an implementer's to repair:
+     *
+     *  - a wall clock that ran out bounds the call, not the diff;
+     *  - a vendor process that exited non-zero with nothing Warden recognises — a crash, a
+     *    refused login, a dropped connection — has said nothing about the work at all;
+     *  - an answer that is not a readable, complete, schema-valid artifact is an answer Warden
+     *    could not read, so whatever verdict it held is unknown rather than negative;
+     *  - a prompt that could not be delivered never reached the vendor;
+     *  - a rate limit, a spent subscription and a turn ceiling are allowances.
+     *
+     * A negative verdict is never one of these. A reviewer that returns `fail`, or a pass
+     * carrying a P1, produces an `ok` role outcome and routes through its findings; a role
+     * that honestly reports itself blocked keeps its generic reason. Being on this list only
+     * lets a continuation <em>consider</em> earlier verdicts: every per-stage check in
+     * {@link #reusableJudgements} still applies, and the stage that failed has no passing row
+     * to reuse, so it is always dispatched again.
+     */
+    private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.of(
+            "role_timeout", "role_timed_out",
+            "role_command_failed", "vendor_call_failed",
+            "role_artifact_unparseable", "vendor_protocol_failed",
+            "role_artifact_incomplete", "vendor_protocol_failed",
+            "role_artifact_schema_violation", "vendor_protocol_failed",
+            "role_prompt_undeliverable", "prompt_undeliverable",
+            "role_rate_limited", "rate_limited",
+            "role_quota_exhausted", "quota_exhausted",
+            // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
+            // opposite of that, and the difference decides both what an operator goes and
+            // reads and whether the stages that already passed survive the retry.
+            "role_turns_exhausted", "turn_ceiling_reached");
+
+    /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
+    private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
+            "role_timed_out", "timeout",
+            "vendor_call_failed", "call_failed",
+            "vendor_protocol_failed", "protocol",
+            "prompt_undeliverable", "prompt_delivery",
+            "rate_limited", "rate_limit",
+            "quota_exhausted", "quota",
+            "turn_ceiling_reached", "turn_ceiling");
+
+    /**
+     * Whether a call timed out on a wall clock the chain deadline had lowered.
+     *
+     * Both runners say it their own way: the direct runner as `role_timeout` after it killed
+     * the process tree, Orca as `role_orca_timeout`, whose worker may still need settling. The
+     * deadline is the cause either way, and naming the profile's limit instead would send the
+     * operator to a number that was never binding.
+     */
+    public static boolean timedOutUnderDeadline(String roleCode, Map<String, Object> details) {
+        if (!"role_timeout".equals(roleCode) && !"role_orca_timeout".equals(roleCode)) return false;
+        return details != null && "max_elapsed_minutes".equals(details.get("wall_clock_capped_by"));
+    }
+
+    /**
+     * The chain block for a run that failed before the loop could start.
+     *
+     * A `warden run --continue A` that fails validation is still a link in A's chain, and a
+     * run that later continues it must inherit A's spend. Without this a configuration typo
+     * between two continuations reset the task's call ceiling: the review of this change
+     * reproduced a second implementer dispatch under `max_role_runs: 1`. The failed run spent
+     * nothing, so the block is A's chain with this run appended. A continuation that would
+     * not carry verdicts — a rejection — starts afresh, exactly as the loop decides.
+     */
+    public static Map<String, Object> chainForPreflightFailure(Path root, String priorRunId,
+                                                               boolean inherits, String runId) {
+        Chain earlier = priorRunId != null && inherits ? Chain.after(root, priorRunId) : Chain.NONE;
+        List<String> runs = new ArrayList<>(earlier.runs());
+        runs.add(runId);
+        Map<String, Object> chain = new LinkedHashMap<>();
+        chain.put("runs", runs);
+        chain.put("role_runs", earlier.roleRuns());
+        chain.put("cost_usd", earlier.costUsd());
+        chain.put("unpriced_calls", earlier.unpricedCalls());
+        chain.put("fix_attempts", earlier.fixAttempts());
+        chain.put("elapsed_seconds", earlier.elapsedSeconds());
+        chain.put("elapsed_known", earlier.elapsedKnown());
+        return chain;
+    }
+
+    /** True when a role outcome code is about the call, not about the candidate. */
+    public static boolean isInfrastructureFailure(String roleCode) {
+        return roleCode != null && INFRASTRUCTURE_REASONS.containsKey(roleCode);
+    }
 
     /**
      * Whether a stop reason is a judgement on the candidate.
@@ -314,12 +441,28 @@ public final class TaskLoop {
         // or a deleted scenario file are all terms the run would then be judged by.
         Map<String, String> configSnapshot = WardenTree.snapshot(root);
         String contractHash = WardenTree.digest(configSnapshot);
-        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd());
+        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd(),
+                task.budget().maxElapsedMinutes(), clock);
         budget.alreadySpent(prior.roleRuns(), prior.costUsd(), prior.unpriced());
+        // Only a continuation that carries verdicts continues the chain; see Chain.
+        if (carried.continuesRun() && carried.reuseJudgements()) {
+            budget.inherit(Chain.after(root, carried.fromRunId()));
+        }
         // One runner for the whole loop: a vendor that ran out at implement time must not be
         // dispatched again at review time. The gate makes the budget count vendor calls, not
-        // role invocations, so a failover cannot spend more than the task allowed.
-        RoleRunner roles = new RoleRunner(processes, budget::requireRoleRun, diffBaseCommit, runId,
+        // role invocations, so a failover cannot spend more than the task allowed, and it
+        // lowers each call's wall clock to what the chain's deadline leaves.
+        RoleRunner.DispatchGate dispatchGate = new RoleRunner.DispatchGate() {
+            @Override public void requireDispatch() { budget.requireRoleRun(); }
+
+            @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            // Asked before a failover dispatch. Answering no makes the role return the spent
+            // call as its outcome, so the loop still charges it; throwing from the next
+            // dispatch instead lost that call's cost and its unpriced count.
+            @Override public boolean hasRoom() { return budget.hasRoom(); }
+        };
+        RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
         GateRunner gates = new GateRunner(processes).withHome(user.home());
 
@@ -353,17 +496,38 @@ public final class TaskLoop {
         summary.put("max_fix_attempts", task.maxFixAttempts());
         summary.put("budget_max_role_runs", task.budget().maxRoleRuns());
         summary.put("budget_max_cost_usd", task.budget().maxCostUsd());
+        if (task.budget().maxElapsedMinutes() != null) {
+            summary.put("budget_max_elapsed_minutes", task.budget().maxElapsedMinutes());
+        }
+        describeChain(summary, budget, runId, task);
         summary.put("review_required", reviewRequired);
         summary.put("visual_qa_required", task.visualQa().required());
         summary.put("visual_qa_role", visualRoleConfigured);
         summary.put("baseline_required", !task.baselineCommands().isEmpty());
         summary.put("baseline_commands", task.baselineCommands());
+        summary.put("acceptance_commands", task.acceptanceCommands());
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
-        summary.put("budget_plan", callPlan.toMap(task.budget().maxRoleRuns(),
+        Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
                 user.policy() == null ? "full" : user.policy().repairReserve()));
+        if (task.budget().maxElapsedMinutes() != null) {
+            plan.put("time_reserve", "not reserved: budgets.max_elapsed_minutes ("
+                    + task.budget().maxElapsedMinutes() + ") bounds the execution time of this "
+                    + "run and every continuation of it. No vendor call starts with less than "
+                    + "a minute left, and each call's wall clock is lowered to what is left. A "
+                    + "call's duration is not predicted, so a repair is never refused in advance "
+                    + "for time; gates and the baseline are bounded by timeout_minutes instead");
+        }
+        if (!budget.inherited().runs().isEmpty()) {
+            plan.put("already_spent_by_chain", Map.of(
+                    "runs", budget.inherited().runs(),
+                    "role_runs", budget.inherited().roleRuns(),
+                    "fix_attempts", budget.inherited().fixAttempts(),
+                    "calls_remaining_under_cap", (long) budget.remaining()));
+        }
+        summary.put("budget_plan", plan);
         // Which stages this task excludes, decided before the walk rather than during it.
         //
         // `skipped_stages` is a record of what the engine reached and passed over, so a run
@@ -426,7 +590,7 @@ public final class TaskLoop {
                         String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
                         workflow, user, summary)
                 : Map.of();
-        header(task, runId, workflow, dryRun, callPlan);
+        header(task, runId, workflow, dryRun, callPlan, budget);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
                     + "; the implementer is given its reason verbatim");
@@ -501,6 +665,68 @@ public final class TaskLoop {
                 }
             }
         }
+        if (!task.reproduceCommands().isEmpty()) {
+            summary.put("reproduction_commands", task.reproduceCommands());
+            if (dryRun) {
+                steps.add(Map.of("step", "reproduction", "attempt", 0L, "dry_run", true));
+                progress.line("red   must fail before any vendor is dispatched: "
+                        + String.join(", ", task.reproduceCommands()));
+            } else if (!WardenTree.sourcePaths(git.changedPaths(diffBaseCommit)).isEmpty()) {
+                // A candidate cannot demonstrate the original defect. Only a verified receipt
+                // from this continuation can speak for the base; missing proof is made visible.
+                ReproductionReceipt receipt = carried.continuesRun()
+                        ? reusableReproduction(root, carried.fromRunId(), task.id(),
+                                String.valueOf(summary.get("acceptance_sha256")), diffBaseCommit)
+                        : null;
+                if (receipt == null) {
+                    summary.put("reproduction_status", "not_run_candidate_present");
+                    steps.add(Map.of("step", "reproduction", "attempt", 0L,
+                            "status", "not_run_candidate_present"));
+                    progress.line("red   not_run_candidate_present: no verified base proof; "
+                            + "reproduction cannot run on a candidate");
+                } else {
+                    summary.put("reproduction_ok", true);
+                    summary.put("reproduction_status", "reused");
+                    summary.put("reproduction_reused_from", receipt.runId());
+                    summary.put("reproduction_receipt_run", receipt.runId());
+                    summary.put("reproduction_report", receipt.report().toString());
+                    summary.put("reproduction_report_sha256", receipt.sha256());
+                    summary.put("reproduction_results", receipt.commands());
+                    steps.add(Map.of("step", "reproduction", "attempt", 0L, "ok", true,
+                            "reused", true, "reused_from", receipt.runId(),
+                            "report", receipt.report().toString()));
+                    progress.line("red   reused verified base proof from " + receipt.runId());
+                }
+            } else {
+                progress.line("red   checking acceptance fails before the first vendor: "
+                        + String.join(", ", task.reproduceCommands()));
+                GateRunner.Outcome reproduction;
+                try (Heartbeat alive = Heartbeat.over("reproduction gates", progress, workspace)) {
+                    reproduction = gates.runReproduction(loaded, stepRunId(runId, "reproduction", 0),
+                            configSnapshot, diffBaseCommit);
+                }
+                steps.add(Map.of("step", "reproduction", "attempt", 0L, "ok", reproduction.ok(),
+                        "code", reproduction.code(), "report", reproduction.report().toString()));
+                summary.put("reproduction_ok", reproduction.ok());
+                summary.put("reproduction_code", reproduction.code());
+                summary.put("reproduction_report", reproduction.report().toString());
+                summary.put("reproduction_report_sha256", GitRepository.contentSha256(reproduction.report()));
+                summary.put("reproduction_results", reproduction.data().getOrDefault("commands", List.of()));
+                if (!reproduction.ok()) {
+                    String reason = "reproduction_passed_before_change".equals(reproduction.code())
+                            ? "reproduction_passed_before_change" : "reproduction_inconclusive";
+                    summary.put("resolution", "reproduction_passed_before_change".equals(reason)
+                            ? "Acceptance already passed on the unchanged tree: "
+                                    + reproduction.data().get("passed_commands")
+                            : "Reproduction did not prove the defect: " + reproduction.code());
+                    progress.line("red   " + reason + "; no vendor dispatched");
+                    return stop(ledger, summary, reason, steps, 0, budget);
+                }
+                summary.put("reproduction_receipt_run", runId);
+                summary.put("reproduction_status", "proved_on_base");
+                progress.line("red   every reproduction command failed on the unchanged tree");
+            }
+        }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
                 progress, carried, reusable, callPlan);
@@ -533,7 +759,8 @@ public final class TaskLoop {
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
-        summary.put("cost_ceiling_binding", budget.unpriced() == 0);
+        summary.put("cost_ceiling_binding", budget.chainUnpriced() == 0);
+        describeChain(summary, budget, runId, task, attempt);
         // Which judging stages did not see the tree as it finally stands. A workflow may
         // legitimately choose not to pay for a second review, but "every stage passed" must
         // not be allowed to mean "every stage passed something, at some point".
@@ -566,6 +793,10 @@ public final class TaskLoop {
             if (cap > 0 && cap < callPlan.minimumToFinish()) {
                 progress.line("      that cap cannot finish this chain even with no repairs");
             }
+            // Named every time, because the number looks like a cap and is not one: a vendor
+            // that reports no price spends against it nothing at all.
+            progress.line("      max_cost_usd " + Progress.money(task.budget().maxCostUsd())
+                    + " is a threshold on the spend vendors report, not a strict cap");
             for (Map<String, Object> branch : recoveryBranches(summary)) {
                 progress.line("      if " + branch.get("stage") + " sends the work back: "
                         + branch.get("calls_to_repair_and_finish") + " call(s) to repair and "
@@ -582,6 +813,7 @@ public final class TaskLoop {
 
         summary.put("reason", "ready_for_human");
         summary.put("safe_next_step", "warden approve " + runId + " --decision accept|reject");
+        summary.put("next_step", NextStep.of("ready_for_human", summary, root));
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
         // Named, not asserted. The chain is declared now, so "all machine, review and visual
@@ -634,6 +866,49 @@ public final class TaskLoop {
         ledger.writeReport("task-run", summary);
         footer(runId, "ready_for_human", "human_gate", budget, summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
+    }
+
+    private static void describeChain(Map<String, Object> summary, Budget budget, String runId,
+                                      TaskSpec.ResolvedTask task) {
+        describeChain(summary, budget, runId, task, 0);
+    }
+
+    /**
+     * The spend of the whole continued chain, this run included, beside this run's own.
+     *
+     * The next `--continue` reads it back as its starting point, so it is written at every
+     * stop and at the gate, not only once. The maxima are the ones in force now: a person may
+     * have raised them since the chain began, and the run records that separately as
+     * `contract_change_budget_only`.
+     */
+    @SuppressWarnings("unchecked")
+    private static void describeChain(Map<String, Object> summary, Budget budget, String runId,
+                                      TaskSpec.ResolvedTask task, int attempt) {
+        Chain earlier = budget.inherited();
+        Map<String, Object> chain = summary.get("chain") instanceof Map<?, ?> existing
+                ? new LinkedHashMap<>((Map<String, Object>) existing) : new LinkedHashMap<>();
+        List<String> runs = new ArrayList<>(earlier.runs());
+        runs.add(runId);
+        chain.put("runs", runs);
+        chain.put("role_runs", budget.chainRuns());
+        chain.put("cost_usd", budget.chainSpent());
+        chain.put("unpriced_calls", budget.chainUnpriced());
+        chain.put("fix_attempts", earlier.fixAttempts() + attempt);
+        chain.put("elapsed_seconds", budget.elapsedSeconds());
+        chain.put("elapsed_known", earlier.elapsedKnown());
+        if (task != null) {
+            chain.put("max_role_runs", task.budget().maxRoleRuns());
+            chain.put("max_cost_usd", task.budget().maxCostUsd());
+            chain.put("max_fix_attempts", task.maxFixAttempts());
+            chain.put("max_elapsed_minutes", task.budget().maxElapsedMinutes());
+        }
+        chain.put("calls_remaining", budget.remaining() == Integer.MAX_VALUE
+                ? null : (long) budget.remaining());
+        if (chain.get("max_fix_attempts") instanceof Number max) {
+            chain.put("fix_attempts_remaining",
+                    Math.max(0, max.longValue() - (earlier.fixAttempts() + attempt)));
+        }
+        summary.put("chain", chain);
     }
 
     /**
@@ -863,6 +1138,12 @@ public final class TaskLoop {
 
         int attempt() { return attempt; }
 
+        /**
+         * Fix rounds the whole chain has used, this run's included. `attempt` stays per run:
+         * it names evidence directories and gates verdict reuse to the first pass.
+         */
+        long fixRoundsUsed() { return budget.inherited().fixAttempts() + attempt; }
+
         List<Map<String, Object>> skipped() { return List.copyOf(skipped); }
 
         void run() throws Exception {
@@ -890,8 +1171,8 @@ public final class TaskLoop {
             // dispatched nobody, so there is no outcome to route and nothing new to object.
             if (outcome == null) { finished(stage); return; }
 
-            while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(outcome)
-                    && attempt < task.maxFixAttempts()) {
+            while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(stage, outcome)
+                    && fixRoundsUsed() < task.maxFixAttempts()) {
                 fixRound(stage, index, failureContext(stage, outcome));
                 outcome = execute(stage);
             }
@@ -907,7 +1188,7 @@ public final class TaskLoop {
             RoleRunner.Outcome reviewed = (RoleRunner.Outcome) outcome;
             long blocking = recordFindings(stage, reviewed);
             while (repairableFindings(stage) > 0 && "fix".equals(stage.onFindings())
-                    && attempt < task.maxFixAttempts()) {
+                    && fixRoundsUsed() < task.maxFixAttempts()) {
                 fixRound(stage, index, reviewContext(loaded.root(), reviewed));
                 outcome = execute(stage);
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
@@ -975,7 +1256,7 @@ public final class TaskLoop {
             // touched the tree, and the verdicts about the tree it started from are no more
             // current than if it had succeeded.
             candidateAboutToChange();
-            progress.line("      -> fix round " + attempt + " of " + task.maxFixAttempts()
+            progress.line("      -> fix round " + fixRoundsUsed() + " of " + task.maxFixAttempts()
                     + ": " + stage.name() + " sends the work back to " + stage.fixWith());
             workspace.note(fixNote(stage, null, null));
             String beforeRepair = currentFingerprint();
@@ -1002,7 +1283,10 @@ public final class TaskLoop {
             // later resume must match before it may reuse this implementer's work.
             stampFingerprint();
             vendors.putIfAbsent(role, fix.vendor());
-            if (!fix.ok()) throw new StopException(reasonFor(fix, "fix_attempt_failed"));
+            if (!fix.ok()) {
+                requireDeadlineNotTheCause(fix);
+                throw new StopException(reasonFor(fix, "fix_attempt_failed"));
+            }
             recordRepairReceipt(fix, beforeRepair);
             requireUnchangedContract();
             for (Workflow.Stage earlier : workflow.recheckBefore(index)) {
@@ -1452,7 +1736,7 @@ public final class TaskLoop {
             summary.put("resolution", "The remaining " + remaining + " vendor call(s) do not "
                     + "meet the repair reserve this policy requires (" + mode + ", needing "
                     + required + "). Raise budgets.max_role_runs to at least "
-                    + (budget.runs() + toFinish) + " and continue this run — the verdicts "
+                    + (budget.chainRuns() + toFinish) + " and continue this run — the verdicts "
                     + "already reached on this tree are kept, because a change to the call "
                     + "ceiling is not a change to what the work is judged by."
                     + ("full".equals(mode)
@@ -2151,7 +2435,7 @@ public final class TaskLoop {
          * asking one to try spends a role run on the operator's configuration and then
          * fails the same way.
          */
-        private boolean fixable(Object outcome) {
+        private boolean fixable(Workflow.Stage stage, Object outcome) {
             if (outcome instanceof VisualQaRunner.Outcome visual) {
                 return "visual_qa_failed".equals(visual.code());
             }
@@ -2159,13 +2443,40 @@ public final class TaskLoop {
                 return !OPERATOR_MUST_RESOLVE.contains(gate.code());
             }
             if (outcome instanceof RoleRunner.Outcome role) {
-                return !roleFailureRequiresOperator(role.code());
+                if (roleFailureRequiresOperator(role.code())) return false;
+                if (!isInfrastructureFailure(role.code())) return true;
+                // A call that timed out, was rate limited or ran out of plan has nothing in it
+                // for anyone to repair, even on a stage an operator declared `on_fail: fix`:
+                // the repair would be a paid call to a writer about a reviewer's endpoint. An
+                // unreadable answer is the one exception, and only when the role that gave it
+                // is the role that would repair it — a writer can be shown its own malformed
+                // artifact and asked again.
+                return "vendor_protocol_failed".equals(INFRASTRUCTURE_REASONS.get(role.code()))
+                        && stage.fixWith().equals(stage.role());
             }
             return true;
         }
 
+        /**
+         * A call whose wall clock the chain deadline lowered, and which then ran out, stopped
+         * because of the deadline. Naming it `role_timed_out` would send the operator to raise
+         * a profile limit that was never the binding one.
+         */
+        private void requireDeadlineNotTheCause(RoleRunner.Outcome role) {
+            if (!timedOutUnderDeadline(role.code(), role.details())) return;
+            throw new Budget.ExceededException("max_elapsed_minutes", "max_elapsed_minutes of "
+                    + (budget.maxElapsedSeconds() / 60) + " reached: a " + role.profile()
+                    + " call was cut to the " + role.details().get("wall_clock_minutes")
+                    + " minute(s) the chain had left, and used them"
+                    + ("role_orca_timeout".equals(role.code())
+                        ? "; its Orca worker must be settled before a continuation dispatches, "
+                          + "and Orca's own lifecycle check refuses one until it is"
+                        : ""));
+        }
+
         private String terminalReason(Workflow.Stage stage, Object outcome) {
             if (outcome instanceof VisualQaRunner.Outcome visual) return visual.code();
+            if (outcome instanceof RoleRunner.Outcome role) requireDeadlineNotTheCause(role);
             if (outcome instanceof RoleRunner.Outcome role) return reasonFor(role, stage.failureReason());
             return stage.failureReason();
         }
@@ -2216,10 +2527,65 @@ public final class TaskLoop {
          */
         private int unpriced;
 
-        Budget(long maxRuns, double maxCost) { this.maxRuns = maxRuns; this.maxCost = maxCost; }
+        /**
+         * What earlier runs of the same chain spent. Counted against every ceiling and never
+         * reported as this run's own: `role_runs` and `total_cost_usd` stay per run, because
+         * the corpus sums runs and would otherwise count a continued chain twice.
+         */
+        private Chain inherited = Chain.NONE;
+        /** Execution time the chain may spend in all, in seconds; null when undeclared. */
+        private final Long maxElapsedSeconds;
+        private final java.util.function.LongSupplier clock;
+        private final long startedNanos;
+
+        Budget(long maxRuns, double maxCost) { this(maxRuns, maxCost, null, System::nanoTime); }
+
+        Budget(long maxRuns, double maxCost, Long maxElapsedMinutes,
+               java.util.function.LongSupplier clock) {
+            this.maxRuns = maxRuns;
+            this.maxCost = maxCost;
+            this.maxElapsedSeconds = maxElapsedMinutes == null ? null : maxElapsedMinutes * 60;
+            this.clock = clock;
+            this.startedNanos = clock.getAsLong();
+        }
 
         int runs() { return runs; }
         double spent() { return spent; }
+
+        void inherit(Chain chain) { this.inherited = chain; }
+
+        Chain inherited() { return inherited; }
+
+        long chainRuns() { return inherited.roleRuns() + runs; }
+
+        double chainSpent() { return inherited.costUsd() + spent; }
+
+        long chainUnpriced() { return inherited.unpricedCalls() + unpriced; }
+
+        /** Execution seconds the chain has used, this run's so far included. */
+        long elapsedSeconds() {
+            return inherited.elapsedSeconds() + (clock.getAsLong() - startedNanos) / 1_000_000_000L;
+        }
+
+        Long maxElapsedSeconds() { return maxElapsedSeconds; }
+
+        /** What is left of the chain's execution time, or null when it declared none. */
+        java.time.Duration wallClockCap() {
+            if (maxElapsedSeconds == null) return null;
+            return java.time.Duration.ofSeconds(Math.max(0, maxElapsedSeconds - elapsedSeconds()));
+        }
+
+        /** Whether {@link #requireRoleRun} would admit another call right now. */
+        boolean hasRoom() {
+            if (maxRuns > 0 && chainRuns() >= maxRuns) return false;
+            if (maxCost > 0 && chainSpent() >= maxCost) return false;
+            return !deadlinePassed();
+        }
+
+        boolean deadlinePassed() {
+            java.time.Duration left = wallClockCap();
+            return left != null && left.getSeconds() < MINIMUM_CALL_SECONDS;
+        }
 
         /**
          * Vendor calls that already happened before this loop, counted so preparation is
@@ -2242,19 +2608,29 @@ public final class TaskLoop {
          */
         int remaining() {
             if (maxRuns <= 0) return Integer.MAX_VALUE;
-            return (int) Math.max(0, maxRuns - runs);
+            return (int) Math.max(0, maxRuns - chainRuns());
         }
 
         long maxRuns() { return maxRuns; }
 
         void requireRoleRun() {
-            if (maxRuns > 0 && runs >= maxRuns) {
+            String earlier = inherited.runs().isEmpty() ? ""
+                    : " across this run and " + String.join(", ", inherited.runs());
+            if (maxRuns > 0 && chainRuns() >= maxRuns) {
                 throw new ExceededException("max_role_runs",
-                        "max_role_runs of " + maxRuns + " reached");
+                        "max_role_runs of " + maxRuns + " reached" + earlier);
             }
-            if (maxCost > 0 && spent >= maxCost) {
+            if (maxCost > 0 && chainSpent() >= maxCost) {
                 throw new ExceededException("max_cost_usd",
-                        "max_cost_usd of " + maxCost + " reached, spent " + spent);
+                        "max_cost_usd of " + maxCost + " reached, spent " + chainSpent() + earlier);
+            }
+            // A call is not started with less than a minute left. The wall clock a profile
+            // declares is in whole minutes, and a call admitted with seconds to spare would be
+            // given a minute it does not have.
+            if (deadlinePassed()) {
+                throw new ExceededException("max_elapsed_minutes",
+                        "max_elapsed_minutes of " + (maxElapsedSeconds / 60) + " reached: "
+                                + elapsedSeconds() + " s of execution already spent" + earlier);
             }
             runs++;
         }
@@ -2264,6 +2640,108 @@ public final class TaskLoop {
         void account(Object cost) {
             if (cost instanceof Number number) spent += number.doubleValue();
             else unpriced++;
+        }
+    }
+
+    /** The shortest time a vendor call is started with. See {@link Budget#requireRoleRun}. */
+    private static final long MINIMUM_CALL_SECONDS = 60;
+
+    /**
+     * What the earlier runs of a continued chain already spent.
+     *
+     * A continuation used to start from nothing: a fresh call ceiling, a fresh set of fix
+     * rounds, a fresh clock. So a task declared as "four calls, one repair" could be run as
+     * four calls and one repair per `--continue`, and the limits an operator chose described
+     * one run rather than the work. The chain is the unit now. Raising a limit is still one
+     * edit to the task file, which is not part of what the work is judged by, and the run
+     * that follows records it as `contract_change_budget_only`.
+     *
+     * Only a continuation that carries verdicts — a `retry` or a `switch` — is the same
+     * chain. A rejection is a person asking for different work, and starts a new one; so
+     * does a run with no `--continue`, which carries nothing at all.
+     *
+     * @param elapsedKnown false when an earlier run predates this record, whose execution
+     *                     time is then not counted rather than guessed
+     */
+    record Chain(List<String> runs, long roleRuns, double costUsd, long unpricedCalls,
+                 long fixAttempts, long elapsedSeconds, boolean elapsedKnown) {
+        static final Chain NONE = new Chain(List.of(), 0, 0, 0, 0, 0, true);
+
+        /** The chain as the named run left it, or {@link #NONE} when it cannot be read. */
+        static Chain after(Path root, String runId) {
+            try {
+                Path file = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+                if (!Files.isRegularFile(file)) return NONE;
+                Map<String, Object> prior = Json.parseObject(Files.readString(file));
+                if (prior.get("chain") instanceof Map<?, ?> chain) {
+                    List<String> runs = new ArrayList<>();
+                    if (chain.get("runs") instanceof List<?> names) {
+                        for (Object name : names) runs.add(String.valueOf(name));
+                    }
+                    return new Chain(List.copyOf(runs), number(chain.get("role_runs")),
+                            decimal(chain.get("cost_usd")), number(chain.get("unpriced_calls")),
+                            number(chain.get("fix_attempts")), number(chain.get("elapsed_seconds")),
+                            !Boolean.FALSE.equals(chain.get("elapsed_known")));
+                }
+                // Written before chains were recorded: the run's own totals are the chain.
+                return new Chain(List.of(runId), number(prior.get("role_runs")),
+                        decimal(prior.get("total_cost_usd")), number(prior.get("unpriced_calls")),
+                        number(prior.get("attempts_used")), 0, false);
+            } catch (Exception unreadable) {
+                return NONE;
+            }
+        }
+
+        private static long number(Object value) {
+            return value instanceof Number number ? number.longValue() : 0L;
+        }
+
+        private static double decimal(Object value) {
+            return value instanceof Number number ? number.doubleValue() : 0.0;
+        }
+    }
+
+    /** A prior run's persisted proof that every reproduction command failed on the base. */
+    private record ReproductionReceipt(String runId, Path report, String sha256, Object commands) {}
+
+    /**
+     * The candidate is expected to move after red proof. Bind reuse to the acceptance and
+     * immutable base instead, and verify the original on-disk receipt even across multiple
+     * continuations. A missing, redirected or corrupted receipt never becomes proof.
+     */
+    private ReproductionReceipt reusableReproduction(Path root, String priorRunId, String taskId,
+                                                       String acceptanceHash, String diffBaseCommit) {
+        try {
+            Path evidenceRoot = root.resolve(".warden/runs").toAbsolutePath().normalize();
+            Map<String, Object> prior = Json.parseObject(Files.readString(
+                    evidenceRoot.resolve(priorRunId).resolve("task-run.json")));
+            if (!Boolean.TRUE.equals(prior.get("reproduction_ok"))
+                    || !taskId.equals(prior.get("task_id"))
+                    || !acceptanceHash.equals(prior.get("acceptance_sha256"))
+                    || !diffBaseCommit.equals(prior.get("diff_base_commit"))) return null;
+            Object reportText = prior.get("reproduction_report");
+            Object receiptRunBody = prior.get("reproduction_receipt_run");
+            String receiptRun = receiptRunBody instanceof String value && !value.isBlank()
+                    ? value : priorRunId;
+            if (!(reportText instanceof String text) || text.isBlank()) return null;
+            Path report = Path.of(text);
+            if (!report.isAbsolute()) report = root.resolve(report);
+            report = report.toAbsolutePath().normalize();
+            Path expected = evidenceRoot.resolve(receiptRun + "--reproduction-0")
+                    .resolve("reproduction-gate.json").normalize();
+            if (!expected.startsWith(evidenceRoot) || !report.equals(expected)
+                    || !Files.isRegularFile(report)) return null;
+            String hash = GitRepository.contentSha256(report);
+            if (!hash.equals(prior.get("reproduction_report_sha256"))) return null;
+            Map<String, Object> receipt = Json.parseObject(Files.readString(report));
+            if (!"reproduction".equals(receipt.get("phase"))
+                    || !Boolean.TRUE.equals(receipt.get("ok"))
+                    || !"passed".equals(receipt.get("code"))
+                    || !taskId.equals(receipt.get("task_id"))
+                    || !diffBaseCommit.equals(receipt.get("merge_base"))) return null;
+            return new ReproductionReceipt(receiptRun, report, hash, receipt.get("commands"));
+        } catch (Exception unreadable) {
+            return null;
         }
     }
 
@@ -2601,7 +3079,7 @@ public final class TaskLoop {
 
     /** What is about to happen, before the first vendor is paid to do any of it. */
     private void header(TaskSpec.ResolvedTask task, String runId, Workflow workflow, boolean dryRun,
-                        CallPlan plan) {
+                        CallPlan plan, Budget budget) {
         progress.blank();
         progress.line("run   " + runId + (dryRun ? "   (dry run: nothing is dispatched)" : ""));
         progress.line("task  " + task.id() + "   risk=" + task.risk()
@@ -2611,8 +3089,21 @@ public final class TaskLoop {
         for (Workflow.Stage stage : workflow.stages()) names.add(stage.name());
         progress.line("plan  " + String.join(" -> ", names));
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
-                + Progress.money(task.budget().maxCostUsd()) + " ceiling, fix rounds <= "
-                + task.maxFixAttempts());
+                + Progress.money(task.budget().maxCostUsd()) + " of reported spend, fix rounds <= "
+                + task.maxFixAttempts()
+                + (task.budget().maxElapsedMinutes() == null ? ""
+                        : ", " + task.budget().maxElapsedMinutes() + " min of execution"));
+        Chain earlier = budget.inherited();
+        if (!earlier.runs().isEmpty()) {
+            // The limits above are the chain's, and a continuation is told how much of them is
+            // gone before it spends any more.
+            progress.line("      continuing " + String.join(", ", earlier.runs()) + ": "
+                    + earlier.roleRuns() + " call(s), " + Progress.money(earlier.costUsd())
+                    + ", " + earlier.fixAttempts() + " fix round(s)"
+                    + (earlier.elapsedKnown() ? ", " + earlier.elapsedSeconds() + " s"
+                            : ", execution time not recorded")
+                    + " already spent");
+        }
         // The arithmetic, before anything is spent rather than after. An operator who is going
         // to be told at the end that the chain never finished is entitled to be told at the
         // start that it could not have.
@@ -2770,15 +3261,40 @@ public final class TaskLoop {
      * both still stop for a human, because Warden does not decide to wait out a quota window.
      */
     private static String reasonFor(RoleRunner.Outcome step, String genericReason) {
-        if ("role_quota_exhausted".equals(step.code())) return "quota_exhausted";
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
         }
-        // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
-        // opposite of that, and the difference decides both what an operator goes and reads
-        // and whether the stages that already passed survive the retry.
-        if ("role_turns_exhausted".equals(step.code())) return "turn_ceiling_reached";
-        return genericReason;
+        String infrastructure = INFRASTRUCTURE_REASONS.get(step.code());
+        return infrastructure != null ? infrastructure : genericReason;
+    }
+
+    /**
+     * The failed call behind an infrastructure stop, named once at the top of the summary.
+     *
+     * The row is already in `steps`; this saves the operator from finding it, and says in so
+     * many words that the stop is not a judgement and what a continuation will keep.
+     */
+    private static void describeInfrastructureStop(String reason, Map<String, Object> summary,
+                                                   List<Map<String, Object>> steps) {
+        String cause = INFRASTRUCTURE_CAUSES.get(reason);
+        if (cause == null) return;
+        Map<String, Object> failure = new LinkedHashMap<>();
+        failure.put("cause", cause);
+        for (int index = steps.size() - 1; index >= 0; index--) {
+            Map<String, Object> row = steps.get(index);
+            if (Boolean.FALSE.equals(row.get("ok")) && row.get("profile") != null) {
+                failure.put("step", row.get("step"));
+                if (row.get("stage") != null) failure.put("stage", row.get("stage"));
+                failure.put("role_code", row.get("code"));
+                failure.put("profile", row.get("profile"));
+                failure.put("vendor", row.get("vendor"));
+                break;
+            }
+        }
+        failure.put("verdict_on_the_work", false);
+        failure.put("on_continue", "stages that already passed this exact tree under the same "
+                + "contract and roster are reused; the failed stage is dispatched again");
+        summary.put("infrastructure_failure", failure);
     }
 
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
@@ -2909,13 +3425,17 @@ public final class TaskLoop {
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
-        summary.put("cost_ceiling_binding", budget.unpriced() == 0);
+        summary.put("cost_ceiling_binding", budget.chainUnpriced() == 0);
+        describeChain(summary, budget, String.valueOf(summary.get("run_id")),
+                null, attempt);
         summary.put("steps", steps);
         // A stop is where the three questions are most often confused, so it is where they are
         // most worth separating: a candidate that passed review can sit inside a run that
         // stopped, and saying only that the run stopped throws that away.
         describeCompletion(summary);
+        describeInfrastructureStop(reason, summary, steps);
         summary.put("safe_next_step", safeNextStep(reason, summary));
+        summary.put("next_step", NextStep.of(reason, summary, ledger.projectRoot()));
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
         Object base = summary.get("diff_base_commit");
@@ -3052,6 +3572,16 @@ public final class TaskLoop {
                 String kept = ". Neither ceiling is part of what the work is judged by, so the "
                         + "verdicts this run already reached on this tree are kept rather than "
                         + "paid for a second time.";
+                if ("max_elapsed_minutes".equals(summary.get("budget_limit_hit"))) {
+                    long used = summary.get("chain") instanceof Map<?, ?> chain
+                            && chain.get("elapsed_seconds") instanceof Number seconds
+                            ? seconds.longValue() : 0L;
+                    yield "raise budgets.max_elapsed_minutes in .warden/tasks/" + taskId
+                            + ".yaml — " + summary.get("budget_stop") + " — to more than "
+                            + ((used + 59) / 60 + 1) + " (the chain has used " + used + " s; a "
+                            + "call needs at least one whole minute), then: " + carryOn
+                            + ". Time a stopped run spends waiting for you is not counted" + kept;
+                }
                 if ("max_cost_usd".equals(summary.get("budget_limit_hit"))) {
                     yield "raise budgets.max_cost_usd in .warden/tasks/" + taskId + ".yaml — "
                             + summary.get("budget_stop") + " — then: " + carryOn
@@ -3077,7 +3607,25 @@ public final class TaskLoop {
             case "finding_protocol_failure" -> "inspect finding_protocol_failure and finding_history in "
                     + "warden report " + runId + " --text; resolve identity/evidence before a new run";
             case "quota_exhausted" -> "wait for the quota window named in the vendor message, "
-                    + "or add a profile from another vendor, then: " + carryOn;
+                    + "or add a profile from another vendor, then: " + carryOn + kept(summary);
+            case "rate_limited" -> "the vendor asked to slow down; its subscription is not "
+                    + "known to be spent, so no other vendor was offered. Wait a few minutes, "
+                    + "then: " + carryOn + kept(summary);
+            case "role_timed_out" -> "the " + failedProfile(summary) + " call ran out of wall "
+                    + "clock. Raise limits.wall_clock_minutes on that profile if the task "
+                    + "needs longer, or narrow the task, then: " + carryOn + kept(summary);
+            case "vendor_call_failed" -> "the " + failedProfile(summary) + " process failed "
+                    + "without a recognised cause (a login, the network, the CLI itself). Read "
+                    + "stderr_tail and stdout_tail in its role report, fix what they name, "
+                    + "then: " + carryOn + kept(summary);
+            case "vendor_protocol_failed" -> "the " + failedProfile(summary) + " call "
+                    + "answered, but not with a readable, complete, schema-valid artifact, so "
+                    + "whatever it concluded is unknown. Check the profile's prompt, schema "
+                    + "and output flags against its raw stdout, then: " + carryOn + kept(summary);
+            case "prompt_undeliverable" -> "the prompt could not be delivered to "
+                    + failedProfile(summary) + " (argument_delivery_check in its role report "
+                    + "says why); switch the profile to prompt_delivery: stdin or a prompt "
+                    + "file, then: " + carryOn + kept(summary);
             case "failover_requires_confirmation" -> "warden approve " + runId
                     + " --decision switch  then  warden run " + taskId + " --continue " + runId;
             case "severity_downgraded_without_change" -> "a finding that had been P1 stopped "
@@ -3102,6 +3650,12 @@ public final class TaskLoop {
                 yield "read `warden report " + runId + " --text`, then either address what it "
                         + "names and start a new run, or " + carryOn;
             }
+            case "reproduction_passed_before_change" -> "the acceptance does not detect the defect. "
+                    + "Strengthen the named check or pick an acceptance command that fails today, "
+                    + "then start a new run; --continue carries no proof after the contract changes.";
+            case "reproduction_inconclusive" -> "the reproduction could not establish a red base. "
+                    + "Resolve the timeout or gate error and start a new run on the unchanged tree "
+                    + "before paying a vendor.";
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";
@@ -3113,6 +3667,33 @@ public final class TaskLoop {
             default -> "read `warden report " + runId + " --text`, then either address what it "
                     + "names and start a new run, or " + carryOn;
         };
+    }
+
+    /** What an infrastructure stop's continuation keeps, named rather than implied. */
+    private static String kept(Map<String, Object> summary) {
+        List<String> passed = new ArrayList<>();
+        if (summary.get("review_coverage") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> entry && Boolean.TRUE.equals(entry.get("ok"))
+                        && !(entry.get("blocking_findings") instanceof Number n && n.longValue() > 0)) {
+                    passed.add(String.valueOf(entry.get("stage")));
+                }
+            }
+        }
+        return ". This stop is not a judgement on the work: "
+                + (passed.isEmpty() ? "any stage that already passed this exact tree"
+                        : String.join(", ", passed))
+                + " is reused rather than paid for again, provided the tree, the acceptance and "
+                + "the roster are unchanged; the failed stage runs again.";
+    }
+
+    /** The profile behind an infrastructure stop, for a sentence that names it. */
+    private static String failedProfile(Map<String, Object> summary) {
+        if (summary.get("infrastructure_failure") instanceof Map<?, ?> failure
+                && failure.get("profile") != null) {
+            return "'" + failure.get("profile") + "'";
+        }
+        return "vendor";
     }
 
     /**

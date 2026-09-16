@@ -98,12 +98,58 @@ public final class StubVendor {
         return seen < Integer.parseInt(threshold);
     }
 
+    /**
+     * `sequence:a,b,c` answers its n-th call with the n-th step, and keeps repeating the last
+     * one. A chain that spans several runs needs a vendor whose behaviour depends on how often
+     * it has been called in all, which the counter file already records across processes.
+     *
+     * Steps: `pass` and `p1` are reviewer verdicts, `rate` is a rate-limited call, `impl`
+     * writes the result an implementer is asked for.
+     */
+    private static void sequence(String[] steps, String[] args) throws Exception {
+        Path counter = Path.of(flag(args, "--counter"));
+        int seen = Files.isRegularFile(counter)
+                ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+        seen++;
+        Files.writeString(counter, String.valueOf(seen), StandardCharsets.UTF_8);
+        String step = steps[Math.min(seen, steps.length) - 1];
+        switch (step) {
+            case "rate" -> {
+                System.out.println("{\"type\":\"error\",\"message\":\"Rate limit reached for requests\"}");
+                System.exit(1);
+            }
+            case "impl" -> {
+                Path target = Path.of("src", "result.txt");
+                Files.createDirectories(target.getParent());
+                Files.writeString(target, "ok", StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created\","
+                        + "\"files_changed\":[\"src/result.txt\"]},\"total_cost_usd\":0.012}");
+            }
+            case "pass", "p1" -> System.out.println(dev.warden.json.Json.write(java.util.Map.of(
+                    "structuredOutput", java.util.Map.of("role", "reviewer", "task_id", "hello",
+                            "status", "completed",
+                            "verdict", "pass".equals(step) ? "pass" : "fail",
+                            "summary", "call " + seen,
+                            "findings", "pass".equals(step) ? List.of() : List.of(p1("SEQ-1"))),
+                    "total_cost_usd", 0.004)));
+            default -> {
+                System.err.println("unknown sequence step: " + step);
+                System.exit(2);
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         if (flag(args, "--expected-effort") != null
                 && !flag(args, "--expected-effort").equals(flag(args, "--actual-effort"))) {
             throw new IllegalArgumentException("effort was not delivered intact");
         }
         String mode = args.length > 0 ? args[0] : "review";
+        if (mode.startsWith("sequence:")) {
+            sequence(mode.substring("sequence:".length()).split(","), args);
+            return;
+        }
         switch (mode) {
             case "impl" -> {
                 Path target = Path.of("src", "result.txt");
@@ -454,6 +500,37 @@ public final class StubVendor {
                 System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":\"" + message + "\"}}");
                 System.err.println("ERROR transport: worker quit with fatal: Transport channel closed");
                 System.exit(1);
+            }
+            // A reviewer whose endpoint refuses its first call and answers every later one. The
+            // refusal is a rate limit or a spent plan, in the shapes QuotaSignal tells apart;
+            // the later answer is a clean pass. It models the stop that is not a verdict and
+            // the retry that should pay only for the reading that never happened.
+            case "rate-limit-once", "quota-once" -> {
+                if (withinFirst(args)) {
+                    String message = mode.equals("rate-limit-once")
+                            ? "Rate limit reached for requests; please retry shortly"
+                            : "You've hit your usage limit. Try again at 9:21 PM.";
+                    System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\"}");
+                    System.exit(1);
+                }
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\","
+                        + "\"task_id\":\"hello\",\"status\":\"completed\",\"verdict\":\"pass\","
+                        + "\"summary\":\"review\",\"findings\":[]},\"total_cost_usd\":0.004}");
+            }
+            // An implementer that writes the result on its first call and is rate limited on
+            // its second — the fix round a reviewer's P1 asked for. The tree is left as the
+            // first call wrote it, so a resume sees the same bytes the objection was about.
+            case "impl-then-rate-limit" -> {
+                if (!withinFirst(args)) {
+                    System.out.println("{\"type\":\"error\",\"message\":\"429 Too Many Requests\"}");
+                    System.exit(1);
+                }
+                Path target = Path.of("src", "result.txt");
+                Files.createDirectories(target.getParent());
+                Files.writeString(target, "ok", StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created\","
+                        + "\"files_changed\":[\"src/result.txt\"]},\"total_cost_usd\":0.012}");
             }
             // Both live specimens of a spent turn ceiling: a message on stderr, a cost in the
             // envelope on stdout, and exit 1. Grok prints `Error: max turns reached`; claude -p

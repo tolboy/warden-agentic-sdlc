@@ -1,0 +1,42 @@
+{
+	"version": 1,
+	"task": {
+		"id": "pilot-task",
+		"goal": "Replace this sentence with the real task; the acceptance command must fail on the unchanged base.",
+		"non_goals": [
+			"Do not modify Warden, the frozen task contract, or the acceptance checker"
+		],
+		"risk": "medium",
+		"scope": [
+			"src"
+		],
+		"timeout_minutes": 30,
+		"max_fix_attempts": 1,
+		"budgets": {
+			"max_role_runs": 4,
+			"max_cost_usd": 10.0
+		}
+	},
+	"target": {
+		"project": "example",
+		"root": "REPLACE-WITH-TARGET-CHECKOUT",
+		"base": "HEAD"
+	},
+	"checks": {
+		"baseline": [
+			"npm run check",
+			"npm run build"
+		],
+		"acceptance": [
+			"npm run test:red"
+		]
+	},
+	"reproduction": {
+		"command": "npm run test:red"
+	},
+	"profiles": {
+		"source_home": "REPLACE-WITH-WARDEN-CONFIG-HOME",
+		"implementer": "existing-writer-profile",
+		"reviewer": "existing-reviewer-profile"
+	}
+}

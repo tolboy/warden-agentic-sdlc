@@ -125,6 +125,51 @@ fails open. The tool refuses instead, and shows the available names.
 The minimal valid task is four lines: `version`, `id`, `goal`, `scope`. Everything else comes
 from `defaults`.
 
+The limits a task may declare, all optional:
+
+```yaml
+budgets:
+  max_role_runs: 4              # vendor calls (default 6)
+  max_cost_usd: 10.0            # spend the vendors report; not a strict cap (default 20)
+  max_elapsed_minutes: 45       # execution time; none when omitted
+max_fix_attempts: 1             # repair rounds (default from project.yaml)
+timeout_minutes: 30             # one gate run's commands, shared
+```
+
+The first four bound the **chain**, not one run: a `warden run --continue` answered `retry`
+or `switch` starts from what the runs before it spent — calls, reported cost, unpriced calls,
+fix rounds and execution time — and the summary's `chain` block records the running totals.
+A continuation after a rejection, and any run without `--continue`, starts a chain of its
+own. A continuation that fails validation before the loop starts still records the chain it
+continued, so the run after it inherits that spend. Raising a limit is an edit to this file; budgets are not part of `acceptance_sha256`, so
+the verdicts already reached survive it. Execution time is the sum of each run's own
+duration: the time a stopped run spends waiting for a person is not counted. No vendor call
+starts with less than a minute left, and each call's wall clock is lowered to what is left, so
+a chain may overrun by less than a minute. Hitting any of them stops with `budget_exhausted`
+and names the limit in `budget_limit_hit`.
+
+Optional task `reproduce: ["check-set-name", "literal command"]` resolves with the same
+rules as list-form `checks`. Every resolved command must be in acceptance and none may be
+in the baseline. It participates in `acceptance_sha256`: changing the red proof contract
+invalidates prior evidence. After a green baseline and before any vendor, an unchanged
+source tree runs all reproduction commands; each must exit non-zero without timing out.
+A zero exit stops `reproduction_passed_before_change`, names the passing commands and asks
+for stronger acceptance in a new run. A timeout, a command the shell cannot find (exit 127 from
+`sh`, or cmd.exe's English "is not recognized" message), an internal gate error or a
+source mutation stops `reproduction_inconclusive`. Both stop with no vendor dispatched.
+
+The `reproduction` step writes `<run>--reproduction-0/reproduction-gate.json`; the summary
+records `reproduction_ok`, command results, report path and SHA-256. A candidate is never
+used to rerun reproduction. A continuation carries proof only with `reproduction_ok: true`,
+the same acceptance hash and diff base, and a matching on-disk report checksum; otherwise
+it records `reproduction_status: not_run_candidate_present` and continues. Dry runs list
+the commands that must fail and record a `dry_run` reproduction step without execution.
+
+`warden pilot prepare` requires a declared `reproduction.command` to be in
+`checks.acceptance` and writes it into the task's `reproduce` list. Preparation executes
+nothing: `reproduction_check.status` is `enforced_by_warden_run`, or `not_declared` when
+omitted (acceptance strength is then unchecked).
+
 **A task with no executable acceptance criterion is not accepted.** This is not pedantry:
 every known successful agent deployment works on mechanically checkable work, and the task
 linter is the place where that requirement becomes mandatory rather than aspirational.
@@ -287,7 +332,15 @@ where a failure or a finding routes. Omitting it runs the built-in chain. See th
 section *The chain of model calls*.
 
 The optional `failover:` block declares what happens when a vendor reports a spent
-subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`.
+subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`. A rate limit is not a
+spent subscription: it never fails over, and the run stops with `rate_limited`.
+
+A stop caused by a vendor's endpoint rather than by its reading of the work has its own reason:
+`quota_exhausted`, `rate_limited`, `role_timed_out`, `vendor_call_failed`,
+`vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
+`failover_requires_confirmation`. The summary carries `infrastructure_failure` (`cause`, the
+stage and profile, `verdict_on_the_work: false`). A `--continue` after any of them, whether
+answered `retry` or `switch`, reuses the verdicts that still describe the tree.
 
 ---
 
@@ -299,6 +352,9 @@ warden profiles             which profiles load, which are eligible, and why not
 warden profiles --verify N  run profile N's own probe; stamps verified_on when it passes
 warden init                 create .warden/project.yaml, inferring checks from package.json,
                             build.gradle(.kts), pom.xml, Cargo.toml or Makefile
+warden pilot prepare        write a reviewable offline pilot bundle from an explicit JSON
+                            spec (`--spec FILE --output DIR`). Does not run the target or
+                            call vendors. See examples/pilot/README.md
 warden doctor               what is installed, authenticated, and misconfigured
 warden do "<goal>"          the whole workflow: isolation (Orca), a task, the loop; stops
                             before a human. --project DIR --scope NAME --in-place --dry-run
@@ -314,6 +370,11 @@ warden run <task>           the whole loop; stops before a human
                             had in force (does not dispatch a planner)
                             --no-orca-gate does not mirror the pending decision
                             into Orca
+                            --wait-for-gate N  after the loop, wait up to N minutes
+                            (1..1440) for a published Orca gate and import the
+                            answer. Imports one decision and exits; never starts,
+                            retries or continues a run. Skipped when no gate was
+                            published, with the reason named in the output
 warden ledger               a table of runs: verdicts, cost, time, findings.
                             Default is local `.warden/runs`. `--global` reads the
                             home corpus from outside a repository, filtered by
@@ -324,10 +385,15 @@ warden ledger               a table of runs: verdicts, cost, time, findings.
                             same allowlist. Incomplete sources mark the report
                             incomplete rather than stating exact spend.
 warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
-                            changed files, the human decision. --text for the table
+                            changed files, the human decision, and `next_step` when
+                            the summary has one. --text prints a next-step block
+                            (kind, sentence, numbered commands, edits, consequences,
+                            findings with suggestions) in place of the one-line
+                            `safe_next_step` for summaries that have `next_step`
 warden status [run-id]      pending and resolved human decisions
                             --worktrees lists pending decisions across every
-                            worktree of this repository
+                            worktree of this repository. `status <run-id>` includes
+                            `next_step` from that run's summary when it exists
 warden approve <run-id>     record a decision; never lands changes.
                             Must be run from the worktree the run lives in.
                             Outside a Warden project the code is
@@ -335,6 +401,17 @@ warden approve <run-id>     record a decision; never lands changes.
                             --from-orca takes the answer from the Orca decision
                             gate the run published, so a decision can be made
                             from another machine or a phone
+                            --wait-minutes N  with --from-orca, poll up to N
+                            minutes (1..1440) while the gate is `pending` or
+                            unreadable, backoff 5s then ×1.5 capped at 10s.
+                            Every other failure (`no_orca_gate`, `stale_decision`,
+                            `gate_resolution_unmapped`, `orca_lifecycle_unreadable`,
+                            `candidate_changed`, a decision already resolved)
+                            fails on the first poll. A deadline exits 1 with
+                            `gate_pending`, waited_seconds, polls, last_error and
+                            next_step, and changes nothing on disk. No answer is
+                            never accept or reject. The wait imports one decision
+                            and never starts a run
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```
@@ -441,6 +518,11 @@ not defensiveness about Orca: measured on 1.4.196, `gate-resolve` takes free tex
 declared option, and re-resolving a settled gate replaces the answer. Both are reasonable for a
 primitive that coordinates agents, and neither may reach an authorization record. `decision.json`
 stays the only decision.
+
+`--wait-minutes N` on that same command (and `warden run --wait-for-gate N`) polls while the
+gate is pending or unreadable, then runs the same validations on the answer that is finally
+imported. The wait never starts, retries or continues a run. A deadline is `gate_pending`
+with the decision file unchanged; silence is not an accept or a reject.
 
 A Conductor node, when one is used, looks like this:
 

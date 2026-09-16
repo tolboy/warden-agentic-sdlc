@@ -43,6 +43,11 @@ public final class TaskLoopTest implements Suite {
             TaskLoop.Outcome ok = loop(clean, home, "r1");
             check.that("a clean run succeeds", ok.ok());
             check.eq("and stops at the human gate", "human_gate", ok.nextAction());
+            Object readyNext = ok.summaryReport().get("next_step");
+            check.that("ready_for_human writes next_step beside safe_next_step",
+                    readyNext instanceof Map<?, ?>);
+            check.eq("and the kind is accept_or_reject", "accept_or_reject",
+                    readyNext instanceof Map<?, ?> map ? map.get("kind") : readyNext);
             check.eq("no fix rounds were needed", 0L, ok.summaryReport().get("attempts_used"));
             check.that("the orchestrator lands nothing itself",
                     !Files.exists(clean.resolve(".git/MERGE_HEAD")));
@@ -248,10 +253,13 @@ public final class TaskLoopTest implements Suite {
             check.eq("and says what it would have stopped for", "preflight_outside_scope",
                     previewed.summaryReport().get("would_stop"));
 
+            reproductionChecks(check, sandbox, home);
             baselineChecks(check, sandbox, home);
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
+            infrastructureResumeChecks(check, sandbox, home);
+            chainBudgetChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -1172,6 +1180,346 @@ public final class TaskLoopTest implements Suite {
     }
 
     /**
+     * A stop the endpoint caused keeps what was already judged, and nothing else.
+     *
+     * Measured on the first external trial: the first reader passed, the second was stopped by
+     * the operator's session limit, the stop was recorded as `reviewer_failed`, and the retry
+     * paid the first reader again for the same verdict about the same bytes. Each leg here is
+     * one way an endpoint can stop a run; each retry must pay only for the reading that never
+     * happened. The last leg is the guard in the other direction: an objection that was on
+     * the record when the endpoint failed is still an objection afterwards.
+     */
+    @SuppressWarnings("unchecked")
+    private void infrastructureResumeChecks(Check check, Path sandbox, Path home) throws Exception {
+        for (String[] leg : List.of(
+                new String[] {"rate-limit-once", "rate_limited", "rate_limit"},
+                new String[] {"quota-once", "quota_exhausted", "quota"})) {
+            String mode = leg[0];
+            Path project = newProject(sandbox, "infra-" + mode);
+            writeProfiles(home, sandbox, "infra-" + mode, 1, 1);
+            writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                    "reviewer", "role, task_id, status, verdict, summary, findings",
+                    mode, sandbox.resolve("infra-" + mode + "-review2.count"), 2);
+            pairedReviewPolicy(home, "stop");
+            String first = "ir-" + mode + "-1";
+            TaskLoop.Outcome stopped = loop(project, home, first);
+            check.eq(mode + ": the stop names the endpoint, not the reviewer",
+                    leg[1], stopped.reason());
+            Map<String, Object> failure =
+                    (Map<String, Object>) stopped.summaryReport().get("infrastructure_failure");
+            check.eq(mode + ": the summary says what kind of trouble it was",
+                    leg[2], failure == null ? null : failure.get("cause"));
+            check.eq(mode + ": at which stage", "review-second",
+                    failure == null ? null : failure.get("stage"));
+            check.eq(mode + ": and that it is not a judgement", false,
+                    failure == null ? null : failure.get("verdict_on_the_work"));
+            check.that(mode + ": no replacement vendor is asked for under failover: stop",
+                    stopped.summaryReport().get("failover_pending") == null);
+            check.contains(mode + ": the next step names the reading it keeps",
+                    String.valueOf(stopped.summaryReport().get("safe_next_step")), "review is reused");
+
+            dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+            check.eq(mode + ": the person is asked retry or abort",
+                    List.of("retry", "abort"), store.read(first).options());
+            store.resolve(first, store.read(first).updatedAt().toString(), "retry", "operator",
+                    "waited for the window");
+
+            String second = "ir-" + mode + "-2";
+            TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner())
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), second,
+                            false, Map.of(), new TaskLoop.Continuation(first, null, true));
+            check.that(mode + ": the retry reaches the human gate", resumed.ok());
+            check.eq(mode + ": keeping the stages that passed this exact tree",
+                    Map.of("from", first, "stages", List.of("implement", "review")),
+                    resumed.summaryReport().get("reused_judgements"));
+            check.eq(mode + ": and paying only for the reading that never happened",
+                    1L, resumed.summaryReport().get("role_runs"));
+            check.eq(mode + ": which the second reader gave", List.of("loop-review-2"),
+                    steps(resumed).stream()
+                            .filter(step -> "review-second".equals(step.get("stage")))
+                            .map(step -> step.get("profile")).toList());
+        }
+
+        // A switch the person approved is not a verdict either. It used to carry nothing, and
+        // run p2-planner-3 paid its writer thirty minutes to redo a candidate it had written.
+        Path switched = newProject(sandbox, "infra-switch");
+        writeProfiles(home, sandbox, "infra-switch", 1, 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("infra-switch-review2.count"), 1);
+        pairedReviewPolicy(home, "confirm");
+        TaskLoop.Outcome asked = loop(switched, home, "is1");
+        check.eq("a spent second reader with a successor asks who should read",
+                "failover_requires_confirmation", asked.reason());
+        dev.warden.approval.ApprovalStore switchStore = new dev.warden.approval.ApprovalStore(switched);
+        switchStore.resolve("is1", switchStore.read("is1").updatedAt().toString(), "switch",
+                "operator", "");
+        Main.Carried carried = Main.continuation(switched, "is1");
+        check.eq("the switch authorises the named successor",
+                Map.of("reviewer", "loop-review"), carried.failover());
+        check.that("and asks the loop to keep what was already judged",
+                carried.continuation().reuseJudgements());
+        TaskLoop.Outcome afterSwitch = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(switched, "hello"), UserConfig.load(home), "is2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the switched run reaches the human gate", afterSwitch.ok());
+        check.eq("without paying the writer or the first reader again",
+                Map.of("from", "is1", "stages", List.of("implement", "review")),
+                afterSwitch.summaryReport().get("reused_judgements"));
+        check.eq("the second reading is the successor's", List.of("loop-review"),
+                steps(afterSwitch).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .map(step -> step.get("profile")).toList());
+
+        // The other direction. The reader objected, the repair it asked for was rate limited,
+        // and the objection must still be answered on the retry rather than carried as a pass.
+        // The reader keeps objecting: a reader that dropped its P1 on the same bytes would be
+        // refused as laundering, which is a different guard.
+        Path objected = newProject(sandbox, "infra-objection");
+        writeProfiles(home, sandbox, "infra-objection", 1, 99);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-then-rate-limit", sandbox.resolve("infra-objection-impl.count"), 2);
+        TaskLoop.Outcome repairStopped = loop(objected, home, "io1");
+        check.eq("a repair stopped by a rate limit is a rate limit",
+                "rate_limited", repairStopped.reason());
+        check.eq("found on the implementer's fix dispatch", "implementer",
+                String.valueOf(repairStopped.summaryReport().get("infrastructure_failure") instanceof Map<?, ?> named
+                        ? named.get("step") : null));
+        dev.warden.approval.ApprovalStore objectionStore = new dev.warden.approval.ApprovalStore(objected);
+        objectionStore.resolve("io1", objectionStore.read("io1").updatedAt().toString(), "retry",
+                "operator", "waited");
+        TaskLoop.Outcome answered = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(objected, "hello"), UserConfig.load(home), "io2",
+                        false, Map.of(), new TaskLoop.Continuation("io1", null, true));
+        check.eq("carrying the writer's stage but not the reading that objected",
+                Map.of("from", "io1", "stages", List.of("implement")),
+                answered.summaryReport().get("reused_judgements"));
+        check.eq("so the reviewer reads again, and objects again", List.of("loop-review"),
+                steps(answered).stream()
+                        .filter(step -> "review".equals(step.get("stage"))
+                                && step.get("reused_from") == null)
+                        .map(step -> step.get("profile")).toList());
+        check.eq("which sends the work back for the repair that was never made",
+                "rate_limited", answered.reason());
+        check.eq("two calls: the reading and the repair", 2L,
+                answered.summaryReport().get("role_runs"));
+
+        // Restore the ordinary roster for the checks that follow.
+        writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /**
+     * The limits a task declares bound the work, not one run of it.
+     *
+     * A continuation used to start with a fresh call ceiling, fresh fix rounds and a fresh
+     * clock, so "four calls, one repair" meant four calls and one repair per `--continue`.
+     * Each leg here is one limit that a continuation must inherit; each would have let the
+     * second run spend again what the first had already used.
+     */
+    @SuppressWarnings("unchecked")
+    private void chainBudgetChecks(Check check, Path sandbox, Path home) throws Exception {
+        // Calls. The first run spends two and is rate limited; the second is left one call,
+        // which cannot fund the repair its reviewer asks for.
+        Path calls = newProject(sandbox, "chain-calls", "medium", 3);
+        writeProfiles(home, sandbox, "chain-calls", 1, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "sequence:rate,p1", sandbox.resolve("chain-calls-review.count"), 1);
+        TaskLoop.Outcome spent = loop(calls, home, "cc1");
+        check.eq("the first run stops on the rate limit", "rate_limited", spent.reason());
+        Map<String, Object> firstChain = (Map<String, Object>) spent.summaryReport().get("chain");
+        check.eq("and records the chain it began", List.of("cc1"), firstChain.get("runs"));
+        check.eq("with the calls it spent", 2L, firstChain.get("role_runs"));
+        retry(calls, "cc1");
+        TaskLoop.Outcome capped = continued(calls, home, "cc2", "cc1");
+        check.eq("the continuation cannot fund a repair the chain has no calls left for",
+                "budget_insufficient_to_finish", capped.reason());
+        check.eq("its own run spent one call", 1L, capped.summaryReport().get("role_runs"));
+        Map<String, Object> chain = (Map<String, Object>) capped.summaryReport().get("chain");
+        check.eq("the chain spent three", 3L, chain.get("role_runs"));
+        check.eq("across both runs", List.of("cc1", "cc2"), chain.get("runs"));
+        check.eq("with nothing left under the cap", 0L, chain.get("calls_remaining"));
+        check.contains("and the floor it names is the chain's, not the run's",
+                String.valueOf(capped.summaryReport().get("resolution")), "at least 5");
+        check.that("the first run's spend is the chain's, not the second run's own cost",
+                ((Number) chain.get("cost_usd")).doubleValue()
+                        > ((Number) capped.summaryReport().get("total_cost_usd")).doubleValue());
+
+        // Fix rounds. One is allowed; the first run used it before its recheck was rate
+        // limited, so the second run may not repair again.
+        Path rounds = newProject(sandbox, "chain-rounds", "medium", 20);
+        editTask(rounds, "max_fix_attempts: 2", "max_fix_attempts: 1");
+        writeProfiles(home, sandbox, "chain-rounds", 1, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "sequence:p1,rate,p1", sandbox.resolve("chain-rounds-review.count"), 1);
+        TaskLoop.Outcome repaired = loop(rounds, home, "cr1");
+        check.eq("the recheck after the one repair is rate limited",
+                "rate_limited", repaired.reason());
+        check.eq("after using the chain's only fix round", 1L,
+                ((Map<String, Object>) repaired.summaryReport().get("chain")).get("fix_attempts"));
+        retry(rounds, "cr1");
+        TaskLoop.Outcome noMore = continued(rounds, home, "cr2", "cr1");
+        check.eq("the same objection on the continuation stops for a person",
+                "blocking_findings_remain", noMore.reason());
+        check.that("without a second repair", steps(noMore).stream()
+                .noneMatch(step -> "implementer".equals(step.get("step")) && step.get("reused_from") == null));
+        check.eq("the chain still counts one fix round, none left", List.of(1L, 0L),
+                List.of(((Map<String, Object>) noMore.summaryReport().get("chain")).get("fix_attempts"),
+                        ((Map<String, Object>) noMore.summaryReport().get("chain"))
+                                .get("fix_attempts_remaining")));
+
+        // Time. A minute of execution; the implementer's two-minute wall clock is lowered to
+        // it, and the reviewer is refused because what is left is under a minute. The clock is
+        // the suite's: each dispatch takes fifty seconds.
+        Path timed = newProject(sandbox, "chain-time", "medium", 20);
+        editTask(timed, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  max_elapsed_minutes: 1");
+        writeProfiles(home, sandbox, "chain-time", 1, 1);
+        java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+        dev.warden.run.Progress fiftySecondsPerCall = line -> {
+            if (line.contains("dispatching, up to")) nanos.addAndGet(50_000_000_000L);
+        };
+        TaskLoop.Outcome late = new TaskLoop(new ProcessRunner())
+                .withProgress(fiftySecondsPerCall).withClock(nanos::get)
+                .run(new ConfigLoader().load(timed, "hello"), UserConfig.load(home), "ct1", false);
+        check.eq("a chain out of time stops on its budget", "budget_exhausted", late.reason());
+        check.eq("naming the time limit, not a call or money limit", "max_elapsed_minutes",
+                late.summaryReport().get("budget_limit_hit"));
+        check.contains("and says which number to raise",
+                String.valueOf(late.summaryReport().get("safe_next_step")), "max_elapsed_minutes");
+        Map<String, Object> implementer = readJson(
+                timed.resolve(".warden/runs/ct1--implementer-0/role-implementer.json"));
+        check.eq("the call before it ran under the time that was left", 1L,
+                implementer.get("wall_clock_minutes"));
+        check.eq("which the report attributes to the deadline", "max_elapsed_minutes",
+                implementer.get("wall_clock_capped_by"));
+        check.eq("beside the profile's own limit", 2L,
+                implementer.get("profile_wall_clock_minutes"));
+        check.eq("fifty seconds of execution are on the chain", 50L,
+                ((Map<String, Object>) late.summaryReport().get("chain")).get("elapsed_seconds"));
+
+        editTask(timed, "max_elapsed_minutes: 1", "max_elapsed_minutes: 3");
+        retry(timed, "ct1");
+        // Time spent waiting for a person is not execution: the clock jumps an hour between
+        // the runs, and the continuation still has the two minutes and ten seconds it was left.
+        nanos.addAndGet(3_600_000_000_000L);
+        TaskLoop.Outcome inTime = new TaskLoop(new ProcessRunner())
+                .withProgress(fiftySecondsPerCall).withClock(nanos::get)
+                .run(new ConfigLoader().load(timed, "hello"), UserConfig.load(home), "ct2", false,
+                        Map.of(), new TaskLoop.Continuation("ct1", null, true));
+        check.that("with the limit raised the chain finishes", inTime.ok());
+        check.eq("keeping the implement stage", Map.of("from", "ct1", "stages", List.of("implement")),
+                inTime.summaryReport().get("reused_judgements"));
+        check.eq("and counting only the two runs' execution", 100L,
+                ((Map<String, Object>) inTime.summaryReport().get("chain")).get("elapsed_seconds"));
+        check.that("the raise is recorded as a budget-only change",
+                inTime.summaryReport().get("contract_change_budget_only") != null);
+
+        // A rejection is a person asking for different work: it starts a new chain.
+        writeProfiles(home, sandbox, "chain-reject", 1, 1);
+        Path rejected = newProject(sandbox, "chain-reject", "medium", 20);
+        TaskLoop.Outcome accepted = loop(rejected, home, "cj1");
+        dev.warden.approval.ApprovalStore rejectStore = new dev.warden.approval.ApprovalStore(rejected);
+        rejectStore.resolve("cj1", rejectStore.read("cj1").updatedAt().toString(), "reject",
+                "operator", "make it say hello");
+        check.that("the first run reached the gate", accepted.ok());
+        TaskLoop.Outcome fresh = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(rejected, "hello"), UserConfig.load(home), "cj2", false,
+                        Map.of(), new TaskLoop.Continuation("cj1", "make it say hello"));
+        check.eq("a rejection's continuation is a chain of its own", List.of("cj2"),
+                ((Map<String, Object>) fresh.summaryReport().get("chain")).get("runs"));
+
+        // A failover the deadline cannot afford. The spent call is still charged; it used to be
+        // lost when the refusal was thrown from the dispatch that would have followed it.
+        Path spentLate = newProject(sandbox, "chain-failover-late", "medium", 20);
+        editTask(spentLate, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  max_elapsed_minutes: 1");
+        writeProfiles(home, sandbox, "chain-failover-late", 1, 1);
+        writeQuotaProfile(home, sandbox, "chain-failover-late");
+        policy(home, "loop-review", "loop-spent, loop-impl", "auto");
+        java.util.concurrent.atomic.AtomicLong lateNanos = new java.util.concurrent.atomic.AtomicLong();
+        dev.warden.run.Progress lateCalls = line -> {
+            if (line.contains("dispatching, up to")) lateNanos.addAndGet(50_000_000_000L);
+        };
+        TaskLoop.Outcome spentThenLate = new TaskLoop(new ProcessRunner())
+                .withProgress(lateCalls).withClock(lateNanos::get)
+                .run(new ConfigLoader().load(spentLate, "hello"), UserConfig.load(home), "cf1", false);
+        check.eq("a failover the deadline refuses stops on the spent plan", "quota_exhausted",
+                spentThenLate.reason());
+        check.eq("with the spent call charged to the run", 1L,
+                spentThenLate.summaryReport().get("role_runs"));
+        check.eq("including the price it never reported", 1L,
+                spentThenLate.summaryReport().get("unpriced_calls"));
+        check.eq("and to the chain", 1L,
+                ((Map<String, Object>) spentThenLate.summaryReport().get("chain")).get("unpriced_calls"));
+
+        // A continuation that fails before the loop starts is still a link in the chain. Found by
+        // the review of this change: a configuration error between two continuations reset the
+        // call ceiling, and a second implementer ran under `max_role_runs: 1`.
+        Path broken = newProject(sandbox, "chain-preflight", "medium", 1);
+        writeProfiles(home, sandbox, "chain-preflight", 1, 1);
+        TaskLoop.Outcome onlyCall = loop(broken, home, "cpa");
+        check.eq("the first run spends its only call", 1L, onlyCall.summaryReport().get("role_runs"));
+        retry(broken, "cpa");
+        Map<String, Object> refused = Main.recordPreflightFailure(broken, UserConfig.load(home),
+                "hello", "cpb", "cpa", new IllegalArgumentException("unknown key 'budget'"));
+        check.eq("a continuation that fails validation is recorded", "run_preflight_failed",
+                refused.get("reason"));
+        Map<String, Object> refusedSummary = readJson(broken.resolve(".warden/runs/cpb/task-run.json"));
+        check.eq("with the run it continued", "cpa", refusedSummary.get("continued_from"));
+        check.eq("and the spend of the chain it joined", 1L,
+                refusedSummary.get("chain") instanceof Map<?, ?> joined ? joined.get("role_runs") : null);
+        retry(broken, "cpb");
+        TaskLoop.Outcome afterRefusal = continued(broken, home, "cpc", "cpb");
+        check.eq("the run after it still meets the chain's ceiling", "budget_exhausted",
+                afterRefusal.reason());
+        check.eq("without dispatching anyone", 0L, afterRefusal.summaryReport().get("role_runs"));
+        check.eq("so the implementer ran once in all", "1",
+                Files.readString(sandbox.resolve("chain-preflight-impl.count")).strip());
+        check.eq("and the chain names all three runs", List.of("cpa", "cpb", "cpc"),
+                ((Map<String, Object>) afterRefusal.summaryReport().get("chain")).get("runs"));
+
+        writeProfiles(home, sandbox, "chain-restore", 1, 1);
+    }
+
+    private void retry(Path project, String runId) throws Exception {
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve(runId, store.read(runId).updatedAt().toString(), "retry", "operator", "waited");
+    }
+
+    private TaskLoop.Outcome continued(Path project, Path home, String runId, String fromRunId)
+            throws Exception {
+        return new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), runId, false,
+                        Map.of(), new TaskLoop.Continuation(fromRunId, null, true));
+    }
+
+    private void editTask(Path project, String from, String to) throws IOException {
+        Path file = project.resolve(".warden/tasks/hello.yaml");
+        String text = Files.readString(file);
+        if (!text.contains(from)) throw new IllegalStateException("task file has no '" + from + "'");
+        Files.writeString(file, text.replace(from, to));
+    }
+
+    /** Two review stages over two reviewer profiles, with the given failover policy. */
+    private void pairedReviewPolicy(Path home, String failover) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: %s }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                """.formatted(failover));
+    }
+
+    /**
      * A recheck that reads the verdict, not just the exit code.
      *
      * Declaring `recheck_after_fix` on a review stage buys a second reading of the diff after
@@ -1293,8 +1641,13 @@ public final class TaskLoopTest implements Suite {
                 .run(new ConfigLoader().load(crashed, "hello"), UserConfig.load(home),
                         "rk3", false);
         check.that("a recheck that cannot complete stops the run", !broke.ok());
-        check.eq("named after the role, not after the stage that sent work back",
-                "reviewer_failed", broke.reason());
+        // A crash is named for what it was, not for the stage that sent work back: the reviewer
+        // exited 4 with nothing Warden recognises, which is the vendor's call failing.
+        check.eq("named after the failed call, not after the stage that sent work back",
+                "vendor_call_failed", broke.reason());
+        check.eq("and the call it names is the reviewer's recheck", "reviewer",
+                String.valueOf(broke.summaryReport().get("infrastructure_failure") instanceof Map<?, ?> named
+                        ? named.get("step") : null));
         check.that("and the stage it happened in is not counted as passed",
                 !listOf(broke.summaryReport().get("completed_stages")).contains("review"));
         check.eq("the candidate is not claimed to have passed review", Boolean.FALSE,
@@ -1577,7 +1930,8 @@ public final class TaskLoopTest implements Suite {
         check.contains("the rendered report keeps the review apart from the stop", rendered,
                 "the candidate passed every review that ran");
         check.contains("names what the chain still owes", rendered, "review-second (not_reached)");
-        check.contains("and prints the command that continues it", rendered, "do next");
+        check.contains("and prints the command that continues it", rendered,
+                "warden run hello --continue lr1");
 
         // The same chain with room to work, back on the default reserve: nothing about the
         // full mode prevents a run whose ceiling actually fits.
@@ -2034,6 +2388,11 @@ public final class TaskLoopTest implements Suite {
         check.contains("the next step points at the task, not another fix",
                 String.valueOf(stopped.summaryReport().get("safe_next_step")),
                 "not the implementer's to close");
+        Object stopNext = stopped.summaryReport().get("next_step");
+        check.that("a stop writes next_step beside safe_next_step",
+                stopNext instanceof Map<?, ?>);
+        check.eq("and a contract_gap stop is fix_contract", "fix_contract",
+                stopNext instanceof Map<?, ?> map ? map.get("kind") : stopNext);
         Map<String, Object> filed =
                 ((List<Map<String, Object>>) ((List<Map<String, Object>>) stopped.summaryReport()
                         .get("finding_history")).get(0).get("findings")).get(0);
@@ -2781,6 +3140,111 @@ public final class TaskLoopTest implements Suite {
         ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
         return new TaskLoop(new ProcessRunner()).withWorkspace(board)
                 .run(loaded, UserConfig.load(home), runId, true);
+    }
+
+    /**
+     * The acceptance is shown to fail before anybody is paid to make it pass. A check that is
+     * green on the unchanged tree cannot prove the change, and the first external trial paid
+     * two readings to learn that about one of its scenarios.
+     */
+    private void reproductionChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path green = newProject(sandbox, "reproduction-green");
+        String pass = WINDOWS ? "exit /b 0" : "exit 0";
+        Path greenTask = green.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(greenTask, Files.readString(greenTask)
+                + "acceptance: [" + yaml(pass) + "]\nreproduce: [" + yaml(pass) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-green", 1, 1);
+        TaskLoop.Outcome refused = loop(green, home, "repro-green");
+        check.that("green reproduction stops before any stub vendor with a named resolution",
+                "reproduction_passed_before_change".equals(refused.reason())
+                        && Long.valueOf(0).equals(refused.summaryReport().get("role_runs"))
+                        && !Files.exists(sandbox.resolve("reproduction-green-impl.count"))
+                        && String.valueOf(refused.summaryReport().get("resolution")).contains(pass)
+                        && String.valueOf(refused.summaryReport().get("safe_next_step"))
+                                .contains("acceptance does not detect the defect"));
+
+        Path red = newProject(sandbox, "reproduction-red");
+        Path task = red.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "reproduce: [fast]\n");
+        writeProfiles(home, sandbox, "reproduction-red", 1, 1);
+        java.util.ArrayList<String> previewLines = new java.util.ArrayList<>();
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner()).withProgress(previewLines::add)
+                .run(new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-preview", true);
+        check.that("dry reproduction lists commands and runs neither gates nor vendors",
+                steps(preview).stream().anyMatch(row -> "reproduction".equals(row.get("step"))
+                        && Boolean.TRUE.equals(row.get("dry_run")))
+                        && previewLines.stream().anyMatch(line -> line.contains("must fail before any vendor"))
+                        && !Files.exists(red.resolve(".warden/runs/repro-preview--reproduction-0"))
+                        && !Files.exists(sandbox.resolve("reproduction-red-impl.count")));
+        TaskLoop.Outcome proved = loop(red, home, "repro-red");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> results = (List<Map<String, Object>>) proved.summaryReport()
+                .getOrDefault("reproduction_results", List.of());
+        check.that("red reproduction records exit one and proof before the normal engine succeeds",
+                proved.ok() && Boolean.TRUE.equals(proved.summaryReport().get("reproduction_ok"))
+                        && results.size() == 1 && Long.valueOf(1).equals(results.get(0).get("exit_code"))
+                        && "reproduction".equals(steps(proved).get(0).get("step")));
+        Path report = red.resolve(".warden/runs/repro-red--reproduction-0/reproduction-gate.json");
+        check.that("red proof retains the report checksum",
+                Files.isRegularFile(report) && dev.warden.git.GitRepository.contentSha256(report)
+                        .equals(proved.summaryReport().get("reproduction_report_sha256")));
+        Files.writeString(red.resolve("src/moved.txt"), "candidate moved after proof\n");
+        TaskLoop.Outcome carried = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-carried", false,
+                Map.of(), new TaskLoop.Continuation("repro-red", null, true));
+        check.that("a moved candidate carries verified red proof without rerunning reproduction",
+                Boolean.TRUE.equals(carried.summaryReport().get("reproduction_ok"))
+                        && "repro-red".equals(carried.summaryReport().get("reproduction_reused_from"))
+                        && !Files.exists(red.resolve(".warden/runs/repro-carried--reproduction-0")));
+        Path priorSummary = red.resolve(".warden/runs/repro-red/task-run.json");
+        String originalSummary = Files.readString(priorSummary);
+        String originalReport = Files.readString(report);
+        // Each independent receipt binding matters: a red verdict about different terms,
+        // another base, or bytes no longer on disk says nothing about this continuation.
+        for (String damaged : List.of("checksum", "missing", "acceptance_sha256", "diff_base_commit", "reproduction_ok")) {
+            Map<String, Object> altered = Json.parseObject(originalSummary);
+            if (damaged.equals("checksum")) Files.writeString(report, originalReport + " ");
+            else if (damaged.equals("missing")) Files.delete(report);
+            else altered.put(damaged, damaged.equals("reproduction_ok") ? false : "different");
+            Files.writeString(priorSummary, Json.writePretty(altered));
+            TaskLoop.Outcome unverified = new TaskLoop(new ProcessRunner()).run(
+                    new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-" + damaged.replace('_', '-'),
+                    false, Map.of(), new TaskLoop.Continuation("repro-red", null, true));
+            check.that("candidate with " + damaged + " proof declines reuse without stopping or rerunning",
+                    "not_run_candidate_present".equals(unverified.summaryReport().get("reproduction_status"))
+                            && unverified.ok() && !Boolean.TRUE.equals(unverified.summaryReport().get("reproduction_ok")));
+            Files.writeString(report, originalReport);
+            Files.writeString(priorSummary, originalSummary);
+        }
+
+        // A command that does not exist fails too, and proves nothing.
+        Path missing = newProject(sandbox, "reproduction-missing");
+        String absent = "warden-no-such-command-for-reproduction";
+        Path missingTask = missing.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(missingTask, Files.readString(missingTask)
+                + "acceptance: [" + yaml(absent) + "]\nreproduce: [" + yaml(absent) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-missing", 1, 1);
+        TaskLoop.Outcome notFound = loop(missing, home, "repro-missing");
+        check.eq("a reproduction command the shell cannot find is not a red base",
+                "reproduction_inconclusive", notFound.reason());
+        check.eq("and says why", "reproduction_command_not_found",
+                notFound.summaryReport().get("reproduction_code"));
+        check.eq("before any vendor is paid", 0L, notFound.summaryReport().get("role_runs"));
+
+        Path mutating = newProject(sandbox, "reproduction-mutates");
+        String mutation = WINDOWS ? "echo changed>src/mutated.txt & exit /b 1"
+                : "echo changed > src/mutated.txt; exit 1";
+        Path mutationTask = mutating.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(mutationTask, Files.readString(mutationTask)
+                + "acceptance: [" + yaml(mutation) + "]\nreproduce: [" + yaml(mutation) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-mutates", 1, 1);
+        TaskLoop.Outcome inconclusive = loop(mutating, home, "repro-mutates");
+        check.that("a command that mutates source is inconclusive and pays no vendor",
+                "reproduction_inconclusive".equals(inconclusive.reason())
+                        && "reproduction_mutated_source".equals(inconclusive.summaryReport().get("reproduction_code"))
+                        && Long.valueOf(0).equals(inconclusive.summaryReport().get("role_runs"))
+                        && String.valueOf(inconclusive.summaryReport().get("safe_next_step"))
+                                .contains("could not establish a red base"));
     }
 
     /**

@@ -85,6 +85,17 @@ public final class FindingsTest implements Suite {
         c.eq("restoring that round does not invent a protocol failure",
                 List.of(), restoredLegacy.get("protocol_violations"));
 
+        var withSuggestion = Findings.of(Map.of("findings", List.of(Map.of(
+                "id", "gap", "severity", "P1", "path", "src/a", "message", "weak acceptance",
+                "category", "contract_gap", "suggestion", "require an exact match")))).get(0);
+        c.eq("a vendor suggestion is carried on the recorded finding",
+                "require an exact match", withSuggestion.toMap().get("suggestion"));
+        c.that("and is not used as the identity", !"require an exact match".equals(withSuggestion.id()));
+        var withoutSuggestion = Findings.of(Map.of("findings", List.of(Map.of(
+                "id", "plain", "severity", "P1", "path", "src/a", "message", "broken")))).get(0);
+        c.that("a finding with no suggestion omits the key rather than writing null",
+                !withoutSuggestion.toMap().containsKey("suggestion"));
+
         var unnamed = Findings.of(Map.of("findings", List.of(Map.of(
                 "severity", "P1", "path", "src/a", "message", "legacy")))).get(0);
         var restored = Findings.recorded(List.of(unnamed.toMap())).get(0);

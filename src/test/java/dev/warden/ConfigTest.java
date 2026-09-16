@@ -72,6 +72,21 @@ public final class ConfigTest implements Suite {
                                 "  full: [\"npm run check\", \"npm run build\"]\n  empty: []"),
                         "project.yaml"));
 
+        String reproductionTask = "version: 1\nid: red-proof\ngoal: prove defect\nscope: ui\n";
+        TaskSpec.ResolvedTask redProof = TaskSpec.parse(reproductionTask
+                + "reproduce: [full]\n", "task.yaml").resolve(project, "task.yaml");
+        check.eq("reproduction resolves named sets through the checks resolver",
+                List.of("npm run check", "npm run build"), redProof.reproduceCommands());
+        check.rejects("reproduction outside acceptance is refused", "must also be an acceptance",
+                () -> TaskSpec.parse(reproductionTask + "reproduce: [missing]\n", "task.yaml")
+                        .resolve(project, "task.yaml"));
+        check.rejects("reproduction cannot contradict the green baseline", "cannot also be a baseline",
+                () -> TaskSpec.parse(reproductionTask + "reproduce: [fast]\n", "task.yaml")
+                        .resolve(withBaseline, "task.yaml"));
+        check.that("changing reproduction invalidates acceptance receipts",
+                !redProof.acceptanceFingerprint().equals(TaskSpec.parse(reproductionTask,
+                        "task.yaml").resolve(project, "task.yaml").acceptanceFingerprint()));
+
         // What has to happen in a checkout before any of `checks` can run. Most projects have
         // nothing to say here; a `git worktree` of an npm project has no node_modules, and
         // without this its gates fail for a reason no implementer put there.
@@ -149,6 +164,33 @@ public final class ConfigTest implements Suite {
                 """, "task.yaml").resolve(noCommands, "task.yaml");
         check.eq("the parser carries a scenario it is not the judge of",
                 List.of("1280x720: text=Save visible"), byCopy.visualQa().scenarios());
+
+        // An execution deadline is optional and bounded; absent means none, not a default.
+        check.eq("a task without an execution deadline declares none", null,
+                TaskSpec.parse(freshTask, "task.yaml").budget().maxElapsedMinutes());
+        check.eq("a declared deadline is carried in minutes", 45L,
+                TaskSpec.parse(freshTask + """
+                        budgets:
+                          max_elapsed_minutes: 45
+                        """, "task.yaml").budget().maxElapsedMinutes());
+        check.rejects("a deadline of no time at all is refused", "max_elapsed_minutes",
+                () -> TaskSpec.parse(freshTask + """
+                        budgets:
+                          max_elapsed_minutes: 0
+                        """, "task.yaml"));
+        String judgedByPixels = freshTask + """
+                visual_qa:
+                  required: true
+                  scenarios: ["1280x720: no-console-errors"]
+                """;
+        String withoutDeadline = TaskSpec.parse(judgedByPixels, "task.yaml")
+                .resolve(noCommands, "task.yaml").acceptanceFingerprint();
+        String withDeadline = TaskSpec.parse(judgedByPixels + """
+                budgets:
+                  max_elapsed_minutes: 45
+                """, "task.yaml").resolve(noCommands, "task.yaml").acceptanceFingerprint();
+        check.eq("and, like the other budgets, it is not part of what the work is judged by",
+                withoutDeadline, withDeadline);
         check.rejects("unsafe base_ref refused", "not a safe git revision name",
                 () -> ProjectConfig.parse(PROJECT.replace("origin/main", "origin/../main"), "project.yaml"));
         check.rejects("wrong version refused", "version must be 1",

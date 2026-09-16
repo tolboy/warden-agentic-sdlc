@@ -546,8 +546,13 @@ public final class OrcaExecutor implements RoleExecutor {
             Result quota = quotaFailure(profile, raw, transcript == null ? "" : transcript.stderr(),
                     duration, evidence);
             if (quota != null) return quota;
-            evidence.put("failure", "role_command_failed");
-            return fail("role_command_failed", evidence, duration, raw);
+            // The agent itself reported failure or asked for a person, through worker_done.
+            // That is its own account of the work, like a direct vendor's `status: failed`,
+            // not an endpoint that broke: it stays a stop for a person and never lets a
+            // continuation carry verdicts past it, as `role_command_failed` now would.
+            evidence.put("failure", "role_orca_reported_failure");
+            evidence.put("settlement_kind", settlement.kind().name().toLowerCase(java.util.Locale.ROOT));
+            return fail("role_orca_reported_failure", evidence, duration, raw);
         }
         if (settlement.kind() != OrcaSettlement.Kind.COMPLETED) {
             evidence.put("failure", remaining(deadline).isZero() || remaining(deadline).isNegative()
@@ -1007,11 +1012,11 @@ public final class OrcaExecutor implements RoleExecutor {
                                        Duration duration, Map<String, Object> evidence) {
         QuotaSignal.Detection detection = QuotaSignal.detect(profile.quotaSignatures(), stdout, stderr);
         if (!detection.matched()) return null;
-        evidence.put("failure", "role_quota_exhausted");
+        evidence.put("failure", detection.roleCode());
         evidence.put("quota", detection.report());
         evidence.put("stderr_tail", tail(stderr, 2000));
         evidence.put("stdout_tail", tail(stdout, 2000));
-        return new Result(false, "role_quota_exhausted", duration, stdout, null, evidence);
+        return new Result(false, detection.roleCode(), duration, stdout, null, evidence);
     }
 
     private static Result fail(String code, Map<String, Object> evidence, Duration duration, String raw) {

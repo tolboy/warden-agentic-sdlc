@@ -73,32 +73,66 @@ public final class QuotaSignal {
      * They are deliberately phrases and not single words: the bare word "quota" appears in
      * ordinary prose about quotas, including this file.
      */
-    public static final List<String> DEFAULT_SIGNATURES = List.of(
+    public static final List<String> QUOTA_SIGNATURES = List.of(
             "usage limit",
             "session limit",
-            "rate limit",
-            "rate_limit",
             "quota exceeded",
             "quota exhausted",
             "out of credits",
             "insufficient credits",
             "insufficient_quota",
-            "credit balance is too low",
+            "credit balance is too low");
+
+    /**
+     * Phrases that mean "slow down", lowercase, which is not the same sentence.
+     *
+     * They used to sit in the list above, and a single 429 was then read as a spent plan: the
+     * role's profile was dropped for the rest of the process and the run either failed over to
+     * another vendor or stopped for a person to choose one. A rate limit is transient and says
+     * nothing about the subscription — the Claude API documents 429 for request-rate and
+     * spend-rate limits alike — so it gets its own kind, keeps the profile eligible, and stops
+     * the run without asking who should replace a vendor that is not gone.
+     *
+     * A spent-subscription phrase wins when both appear. Claude's session-limit envelope is an
+     * HTTP 429, and the more specific sentence is the one to believe.
+     */
+    public static final List<String> RATE_LIMIT_SIGNATURES = List.of(
+            "rate limit",
+            "rate_limit",
             "429 too many requests",
             "resource_exhausted");
+
+    /** Every phrase either list recognises, in the order they are tried. */
+    public static final List<String> DEFAULT_SIGNATURES = concat(QUOTA_SIGNATURES, RATE_LIMIT_SIGNATURES);
+
+    public static final String QUOTA_EXHAUSTED = "quota_exhausted";
+    public static final String RATE_LIMITED = "rate_limited";
 
     /** Keys under which vendors carry the human-readable text of a structured error. */
     private static final List<String> MESSAGE_KEYS =
             List.of("message", "msg", "detail", "description", "text");
 
-    public record Detection(boolean matched, String signature, String evidence, String detectedBy) {
+    /**
+     * @param kind {@link #QUOTA_EXHAUSTED} or {@link #RATE_LIMITED}; null when nothing matched
+     */
+    public record Detection(boolean matched, String signature, String evidence, String detectedBy,
+                            String kind) {
 
-        static final Detection NONE = new Detection(false, null, null, null);
+        static final Detection NONE = new Detection(false, null, null, null, null);
+
+        public boolean rateLimited() { return RATE_LIMITED.equals(kind); }
+
+        /** The role outcome code this detection stands for, or null when nothing matched. */
+        public String roleCode() {
+            if (!matched) return null;
+            return rateLimited() ? "role_rate_limited" : "role_quota_exhausted";
+        }
 
         /** The evidence block that goes into the run report. Empty when nothing matched. */
         public Map<String, Object> report() {
             if (!matched) return Map.of();
             Map<String, Object> quota = new LinkedHashMap<>();
+            quota.put("kind", kind);
             quota.put("matched_signature", signature);
             quota.put("detected_by", detectedBy);
             quota.put("vendor_message", evidence);
@@ -116,34 +150,51 @@ public final class QuotaSignal {
      *                        vendor's wording cannot silently un-teach it another's.
      */
     public static Detection detect(List<String> extraSignatures, String stdout, String stderr) {
-        List<String> signatures = new ArrayList<>(DEFAULT_SIGNATURES);
+        // A profile's own phrases describe its vendor's spent plan; that is the only thing the
+        // profile key has ever been documented to mean, so they join the quota list.
+        List<String> quota = new ArrayList<>(QUOTA_SIGNATURES);
         if (extraSignatures != null) {
             for (String extra : extraSignatures) {
-                if (extra != null && !extra.isBlank()) signatures.add(extra.toLowerCase(Locale.ROOT));
+                if (extra != null && !extra.isBlank()) quota.add(extra.toLowerCase(Locale.ROOT));
             }
         }
 
         List<String> structured = structuredErrorMessages(stdout);
         structured.addAll(structuredErrorMessages(stderr));
-        Detection inEvents = match(signatures, structured, "structured_error_event");
-        if (inEvents.matched()) return inEvents;
-
-        // Only reached when the vendor said nothing machine-readable about the failure. stdout
-        // is deliberately not consulted here — see the note on false negatives above.
-        return match(signatures, lines(stderr), "stderr_text");
+        // stderr is consulted only as text, and stdout never is — see the note on false
+        // negatives above. The kind is decided across both sources before the source is: a
+        // spent plan named anywhere outranks a rate limit named anywhere, because a CLI may put
+        // a generic 429 in its event stream and the reason for it on stderr. Within a kind, the
+        // structured event is the stronger evidence and is the one recorded.
+        List<String> text = lines(stderr);
+        for (Detection found : List.of(
+                match(quota, structured, "structured_error_event", QUOTA_EXHAUSTED),
+                match(quota, text, "stderr_text", QUOTA_EXHAUSTED),
+                match(RATE_LIMIT_SIGNATURES, structured, "structured_error_event", RATE_LIMITED),
+                match(RATE_LIMIT_SIGNATURES, text, "stderr_text", RATE_LIMITED))) {
+            if (found.matched()) return found;
+        }
+        return Detection.NONE;
     }
 
-    private static Detection match(List<String> signatures, List<String> candidates, String detectedBy) {
+    private static Detection match(List<String> signatures, List<String> candidates, String detectedBy,
+                                   String kind) {
         for (String candidate : candidates) {
             if (candidate == null || candidate.isBlank()) continue;
             String haystack = candidate.toLowerCase(Locale.ROOT);
             for (String signature : signatures) {
                 if (haystack.contains(signature)) {
-                    return new Detection(true, signature, condense(candidate), detectedBy);
+                    return new Detection(true, signature, condense(candidate), detectedBy, kind);
                 }
             }
         }
         return Detection.NONE;
+    }
+
+    private static List<String> concat(List<String> first, List<String> second) {
+        List<String> all = new ArrayList<>(first);
+        all.addAll(second);
+        return List.copyOf(all);
     }
 
     /**

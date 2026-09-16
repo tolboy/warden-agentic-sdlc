@@ -90,6 +90,17 @@ public record Profile(
      * vision path was part of the probe. This keeps the existing verify/stamp workflow usable:
      * an unverified profile must still parse before {@code warden profiles --verify} can run it.
      */
+    /**
+     * The same profile with a shorter wall clock, for one call that a chain deadline bounds.
+     * Nothing else moves: the verdict the call reaches is judged under the same contract.
+     */
+    public Profile withWallClockMinutes(long minutes) {
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
+                promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields, quotaSignatures,
+                promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified);
+    }
+
     public boolean hasVerifiedVision() {
         return vision != null && vision.verificationRequired() && verified;
     }

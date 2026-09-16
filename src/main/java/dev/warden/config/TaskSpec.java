@@ -23,6 +23,7 @@ public record TaskSpec(
         Values.Selector scope,
         Values.Selector checks,
         List<String> acceptance,
+        List<String> reproduce,
         Authority authority,
         VisualQa visualQa,
         Budget budget,
@@ -31,14 +32,24 @@ public record TaskSpec(
 
     public record Authority(boolean workspaceWrite, boolean network, boolean land) {}
     public record VisualQa(boolean required, List<String> scenarios, String start, String url) {}
-    public record Budget(long maxRoleRuns, double maxCostUsd) {}
+    /**
+     * @param maxElapsedMinutes the execution time a continued chain of runs may spend, summed
+     *                          across `--continue`; null when the task declares none. Time a
+     *                          stopped run spends waiting for a person is not counted.
+     */
+    public record Budget(long maxRoleRuns, double maxCostUsd, Long maxElapsedMinutes) {
+        public Budget(long maxRoleRuns, double maxCostUsd) {
+            this(maxRoleRuns, maxCostUsd, null);
+        }
+    }
 
     private static final Set<String> TOP_LEVEL = Set.of(
-            "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance",
+            "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
             "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios", "start", "url");
-    private static final Set<String> BUDGET_KEYS = Set.of("max_role_runs", "max_cost_usd");
+    private static final Set<String> BUDGET_KEYS =
+            Set.of("max_role_runs", "max_cost_usd", "max_elapsed_minutes");
 
     public static TaskSpec parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -60,6 +71,8 @@ public record TaskSpec(
         }
         Values.Selector checks = root.selector("checks");
         List<String> acceptance = root.optStringList("acceptance", List.of());
+
+        List<String> reproduce = root.optStringList("reproduce", List.of());
 
         Values authorityNode = root.optMap("authority").rejectUnknownKeys(AUTHORITY_KEYS);
         Authority authority = new Authority(
@@ -90,7 +103,9 @@ public record TaskSpec(
         Values budgetNode = root.optMap("budgets").rejectUnknownKeys(BUDGET_KEYS);
         Budget budget = new Budget(
                 budgetNode.optInt("max_role_runs", 6, 1, 50),
-                budgetNode.optDouble("max_cost_usd", 20.0, 0.0, 10000.0));
+                budgetNode.optDouble("max_cost_usd", 20.0, 0.0, 10000.0),
+                budgetNode.has("max_elapsed_minutes")
+                        ? budgetNode.optInt("max_elapsed_minutes", 60, 1, 1440) : null);
 
         Long maxFixAttempts = root.has("max_fix_attempts")
                 ? root.optInt("max_fix_attempts", 2, 0, 10) : null;
@@ -98,7 +113,7 @@ public record TaskSpec(
                 ? root.optInt("timeout_minutes", 30, 1, 240) : null;
 
         root.throwIfAny();
-        return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance,
+        return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance, reproduce,
                 authority, visualQa, budget, maxFixAttempts, timeoutMinutes);
     }
 
@@ -139,17 +154,7 @@ public record TaskSpec(
         List<String> requested = checks.isEmpty()
                 ? (project.defaultChecks() == null ? List.of() : List.of(project.defaultChecks()))
                 : checks.entries();
-        for (String entry : requested) {
-            List<String> named = project.checks().get(entry);
-            if (named != null) { commands.addAll(named); continue; }
-            if (bareChecks) {
-                collector.add("checks names '" + entry + "', which is not defined under checks in "
-                        + "project.yaml. Available: " + project.checks().keySet()
-                        + ". To run a literal command, write it as a list: checks: [\"" + entry + "\"]");
-                continue;
-            }
-            commands.add(entry);
-        }
+        commands.addAll(resolveCommands(requested, bareChecks, project, collector));
         commands.addAll(acceptance);
 
         List<String> baselineCommands = project.defaultBaselineChecks() == null
@@ -162,6 +167,16 @@ public record TaskSpec(
             Set<String> allCommands = new LinkedHashSet<>(baselineCommands);
             allCommands.addAll(commands);
             commands = new ArrayList<>(allCommands);
+        }
+
+        List<String> reproduceCommands = resolveCommands(reproduce, false, project, collector);
+        for (String command : reproduceCommands) {
+            if (!commands.contains(command)) {
+                collector.add("reproduce command must also be an acceptance command: " + command);
+            }
+            if (baselineCommands.contains(command)) {
+                collector.add("reproduce command cannot also be a baseline command: " + command);
+            }
         }
 
         // Browser scenarios are an executable definition of done, and a stricter one than
@@ -194,11 +209,30 @@ public record TaskSpec(
                 List.copyOf(paths),
                 List.copyOf(baselineCommands),
                 List.copyOf(commands),
+                List.copyOf(reproduceCommands),
                 authority,
                 visualQa,
                 budget,
                 maxFixAttempts != null ? maxFixAttempts : project.defaultMaxFixAttempts(),
                 timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes());
+    }
+
+    private static List<String> resolveCommands(List<String> requested, boolean bareChecks,
+                                                 ProjectConfig project,
+                                                 ConfigException.Collector collector) {
+        List<String> commands = new ArrayList<>();
+        for (String entry : requested) {
+            List<String> named = project.checks().get(entry);
+            if (named != null) { commands.addAll(named); continue; }
+            if (bareChecks) {
+                collector.add("checks names '" + entry + "', which is not defined under checks in "
+                        + "project.yaml. Available: " + project.checks().keySet()
+                        + ". To run a literal command, write it as a list: checks: [\"" + entry + "\"]");
+                continue;
+            }
+            commands.add(entry);
+        }
+        return commands;
     }
 
     /** A task with every indirection resolved. This is what the gates and roles receive. */
@@ -211,11 +245,22 @@ public record TaskSpec(
             List<String> scopePaths,
             List<String> baselineCommands,
             List<String> acceptanceCommands,
+            List<String> reproduceCommands,
             Authority authority,
             VisualQa visualQa,
             Budget budget,
             long maxFixAttempts,
             long timeoutMinutes) {
+
+        // Existing internal callers construct planning-only tasks without reproduction.
+        public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
+                            String baseRef, List<String> scopePaths, List<String> baselineCommands,
+                            List<String> acceptanceCommands, Authority authority, VisualQa visualQa,
+                            Budget budget, long maxFixAttempts, long timeoutMinutes) {
+            this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
+                    acceptanceCommands, List.of(), authority, visualQa, budget,
+                    maxFixAttempts, timeoutMinutes);
+        }
 
         /**
          * A hash of what this task is judged by, with the bounds on how long it may take
@@ -245,6 +290,13 @@ public record TaskSpec(
             fields.put("scope_paths", String.join(" ", scopePaths));
             fields.put("baseline_commands", String.join(" ", baselineCommands));
             fields.put("acceptance_commands", String.join(" ", acceptanceCommands));
+            // Reproduction defines which acceptance must detect the defect on the base.
+            // Changing it changes the verdict contract, so earlier red proof cannot survive.
+            // Omitted when empty, so a task that declares none keeps the hash it had before the
+            // key existed and a continuation across the upgrade still reuses its verdicts.
+            if (!reproduceCommands.isEmpty()) {
+                fields.put("reproduce_commands", String.join("\u0000", reproduceCommands));
+            }
             fields.put("authority", authority.workspaceWrite() + "/" + authority.network()
                     + "/" + authority.land());
             fields.put("visual_required", String.valueOf(visualQa.required()));

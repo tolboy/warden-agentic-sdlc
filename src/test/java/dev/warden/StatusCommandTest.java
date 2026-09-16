@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -40,6 +41,7 @@ public final class StatusCommandTest implements Suite {
             worktreesReportsMalformedInCurrentCheckout(check, sandbox);
             approveInstructionIsPasteable(check, sandbox);
             porcelainIgnoresBare(check);
+            statusIncludesNextStepWhenPresent(check, sandbox);
         } finally {
             deleteTree(sandbox);
         }
@@ -349,6 +351,48 @@ public final class StatusCommandTest implements Suite {
                         "decision_recorded", parseCli(pwsh).get("code"));
             }
         }
+    }
+
+    private void statusIncludesNextStepWhenPresent(Check check, Path sandbox) throws Exception {
+        Path project = sandbox.resolve("next-step-status");
+        Files.createDirectories(project.resolve(".warden"));
+        Files.writeString(project.resolve(".warden/project.yaml"),
+                "version: 1\nproject: fixture\n");
+        Path summary = project.resolve(".warden/runs/ns-1/task-run.json");
+        Files.createDirectories(summary.getParent());
+        Map<String, Object> next = new LinkedHashMap<>();
+        next.put("kind", "fix_contract");
+        next.put("summary", "change the acceptance");
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("run_id", "ns-1");
+        body.put("task_id", "hello");
+        body.put("next_step", next);
+        Files.writeString(summary, Json.write(body));
+        new ApprovalStore(project).createFailure("ns-1", "hello", "blocking_findings_remain",
+                summary, null);
+
+        StatusCommand.Outcome with = new StatusCommand(new ProcessRunner())
+                .run(project, new String[] {"status", "ns-1"});
+        check.that("status of a run with next_step is ok", with.ok());
+        Object reportedNext = with.report().get("next_step");
+        check.that("and includes next_step", reportedNext instanceof Map<?, ?>);
+        check.eq("kind from the summary", "fix_contract",
+                reportedNext instanceof Map<?, ?> map ? map.get("kind") : reportedNext);
+
+        Path older = sandbox.resolve("old-status");
+        Files.createDirectories(older.resolve(".warden"));
+        Files.writeString(older.resolve(".warden/project.yaml"),
+                "version: 1\nproject: fixture\n");
+        Path oldSummary = older.resolve(".warden/runs/old-1/task-run.json");
+        Files.createDirectories(oldSummary.getParent());
+        Files.writeString(oldSummary, "{\"run_id\":\"old-1\",\"task_id\":\"hello\"}");
+        new ApprovalStore(older).createFailure("old-1", "hello", "budget_exhausted",
+                oldSummary, null);
+        StatusCommand.Outcome without = new StatusCommand(new ProcessRunner())
+                .run(older, new String[] {"status", "old-1"});
+        check.that("status of an older run is still ok", without.ok());
+        check.that("and omits next_step when the summary has none",
+                !without.report().containsKey("next_step"));
     }
 
     private void porcelainIgnoresBare(Check check) {

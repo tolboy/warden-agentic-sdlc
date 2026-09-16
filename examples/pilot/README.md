@@ -4,12 +4,56 @@ This opt-in template tests whether Warden reduces active operator time on a real
 bounded, **non-visual** task. It is not a new global default or an implementation of
 the full P3/P4 roadmap. No target project or paid run is selected by these files.
 
+## Offline preparation command
+
+`warden pilot prepare` is the bounded P2 slice that turns one explicit JSON spec into a
+reviewable bundle so the YAML below does not have to be copied by hand. It is **not** a
+planner, **not** a live run, and it does **not** close all of P2 or P2PLAN-17.
+
+```text
+warden pilot prepare --spec examples/pilot/prepare-spec.json --output <new-directory>
+```
+
+The spec names the task id, Unicode-safe goal, target checkout/base, explicit scope,
+separate baseline and acceptance command lists, two existing writer/reviewer profiles in
+a source config home, and the existing budget/time fields. Unknown keys are refused.
+Commands are never inferred from the goal.
+
+The output directory must not already exist. The bundle contains:
+
+- `target/.warden/project.yaml` and `tasks/<id>.yaml` — to install later at
+  `<target-checkout>/.warden`. The command does not write into the target checkout.
+- `config/` — isolated policy home with the shipped three-stage pilot policy and the two
+  remapped profiles (`pilot-implement`, `pilot-review`) plus their prompt/schema files.
+- `RUNBOOK.md`, `observations.md`, `prepare-report.json`.
+
+It copies only the selected profiles and declared relative resources. Absolute operational
+dependencies are reported unresolved rather than copied. Symlinks, `..` escapes, secrets and
+environment files are refused. `verified_on`, model, effort and grants are kept as they were.
+
+The command does not execute configured checks, call vendors, invoke `run`/`do`/`role`, or
+change the global home. Generated files are validated with the existing parsers before the
+bundle is published. Failure does not leave a directory advertised as ready.
+
+A suite being repaired must not appear in the green baseline. A declared
+`reproduction.command` must be in `checks.acceptance` and is written as task `reproduce`.
+The report marks it `enforced_by_warden_run`: the live run refuses vendor dispatch if it
+passes on the unchanged base, and treats timeout as inconclusive. Omission is `not_declared`
+and leaves acceptance strength unchecked. Preparation runs no checks and proves neither
+semantic acceptance strength, quota, runtime authentication nor live readiness.
+
+The committed [prepare-spec.json](prepare-spec.json) uses `REPLACE-WITH-TARGET-CHECKOUT` and
+`REPLACE-WITH-WARDEN-CONFIG-HOME` so it stays portable and does not name a local path.
+Replace those with real paths before running it. [sample-runbook.md](sample-runbook.md)
+shows the generated runbook shape.
+
 ## Prepare once
 
 1. Choose a real bugfix or small feature with a working baseline build/test and an
    independently observable acceptance check. Use an isolated checkout of the target
    repository. Record its base commit. Do not choose a UI task and remove its visual
-   checks merely to fit this template.
+   checks merely to fit this template. Prefer `warden pilot prepare` over hand-editing
+   every YAML file; still review the bundle before installing it.
 2. Choose a separate, durable pilot configuration directory. Set `WARDEN_CONFIG_HOME`
    to that directory **before** `warden setup`; the normal home and policy stay unchanged.
    Keep this home after deleting the target worktree: its `ledger/` is the measurement corpus.
@@ -54,8 +98,10 @@ workflow needs two calls for implement/review and four with a review repair/rech
 Gates consume time but no vendor calls. The four-call cap is not suitable for adding
 planner, visual roles, or another reviewer without recalculating the plan.
 `timeout_minutes` in the task bounds a gate, not the workflow. The monetary threshold
-covers known spend only; unpriced calls and the last call can exceed it. Per-call
-timeouts do not provide an overall deadline.
+covers known spend only; unpriced calls and the last call can exceed it. An overall
+execution deadline is `budgets.max_elapsed_minutes`, optional in the prepare spec: no call
+starts with under a minute left, each call's wall clock is lowered to what is left, and time
+spent waiting for a person is not counted.
 
 ## Freeze and execute later
 
@@ -74,8 +120,9 @@ warden run pilot-task --run-id pilot-01
 This is an **observed single-run experiment**. One ordinary repair of the target code
 is allowed. Any stop is an experimental outcome: do not use `--continue`, retry, a new
 run ID, a new writer or a larger budget to make the same trial look successful.
-These are experiment rules, not newly implemented CLI prohibitions. P3's durable
-repair counter across continuations and P4's execution deadline remain deferred.
+These are experiment rules, not CLI prohibitions. Warden itself now counts a `retry` or
+`switch` continuation against the same call, cost and repair limits and the same
+`max_elapsed_minutes`, so a continuation cannot quietly buy a second allowance either.
 If the operator must stop a slow run, record the intervention and settle the worker
 before starting anything else. A required Warden patch means this version failed the
 trial; retain the evidence and count troubleshooting time before planning another trial.

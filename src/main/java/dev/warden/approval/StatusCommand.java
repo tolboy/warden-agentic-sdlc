@@ -79,6 +79,8 @@ public final class StatusCommand {
                 HumanDecision decision = store.read(runId);
                 result.put("decision", decision.toMap());
                 result.put("decision_path", store.decisionPath(runId).toString());
+                Object nextStep = nextStepFrom(root, decision);
+                if (nextStep != null) result.put("next_step", nextStep);
             } catch (ApprovalException failure) {
                 Map<String, Object> error = new LinkedHashMap<>();
                 error.put("ok", false);
@@ -297,6 +299,22 @@ public final class StatusCommand {
         row.put("path", file.toAbsolutePath().normalize().toString());
         row.put("error", problem);
         return row;
+    }
+
+    /**
+     * Older summaries have no structured step; omitting the key is how this command
+     * stays truthful about a run that never wrote one.
+     */
+    private static Object nextStepFrom(Path root, HumanDecision decision) {
+        try {
+            Path summary = Path.of(decision.summaryPath());
+            if (!summary.isAbsolute()) summary = root.resolve(summary);
+            if (!Files.isRegularFile(summary)) return null;
+            Map<String, Object> body = Json.parseObject(Files.readString(summary, StandardCharsets.UTF_8));
+            return body.get("next_step");
+        } catch (Exception unreadable) {
+            return null;
+        }
     }
 
     private static String runId(String[] args) {

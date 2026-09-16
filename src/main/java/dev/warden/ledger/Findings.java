@@ -83,6 +83,13 @@ public final class Findings {
             value.put("message", message);
             for (String field : List.of("scenario", "expected", "actual", "scope_relation"))
                 value.put(field, text(raw.get(field)));
+            // Copied when the vendor named one, omitted otherwise. Not part of identity,
+            // derivation, registry comparisons or any hash: it is what the operator is
+            // being asked to do, not what the defect is.
+            Object suggestion = raw.get("suggestion");
+            if (suggestion instanceof String proposed && !proposed.isBlank()) {
+                value.put("suggestion", proposed);
+            }
             value.put("evidence_refs", refs(raw.get("evidence_refs")));
             value.put("supersedes", refs(raw.get("supersedes")));
             // A serialized empty list is indistinguishable from a field the vendor never

@@ -328,20 +328,21 @@ public final class DirectCliExecutor implements RoleExecutor {
     }
 
     /**
-     * Classifies a failed run as an exhausted subscription, or returns null to let the caller
-     * report the generic failure. Only ever consulted for a run that already failed: a vendor
-     * that produced a usable artifact is never reclassified on the strength of its prose.
+     * Classifies a failed run as an exhausted subscription or a transient rate limit, or
+     * returns null to let the caller report the generic failure. Only ever consulted for a run
+     * that already failed: a vendor that produced a usable artifact is never reclassified on
+     * the strength of its prose.
      */
     private static Result quotaFailure(Request request, ProcessRunner.Result process,
                                        Duration duration, Map<String, Object> evidence) {
         QuotaSignal.Detection detection = QuotaSignal.detect(
                 request.profile().quotaSignatures(), process.stdout(), process.stderr());
         if (!detection.matched()) return null;
-        evidence.put("failure", "role_quota_exhausted");
+        evidence.put("failure", detection.roleCode());
         evidence.put("quota", detection.report());
         evidence.put("stderr_tail", tail(process.stderr(), 2000));
         evidence.put("stdout_tail", tail(process.stdout(), 2000));
-        return new Result(false, "role_quota_exhausted", duration, process.stdout(), null, evidence);
+        return new Result(false, detection.roleCode(), duration, process.stdout(), null, evidence);
     }
 
     /**

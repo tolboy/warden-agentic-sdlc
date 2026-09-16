@@ -11,6 +11,46 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A task's limits bound the chain of runs `--continue` links, not each run. A `retry` or
+  `switch` continuation inherits the calls, reported cost, unpriced calls and fix rounds the
+  earlier runs spent, read from the new `chain` block of their summary; before, every
+  continuation started with a fresh ceiling and fresh fix rounds. A rejection still starts a
+  new chain. `role_runs` and `total_cost_usd` stay per run.
+- A stop caused by a vendor's endpoint is no longer a verdict on the work. A timeout, a failed
+  vendor process, an unreadable or schema-invalid artifact and an undeliverable prompt used to
+  stop the run as `<role>_failed`, which every `--continue` treated as an objection and so paid
+  every passed stage again. They are now `role_timed_out`, `vendor_call_failed`,
+  `vendor_protocol_failed` and `prompt_undeliverable`, the summary names the failed call as
+  `infrastructure_failure`, and a continuation reuses the verdicts that still describe the tree.
+  `quota_exhausted` and `failover_requires_confirmation` join them: the first told the operator
+  to wait and continue and then declined every verdict on the continuation. The first external
+  trial paid a second Codex reading this way. No implementer fix round is spent on any of them,
+  except for a writer's own unreadable artifact.
+- A `switch` answered on a failover stop carries earlier verdicts. It used to carry only the
+  substitution, and run `p2-planner-3` paid its writer thirty minutes to redo its own candidate.
+- A rate limit is no longer read as a spent subscription. `QuotaSignal` keeps separate phrase
+  lists; a 429 or "rate limit" becomes `role_rate_limited`, which stops the run as
+  `rate_limited` without dropping the profile or offering a replacement vendor. A spent-plan
+  phrase still wins when both appear, so Claude's session-limit envelope stays a quota stop.
+  Measured only offline, against recorded and synthetic transcripts.
+- Found by the independent review of the three items above, before merge: a spent-plan phrase
+  on stderr now outranks a rate-limit phrase in the event stream; an Orca call the chain
+  deadline cut short stops as `budget_exhausted` like a direct one; a failover the budget
+  cannot afford returns the spent call instead of throwing past it, so its cost and unpriced
+  count are no longer lost; and an Orca worker that reports failure or escalates stops as
+  `role_orca_reported_failure` rather than as an endpoint failure a continuation would carry
+  verdicts past.
+- Found by the review of the pull request: a `--continue` that failed validation wrote a
+  summary with no `chain`, so the run continuing it started from zero and could dispatch past
+  the task's call ceiling; it now records `continued_from` and the chain it joined. The next
+  step no longer previews under the id its live run needs (a dry run reserves it), proposes an
+  acceptance edit only for a `contract_gap` finding (other non-product blockers are
+  `resolve_blockers`), and `pilot prepare` no longer reads a JSON Schema `$ref` fragment such
+  as `#/$defs/text` as a file path.
+- `warden pilot prepare` no longer interpolates a profile command into `sh -c` on POSIX.
+  Presence is a filesystem PATH walk (Windows still uses `where.exe` as argv), so a value
+  such as `git; touch marker` cannot run during offline preparation. Live `run`/`role`
+  lookup is unchanged.
 - `bin/warden` exports `WARDEN_HOME`. The POSIX launcher computed the home and never exported
   it, so a run started from a target repository could not find `scripts/visual-qa.mjs` and
   stopped `visual_qa_unavailable` after its reviews had already been paid for. `warden.cmd`
@@ -44,6 +84,44 @@ that exists in code but has never been run live says so.
   the README says to keep validated profile wall clocks rather than tighten them.
 
 ### Added
+
+- `budgets.max_elapsed_minutes`: an execution deadline for a task, summed across the runs a
+  `--continue` links and not counting time spent waiting for a person. No vendor call starts
+  with less than a minute left, each call's wall clock is lowered to what is left, and a
+  lowered call that times out stops as `budget_exhausted` with `budget_limit_hit:
+  max_elapsed_minutes`. Gates keep `timeout_minutes`. Suite-covered with a test clock; not a
+  live claim.
+- Optional task `reproduce` proves the acceptance fails on the unchanged source tree before
+  the first vendor call. Green reproduction stops `reproduction_passed_before_change`;
+  a timeout, a command the shell cannot find, an internal error or a source mutation stops
+  `reproduction_inconclusive`. Continuations over candidates carry only verified evidence for
+  the same acceptance and diff base; missing proof is recorded without stopping. Dry-run
+  previews the checks. A task without `reproduce` keeps its acceptance hash.
+- `warden pilot prepare` validates reproduction membership in acceptance, writes `reproduce`
+  into the task, and reports `enforced_by_warden_run`; omission explicitly leaves acceptance
+  strength unchecked. This is fixture-tested and makes no live-pilot claim. An optional
+  `budgets.max_elapsed_minutes` in the spec is written into the task.
+- Reviewer findings carry a vendor `suggestion` when one was supplied, omitted otherwise.
+  It is not part of finding identity, derivation, registry comparisons or any hash.
+- A structured `next_step` beside `safe_next_step` on a stop and on `ready_for_human`: kind,
+  one sentence, the complete commands with real run and task ids, edits, consequences, and
+  (for `fix_contract` / `repair_or_retry`) the open blocking findings with suggestions. A
+  `contract_gap` names the task file, the acceptance currently in force, the reviewer's
+  suggestion and that editing it moves `acceptance_sha256`, so no verdict of this run can be
+  reused. `warden report --text` prints the block when the field exists and keeps the
+  one-line sentence for older summaries; `warden status <run-id>` includes it when present.
+- `warden approve <run-id> --from-orca --wait-minutes N` (1..1440): bounded poll, 5 s then
+  ×1.5 capped at 10 s, while the Orca gate is pending or unreadable. The answer that is
+  finally imported still goes through the existing validations. A deadline is `gate_pending`
+  with the decision file unchanged; no answer is never accept or reject. The wait never
+  starts, retries or continues a run. `warden run --wait-for-gate N` is the same waiter after
+  the loop, skipped (with the reason) when no gate was published.
+- `warden pilot prepare --spec FILE --output DIR`: deterministic offline preparation of an
+  external-pilot bundle from an explicit JSON spec (task, target, separate baseline and
+  acceptance commands, two existing profiles). Writes a new reviewable directory with target
+  YAML, isolated config home, observation sheet and runbook. Validates with existing parsers
+  before publish; never overwrites DIR; never edits the target checkout or global home; never
+  runs checks or vendors. One P2 slice — not all of P2, not P2PLAN-17, not P3/P4.
 
 - `examples/pilot/`: opt-in policy, task template, measurement protocol and a per-trial
   observation sheet for one observed external trial with a fixed writer, independent

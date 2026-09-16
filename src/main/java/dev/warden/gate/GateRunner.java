@@ -26,6 +26,8 @@ public final class GateRunner {
     private static final Kind ACCEPTANCE = new Kind("acceptance", "machine-gate", "machine_gate");
     private static final Kind BASELINE = new Kind("baseline", "baseline-gate", "baseline_gate");
 
+    private static final Kind REPRODUCTION = new Kind("reproduction", "reproduction-gate", "reproduction_gate");
+
     public GateRunner(ProcessRunner processes) { this.processes = processes; }
 
     /**
@@ -66,6 +68,14 @@ public final class GateRunner {
                 loaded.resolved().baselineCommands(), BASELINE);
     }
 
+    /** A red proof uses the same scope, timeout and immutable-contract guards as baseline. */
+    public Outcome runReproduction(ConfigLoader.Loaded loaded, String runId,
+                                   Map<String, String> pinnedConfig, String pinnedMergeBase)
+            throws IOException, InterruptedException {
+        return runCommands(loaded, runId, pinnedConfig, pinnedMergeBase,
+                loaded.resolved().reproduceCommands(), REPRODUCTION);
+    }
+
     private Outcome runCommands(ConfigLoader.Loaded loaded, String runId,
                                 Map<String, String> pinnedConfig, String pinnedMergeBase,
                                 List<String> commandsToRun, Kind kind)
@@ -100,7 +110,11 @@ public final class GateRunner {
             return finish(ledger, kind, false, "preflight_outside_scope", base(loaded, contractHash, mergeBase,
                     List.copyOf(initialPaths), initialViolations, null));
         }
-        String baselineSource = kind.equals(BASELINE) ? git.sourceFingerprint(mergeBase) : null;
+        if (kind.equals(REPRODUCTION) && !WardenTree.sourcePaths(initialPaths).isEmpty()) {
+            return finish(ledger, kind, false, "candidate_present", base(loaded, contractHash,
+                    mergeBase, List.copyOf(initialPaths), List.of(), "reproduction requires an unchanged tree"));
+        }
+        String baselineSource = kind.equals(BASELINE) || kind.equals(REPRODUCTION) ? git.sourceFingerprint(mergeBase) : null;
 
         List<Map<String, Object>> commands = new ArrayList<>();
         long totalMillis = 0;
@@ -148,11 +162,11 @@ public final class GateRunner {
                 if (!baselineSource.equals(afterSource)) {
                     Map<String, Object> report = base(loaded, contractHash, mergeBase,
                             List.copyOf(afterPaths), violations,
-                            "a baseline command changed project source before vendor dispatch");
+                            "a " + kind.phase() + " command changed project source before vendor dispatch");
                     report.put("commands", commands);
                     report.put("source_fingerprint_before", baselineSource);
                     report.put("source_fingerprint_after", afterSource);
-                    return finish(ledger, kind, false, "baseline_mutated_source", report);
+                    return finish(ledger, kind, false, kind.phase() + "_mutated_source", report);
                 }
             }
             if (!violations.isEmpty()) {
@@ -161,7 +175,16 @@ public final class GateRunner {
                 report.put("commands", commands);
                 return finish(ledger, kind, false, "blast_radius_after_command", report);
             }
-            if (!result.ok()) {
+            // A reproduction that fails because its command does not exist proves nothing
+            // about the defect: a typo in `reproduce` would otherwise read as a red base.
+            if (kind.equals(REPRODUCTION) && !result.timedOut() && commandNotFound(result)) {
+                Map<String, Object> report = base(loaded, contractHash, mergeBase,
+                        List.copyOf(afterPaths), List.of(),
+                        "the shell could not find the command (exit " + result.exitCode() + ")");
+                report.put("commands", commands);
+                return finish(ledger, kind, false, "reproduction_command_not_found", report);
+            }
+            if (result.timedOut() || (!kind.equals(REPRODUCTION) && !result.ok())) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(afterPaths), List.of(), result.timedOut() ? "command timed out" : "command failed");
                 report.put("commands", commands);
@@ -173,6 +196,14 @@ public final class GateRunner {
         Map<String, Object> report = base(loaded, contractHash, mergeBase,
                 List.copyOf(git.changedPaths(mergeBase)), List.of(), null);
         report.put("commands", commands);
+        if (kind.equals(REPRODUCTION)) {
+            List<String> passed = commands.stream().filter(item -> Long.valueOf(0).equals(item.get("exit_code")))
+                    .map(item -> String.valueOf(item.get("command"))).toList();
+            if (!passed.isEmpty()) {
+                report.put("passed_commands", passed);
+                return finish(ledger, kind, false, "reproduction_passed_before_change", report);
+            }
+        }
         report.put("worktree_fingerprint", git.fingerprint(mergeBase));
         report.put("does_not_cover", List.of("paths ignored by .gitignore"));
         return finish(ledger, kind, true, "passed", report);
@@ -230,6 +261,21 @@ public final class GateRunner {
         item.put("stdout_truncated", result.stdoutTruncated());
         item.put("stderr_truncated", result.stderrTruncated());
         return item;
+    }
+
+    /**
+     * Whether the shell, not the command, produced the failure.
+     *
+     * POSIX `sh` answers 127. `cmd.exe /c` answers 1 — measured on Windows 11, where 9009 is
+     * only the errorlevel inside a batch file — and says so on stderr in the host's language,
+     * so the English sentence is the only one recognised; on another locale a missing command
+     * still reads as a red base, which the reproduction report's stderr tail shows.
+     */
+    static boolean commandNotFound(ProcessRunner.Result result) {
+        if (result.exitCode() == 127 || result.exitCode() == 9009) return true;
+        String stderr = result.stderr() == null ? "" : result.stderr();
+        return result.exitCode() == 1
+                && stderr.contains("is not recognized as an internal or external command");
     }
 
     private static List<String> shell(String command) {

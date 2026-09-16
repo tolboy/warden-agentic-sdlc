@@ -16,6 +16,7 @@ The source of truth is Warden, not a target-project branch.
 | Configuration integrity | Warden | Implemented: the whole `.warden` tree except `runs/` is snapshotted before the first dispatch and compared after every role and around every gate command. Any modification, addition or deletion is `contract_mutated` naming the path. Because that holds, `.warden` sits outside the task's source blast radius without opening a hole |
 | Workspace/tool policy | Git + TaskSpec authority | Scope and local write/network/land declarations implemented; tool allowlists pending |
 | Pre-agent baseline | Warden | Implemented: optional `defaults.baseline_checks` names a project check set run before the first vendor. Red is `baseline_failed` and zero vendor calls. The same commands are the floor of the later acceptance gate, so an agent cannot break a test that was green at dispatch and still pass a narrower task check. A baseline command that mutates project source is `baseline_mutated_source`. Omitted by existing projects and by greenfield `warden init`. Not a `workflow.stages` item and not configurable away. Covered by the suite; not a live claim |
+| Pre-agent reproduction | Warden | Optional task `reproduce` reuses check resolution and GateRunner after baseline, before Engine construction. Every command must exit non-zero on unchanged source; timeouts, a command the shell cannot find and source mutations are inconclusive, and a zero exit stops before vendor dispatch. A candidate is never tested for red proof. Continuations reuse a checksummed receipt only with the same acceptance hash and diff base; otherwise `not_run_candidate_present` is visible without stopping. Dry-run only previews. Covered by fixtures; not a live claim |
 | Evidence ledger | Warden | Implemented: machine reports, append-only JSONL, `warden ledger` aggregation, and per-attempt vendor cost, turns, tokens and model as reported. A failover is two `vendor_attempts`, not one `role_run`: every split (`by_profile`, `by_vendor`, `by_model`, `by_outcome`) and every telemetry total counts the actual dispatch. Historical ledgers without the nested array remain one attempt per `role_run`. Every vendor runs through its own CLI on the operator's subscription, so a price exists only if that CLI printed one: `unpriced_calls` and `cost_ceiling_binding` say how much of a run the `max_cost_usd` ceiling actually measured, because a run where nothing priced itself can spend every allowed call and charge $0.00 against a $40 limit. `max_role_runs` is the bound that always holds. Telemetry is read from the vendor's envelope **before** the outcome is judged, so a call that failed is costed like any other: a run whose grok implementer died at its turn ceiling reported `total_cost_usd: 1.33` and was recorded as free, and an Opus review that did the same hid $4.88, because extraction used to happen only after a valid artifact. A ceiling that measures only the calls that worked is not measuring the run most worth costing. Each local append also projects an allowlisted measurement into `<UserConfig.home>/ledger/` through one write-then-deliver protocol; see below. `warden ledger` remains local to the project tree by default; `--global` reads the home corpus from outside a repository, filtered by recorded project identity, and `--import` copies selected local runs and archives through the same allowlist |
 | Run report | Warden | Implemented: `warden report <run-id>` joins the per-stage evidence into one view — stages in order, vendor/model/cost/tokens/duration per call, browser scenarios and screenshot hashes, source files changed since the pinned base, and the human decision. A value the vendor never reported stays absent and renders as `?` rather than becoming a zero. Verified live: Grok 4.6 review, $0.0835, 104042/13006 tokens |
 | Conductor | Optional outer adapter | Machine-only workflow implemented; it does not duplicate Warden's role loop. Not part of the primary path. See [`docs/adr/0001-layer-split.md`](adr/0001-layer-split.md) |
@@ -268,10 +269,11 @@ Every vendor failure resolves to exactly one of these, and the choice is made in
 
 | Outcome | Response | Why not the other one |
 |---|---|---|
-| `role_quota_exhausted` | Fail over to the next eligible vendor; exclude this profile for the rest of the process | Retrying the same vendor refuses identically and spends the budget proving it |
-| `role_command_failed`, `role_timeout`, `role_artifact_*` | Stop the role; the loop may hand the failure text back to the same vendor as a fix round | Failing over would route around a defect instead of surfacing it |
-| `role_prompt_undeliverable`, `authority_denied` | Stop the role; no vendor is dispatched at all | These are configuration faults. Routing around one hides it and pays a second vendor for the same corrupted request |
-| `role_orca_unavailable`, `role_orca_no_worktree`, `role_orca_no_coordinator`, `role_orca_unsettled`, `role_orca_start_failed`, `role_orca_timeout`, `role_orca_lifecycle_unaccounted` | Stop the role; no failover to Direct CLI; no fix round | The profile declared `runner: orca`. Pretending it was a CLI would hide a missing worktree, an unproven settlement, or a worker that was not fenced. `role_timeout` is reserved for Direct CLI after ProcessRunner has killed the process tree |
+| `role_quota_exhausted` | Fail over to the next eligible vendor; exclude this profile for the rest of the process. With no failover the run's reason is `quota_exhausted` | Retrying the same vendor refuses identically and spends the budget proving it |
+| `role_rate_limited` | Stop the role; no failover, and the profile stays eligible. The run's reason is `rate_limited` | A rate limit is transient and says nothing about the plan; the Claude API documents HTTP 429 for request-rate and spend-rate limits alike. Treating it as a spent subscription dropped a working vendor and offered the operator a replacement for it. `QuotaSignal` keeps two phrase lists, and a spent-plan phrase outranks a rate-limit phrase in the same failure, because Claude's session limit is itself a 429 |
+| `role_timeout`, `role_command_failed`, `role_artifact_unparseable`, `role_artifact_incomplete`, `role_artifact_schema_violation` | Stop the role. The run's reason is `role_timed_out`, `vendor_call_failed` or `vendor_protocol_failed`, not `<role>_failed`. A fix round is offered only for an unreadable artifact from the role that would repair it — a writer can be shown its own malformed answer; nobody repairs a reviewer's endpoint | Failing over would route around a defect instead of surfacing it. The old reason, `reviewer_failed`, read as "the reviewer objected", and a continuation treated it as a verdict: on the first external trial a clean first reading was paid for twice because the second reader had been stopped by a session limit |
+| `role_prompt_undeliverable`, `authority_denied` | Stop the role; no vendor is dispatched at all. The run's reason for the first is `prompt_undeliverable` | These are configuration faults. Routing around one hides it and pays a second vendor for the same corrupted request |
+| `role_orca_unavailable`, `role_orca_no_worktree`, `role_orca_no_coordinator`, `role_orca_unsettled`, `role_orca_start_failed`, `role_orca_timeout`, `role_orca_lifecycle_unaccounted`, `role_orca_reported_failure` | Stop the role; no failover to Direct CLI; no fix round. `role_orca_reported_failure` is a worker that sent `worker_done` as failed or escalated: its own account of the work, so a continuation does not carry verdicts past it. A `role_orca_timeout` on a wall clock the chain deadline lowered stops as `budget_exhausted` / `max_elapsed_minutes` | The profile declared `runner: orca`. Pretending it was a CLI would hide a missing worktree, an unproven settlement, or a worker that was not fenced. `role_timeout` is reserved for Direct CLI after ProcessRunner has killed the process tree |
 | `role_human_input_required` | Stop the role; retain the worker | A native agent is parked on input only a person can provide. Handing that to a new implementer would abandon a live session |
 | `role_turns_exhausted` | Stop the role; no failover. The run's reason is `turn_ceiling_reached`, and a later `--continue` keeps the verdicts the earlier stages already reached | The vendor was interrupted by a ceiling the operator set, not by anything in the work. Another vendor would meet the same ceiling on the same diff, and `role_command_failed` would send someone to read a transcript with no defect in it. Both measured specimens exit non-zero — grok prints `Error: max turns reached`, `claude -p` reports `error_max_turns` — so the classification is made on both failure paths, not only where a vendor exits 0 without an artifact |
 | `role_runner_unimplemented` | Retired; nothing emits it | Every runner the profile schema accepts now has an adapter. The code stays in the ledger's configuration-failure set so evidence written before that still classifies, rather than being reclassified after the fact |
@@ -338,6 +340,54 @@ means: it measures only the calls whose vendor reported a price.
 
 A budget stop leaves earlier verdicts standing, on the same terms as `turn_ceiling_reached` —
 the source fingerprint, the acceptance surface and the judging contract all have to match.
+
+So does every stop the vendor's endpoint caused: `quota_exhausted`, `rate_limited`,
+`role_timed_out`, `vendor_call_failed`, `vendor_protocol_failed`, `prompt_undeliverable` and
+`failover_requires_confirmation`. The summary names the failed call once, as
+`infrastructure_failure` with a one-word `cause`, `verdict_on_the_work: false` and what a
+continuation keeps. A `switch` answered on a failover stop carries verdicts too; before, it
+carried only the authorised substitution, and the writer and every reader were paid again. The
+stage whose call failed has no passing row, so it is always dispatched again, and an objection
+that was on the record when the endpoint failed — a pass carrying a P1, or a reading a repair
+had already overtaken — is never carried as a pass.
+
+`HumanDecision.Kind.FAILOVER` still offers only `abort` and `switch`. Waiting out a quota
+window on a roster with a successor means answering `abort` today; adding `retry` there would
+change the decision file's option list, which existing files are validated against.
+
+## What a continuation inherits
+
+The limits a task declares — `max_role_runs`, `max_cost_usd`, `max_fix_attempts` and the
+optional `max_elapsed_minutes` — bound the chain of runs that `--continue` links, not one run.
+Before, a continuation started from nothing, so "four calls, one repair" described each run
+and a stopped task could be continued into as many calls as the operator had patience for.
+
+| Continuation | Chain |
+|---|---|
+| `retry` (a failure) or `switch` (a failover) | Inherits: calls, reported cost, unpriced calls, fix rounds and execution time, read from the prior run's `chain` block, or from its own totals when it predates the block (its execution time is then `elapsed_known: false`, not guessed) |
+| `reject` (a rejection note) | Starts a new chain. A person asked for different work, and the note is the only thing carried |
+| no `--continue` | Starts a new chain and carries nothing |
+| a `--continue` that fails before the loop starts | Still a link: `run_preflight_failed` records `continued_from` and the chain it would have joined, with nothing of its own added, so the run that continues it next inherits the spend. A configuration error between two continuations used to reset the ceiling |
+
+The ceilings compare the chain's totals; `role_runs`, `total_cost_usd` and `attempts_used`
+stay the run's own, because the corpus sums runs and would otherwise count a chain twice. The
+repair reserve counts the chain's calls, and its advice names the chain's floor. `attempt`
+stays per run too: it names evidence directories, and only a run's first pass may consume a
+carried verdict.
+
+`max_elapsed_minutes` is execution time: the sum of each run's duration, so a night spent
+waiting for a person does not expire the chain. It is enforced at dispatch, the same place as
+the call ceiling: no call starts with less than a minute left, and the call that does start
+runs under the profile's wall clock lowered to what is left, in whole minutes. The role report
+records `wall_clock_capped_by: max_elapsed_minutes` beside `profile_wall_clock_minutes`, and a
+lowered call that times out stops as `budget_exhausted` with `budget_limit_hit:
+max_elapsed_minutes`, not as `role_timed_out`, which would send the operator to a profile
+limit that was never binding. Gates and the baseline are not interrupted; `timeout_minutes`
+bounds them. A call's duration is not predicted, so a repair is never refused in advance for
+time — `budget_plan.time_reserve` says so.
+
+`max_cost_usd` is still a threshold on reported spend. The preview says so in as many words,
+because a Codex call reports no price and spends nothing against it.
 
 ## What a carried verdict has to prove
 
@@ -512,6 +562,19 @@ reported `budget_exhausted` and nothing else.
   passed, was rechecked after a browser repair and came back with a P1 stayed listed as a
   stage that had passed.
 - `safe_next_step` — the one command that moves the run forward without paying twice.
+- `next_step` — the same diagnosis, structured: a `kind`, a sentence, the complete commands
+  with the real run and task ids filled in, the files to edit, what is kept, and (for a
+  contract gap or a remaining product defect) the open blocking findings with their
+  suggestions. `warden report --text` prints the block when the field exists and falls back
+  to the one-line sentence for older summaries. `warden status <run-id>` copies it from the
+  summary when it is there. A `contract_gap` names the task file, the acceptance currently
+  in force, the reviewer's suggestion and the `acceptance_sha256` consequence: editing the
+  acceptance invalidates every verdict of this run, so the next run is a new run, not a
+  `--continue`. Only a `contract_gap` finding proposes an acceptance edit, and only with its
+  own suggestion; blockers of the other non-product categories — missing access, an
+  unavailable provider, spent quota, a tooling failure, a disagreement — are
+  `resolve_blockers`, which lists them and edits nothing. The preview command takes a
+  generated id, because a dry run reserves the id it runs under.
 
 Neither of the first two implies the other, and a run can legitimately be a pass on one and a
 no on the other.
@@ -626,7 +689,11 @@ is not.
 `decision.json` is the decision. What the Orca gate adds is reach: a run stops for a person,
 and the person is not at the worktree. So the pending decision is mirrored into Orca as a
 decision gate carrying Warden's own options, and `warden approve --from-orca` carries the
-answer back.
+answer back. `--wait-minutes N` (1..1440) polls that same import while the gate is pending
+or unreadable, with 5 s then ×1.5 capped at 10 s, and then exits. `warden run --wait-for-gate N`
+is the same waiter after the loop, skipped when no gate was published. Neither starts a run.
+A deadline is `gate_pending` and leaves the decision file untouched; no answer is never
+accept or reject.
 
 The mirror decides nothing, and that is enforced rather than trusted. An imported answer is
 admitted only if it maps exactly onto one of the decision's declared options, only while the

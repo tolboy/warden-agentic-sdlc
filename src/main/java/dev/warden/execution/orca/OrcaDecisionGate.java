@@ -63,10 +63,27 @@ public final class OrcaDecisionGate {
         public boolean resolved() { return "resolved".equals(status); }
     }
 
+    /**
+     * How one published gate is read back. Production talks to Orca; tests inject a
+     * sequence so a wait can be exercised without sleeping or spawning a CLI.
+     */
+    @FunctionalInterface
+    public interface Reader {
+        Answer read(Path root, OrcaLifecycle.Gate gate) throws Exception;
+    }
+
     private final OrcaClient orca;
+    private final Reader reader;
 
     public OrcaDecisionGate(ProcessRunner processes) {
         this.orca = new OrcaClient(processes);
+        this.reader = (root, gate) -> readFrom(orca, root, gate);
+    }
+
+    /** Test seam for the import path. {@link #publish} is not used on this instance. */
+    public OrcaDecisionGate(Reader reader) {
+        this.orca = null;
+        this.reader = reader;
     }
 
     /**
@@ -177,6 +194,10 @@ public final class OrcaDecisionGate {
 
     /** Read one published gate back from Orca, or null when it cannot be read. */
     public Answer read(Path root, OrcaLifecycle.Gate gate) throws Exception {
+        return reader.read(root, gate);
+    }
+
+    private static Answer readFrom(OrcaClient orca, Path root, OrcaLifecycle.Gate gate) throws Exception {
         OrcaClient.Rpc listed = orca.invoke(root, Duration.ofSeconds(20),
                 List.of("orchestration", "gate-list", "--run", gate.orcaRunId()));
         if (!listed.ok()) return null;
