@@ -11,6 +11,10 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `warden pilot prepare` no longer interpolates a profile command into `sh -c` on POSIX.
+  Presence is a filesystem PATH walk (Windows still uses `where.exe` as argv), so a value
+  such as `git; touch marker` cannot run during offline preparation. Live `run`/`role`
+  lookup is unchanged.
 - `bin/warden` exports `WARDEN_HOME`. The POSIX launcher computed the home and never exported
   it, so a run started from a target repository could not find `scripts/visual-qa.mjs` and
   stopped `visual_qa_unavailable` after its reviews had already been paid for. `warden.cmd`
@@ -44,6 +48,13 @@ that exists in code but has never been run live says so.
   the README says to keep validated profile wall clocks rather than tighten them.
 
 ### Added
+
+- `warden pilot prepare --spec FILE --output DIR`: deterministic offline preparation of an
+  external-pilot bundle from an explicit JSON spec (task, target, separate baseline and
+  acceptance commands, two existing profiles). Writes a new reviewable directory with target
+  YAML, isolated config home, observation sheet and runbook. Validates with existing parsers
+  before publish; never overwrites DIR; never edits the target checkout or global home; never
+  runs checks or vendors. One P2 slice — not all of P2, not P2PLAN-17, not P3/P4.
 
 - `examples/pilot/`: opt-in policy, task template, measurement protocol and a per-trial
   observation sheet for one observed external trial with a fixed writer, independent

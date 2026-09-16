@@ -24,6 +24,7 @@ import dev.warden.ledger.RunReport;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
 import dev.warden.run.DoCommand;
+import dev.warden.run.PilotPrepareCommand;
 import dev.warden.run.Preparation;
 import dev.warden.run.TaskLoop;
 
@@ -72,6 +73,7 @@ public final class Main {
                 case "status" -> status(args);
                 case "approve" -> approve(args);
                 case "land" -> land(args);
+                case "pilot" -> pilot(args);
                 default -> {
                     System.err.println("warden: unknown command '" + args[0] + "'");
                     usage();
@@ -134,6 +136,20 @@ public final class Main {
             new java.util.concurrent.CountDownLatch(1).await();
         }
         return 0;
+    }
+
+    /**
+     * Offline external-pilot preparation. Writes a reviewable bundle; never runs the target,
+     * never calls a vendor, never edits the target checkout or the global home.
+     */
+    private static int pilot(String[] args) {
+        if (args.length < 2 || args[1].equals("--help") || args[1].equals("-h")) {
+            usage();
+            return args.length < 2 ? 2 : 0;
+        }
+        PilotPrepareCommand.Outcome outcome = new PilotPrepareCommand().run(args);
+        System.out.println(Json.write(outcome.report()));
+        return outcome.exitCode();
     }
 
     private static int init(String[] args) throws Exception {
@@ -996,6 +1012,14 @@ public final class Main {
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
                   warden init [--base-ref REF] create a conservative project starter config
+                  warden pilot prepare --spec FILE --output DIR
+                                           write a self-contained offline pilot bundle from
+                                           an explicit JSON spec: target project/task YAML,
+                                           isolated config home with two selected profiles,
+                                           observation sheet and operator runbook. Never
+                                           overwrites DIR, never edits the target checkout
+                                           or global home, never runs checks or vendors.
+                                           Does not close all of P2 or implement P3/P4.
                   warden validate <task>       validate and resolve the project task contract
                   warden gates <task>          preflight and machine gates only; spends nothing
                   warden visual-qa <task>      launch preview, screenshot, assert control visibility

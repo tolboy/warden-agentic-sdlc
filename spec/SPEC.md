@@ -299,6 +299,9 @@ warden profiles             which profiles load, which are eligible, and why not
 warden profiles --verify N  run profile N's own probe; stamps verified_on when it passes
 warden init                 create .warden/project.yaml, inferring checks from package.json,
                             build.gradle(.kts), pom.xml, Cargo.toml or Makefile
+warden pilot prepare        write a reviewable offline pilot bundle from an explicit JSON
+                            spec (`--spec FILE --output DIR`). Does not run the target or
+                            call vendors. See examples/pilot/README.md
 warden doctor               what is installed, authenticated, and misconfigured
 warden do "<goal>"          the whole workflow: isolation (Orca), a task, the loop; stops
                             before a human. --project DIR --scope NAME --in-place --dry-run

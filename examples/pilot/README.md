@@ -4,12 +4,53 @@ This opt-in template tests whether Warden reduces active operator time on a real
 bounded, **non-visual** task. It is not a new global default or an implementation of
 the full P3/P4 roadmap. No target project or paid run is selected by these files.
 
+## Offline preparation command
+
+`warden pilot prepare` is the bounded P2 slice that turns one explicit JSON spec into a
+reviewable bundle so the YAML below does not have to be copied by hand. It is **not** a
+planner, **not** a live run, and it does **not** close all of P2 or P2PLAN-17.
+
+```text
+warden pilot prepare --spec examples/pilot/prepare-spec.json --output <new-directory>
+```
+
+The spec names the task id, Unicode-safe goal, target checkout/base, explicit scope,
+separate baseline and acceptance command lists, two existing writer/reviewer profiles in
+a source config home, and the existing budget/time fields. Unknown keys are refused.
+Commands are never inferred from the goal.
+
+The output directory must not already exist. The bundle contains:
+
+- `target/.warden/project.yaml` and `tasks/<id>.yaml` — to install later at
+  `<target-checkout>/.warden`. The command does not write into the target checkout.
+- `config/` — isolated policy home with the shipped three-stage pilot policy and the two
+  remapped profiles (`pilot-implement`, `pilot-review`) plus their prompt/schema files.
+- `RUNBOOK.md`, `observations.md`, `prepare-report.json`.
+
+It copies only the selected profiles and declared relative resources. Absolute operational
+dependencies are reported unresolved rather than copied. Symlinks, `..` escapes, secrets and
+environment files are refused. `verified_on`, model, effort and grants are kept as they were.
+
+The command does not execute configured checks, call vendors, invoke `run`/`do`/`role`, or
+change the global home. Generated files are validated with the existing parsers before the
+bundle is published. Failure does not leave a directory advertised as ready.
+
+A suite being repaired must not appear in the green baseline. Reproduction may be declared
+for the runbook; it is recorded `not_run`. Semantic acceptance strength, quota, runtime
+authentication and live readiness are not proven by preparation.
+
+The committed [prepare-spec.json](prepare-spec.json) uses `REPLACE-WITH-TARGET-CHECKOUT` and
+`REPLACE-WITH-WARDEN-CONFIG-HOME` so it stays portable and does not name a local path.
+Replace those with real paths before running it. [sample-runbook.md](sample-runbook.md)
+shows the generated runbook shape.
+
 ## Prepare once
 
 1. Choose a real bugfix or small feature with a working baseline build/test and an
    independently observable acceptance check. Use an isolated checkout of the target
    repository. Record its base commit. Do not choose a UI task and remove its visual
-   checks merely to fit this template.
+   checks merely to fit this template. Prefer `warden pilot prepare` over hand-editing
+   every YAML file; still review the bundle before installing it.
 2. Choose a separate, durable pilot configuration directory. Set `WARDEN_CONFIG_HOME`
    to that directory **before** `warden setup`; the normal home and policy stay unchanged.
    Keep this home after deleting the target worktree: its `ledger/` is the measurement corpus.
