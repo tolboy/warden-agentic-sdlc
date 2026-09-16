@@ -43,6 +43,11 @@ public final class TaskLoopTest implements Suite {
             TaskLoop.Outcome ok = loop(clean, home, "r1");
             check.that("a clean run succeeds", ok.ok());
             check.eq("and stops at the human gate", "human_gate", ok.nextAction());
+            Object readyNext = ok.summaryReport().get("next_step");
+            check.that("ready_for_human writes next_step beside safe_next_step",
+                    readyNext instanceof Map<?, ?>);
+            check.eq("and the kind is accept_or_reject", "accept_or_reject",
+                    readyNext instanceof Map<?, ?> map ? map.get("kind") : readyNext);
             check.eq("no fix rounds were needed", 0L, ok.summaryReport().get("attempts_used"));
             check.that("the orchestrator lands nothing itself",
                     !Files.exists(clean.resolve(".git/MERGE_HEAD")));
@@ -1876,7 +1881,8 @@ public final class TaskLoopTest implements Suite {
         check.contains("the rendered report keeps the review apart from the stop", rendered,
                 "the candidate passed every review that ran");
         check.contains("names what the chain still owes", rendered, "review-second (not_reached)");
-        check.contains("and prints the command that continues it", rendered, "do next");
+        check.contains("and prints the command that continues it", rendered,
+                "warden run hello --continue lr1");
 
         // The same chain with room to work, back on the default reserve: nothing about the
         // full mode prevents a run whose ceiling actually fits.
@@ -2333,6 +2339,11 @@ public final class TaskLoopTest implements Suite {
         check.contains("the next step points at the task, not another fix",
                 String.valueOf(stopped.summaryReport().get("safe_next_step")),
                 "not the implementer's to close");
+        Object stopNext = stopped.summaryReport().get("next_step");
+        check.that("a stop writes next_step beside safe_next_step",
+                stopNext instanceof Map<?, ?>);
+        check.eq("and a contract_gap stop is fix_contract", "fix_contract",
+                stopNext instanceof Map<?, ?> map ? map.get("kind") : stopNext);
         Map<String, Object> filed =
                 ((List<Map<String, Object>>) ((List<Map<String, Object>>) stopped.summaryReport()
                         .get("finding_history")).get(0).get("findings")).get(0);

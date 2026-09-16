@@ -2,6 +2,8 @@ package dev.warden;
 
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.ledger.LedgerReader;
+import dev.warden.ledger.RunReport;
+import dev.warden.run.NextStep;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
@@ -181,6 +183,54 @@ public final class LedgerTest implements Suite {
                     timeoutFailures.get("configuration"));
             check.eq("and is not counted as a baseline or acceptance failure", 0L,
                     timeoutFailures.get("baseline"));
+
+            Path reported = root.resolve("next-step-report");
+            Files.createDirectories(reported.resolve(".warden"));
+            Files.writeString(reported.resolve(".warden/project.yaml"),
+                    "version: 1\nproject: fixture\n");
+            Map<String, Object> nextSummary = new LinkedHashMap<>();
+            nextSummary.put("run_id", "ns-report");
+            nextSummary.put("task_id", "hello");
+            nextSummary.put("ok", false);
+            nextSummary.put("reason", "blocking_findings_remain");
+            nextSummary.put("next_action", "human_escalation");
+            nextSummary.put("acceptance_sha256", "abc123sha");
+            nextSummary.put("acceptance_commands", List.of("echo water visible"));
+            nextSummary.put("nonactionable_blocking_ids", List.of("acceptance-too-weak"));
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("id", "acceptance-too-weak");
+            gap.put("severity", "P1");
+            gap.put("category", "contract_gap");
+            gap.put("path", ".warden/tasks/hello.yaml");
+            gap.put("message", "the acceptance command matches a substring");
+            gap.put("suggestion", "require an exact match");
+            nextSummary.put("finding_history", List.of(Map.of("stage", "review", "findings", List.of(gap))));
+            nextSummary.put("next_step", NextStep.of("blocking_findings_remain", nextSummary, reported));
+            new EvidenceLedger(reported, "ns-report").writeReport("task-run", nextSummary);
+            Map<String, Object> joined = new RunReport().of(reported, "ns-report");
+            check.that("the joined report projects next_step",
+                    joined.get("next_step") instanceof Map<?, ?>);
+            check.eq("kind survives the join", "fix_contract",
+                    ((Map<?, ?>) joined.get("next_step")).get("kind"));
+            String rendered = RunReport.render(joined);
+            check.contains("render prints the structured block", rendered, "next     fix_contract");
+
+            Path older = root.resolve("old-report");
+            Files.createDirectories(older.resolve(".warden"));
+            Files.writeString(older.resolve(".warden/project.yaml"),
+                    "version: 1\nproject: fixture\n");
+            Map<String, Object> oldSummary = new LinkedHashMap<>();
+            oldSummary.put("run_id", "old-report");
+            oldSummary.put("task_id", "hello");
+            oldSummary.put("ok", false);
+            oldSummary.put("reason", "budget_exhausted");
+            oldSummary.put("next_action", "human_escalation");
+            oldSummary.put("safe_next_step", "warden approve old-report --decision retry");
+            new EvidenceLedger(older, "old-report").writeReport("task-run", oldSummary);
+            String oldText = RunReport.render(new RunReport().of(older, "old-report"));
+            check.contains("an old summary still renders the one-line next step", oldText,
+                    "do next  warden approve old-report --decision retry");
+            check.that("and does not invent a structured block", !oldText.contains("next     "));
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);

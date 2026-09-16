@@ -768,6 +768,7 @@ public final class TaskLoop {
 
         summary.put("reason", "ready_for_human");
         summary.put("safe_next_step", "warden approve " + runId + " --decision accept|reject");
+        summary.put("next_step", NextStep.of("ready_for_human", summary, root));
         summary.put("next_action", "human_gate");
         Path file = ledger.writeReport("task-run", summary);
         // Named, not asserted. The chain is declared now, so "all machine, review and visual
@@ -3379,6 +3380,7 @@ public final class TaskLoop {
         describeCompletion(summary);
         describeInfrastructureStop(reason, summary, steps);
         summary.put("safe_next_step", safeNextStep(reason, summary));
+        summary.put("next_step", NextStep.of(reason, summary, ledger.projectRoot()));
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
         Object base = summary.get("diff_base_commit");

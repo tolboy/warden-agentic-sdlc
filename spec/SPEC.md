@@ -369,6 +369,11 @@ warden run <task>           the whole loop; stops before a human
                             had in force (does not dispatch a planner)
                             --no-orca-gate does not mirror the pending decision
                             into Orca
+                            --wait-for-gate N  after the loop, wait up to N minutes
+                            (1..1440) for a published Orca gate and import the
+                            answer. Imports one decision and exits; never starts,
+                            retries or continues a run. Skipped when no gate was
+                            published, with the reason named in the output
 warden ledger               a table of runs: verdicts, cost, time, findings.
                             Default is local `.warden/runs`. `--global` reads the
                             home corpus from outside a repository, filtered by
@@ -379,10 +384,15 @@ warden ledger               a table of runs: verdicts, cost, time, findings.
                             same allowlist. Incomplete sources mark the report
                             incomplete rather than stating exact spend.
 warden report <run-id>      one run joined: stages, vendors, cost, tokens, screenshots,
-                            changed files, the human decision. --text for the table
+                            changed files, the human decision, and `next_step` when
+                            the summary has one. --text prints a next-step block
+                            (kind, sentence, numbered commands, edits, consequences,
+                            findings with suggestions) in place of the one-line
+                            `safe_next_step` for summaries that have `next_step`
 warden status [run-id]      pending and resolved human decisions
                             --worktrees lists pending decisions across every
-                            worktree of this repository
+                            worktree of this repository. `status <run-id>` includes
+                            `next_step` from that run's summary when it exists
 warden approve <run-id>     record a decision; never lands changes.
                             Must be run from the worktree the run lives in.
                             Outside a Warden project the code is
@@ -390,6 +400,17 @@ warden approve <run-id>     record a decision; never lands changes.
                             --from-orca takes the answer from the Orca decision
                             gate the run published, so a decision can be made
                             from another machine or a phone
+                            --wait-minutes N  with --from-orca, poll up to N
+                            minutes (1..1440) while the gate is `pending` or
+                            unreadable, backoff 5s then ×1.5 capped at 10s.
+                            Every other failure (`no_orca_gate`, `stale_decision`,
+                            `gate_resolution_unmapped`, `orca_lifecycle_unreadable`,
+                            `candidate_changed`, a decision already resolved)
+                            fails on the first poll. A deadline exits 1 with
+                            `gate_pending`, waited_seconds, polls, last_error and
+                            next_step, and changes nothing on disk. No answer is
+                            never accept or reject. The wait imports one decision
+                            and never starts a run
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```
@@ -496,6 +517,11 @@ not defensiveness about Orca: measured on 1.4.196, `gate-resolve` takes free tex
 declared option, and re-resolving a settled gate replaces the answer. Both are reasonable for a
 primitive that coordinates agents, and neither may reach an authorization record. `decision.json`
 stays the only decision.
+
+`--wait-minutes N` on that same command (and `warden run --wait-for-gate N`) polls while the
+gate is pending or unreadable, then runs the same validations on the answer that is finally
+imported. The wait never starts, retries or continues a run. A deadline is `gate_pending`
+with the decision file unchanged; silence is not an accept or a reject.
 
 A Conductor node, when one is used, looks like this:
 

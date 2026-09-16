@@ -87,6 +87,21 @@ that exists in code but has never been run live says so.
 - `warden pilot prepare` validates reproduction membership in acceptance, writes `reproduce`
   into the task, and reports `enforced_by_warden_run`; omission explicitly leaves acceptance
   strength unchecked. This is fixture-tested and makes no live-pilot claim.
+- Reviewer findings carry a vendor `suggestion` when one was supplied, omitted otherwise.
+  It is not part of finding identity, derivation, registry comparisons or any hash.
+- A structured `next_step` beside `safe_next_step` on a stop and on `ready_for_human`: kind,
+  one sentence, the complete commands with real run and task ids, edits, consequences, and
+  (for `fix_contract` / `repair_or_retry`) the open blocking findings with suggestions. A
+  `contract_gap` names the task file, the acceptance currently in force, the reviewer's
+  suggestion and that editing it moves `acceptance_sha256`, so no verdict of this run can be
+  reused. `warden report --text` prints the block when the field exists and keeps the
+  one-line sentence for older summaries; `warden status <run-id>` includes it when present.
+- `warden approve <run-id> --from-orca --wait-minutes N` (1..1440): bounded poll, 5 s then
+  ×1.5 capped at 10 s, while the Orca gate is pending or unreadable. The answer that is
+  finally imported still goes through the existing validations. A deadline is `gate_pending`
+  with the decision file unchanged; no answer is never accept or reject. The wait never
+  starts, retries or continues a run. `warden run --wait-for-gate N` is the same waiter after
+  the loop, skipped (with the reason) when no gate was published.
 - `warden pilot prepare --spec FILE --output DIR`: deterministic offline preparation of an
   external-pilot bundle from an explicit JSON spec (task, target, separate baseline and
   acceptance commands, two existing profiles). Writes a new reviewable directory with target

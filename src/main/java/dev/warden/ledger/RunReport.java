@@ -5,6 +5,7 @@ import dev.warden.config.Workflow;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
+import dev.warden.run.NextStep;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -83,6 +84,7 @@ public final class RunReport {
         report.put("budget_reserve", summary.get("budget_reserve"));
         report.put("budget_limit_hit", summary.get("budget_limit_hit"));
         report.put("safe_next_step", summary.get("safe_next_step"));
+        report.put("next_step", summary.get("next_step"));
         // What a continuation refused to carry over, and why. A run that paid for a stage it
         // could have inherited should be able to say which term moved.
         report.put("reused_judgements", summary.get("reused_judgements"));
@@ -537,7 +539,11 @@ public final class RunReport {
             out.append("owed     the workflow did not finish: ")
                     .append(String.join(", ", owed)).append('\n');
         }
-        if (report.get("safe_next_step") instanceof String step) {
+        if (report.get("next_step") instanceof Map<?, ?> structured) {
+            // A structured step names the kind, the commands with real ids, and what is
+            // kept. The one-line sentence stays on older summaries that never had one.
+            NextStep.render(out, structured);
+        } else if (report.get("safe_next_step") instanceof String step) {
             out.append("do next  ").append(step).append('\n');
         }
 

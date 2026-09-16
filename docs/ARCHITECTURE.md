@@ -561,6 +561,15 @@ reported `budget_exhausted` and nothing else.
   passed, was rechecked after a browser repair and came back with a P1 stayed listed as a
   stage that had passed.
 - `safe_next_step` — the one command that moves the run forward without paying twice.
+- `next_step` — the same diagnosis, structured: a `kind`, a sentence, the complete commands
+  with the real run and task ids filled in, the files to edit, what is kept, and (for a
+  contract gap or a remaining product defect) the open blocking findings with their
+  suggestions. `warden report --text` prints the block when the field exists and falls back
+  to the one-line sentence for older summaries. `warden status <run-id>` copies it from the
+  summary when it is there. A `contract_gap` names the task file, the acceptance currently
+  in force, the reviewer's suggestion and the `acceptance_sha256` consequence: editing the
+  acceptance invalidates every verdict of this run, so the next run is a new run, not a
+  `--continue`.
 
 Neither of the first two implies the other, and a run can legitimately be a pass on one and a
 no on the other.
@@ -675,7 +684,11 @@ is not.
 `decision.json` is the decision. What the Orca gate adds is reach: a run stops for a person,
 and the person is not at the worktree. So the pending decision is mirrored into Orca as a
 decision gate carrying Warden's own options, and `warden approve --from-orca` carries the
-answer back.
+answer back. `--wait-minutes N` (1..1440) polls that same import while the gate is pending
+or unreadable, with 5 s then ×1.5 capped at 10 s, and then exits. `warden run --wait-for-gate N`
+is the same waiter after the loop, skipped when no gate was published. Neither starts a run.
+A deadline is `gate_pending` and leaves the decision file untouched; no answer is never
+accept or reject.
 
 The mirror decides nothing, and that is enforced rather than trusted. An imported answer is
 admitted only if it maps exactly onto one of the decision's declared options, only while the
