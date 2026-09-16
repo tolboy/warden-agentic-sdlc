@@ -147,6 +147,28 @@ starts with less than a minute left, and each call's wall clock is lowered to wh
 a chain may overrun by less than a minute. Hitting any of them stops with `budget_exhausted`
 and names the limit in `budget_limit_hit`.
 
+Optional task `reproduce: ["check-set-name", "literal command"]` resolves with the same
+rules as list-form `checks`. Every resolved command must be in acceptance and none may be
+in the baseline. It participates in `acceptance_sha256`: changing the red proof contract
+invalidates prior evidence. After a green baseline and before any vendor, an unchanged
+source tree runs all reproduction commands; each must exit non-zero without timing out.
+A zero exit stops `reproduction_passed_before_change`, names the passing commands and asks
+for stronger acceptance in a new run. A timeout, a command the shell cannot find (exit 127 from
+`sh`, or cmd.exe's English "is not recognized" message), an internal gate error or a
+source mutation stops `reproduction_inconclusive`. Both stop with no vendor dispatched.
+
+The `reproduction` step writes `<run>--reproduction-0/reproduction-gate.json`; the summary
+records `reproduction_ok`, command results, report path and SHA-256. A candidate is never
+used to rerun reproduction. A continuation carries proof only with `reproduction_ok: true`,
+the same acceptance hash and diff base, and a matching on-disk report checksum; otherwise
+it records `reproduction_status: not_run_candidate_present` and continues. Dry runs list
+the commands that must fail and record a `dry_run` reproduction step without execution.
+
+`warden pilot prepare` requires a declared `reproduction.command` to be in
+`checks.acceptance` and writes it into the task's `reproduce` list. Preparation executes
+nothing: `reproduction_check.status` is `enforced_by_warden_run`, or `not_declared` when
+omitted (acceptance strength is then unchecked).
+
 **A task with no executable acceptance criterion is not accepted.** This is not pedantry:
 every known successful agent deployment works on mechanically checkable work, and the task
 linter is the place where that requirement becomes mandatory rather than aspirational.

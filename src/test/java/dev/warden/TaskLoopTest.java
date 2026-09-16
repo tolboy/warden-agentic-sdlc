@@ -248,6 +248,7 @@ public final class TaskLoopTest implements Suite {
             check.eq("and says what it would have stopped for", "preflight_outside_scope",
                     previewed.summaryReport().get("would_stop"));
 
+            reproductionChecks(check, sandbox, home);
             baselineChecks(check, sandbox, home);
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
@@ -3079,6 +3080,111 @@ public final class TaskLoopTest implements Suite {
         ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
         return new TaskLoop(new ProcessRunner()).withWorkspace(board)
                 .run(loaded, UserConfig.load(home), runId, true);
+    }
+
+    /**
+     * The acceptance is shown to fail before anybody is paid to make it pass. A check that is
+     * green on the unchanged tree cannot prove the change, and the first external trial paid
+     * two readings to learn that about one of its scenarios.
+     */
+    private void reproductionChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path green = newProject(sandbox, "reproduction-green");
+        String pass = WINDOWS ? "exit /b 0" : "exit 0";
+        Path greenTask = green.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(greenTask, Files.readString(greenTask)
+                + "acceptance: [" + yaml(pass) + "]\nreproduce: [" + yaml(pass) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-green", 1, 1);
+        TaskLoop.Outcome refused = loop(green, home, "repro-green");
+        check.that("green reproduction stops before any stub vendor with a named resolution",
+                "reproduction_passed_before_change".equals(refused.reason())
+                        && Long.valueOf(0).equals(refused.summaryReport().get("role_runs"))
+                        && !Files.exists(sandbox.resolve("reproduction-green-impl.count"))
+                        && String.valueOf(refused.summaryReport().get("resolution")).contains(pass)
+                        && String.valueOf(refused.summaryReport().get("safe_next_step"))
+                                .contains("acceptance does not detect the defect"));
+
+        Path red = newProject(sandbox, "reproduction-red");
+        Path task = red.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "reproduce: [fast]\n");
+        writeProfiles(home, sandbox, "reproduction-red", 1, 1);
+        java.util.ArrayList<String> previewLines = new java.util.ArrayList<>();
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner()).withProgress(previewLines::add)
+                .run(new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-preview", true);
+        check.that("dry reproduction lists commands and runs neither gates nor vendors",
+                steps(preview).stream().anyMatch(row -> "reproduction".equals(row.get("step"))
+                        && Boolean.TRUE.equals(row.get("dry_run")))
+                        && previewLines.stream().anyMatch(line -> line.contains("must fail before any vendor"))
+                        && !Files.exists(red.resolve(".warden/runs/repro-preview--reproduction-0"))
+                        && !Files.exists(sandbox.resolve("reproduction-red-impl.count")));
+        TaskLoop.Outcome proved = loop(red, home, "repro-red");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> results = (List<Map<String, Object>>) proved.summaryReport()
+                .getOrDefault("reproduction_results", List.of());
+        check.that("red reproduction records exit one and proof before the normal engine succeeds",
+                proved.ok() && Boolean.TRUE.equals(proved.summaryReport().get("reproduction_ok"))
+                        && results.size() == 1 && Long.valueOf(1).equals(results.get(0).get("exit_code"))
+                        && "reproduction".equals(steps(proved).get(0).get("step")));
+        Path report = red.resolve(".warden/runs/repro-red--reproduction-0/reproduction-gate.json");
+        check.that("red proof retains the report checksum",
+                Files.isRegularFile(report) && dev.warden.git.GitRepository.contentSha256(report)
+                        .equals(proved.summaryReport().get("reproduction_report_sha256")));
+        Files.writeString(red.resolve("src/moved.txt"), "candidate moved after proof\n");
+        TaskLoop.Outcome carried = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-carried", false,
+                Map.of(), new TaskLoop.Continuation("repro-red", null, true));
+        check.that("a moved candidate carries verified red proof without rerunning reproduction",
+                Boolean.TRUE.equals(carried.summaryReport().get("reproduction_ok"))
+                        && "repro-red".equals(carried.summaryReport().get("reproduction_reused_from"))
+                        && !Files.exists(red.resolve(".warden/runs/repro-carried--reproduction-0")));
+        Path priorSummary = red.resolve(".warden/runs/repro-red/task-run.json");
+        String originalSummary = Files.readString(priorSummary);
+        String originalReport = Files.readString(report);
+        // Each independent receipt binding matters: a red verdict about different terms,
+        // another base, or bytes no longer on disk says nothing about this continuation.
+        for (String damaged : List.of("checksum", "missing", "acceptance_sha256", "diff_base_commit", "reproduction_ok")) {
+            Map<String, Object> altered = Json.parseObject(originalSummary);
+            if (damaged.equals("checksum")) Files.writeString(report, originalReport + " ");
+            else if (damaged.equals("missing")) Files.delete(report);
+            else altered.put(damaged, damaged.equals("reproduction_ok") ? false : "different");
+            Files.writeString(priorSummary, Json.writePretty(altered));
+            TaskLoop.Outcome unverified = new TaskLoop(new ProcessRunner()).run(
+                    new ConfigLoader().load(red, "hello"), UserConfig.load(home), "repro-" + damaged.replace('_', '-'),
+                    false, Map.of(), new TaskLoop.Continuation("repro-red", null, true));
+            check.that("candidate with " + damaged + " proof declines reuse without stopping or rerunning",
+                    "not_run_candidate_present".equals(unverified.summaryReport().get("reproduction_status"))
+                            && unverified.ok() && !Boolean.TRUE.equals(unverified.summaryReport().get("reproduction_ok")));
+            Files.writeString(report, originalReport);
+            Files.writeString(priorSummary, originalSummary);
+        }
+
+        // A command that does not exist fails too, and proves nothing.
+        Path missing = newProject(sandbox, "reproduction-missing");
+        String absent = "warden-no-such-command-for-reproduction";
+        Path missingTask = missing.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(missingTask, Files.readString(missingTask)
+                + "acceptance: [" + yaml(absent) + "]\nreproduce: [" + yaml(absent) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-missing", 1, 1);
+        TaskLoop.Outcome notFound = loop(missing, home, "repro-missing");
+        check.eq("a reproduction command the shell cannot find is not a red base",
+                "reproduction_inconclusive", notFound.reason());
+        check.eq("and says why", "reproduction_command_not_found",
+                notFound.summaryReport().get("reproduction_code"));
+        check.eq("before any vendor is paid", 0L, notFound.summaryReport().get("role_runs"));
+
+        Path mutating = newProject(sandbox, "reproduction-mutates");
+        String mutation = WINDOWS ? "echo changed>src/mutated.txt & exit /b 1"
+                : "echo changed > src/mutated.txt; exit 1";
+        Path mutationTask = mutating.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(mutationTask, Files.readString(mutationTask)
+                + "acceptance: [" + yaml(mutation) + "]\nreproduce: [" + yaml(mutation) + "]\n");
+        writeProfiles(home, sandbox, "reproduction-mutates", 1, 1);
+        TaskLoop.Outcome inconclusive = loop(mutating, home, "repro-mutates");
+        check.that("a command that mutates source is inconclusive and pays no vendor",
+                "reproduction_inconclusive".equals(inconclusive.reason())
+                        && "reproduction_mutated_source".equals(inconclusive.summaryReport().get("reproduction_code"))
+                        && Long.valueOf(0).equals(inconclusive.summaryReport().get("role_runs"))
+                        && String.valueOf(inconclusive.summaryReport().get("safe_next_step"))
+                                .contains("could not establish a red base"));
     }
 
     /**

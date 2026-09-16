@@ -41,4 +41,7 @@ authorisation. Green baseline, quota, authentication and live readiness remain u
 
 - Green baseline: the commands that must already pass, never the suite being repaired.
 - Red acceptance: the independent check the writer is asked to restore.
-- Reproduction: recorded for the observation sheet; still `not_run` until the operator runs it.
+- Reproduction: `npm run test:red`, also listed in acceptance and generated task `reproduce`.
+  Status: `enforced_by_warden_run`. The live run refuses to dispatch if the command passes
+  on the unchanged base; timeout is inconclusive. Preparation does not execute it.
+  When reproduction is omitted, status is `not_declared` and acceptance strength is unchecked.

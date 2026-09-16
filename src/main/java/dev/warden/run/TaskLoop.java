@@ -620,6 +620,68 @@ public final class TaskLoop {
                 }
             }
         }
+        if (!task.reproduceCommands().isEmpty()) {
+            summary.put("reproduction_commands", task.reproduceCommands());
+            if (dryRun) {
+                steps.add(Map.of("step", "reproduction", "attempt", 0L, "dry_run", true));
+                progress.line("red   must fail before any vendor is dispatched: "
+                        + String.join(", ", task.reproduceCommands()));
+            } else if (!WardenTree.sourcePaths(git.changedPaths(diffBaseCommit)).isEmpty()) {
+                // A candidate cannot demonstrate the original defect. Only a verified receipt
+                // from this continuation can speak for the base; missing proof is made visible.
+                ReproductionReceipt receipt = carried.continuesRun()
+                        ? reusableReproduction(root, carried.fromRunId(), task.id(),
+                                String.valueOf(summary.get("acceptance_sha256")), diffBaseCommit)
+                        : null;
+                if (receipt == null) {
+                    summary.put("reproduction_status", "not_run_candidate_present");
+                    steps.add(Map.of("step", "reproduction", "attempt", 0L,
+                            "status", "not_run_candidate_present"));
+                    progress.line("red   not_run_candidate_present: no verified base proof; "
+                            + "reproduction cannot run on a candidate");
+                } else {
+                    summary.put("reproduction_ok", true);
+                    summary.put("reproduction_status", "reused");
+                    summary.put("reproduction_reused_from", receipt.runId());
+                    summary.put("reproduction_receipt_run", receipt.runId());
+                    summary.put("reproduction_report", receipt.report().toString());
+                    summary.put("reproduction_report_sha256", receipt.sha256());
+                    summary.put("reproduction_results", receipt.commands());
+                    steps.add(Map.of("step", "reproduction", "attempt", 0L, "ok", true,
+                            "reused", true, "reused_from", receipt.runId(),
+                            "report", receipt.report().toString()));
+                    progress.line("red   reused verified base proof from " + receipt.runId());
+                }
+            } else {
+                progress.line("red   checking acceptance fails before the first vendor: "
+                        + String.join(", ", task.reproduceCommands()));
+                GateRunner.Outcome reproduction;
+                try (Heartbeat alive = Heartbeat.over("reproduction gates", progress, workspace)) {
+                    reproduction = gates.runReproduction(loaded, stepRunId(runId, "reproduction", 0),
+                            configSnapshot, diffBaseCommit);
+                }
+                steps.add(Map.of("step", "reproduction", "attempt", 0L, "ok", reproduction.ok(),
+                        "code", reproduction.code(), "report", reproduction.report().toString()));
+                summary.put("reproduction_ok", reproduction.ok());
+                summary.put("reproduction_code", reproduction.code());
+                summary.put("reproduction_report", reproduction.report().toString());
+                summary.put("reproduction_report_sha256", GitRepository.contentSha256(reproduction.report()));
+                summary.put("reproduction_results", reproduction.data().getOrDefault("commands", List.of()));
+                if (!reproduction.ok()) {
+                    String reason = "reproduction_passed_before_change".equals(reproduction.code())
+                            ? "reproduction_passed_before_change" : "reproduction_inconclusive";
+                    summary.put("resolution", "reproduction_passed_before_change".equals(reason)
+                            ? "Acceptance already passed on the unchanged tree: "
+                                    + reproduction.data().get("passed_commands")
+                            : "Reproduction did not prove the defect: " + reproduction.code());
+                    progress.line("red   " + reason + "; no vendor dispatched");
+                    return stop(ledger, summary, reason, steps, 0, budget);
+                }
+                summary.put("reproduction_receipt_run", runId);
+                summary.put("reproduction_status", "proved_on_base");
+                progress.line("red   every reproduction command failed on the unchanged tree");
+            }
+        }
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
                 progress, carried, reusable, callPlan);
@@ -2583,6 +2645,50 @@ public final class TaskLoop {
         }
     }
 
+    /** A prior run's persisted proof that every reproduction command failed on the base. */
+    private record ReproductionReceipt(String runId, Path report, String sha256, Object commands) {}
+
+    /**
+     * The candidate is expected to move after red proof. Bind reuse to the acceptance and
+     * immutable base instead, and verify the original on-disk receipt even across multiple
+     * continuations. A missing, redirected or corrupted receipt never becomes proof.
+     */
+    private ReproductionReceipt reusableReproduction(Path root, String priorRunId, String taskId,
+                                                       String acceptanceHash, String diffBaseCommit) {
+        try {
+            Path evidenceRoot = root.resolve(".warden/runs").toAbsolutePath().normalize();
+            Map<String, Object> prior = Json.parseObject(Files.readString(
+                    evidenceRoot.resolve(priorRunId).resolve("task-run.json")));
+            if (!Boolean.TRUE.equals(prior.get("reproduction_ok"))
+                    || !taskId.equals(prior.get("task_id"))
+                    || !acceptanceHash.equals(prior.get("acceptance_sha256"))
+                    || !diffBaseCommit.equals(prior.get("diff_base_commit"))) return null;
+            Object reportText = prior.get("reproduction_report");
+            Object receiptRunBody = prior.get("reproduction_receipt_run");
+            String receiptRun = receiptRunBody instanceof String value && !value.isBlank()
+                    ? value : priorRunId;
+            if (!(reportText instanceof String text) || text.isBlank()) return null;
+            Path report = Path.of(text);
+            if (!report.isAbsolute()) report = root.resolve(report);
+            report = report.toAbsolutePath().normalize();
+            Path expected = evidenceRoot.resolve(receiptRun + "--reproduction-0")
+                    .resolve("reproduction-gate.json").normalize();
+            if (!expected.startsWith(evidenceRoot) || !report.equals(expected)
+                    || !Files.isRegularFile(report)) return null;
+            String hash = GitRepository.contentSha256(report);
+            if (!hash.equals(prior.get("reproduction_report_sha256"))) return null;
+            Map<String, Object> receipt = Json.parseObject(Files.readString(report));
+            if (!"reproduction".equals(receipt.get("phase"))
+                    || !Boolean.TRUE.equals(receipt.get("ok"))
+                    || !"passed".equals(receipt.get("code"))
+                    || !taskId.equals(receipt.get("task_id"))
+                    || !diffBaseCommit.equals(receipt.get("merge_base"))) return null;
+            return new ReproductionReceipt(receiptRun, report, hash, receipt.get("commands"));
+        } catch (Exception unreadable) {
+            return null;
+        }
+    }
+
     /** A prior run's independently persisted proof that project checks started green. */
     private record BaselineReceipt(String runId, Path report, String sha256) {}
 
@@ -3487,6 +3593,12 @@ public final class TaskLoop {
                 yield "read `warden report " + runId + " --text`, then either address what it "
                         + "names and start a new run, or " + carryOn;
             }
+            case "reproduction_passed_before_change" -> "the acceptance does not detect the defect. "
+                    + "Strengthen the named check or pick an acceptance command that fails today, "
+                    + "then start a new run; --continue carries no proof after the contract changes.";
+            case "reproduction_inconclusive" -> "the reproduction could not establish a red base. "
+                    + "Resolve the timeout or gate error and start a new run on the unchanged tree "
+                    + "before paying a vendor.";
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";

@@ -78,6 +78,15 @@ that exists in code but has never been run live says so.
   lowered call that times out stops as `budget_exhausted` with `budget_limit_hit:
   max_elapsed_minutes`. Gates keep `timeout_minutes`. Suite-covered with a test clock; not a
   live claim.
+- Optional task `reproduce` proves the acceptance fails on the unchanged source tree before
+  the first vendor call. Green reproduction stops `reproduction_passed_before_change`;
+  a timeout, a command the shell cannot find, an internal error or a source mutation stops
+  `reproduction_inconclusive`. Continuations over candidates carry only verified evidence for
+  the same acceptance and diff base; missing proof is recorded without stopping. Dry-run
+  previews the checks. A task without `reproduce` keeps its acceptance hash.
+- `warden pilot prepare` validates reproduction membership in acceptance, writes `reproduce`
+  into the task, and reports `enforced_by_warden_run`; omission explicitly leaves acceptance
+  strength unchecked. This is fixture-tested and makes no live-pilot claim.
 - `warden pilot prepare --spec FILE --output DIR`: deterministic offline preparation of an
   external-pilot bundle from an explicit JSON spec (task, target, separate baseline and
   acceptance commands, two existing profiles). Writes a new reviewable directory with target

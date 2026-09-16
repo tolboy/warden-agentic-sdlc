@@ -475,6 +475,9 @@ public final class PilotPrepareCommand {
         yaml.append("risk: ").append(spec.risk()).append('\n');
         yaml.append("scope: ").append(PilotPrepareSpec.SCOPE_NAME).append('\n');
         yaml.append("checks: ").append(PilotPrepareSpec.ACCEPTANCE_CHECK_NAME).append('\n');
+        if (spec.reproductionCommand() != null) {
+            yaml.append("reproduce: [").append(TaskDraft.quote(spec.reproductionCommand())).append("]\n");
+        }
         yaml.append("authority:\n");
         yaml.append("  workspace_write: true\n");
         yaml.append("  network: false\n");
@@ -734,17 +737,15 @@ public final class PilotPrepareCommand {
         report.put("not_proven", notProven);
         report.put("preview", preview);
         report.put("reproduction_check", Map.of(
-                "command", spec.reproductionCommand() == null
-                        ? spec.acceptanceCommands().get(0) : spec.reproductionCommand(),
-                "status", "not_run",
-                "note", "Independent negative/reproduction check the operator still needs to run "
-                        + "against the unrepaired target. This command did not execute it."));
+                "command", spec.reproductionCommand() == null ? "" : spec.reproductionCommand(),
+                "status", spec.reproductionCommand() == null ? "not_declared" : "enforced_by_warden_run",
+                "note", reproductionNote(spec)));
         report.put("operator_next_steps", List.of(
                 "Review the generated project.yaml, task.yaml, policy and remapped profiles",
                 "Copy bundle/target/.warden into " + installTo + " only after that review",
                 "Set " + UserConfig.HOME_ENVIRONMENT_VARIABLE + " to the bundle config home",
                 "Run the printed validate and dry-run with the fresh run id " + previewRunId,
-                "Run the independent reproduction command yourself; it is still not_run",
+                reproductionNote(spec),
                 "Choose A/B order, known-spend tolerance and whether to authorise a later live run",
                 "Do not treat this bundle as proof of quota, authentication or live readiness"));
         report.put("source_and_global_homes_mutated", false);
@@ -767,13 +768,20 @@ public final class PilotPrepareCommand {
         return row;
     }
 
+    private static String reproductionNote(PilotPrepareSpec spec) {
+        return spec.reproductionCommand() == null
+                ? "Reproduction is not_declared; acceptance strength is unchecked."
+                : "Reproduction is enforced_by_warden_run: the live run will refuse to dispatch "
+                        + "if the command passes on the unchanged base. A timeout is inconclusive.";
+    }
+
     private static String runbook(Options options, PilotPrepareSpec spec, Generated generated,
                                   String previewRunId, List<String> unresolved) {
         String bundle = options.output().toString();
         String configHome = options.output().resolve("config").toString();
         String installTo = spec.targetRoot().resolve(".warden").toString();
         String reproduction = spec.reproductionCommand() == null
-                ? spec.acceptanceCommands().get(0) : spec.reproductionCommand();
+                ? "not_declared" : spec.reproductionCommand();
         String unresolvedBlock = unresolved.isEmpty()
                 ? "None recorded.\n"
                 : String.join("\n", unresolved.stream().map(item -> "- " + item).toList()) + "\n";
@@ -835,11 +843,11 @@ public final class PilotPrepareCommand {
 
                 %s
 
-                Independent reproduction the operator still needs to run:
+                Declared reproduction (preparation does not execute it):
 
                     %s
 
-                Status of that reproduction: `not_run`.
+                %s
 
                 ## Provenance
 
@@ -862,7 +870,7 @@ public final class PilotPrepareCommand {
                 1. Confirm the task, base revision and that the red suite is not in the baseline.
                 2. Review generated YAML, then install `.warden` into the target checkout.
                 3. Confirm the two remapped profiles still name the intended model/effort.
-                4. Run the independent reproduction yourself.
+                4. Review the reproduction contract before authorising a live run.
                 5. Choose known-spend tolerance, A/B order, and whether to authorise a live run.
                 6. Do not read this file as proof of quota, authentication, green baseline or live readiness.
 
@@ -875,7 +883,7 @@ public final class PilotPrepareCommand {
                 spec.targetRoot().toString().replace('\\', '/'), spec.taskId(), spec.taskId(),
                 previewRunId,
                 bullet(spec.baselineCommands()), bullet(spec.acceptanceCommands()),
-                reproduction,
+                reproduction, reproductionNote(spec),
                 Main.VERSION, generated.wardenRevision(), spec.targetRoot(),
                 generated.targetRevision(),
                 generated.writer().name(), generated.writer().model(), generated.writer().effort(),
@@ -886,7 +894,7 @@ public final class PilotPrepareCommand {
 
     private static String observations(PilotPrepareSpec spec, Generated generated) {
         String reproduction = spec.reproductionCommand() == null
-                ? spec.acceptanceCommands().get(0) : spec.reproductionCommand();
+                ? "not_declared" : spec.reproductionCommand();
         String writer = generated.writer().vendor() + " " + generated.writer().model()
                 + " " + generated.writer().effort() + " wall=" + generated.writer().wallClockMinutes();
         String reader = generated.reviewer().vendor() + " " + generated.reviewer().model()

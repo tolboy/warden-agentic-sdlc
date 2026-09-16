@@ -78,6 +78,14 @@ public final class PilotPrepareTest implements Suite {
         check.eq("unicode/quotes/newlines round-trip into the task goal", goal, loaded.resolved().goal());
         check.eq("green baseline stays the declared baseline",
                 List.of("git diff --check"), loaded.resolved().baselineCommands());
+        check.eq("prepare writes the declared reproduction into the task",
+                List.of(marker.toString()), loaded.resolved().reproduceCommands());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> reproduction = (Map<String, Object>) outcome.report().get("reproduction_check");
+        check.eq("prepare delegates red proof enforcement to the live run", "enforced_by_warden_run",
+                reproduction.get("status"));
+        check.contains("runbook explains refusal on a green base",
+                Files.readString(output.resolve("RUNBOOK.md")), "refuse to dispatch");
         check.that("red acceptance is not in the green baseline",
                 !loaded.resolved().baselineCommands().contains(marker.toString()));
         check.that("red acceptance is in the resolved gate",
@@ -255,6 +263,10 @@ public final class PilotPrepareTest implements Suite {
         Files.deleteIfExists(missingResourceHome.resolve("prompts/nested/writer.md"));
         refuse(check, sandbox, "missing-resource", target, missingResourceHome,
                 spec -> {}, PilotPrepareCommand.PREPARE_REFUSED, "missing or not a regular file");
+
+        refuse(check, sandbox, "reproduction-outside-acceptance", target, sourceHome,
+                spec -> spec.put("reproduction", Map.of("command", "not an acceptance command")),
+                PilotPrepareCommand.INVALID_SPEC, "must be one of checks.acceptance");
 
         refuse(check, sandbox, "overlap", target, sourceHome, spec -> {
             checks(spec).put("baseline", List.of("npm run qa:red"));

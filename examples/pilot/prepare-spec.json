@@ -2,7 +2,7 @@
 	"version": 1,
 	"task": {
 		"id": "pilot-task",
-		"goal": "Replace this sentence with the real task and its observable acceptance.",
+		"goal": "Replace this sentence with the real task; the acceptance command must fail on the unchanged base.",
 		"non_goals": [
 			"Do not modify Warden, the frozen task contract, or the acceptance checker"
 		],

@@ -124,6 +124,9 @@ public record PilotPrepareSpec(
             reproduction = reproductionNode.requireString("command");
             if (reproduction != null) {
                 validateCommands(root, "reproduction.command", List.of(reproduction));
+                if (!acceptance.contains(reproduction)) {
+                    root.collector().add("reproduction.command must be one of checks.acceptance");
+                }
             }
         }
 

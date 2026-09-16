@@ -72,6 +72,21 @@ public final class ConfigTest implements Suite {
                                 "  full: [\"npm run check\", \"npm run build\"]\n  empty: []"),
                         "project.yaml"));
 
+        String reproductionTask = "version: 1\nid: red-proof\ngoal: prove defect\nscope: ui\n";
+        TaskSpec.ResolvedTask redProof = TaskSpec.parse(reproductionTask
+                + "reproduce: [full]\n", "task.yaml").resolve(project, "task.yaml");
+        check.eq("reproduction resolves named sets through the checks resolver",
+                List.of("npm run check", "npm run build"), redProof.reproduceCommands());
+        check.rejects("reproduction outside acceptance is refused", "must also be an acceptance",
+                () -> TaskSpec.parse(reproductionTask + "reproduce: [missing]\n", "task.yaml")
+                        .resolve(project, "task.yaml"));
+        check.rejects("reproduction cannot contradict the green baseline", "cannot also be a baseline",
+                () -> TaskSpec.parse(reproductionTask + "reproduce: [fast]\n", "task.yaml")
+                        .resolve(withBaseline, "task.yaml"));
+        check.that("changing reproduction invalidates acceptance receipts",
+                !redProof.acceptanceFingerprint().equals(TaskSpec.parse(reproductionTask,
+                        "task.yaml").resolve(project, "task.yaml").acceptanceFingerprint()));
+
         // What has to happen in a checkout before any of `checks` can run. Most projects have
         // nothing to say here; a `git worktree` of an npm project has no node_modules, and
         // without this its gates fail for a reason no implementer put there.

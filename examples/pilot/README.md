@@ -35,9 +35,12 @@ The command does not execute configured checks, call vendors, invoke `run`/`do`/
 change the global home. Generated files are validated with the existing parsers before the
 bundle is published. Failure does not leave a directory advertised as ready.
 
-A suite being repaired must not appear in the green baseline. Reproduction may be declared
-for the runbook; it is recorded `not_run`. Semantic acceptance strength, quota, runtime
-authentication and live readiness are not proven by preparation.
+A suite being repaired must not appear in the green baseline. A declared
+`reproduction.command` must be in `checks.acceptance` and is written as task `reproduce`.
+The report marks it `enforced_by_warden_run`: the live run refuses vendor dispatch if it
+passes on the unchanged base, and treats timeout as inconclusive. Omission is `not_declared`
+and leaves acceptance strength unchecked. Preparation runs no checks and proves neither
+semantic acceptance strength, quota, runtime authentication nor live readiness.
 
 The committed [prepare-spec.json](prepare-spec.json) uses `REPLACE-WITH-TARGET-CHECKOUT` and
 `REPLACE-WITH-WARDEN-CONFIG-HOME` so it stays portable and does not name a local path.
