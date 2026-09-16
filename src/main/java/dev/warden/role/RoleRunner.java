@@ -83,6 +83,16 @@ public final class RoleRunner {
         void requireDispatch();
 
         default boolean hasRoom() { return true; }
+
+        /**
+         * The longest the next call may run, or null when nothing but the profile bounds it.
+         *
+         * Asked right after {@link #requireDispatch} admitted the call. A chain with an
+         * execution deadline answers with what is left of it, and the call's wall clock is
+         * lowered to that — never raised — so a vendor that would have been allowed an hour
+         * cannot carry the chain an hour past the time the operator gave it.
+         */
+        default java.time.Duration wallClockCap() { return null; }
     }
 
     /**
@@ -431,6 +441,16 @@ public final class RoleRunner {
             // this line and is never blocked for analytics.
             if (user.home() != null) HomeCorpus.requireDispatch(user.home(), root);
             gate.requireDispatch();
+            java.time.Duration cap = gate.wallClockCap();
+            if (cap != null && cap.toMinutes() < profile.wallClockMinutes()) {
+                // Whole minutes, because that is the unit a profile declares; a cap under one
+                // minute is refused by the gate before it gets here. The call may therefore
+                // outlast the deadline by less than a minute, and the report says so.
+                report.put("profile_wall_clock_minutes", profile.wallClockMinutes());
+                profile = profile.withWallClockMinutes(Math.max(1, cap.toMinutes()));
+                report.put("wall_clock_minutes", profile.wallClockMinutes());
+                report.put("wall_clock_capped_by", "max_elapsed_minutes");
+            }
             report.put("view_state", "running");
             report.put("controller_pid", ProcessHandle.current().pid());
             report.put("controller_started_at", ProcessHandle.current().info().startInstant()

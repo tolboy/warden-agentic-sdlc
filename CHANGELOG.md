@@ -11,6 +11,11 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A task's limits bound the chain of runs `--continue` links, not each run. A `retry` or
+  `switch` continuation inherits the calls, reported cost, unpriced calls and fix rounds the
+  earlier runs spent, read from the new `chain` block of their summary; before, every
+  continuation started with a fresh ceiling and fresh fix rounds. A rejection still starts a
+  new chain. `role_runs` and `total_cost_usd` stay per run.
 - A stop caused by a vendor's endpoint is no longer a verdict on the work. A timeout, a failed
   vendor process, an unreadable or schema-invalid artifact and an undeliverable prompt used to
   stop the run as `<role>_failed`, which every `--continue` treated as an objection and so paid
@@ -67,6 +72,12 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- `budgets.max_elapsed_minutes`: an execution deadline for a task, summed across the runs a
+  `--continue` links and not counting time spent waiting for a person. No vendor call starts
+  with less than a minute left, each call's wall clock is lowered to what is left, and a
+  lowered call that times out stops as `budget_exhausted` with `budget_limit_hit:
+  max_elapsed_minutes`. Gates keep `timeout_minutes`. Suite-covered with a test clock; not a
+  live claim.
 - `warden pilot prepare --spec FILE --output DIR`: deterministic offline preparation of an
   external-pilot bundle from an explicit JSON spec (task, target, separate baseline and
   acceptance commands, two existing profiles). Writes a new reviewable directory with target

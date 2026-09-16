@@ -253,6 +253,7 @@ public final class TaskLoopTest implements Suite {
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
             infrastructureResumeChecks(check, sandbox, home);
+            chainBudgetChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -1277,8 +1278,8 @@ public final class TaskLoopTest implements Suite {
         check.eq("a repair stopped by a rate limit is a rate limit",
                 "rate_limited", repairStopped.reason());
         check.eq("found on the implementer's fix dispatch", "implementer",
-                ((Map<String, Object>) repairStopped.summaryReport().get("infrastructure_failure"))
-                        .get("step"));
+                String.valueOf(repairStopped.summaryReport().get("infrastructure_failure") instanceof Map<?, ?> named
+                        ? named.get("step") : null));
         dev.warden.approval.ApprovalStore objectionStore = new dev.warden.approval.ApprovalStore(objected);
         objectionStore.resolve("io1", objectionStore.read("io1").updatedAt().toString(), "retry",
                 "operator", "waited");
@@ -1300,6 +1301,149 @@ public final class TaskLoopTest implements Suite {
 
         // Restore the ordinary roster for the checks that follow.
         writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /**
+     * The limits a task declares bound the work, not one run of it.
+     *
+     * A continuation used to start with a fresh call ceiling, fresh fix rounds and a fresh
+     * clock, so "four calls, one repair" meant four calls and one repair per `--continue`.
+     * Each leg here is one limit that a continuation must inherit; each would have let the
+     * second run spend again what the first had already used.
+     */
+    @SuppressWarnings("unchecked")
+    private void chainBudgetChecks(Check check, Path sandbox, Path home) throws Exception {
+        // Calls. The first run spends two and is rate limited; the second is left one call,
+        // which cannot fund the repair its reviewer asks for.
+        Path calls = newProject(sandbox, "chain-calls", "medium", 3);
+        writeProfiles(home, sandbox, "chain-calls", 1, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "sequence:rate,p1", sandbox.resolve("chain-calls-review.count"), 1);
+        TaskLoop.Outcome spent = loop(calls, home, "cc1");
+        check.eq("the first run stops on the rate limit", "rate_limited", spent.reason());
+        Map<String, Object> firstChain = (Map<String, Object>) spent.summaryReport().get("chain");
+        check.eq("and records the chain it began", List.of("cc1"), firstChain.get("runs"));
+        check.eq("with the calls it spent", 2L, firstChain.get("role_runs"));
+        retry(calls, "cc1");
+        TaskLoop.Outcome capped = continued(calls, home, "cc2", "cc1");
+        check.eq("the continuation cannot fund a repair the chain has no calls left for",
+                "budget_insufficient_to_finish", capped.reason());
+        check.eq("its own run spent one call", 1L, capped.summaryReport().get("role_runs"));
+        Map<String, Object> chain = (Map<String, Object>) capped.summaryReport().get("chain");
+        check.eq("the chain spent three", 3L, chain.get("role_runs"));
+        check.eq("across both runs", List.of("cc1", "cc2"), chain.get("runs"));
+        check.eq("with nothing left under the cap", 0L, chain.get("calls_remaining"));
+        check.contains("and the floor it names is the chain's, not the run's",
+                String.valueOf(capped.summaryReport().get("resolution")), "at least 5");
+        check.that("the first run's spend is the chain's, not the second run's own cost",
+                ((Number) chain.get("cost_usd")).doubleValue()
+                        > ((Number) capped.summaryReport().get("total_cost_usd")).doubleValue());
+
+        // Fix rounds. One is allowed; the first run used it before its recheck was rate
+        // limited, so the second run may not repair again.
+        Path rounds = newProject(sandbox, "chain-rounds", "medium", 20);
+        editTask(rounds, "max_fix_attempts: 2", "max_fix_attempts: 1");
+        writeProfiles(home, sandbox, "chain-rounds", 1, 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "sequence:p1,rate,p1", sandbox.resolve("chain-rounds-review.count"), 1);
+        TaskLoop.Outcome repaired = loop(rounds, home, "cr1");
+        check.eq("the recheck after the one repair is rate limited",
+                "rate_limited", repaired.reason());
+        check.eq("after using the chain's only fix round", 1L,
+                ((Map<String, Object>) repaired.summaryReport().get("chain")).get("fix_attempts"));
+        retry(rounds, "cr1");
+        TaskLoop.Outcome noMore = continued(rounds, home, "cr2", "cr1");
+        check.eq("the same objection on the continuation stops for a person",
+                "blocking_findings_remain", noMore.reason());
+        check.that("without a second repair", steps(noMore).stream()
+                .noneMatch(step -> "implementer".equals(step.get("step")) && step.get("reused_from") == null));
+        check.eq("the chain still counts one fix round, none left", List.of(1L, 0L),
+                List.of(((Map<String, Object>) noMore.summaryReport().get("chain")).get("fix_attempts"),
+                        ((Map<String, Object>) noMore.summaryReport().get("chain"))
+                                .get("fix_attempts_remaining")));
+
+        // Time. A minute of execution; the implementer's two-minute wall clock is lowered to
+        // it, and the reviewer is refused because what is left is under a minute. The clock is
+        // the suite's: each dispatch takes fifty seconds.
+        Path timed = newProject(sandbox, "chain-time", "medium", 20);
+        editTask(timed, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  max_elapsed_minutes: 1");
+        writeProfiles(home, sandbox, "chain-time", 1, 1);
+        java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+        dev.warden.run.Progress fiftySecondsPerCall = line -> {
+            if (line.contains("dispatching, up to")) nanos.addAndGet(50_000_000_000L);
+        };
+        TaskLoop.Outcome late = new TaskLoop(new ProcessRunner())
+                .withProgress(fiftySecondsPerCall).withClock(nanos::get)
+                .run(new ConfigLoader().load(timed, "hello"), UserConfig.load(home), "ct1", false);
+        check.eq("a chain out of time stops on its budget", "budget_exhausted", late.reason());
+        check.eq("naming the time limit, not a call or money limit", "max_elapsed_minutes",
+                late.summaryReport().get("budget_limit_hit"));
+        check.contains("and says which number to raise",
+                String.valueOf(late.summaryReport().get("safe_next_step")), "max_elapsed_minutes");
+        Map<String, Object> implementer = readJson(
+                timed.resolve(".warden/runs/ct1--implementer-0/role-implementer.json"));
+        check.eq("the call before it ran under the time that was left", 1L,
+                implementer.get("wall_clock_minutes"));
+        check.eq("which the report attributes to the deadline", "max_elapsed_minutes",
+                implementer.get("wall_clock_capped_by"));
+        check.eq("beside the profile's own limit", 2L,
+                implementer.get("profile_wall_clock_minutes"));
+        check.eq("fifty seconds of execution are on the chain", 50L,
+                ((Map<String, Object>) late.summaryReport().get("chain")).get("elapsed_seconds"));
+
+        editTask(timed, "max_elapsed_minutes: 1", "max_elapsed_minutes: 3");
+        retry(timed, "ct1");
+        // Time spent waiting for a person is not execution: the clock jumps an hour between
+        // the runs, and the continuation still has the two minutes and ten seconds it was left.
+        nanos.addAndGet(3_600_000_000_000L);
+        TaskLoop.Outcome inTime = new TaskLoop(new ProcessRunner())
+                .withProgress(fiftySecondsPerCall).withClock(nanos::get)
+                .run(new ConfigLoader().load(timed, "hello"), UserConfig.load(home), "ct2", false,
+                        Map.of(), new TaskLoop.Continuation("ct1", null, true));
+        check.that("with the limit raised the chain finishes", inTime.ok());
+        check.eq("keeping the implement stage", Map.of("from", "ct1", "stages", List.of("implement")),
+                inTime.summaryReport().get("reused_judgements"));
+        check.eq("and counting only the two runs' execution", 100L,
+                ((Map<String, Object>) inTime.summaryReport().get("chain")).get("elapsed_seconds"));
+        check.that("the raise is recorded as a budget-only change",
+                inTime.summaryReport().get("contract_change_budget_only") != null);
+
+        // A rejection is a person asking for different work: it starts a new chain.
+        writeProfiles(home, sandbox, "chain-reject", 1, 1);
+        Path rejected = newProject(sandbox, "chain-reject", "medium", 20);
+        TaskLoop.Outcome accepted = loop(rejected, home, "cj1");
+        dev.warden.approval.ApprovalStore rejectStore = new dev.warden.approval.ApprovalStore(rejected);
+        rejectStore.resolve("cj1", rejectStore.read("cj1").updatedAt().toString(), "reject",
+                "operator", "make it say hello");
+        check.that("the first run reached the gate", accepted.ok());
+        TaskLoop.Outcome fresh = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(rejected, "hello"), UserConfig.load(home), "cj2", false,
+                        Map.of(), new TaskLoop.Continuation("cj1", "make it say hello"));
+        check.eq("a rejection's continuation is a chain of its own", List.of("cj2"),
+                ((Map<String, Object>) fresh.summaryReport().get("chain")).get("runs"));
+
+        writeProfiles(home, sandbox, "chain-restore", 1, 1);
+    }
+
+    private void retry(Path project, String runId) throws Exception {
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve(runId, store.read(runId).updatedAt().toString(), "retry", "operator", "waited");
+    }
+
+    private TaskLoop.Outcome continued(Path project, Path home, String runId, String fromRunId)
+            throws Exception {
+        return new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), runId, false,
+                        Map.of(), new TaskLoop.Continuation(fromRunId, null, true));
+    }
+
+    private void editTask(Path project, String from, String to) throws IOException {
+        Path file = project.resolve(".warden/tasks/hello.yaml");
+        String text = Files.readString(file);
+        if (!text.contains(from)) throw new IllegalStateException("task file has no '" + from + "'");
+        Files.writeString(file, text.replace(from, to));
     }
 
     /** Two review stages over two reviewer profiles, with the given failover policy. */
@@ -1447,7 +1591,8 @@ public final class TaskLoopTest implements Suite {
         check.eq("named after the failed call, not after the stage that sent work back",
                 "vendor_call_failed", broke.reason());
         check.eq("and the call it names is the reviewer's recheck", "reviewer",
-                ((Map<?, ?>) broke.summaryReport().get("infrastructure_failure")).get("step"));
+                String.valueOf(broke.summaryReport().get("infrastructure_failure") instanceof Map<?, ?> named
+                        ? named.get("step") : null));
         check.that("and the stage it happened in is not counted as passed",
                 !listOf(broke.summaryReport().get("completed_stages")).contains("review"));
         check.eq("the candidate is not claimed to have passed review", Boolean.FALSE,

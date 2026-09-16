@@ -98,12 +98,58 @@ public final class StubVendor {
         return seen < Integer.parseInt(threshold);
     }
 
+    /**
+     * `sequence:a,b,c` answers its n-th call with the n-th step, and keeps repeating the last
+     * one. A chain that spans several runs needs a vendor whose behaviour depends on how often
+     * it has been called in all, which the counter file already records across processes.
+     *
+     * Steps: `pass` and `p1` are reviewer verdicts, `rate` is a rate-limited call, `impl`
+     * writes the result an implementer is asked for.
+     */
+    private static void sequence(String[] steps, String[] args) throws Exception {
+        Path counter = Path.of(flag(args, "--counter"));
+        int seen = Files.isRegularFile(counter)
+                ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+        seen++;
+        Files.writeString(counter, String.valueOf(seen), StandardCharsets.UTF_8);
+        String step = steps[Math.min(seen, steps.length) - 1];
+        switch (step) {
+            case "rate" -> {
+                System.out.println("{\"type\":\"error\",\"message\":\"Rate limit reached for requests\"}");
+                System.exit(1);
+            }
+            case "impl" -> {
+                Path target = Path.of("src", "result.txt");
+                Files.createDirectories(target.getParent());
+                Files.writeString(target, "ok", StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created\","
+                        + "\"files_changed\":[\"src/result.txt\"]},\"total_cost_usd\":0.012}");
+            }
+            case "pass", "p1" -> System.out.println(dev.warden.json.Json.write(java.util.Map.of(
+                    "structuredOutput", java.util.Map.of("role", "reviewer", "task_id", "hello",
+                            "status", "completed",
+                            "verdict", "pass".equals(step) ? "pass" : "fail",
+                            "summary", "call " + seen,
+                            "findings", "pass".equals(step) ? List.of() : List.of(p1("SEQ-1"))),
+                    "total_cost_usd", 0.004)));
+            default -> {
+                System.err.println("unknown sequence step: " + step);
+                System.exit(2);
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         if (flag(args, "--expected-effort") != null
                 && !flag(args, "--expected-effort").equals(flag(args, "--actual-effort"))) {
             throw new IllegalArgumentException("effort was not delivered intact");
         }
         String mode = args.length > 0 ? args[0] : "review";
+        if (mode.startsWith("sequence:")) {
+            sequence(mode.substring("sequence:".length()).split(","), args);
+            return;
+        }
         switch (mode) {
             case "impl" -> {
                 Path target = Path.of("src", "result.txt");

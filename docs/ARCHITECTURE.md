@@ -354,6 +354,39 @@ had already overtaken — is never carried as a pass.
 window on a roster with a successor means answering `abort` today; adding `retry` there would
 change the decision file's option list, which existing files are validated against.
 
+## What a continuation inherits
+
+The limits a task declares — `max_role_runs`, `max_cost_usd`, `max_fix_attempts` and the
+optional `max_elapsed_minutes` — bound the chain of runs that `--continue` links, not one run.
+Before, a continuation started from nothing, so "four calls, one repair" described each run
+and a stopped task could be continued into as many calls as the operator had patience for.
+
+| Continuation | Chain |
+|---|---|
+| `retry` (a failure) or `switch` (a failover) | Inherits: calls, reported cost, unpriced calls, fix rounds and execution time, read from the prior run's `chain` block, or from its own totals when it predates the block (its execution time is then `elapsed_known: false`, not guessed) |
+| `reject` (a rejection note) | Starts a new chain. A person asked for different work, and the note is the only thing carried |
+| no `--continue` | Starts a new chain and carries nothing |
+
+The ceilings compare the chain's totals; `role_runs`, `total_cost_usd` and `attempts_used`
+stay the run's own, because the corpus sums runs and would otherwise count a chain twice. The
+repair reserve counts the chain's calls, and its advice names the chain's floor. `attempt`
+stays per run too: it names evidence directories, and only a run's first pass may consume a
+carried verdict.
+
+`max_elapsed_minutes` is execution time: the sum of each run's duration, so a night spent
+waiting for a person does not expire the chain. It is enforced at dispatch, the same place as
+the call ceiling: no call starts with less than a minute left, and the call that does start
+runs under the profile's wall clock lowered to what is left, in whole minutes. The role report
+records `wall_clock_capped_by: max_elapsed_minutes` beside `profile_wall_clock_minutes`, and a
+lowered call that times out stops as `budget_exhausted` with `budget_limit_hit:
+max_elapsed_minutes`, not as `role_timed_out`, which would send the operator to a profile
+limit that was never binding. Gates and the baseline are not interrupted; `timeout_minutes`
+bounds them. A call's duration is not predicted, so a repair is never refused in advance for
+time — `budget_plan.time_reserve` says so.
+
+`max_cost_usd` is still a threshold on reported spend. The preview says so in as many words,
+because a Codex call reports no price and spends nothing against it.
+
 ## What a carried verdict has to prove
 
 Reusing a verdict across runs rests on two claims, and until recently only one was checked.

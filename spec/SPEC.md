@@ -125,6 +125,28 @@ fails open. The tool refuses instead, and shows the available names.
 The minimal valid task is four lines: `version`, `id`, `goal`, `scope`. Everything else comes
 from `defaults`.
 
+The limits a task may declare, all optional:
+
+```yaml
+budgets:
+  max_role_runs: 4              # vendor calls (default 6)
+  max_cost_usd: 10.0            # spend the vendors report; not a strict cap (default 20)
+  max_elapsed_minutes: 45       # execution time; none when omitted
+max_fix_attempts: 1             # repair rounds (default from project.yaml)
+timeout_minutes: 30             # one gate run's commands, shared
+```
+
+The first four bound the **chain**, not one run: a `warden run --continue` answered `retry`
+or `switch` starts from what the runs before it spent — calls, reported cost, unpriced calls,
+fix rounds and execution time — and the summary's `chain` block records the running totals.
+A continuation after a rejection, and any run without `--continue`, starts a chain of its
+own. Raising a limit is an edit to this file; budgets are not part of `acceptance_sha256`, so
+the verdicts already reached survive it. Execution time is the sum of each run's own
+duration: the time a stopped run spends waiting for a person is not counted. No vendor call
+starts with less than a minute left, and each call's wall clock is lowered to what is left, so
+a chain may overrun by less than a minute. Hitting any of them stops with `budget_exhausted`
+and names the limit in `budget_limit_hit`.
+
 **A task with no executable acceptance criterion is not accepted.** This is not pedantry:
 every known successful agent deployment works on mechanically checkable work, and the task
 linter is the place where that requirement becomes mandatory rather than aspirational.

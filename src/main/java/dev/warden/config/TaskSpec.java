@@ -31,14 +31,24 @@ public record TaskSpec(
 
     public record Authority(boolean workspaceWrite, boolean network, boolean land) {}
     public record VisualQa(boolean required, List<String> scenarios, String start, String url) {}
-    public record Budget(long maxRoleRuns, double maxCostUsd) {}
+    /**
+     * @param maxElapsedMinutes the execution time a continued chain of runs may spend, summed
+     *                          across `--continue`; null when the task declares none. Time a
+     *                          stopped run spends waiting for a person is not counted.
+     */
+    public record Budget(long maxRoleRuns, double maxCostUsd, Long maxElapsedMinutes) {
+        public Budget(long maxRoleRuns, double maxCostUsd) {
+            this(maxRoleRuns, maxCostUsd, null);
+        }
+    }
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance",
             "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios", "start", "url");
-    private static final Set<String> BUDGET_KEYS = Set.of("max_role_runs", "max_cost_usd");
+    private static final Set<String> BUDGET_KEYS =
+            Set.of("max_role_runs", "max_cost_usd", "max_elapsed_minutes");
 
     public static TaskSpec parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -90,7 +100,9 @@ public record TaskSpec(
         Values budgetNode = root.optMap("budgets").rejectUnknownKeys(BUDGET_KEYS);
         Budget budget = new Budget(
                 budgetNode.optInt("max_role_runs", 6, 1, 50),
-                budgetNode.optDouble("max_cost_usd", 20.0, 0.0, 10000.0));
+                budgetNode.optDouble("max_cost_usd", 20.0, 0.0, 10000.0),
+                budgetNode.has("max_elapsed_minutes")
+                        ? budgetNode.optInt("max_elapsed_minutes", 60, 1, 1440) : null);
 
         Long maxFixAttempts = root.has("max_fix_attempts")
                 ? root.optInt("max_fix_attempts", 2, 0, 10) : null;
