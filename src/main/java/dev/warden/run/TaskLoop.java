@@ -254,7 +254,75 @@ public final class TaskLoop {
             // promises never to charge: recovery replays delivery, not execution. The
             // fingerprint and acceptance checks below still apply, so a run that had already
             // moved the tree before the corpus refused declines reuse on its own.
-            "ledger_unavailable");
+            "ledger_unavailable",
+            // Every stop a vendor's endpoint caused rather than its reading of the diff. See
+            // INFRASTRUCTURE_REASONS for how each is reached and why none of them is a verdict.
+            // `quota_exhausted` was missing for longer than the others, and its own next step
+            // told the operator to wait and continue: the continuation then declined every
+            // verdict because the stop was "about the work", and paid for all of them again.
+            "quota_exhausted",
+            "rate_limited",
+            "failover_requires_confirmation",
+            "role_timed_out",
+            "vendor_call_failed",
+            "vendor_protocol_failed",
+            "prompt_undeliverable");
+
+    /**
+     * Role outcome codes that describe the call rather than the candidate, and the stop reason
+     * each one becomes.
+     *
+     * They all used to become `<role>_failed`, which reads as "the reviewer objected" and is
+     * treated as a verdict by every continuation. Measured on the first external trial: a
+     * reviewer killed by the operator's session limit was recorded as `reviewer_failed`, the
+     * retry declined the first reader's clean pass as if it had been overruled, and a second
+     * paid Codex reading reached the same conclusion about the same bytes.
+     *
+     * None of them is a verdict, and none of them is an implementer's to repair:
+     *
+     *  - a wall clock that ran out bounds the call, not the diff;
+     *  - a vendor process that exited non-zero with nothing Warden recognises — a crash, a
+     *    refused login, a dropped connection — has said nothing about the work at all;
+     *  - an answer that is not a readable, complete, schema-valid artifact is an answer Warden
+     *    could not read, so whatever verdict it held is unknown rather than negative;
+     *  - a prompt that could not be delivered never reached the vendor;
+     *  - a rate limit, a spent subscription and a turn ceiling are allowances.
+     *
+     * A negative verdict is never one of these. A reviewer that returns `fail`, or a pass
+     * carrying a P1, produces an `ok` role outcome and routes through its findings; a role
+     * that honestly reports itself blocked keeps its generic reason. Being on this list only
+     * lets a continuation <em>consider</em> earlier verdicts: every per-stage check in
+     * {@link #reusableJudgements} still applies, and the stage that failed has no passing row
+     * to reuse, so it is always dispatched again.
+     */
+    private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.of(
+            "role_timeout", "role_timed_out",
+            "role_command_failed", "vendor_call_failed",
+            "role_artifact_unparseable", "vendor_protocol_failed",
+            "role_artifact_incomplete", "vendor_protocol_failed",
+            "role_artifact_schema_violation", "vendor_protocol_failed",
+            "role_prompt_undeliverable", "prompt_undeliverable",
+            "role_rate_limited", "rate_limited",
+            "role_quota_exhausted", "quota_exhausted",
+            // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
+            // opposite of that, and the difference decides both what an operator goes and
+            // reads and whether the stages that already passed survive the retry.
+            "role_turns_exhausted", "turn_ceiling_reached");
+
+    /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
+    private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
+            "role_timed_out", "timeout",
+            "vendor_call_failed", "call_failed",
+            "vendor_protocol_failed", "protocol",
+            "prompt_undeliverable", "prompt_delivery",
+            "rate_limited", "rate_limit",
+            "quota_exhausted", "quota",
+            "turn_ceiling_reached", "turn_ceiling");
+
+    /** True when a role outcome code is about the call, not about the candidate. */
+    public static boolean isInfrastructureFailure(String roleCode) {
+        return roleCode != null && INFRASTRUCTURE_REASONS.containsKey(roleCode);
+    }
 
     /**
      * Whether a stop reason is a judgement on the candidate.
@@ -890,7 +958,7 @@ public final class TaskLoop {
             // dispatched nobody, so there is no outcome to route and nothing new to object.
             if (outcome == null) { finished(stage); return; }
 
-            while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(outcome)
+            while (failed(outcome) && "fix".equals(stage.onFail()) && fixable(stage, outcome)
                     && attempt < task.maxFixAttempts()) {
                 fixRound(stage, index, failureContext(stage, outcome));
                 outcome = execute(stage);
@@ -2151,7 +2219,7 @@ public final class TaskLoop {
          * asking one to try spends a role run on the operator's configuration and then
          * fails the same way.
          */
-        private boolean fixable(Object outcome) {
+        private boolean fixable(Workflow.Stage stage, Object outcome) {
             if (outcome instanceof VisualQaRunner.Outcome visual) {
                 return "visual_qa_failed".equals(visual.code());
             }
@@ -2159,7 +2227,16 @@ public final class TaskLoop {
                 return !OPERATOR_MUST_RESOLVE.contains(gate.code());
             }
             if (outcome instanceof RoleRunner.Outcome role) {
-                return !roleFailureRequiresOperator(role.code());
+                if (roleFailureRequiresOperator(role.code())) return false;
+                if (!isInfrastructureFailure(role.code())) return true;
+                // A call that timed out, was rate limited or ran out of plan has nothing in it
+                // for anyone to repair, even on a stage an operator declared `on_fail: fix`:
+                // the repair would be a paid call to a writer about a reviewer's endpoint. An
+                // unreadable answer is the one exception, and only when the role that gave it
+                // is the role that would repair it — a writer can be shown its own malformed
+                // artifact and asked again.
+                return "vendor_protocol_failed".equals(INFRASTRUCTURE_REASONS.get(role.code()))
+                        && stage.fixWith().equals(stage.role());
             }
             return true;
         }
@@ -2770,15 +2847,40 @@ public final class TaskLoop {
      * both still stop for a human, because Warden does not decide to wait out a quota window.
      */
     private static String reasonFor(RoleRunner.Outcome step, String genericReason) {
-        if ("role_quota_exhausted".equals(step.code())) return "quota_exhausted";
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
         }
-        // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
-        // opposite of that, and the difference decides both what an operator goes and reads
-        // and whether the stages that already passed survive the retry.
-        if ("role_turns_exhausted".equals(step.code())) return "turn_ceiling_reached";
-        return genericReason;
+        String infrastructure = INFRASTRUCTURE_REASONS.get(step.code());
+        return infrastructure != null ? infrastructure : genericReason;
+    }
+
+    /**
+     * The failed call behind an infrastructure stop, named once at the top of the summary.
+     *
+     * The row is already in `steps`; this saves the operator from finding it, and says in so
+     * many words that the stop is not a judgement and what a continuation will keep.
+     */
+    private static void describeInfrastructureStop(String reason, Map<String, Object> summary,
+                                                   List<Map<String, Object>> steps) {
+        String cause = INFRASTRUCTURE_CAUSES.get(reason);
+        if (cause == null) return;
+        Map<String, Object> failure = new LinkedHashMap<>();
+        failure.put("cause", cause);
+        for (int index = steps.size() - 1; index >= 0; index--) {
+            Map<String, Object> row = steps.get(index);
+            if (Boolean.FALSE.equals(row.get("ok")) && row.get("profile") != null) {
+                failure.put("step", row.get("step"));
+                if (row.get("stage") != null) failure.put("stage", row.get("stage"));
+                failure.put("role_code", row.get("code"));
+                failure.put("profile", row.get("profile"));
+                failure.put("vendor", row.get("vendor"));
+                break;
+            }
+        }
+        failure.put("verdict_on_the_work", false);
+        failure.put("on_continue", "stages that already passed this exact tree under the same "
+                + "contract and roster are reused; the failed stage is dispatched again");
+        summary.put("infrastructure_failure", failure);
     }
 
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
@@ -2915,6 +3017,7 @@ public final class TaskLoop {
         // most worth separating: a candidate that passed review can sit inside a run that
         // stopped, and saying only that the run stopped throws that away.
         describeCompletion(summary);
+        describeInfrastructureStop(reason, summary, steps);
         summary.put("safe_next_step", safeNextStep(reason, summary));
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
@@ -3077,7 +3180,25 @@ public final class TaskLoop {
             case "finding_protocol_failure" -> "inspect finding_protocol_failure and finding_history in "
                     + "warden report " + runId + " --text; resolve identity/evidence before a new run";
             case "quota_exhausted" -> "wait for the quota window named in the vendor message, "
-                    + "or add a profile from another vendor, then: " + carryOn;
+                    + "or add a profile from another vendor, then: " + carryOn + kept(summary);
+            case "rate_limited" -> "the vendor asked to slow down; its subscription is not "
+                    + "known to be spent, so no other vendor was offered. Wait a few minutes, "
+                    + "then: " + carryOn + kept(summary);
+            case "role_timed_out" -> "the " + failedProfile(summary) + " call ran out of wall "
+                    + "clock. Raise limits.wall_clock_minutes on that profile if the task "
+                    + "needs longer, or narrow the task, then: " + carryOn + kept(summary);
+            case "vendor_call_failed" -> "the " + failedProfile(summary) + " process failed "
+                    + "without a recognised cause (a login, the network, the CLI itself). Read "
+                    + "stderr_tail and stdout_tail in its role report, fix what they name, "
+                    + "then: " + carryOn + kept(summary);
+            case "vendor_protocol_failed" -> "the " + failedProfile(summary) + " call "
+                    + "answered, but not with a readable, complete, schema-valid artifact, so "
+                    + "whatever it concluded is unknown. Check the profile's prompt, schema "
+                    + "and output flags against its raw stdout, then: " + carryOn + kept(summary);
+            case "prompt_undeliverable" -> "the prompt could not be delivered to "
+                    + failedProfile(summary) + " (argument_delivery_check in its role report "
+                    + "says why); switch the profile to prompt_delivery: stdin or a prompt "
+                    + "file, then: " + carryOn + kept(summary);
             case "failover_requires_confirmation" -> "warden approve " + runId
                     + " --decision switch  then  warden run " + taskId + " --continue " + runId;
             case "severity_downgraded_without_change" -> "a finding that had been P1 stopped "
@@ -3113,6 +3234,33 @@ public final class TaskLoop {
             default -> "read `warden report " + runId + " --text`, then either address what it "
                     + "names and start a new run, or " + carryOn;
         };
+    }
+
+    /** What an infrastructure stop's continuation keeps, named rather than implied. */
+    private static String kept(Map<String, Object> summary) {
+        List<String> passed = new ArrayList<>();
+        if (summary.get("review_coverage") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> entry && Boolean.TRUE.equals(entry.get("ok"))
+                        && !(entry.get("blocking_findings") instanceof Number n && n.longValue() > 0)) {
+                    passed.add(String.valueOf(entry.get("stage")));
+                }
+            }
+        }
+        return ". This stop is not a judgement on the work: "
+                + (passed.isEmpty() ? "any stage that already passed this exact tree"
+                        : String.join(", ", passed))
+                + " is reused rather than paid for again, provided the tree, the acceptance and "
+                + "the roster are unchanged; the failed stage runs again.";
+    }
+
+    /** The profile behind an infrastructure stop, for a sentence that names it. */
+    private static String failedProfile(Map<String, Object> summary) {
+        if (summary.get("infrastructure_failure") instanceof Map<?, ?> failure
+                && failure.get("profile") != null) {
+            return "'" + failure.get("profile") + "'";
+        }
+        return "vendor";
     }
 
     /**

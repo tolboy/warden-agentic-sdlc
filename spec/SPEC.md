@@ -287,7 +287,15 @@ where a failure or a finding routes. Omitting it runs the built-in chain. See th
 section *The chain of model calls*.
 
 The optional `failover:` block declares what happens when a vendor reports a spent
-subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`.
+subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`. A rate limit is not a
+spent subscription: it never fails over, and the run stops with `rate_limited`.
+
+A stop caused by a vendor's endpoint rather than by its reading of the work has its own reason:
+`quota_exhausted`, `rate_limited`, `role_timed_out`, `vendor_call_failed`,
+`vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
+`failover_requires_confirmation`. The summary carries `infrastructure_failure` (`cause`, the
+stage and profile, `verdict_on_the_work: false`). A `--continue` after any of them, whether
+answered `retry` or `switch`, reuses the verdicts that still describe the tree.
 
 ---
 

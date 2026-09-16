@@ -246,5 +246,30 @@ public final class WorkflowTest implements Suite {
                 true, dev.warden.run.TaskLoop.isAboutTheWork("blocking_findings_remain"));
         check.eq("and so is a repair that went nowhere",
                 true, dev.warden.run.TaskLoop.isAboutTheWork("repair_made_no_progress"));
+        // Every stop a vendor endpoint caused. The first of these was the one the operator was
+        // told to wait out and continue — and the continuation then threw every verdict away.
+        for (String reason : List.of("quota_exhausted", "rate_limited",
+                "failover_requires_confirmation", "role_timed_out", "vendor_call_failed",
+                "vendor_protocol_failed", "prompt_undeliverable")) {
+            check.eq(reason + " is not a verdict on the work",
+                    false, dev.warden.run.TaskLoop.isAboutTheWork(reason));
+        }
+        // A role that failed for a reason nobody classified keeps the conservative answer.
+        check.eq("an unclassified role failure still is",
+                true, dev.warden.run.TaskLoop.isAboutTheWork("reviewer_failed"));
+        check.eq("and so is a contract whose acceptance passed before the change",
+                true, dev.warden.run.TaskLoop.isAboutTheWork("reproduction_passed_before_change"));
+        for (String code : List.of("role_timeout", "role_command_failed",
+                "role_artifact_unparseable", "role_artifact_incomplete",
+                "role_artifact_schema_violation", "role_prompt_undeliverable",
+                "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted")) {
+            check.eq(code + " is an infrastructure failure", true,
+                    dev.warden.run.TaskLoop.isInfrastructureFailure(code));
+        }
+        for (String code : List.of("role_reported_blocked", "role_violated_read_only",
+                "role_unresolved", "ok")) {
+            check.eq(code + " is not classified as infrastructure", false,
+                    dev.warden.run.TaskLoop.isInfrastructureFailure(code));
+        }
     }
 }

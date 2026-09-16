@@ -252,6 +252,7 @@ public final class TaskLoopTest implements Suite {
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
+            infrastructureResumeChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -1172,6 +1173,154 @@ public final class TaskLoopTest implements Suite {
     }
 
     /**
+     * A stop the endpoint caused keeps what was already judged, and nothing else.
+     *
+     * Measured on the first external trial: the first reader passed, the second was stopped by
+     * the operator's session limit, the stop was recorded as `reviewer_failed`, and the retry
+     * paid the first reader again for the same verdict about the same bytes. Each leg here is
+     * one way an endpoint can stop a run; each retry must pay only for the reading that never
+     * happened. The last leg is the guard in the other direction: an objection that was on
+     * the record when the endpoint failed is still an objection afterwards.
+     */
+    @SuppressWarnings("unchecked")
+    private void infrastructureResumeChecks(Check check, Path sandbox, Path home) throws Exception {
+        for (String[] leg : List.of(
+                new String[] {"rate-limit-once", "rate_limited", "rate_limit"},
+                new String[] {"quota-once", "quota_exhausted", "quota"})) {
+            String mode = leg[0];
+            Path project = newProject(sandbox, "infra-" + mode);
+            writeProfiles(home, sandbox, "infra-" + mode, 1, 1);
+            writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                    "reviewer", "role, task_id, status, verdict, summary, findings",
+                    mode, sandbox.resolve("infra-" + mode + "-review2.count"), 2);
+            pairedReviewPolicy(home, "stop");
+            String first = "ir-" + mode + "-1";
+            TaskLoop.Outcome stopped = loop(project, home, first);
+            check.eq(mode + ": the stop names the endpoint, not the reviewer",
+                    leg[1], stopped.reason());
+            Map<String, Object> failure =
+                    (Map<String, Object>) stopped.summaryReport().get("infrastructure_failure");
+            check.eq(mode + ": the summary says what kind of trouble it was",
+                    leg[2], failure == null ? null : failure.get("cause"));
+            check.eq(mode + ": at which stage", "review-second",
+                    failure == null ? null : failure.get("stage"));
+            check.eq(mode + ": and that it is not a judgement", false,
+                    failure == null ? null : failure.get("verdict_on_the_work"));
+            check.that(mode + ": no replacement vendor is asked for under failover: stop",
+                    stopped.summaryReport().get("failover_pending") == null);
+            check.contains(mode + ": the next step names the reading it keeps",
+                    String.valueOf(stopped.summaryReport().get("safe_next_step")), "review is reused");
+
+            dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+            check.eq(mode + ": the person is asked retry or abort",
+                    List.of("retry", "abort"), store.read(first).options());
+            store.resolve(first, store.read(first).updatedAt().toString(), "retry", "operator",
+                    "waited for the window");
+
+            String second = "ir-" + mode + "-2";
+            TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner())
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), second,
+                            false, Map.of(), new TaskLoop.Continuation(first, null, true));
+            check.that(mode + ": the retry reaches the human gate", resumed.ok());
+            check.eq(mode + ": keeping the stages that passed this exact tree",
+                    Map.of("from", first, "stages", List.of("implement", "review")),
+                    resumed.summaryReport().get("reused_judgements"));
+            check.eq(mode + ": and paying only for the reading that never happened",
+                    1L, resumed.summaryReport().get("role_runs"));
+            check.eq(mode + ": which the second reader gave", List.of("loop-review-2"),
+                    steps(resumed).stream()
+                            .filter(step -> "review-second".equals(step.get("stage")))
+                            .map(step -> step.get("profile")).toList());
+        }
+
+        // A switch the person approved is not a verdict either. It used to carry nothing, and
+        // run p2-planner-3 paid its writer thirty minutes to redo a candidate it had written.
+        Path switched = newProject(sandbox, "infra-switch");
+        writeProfiles(home, sandbox, "infra-switch", 1, 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("infra-switch-review2.count"), 1);
+        pairedReviewPolicy(home, "confirm");
+        TaskLoop.Outcome asked = loop(switched, home, "is1");
+        check.eq("a spent second reader with a successor asks who should read",
+                "failover_requires_confirmation", asked.reason());
+        dev.warden.approval.ApprovalStore switchStore = new dev.warden.approval.ApprovalStore(switched);
+        switchStore.resolve("is1", switchStore.read("is1").updatedAt().toString(), "switch",
+                "operator", "");
+        Main.Carried carried = Main.continuation(switched, "is1");
+        check.eq("the switch authorises the named successor",
+                Map.of("reviewer", "loop-review"), carried.failover());
+        check.that("and asks the loop to keep what was already judged",
+                carried.continuation().reuseJudgements());
+        TaskLoop.Outcome afterSwitch = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(switched, "hello"), UserConfig.load(home), "is2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the switched run reaches the human gate", afterSwitch.ok());
+        check.eq("without paying the writer or the first reader again",
+                Map.of("from", "is1", "stages", List.of("implement", "review")),
+                afterSwitch.summaryReport().get("reused_judgements"));
+        check.eq("the second reading is the successor's", List.of("loop-review"),
+                steps(afterSwitch).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .map(step -> step.get("profile")).toList());
+
+        // The other direction. The reader objected, the repair it asked for was rate limited,
+        // and the objection must still be answered on the retry rather than carried as a pass.
+        // The reader keeps objecting: a reader that dropped its P1 on the same bytes would be
+        // refused as laundering, which is a different guard.
+        Path objected = newProject(sandbox, "infra-objection");
+        writeProfiles(home, sandbox, "infra-objection", 1, 99);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-then-rate-limit", sandbox.resolve("infra-objection-impl.count"), 2);
+        TaskLoop.Outcome repairStopped = loop(objected, home, "io1");
+        check.eq("a repair stopped by a rate limit is a rate limit",
+                "rate_limited", repairStopped.reason());
+        check.eq("found on the implementer's fix dispatch", "implementer",
+                ((Map<String, Object>) repairStopped.summaryReport().get("infrastructure_failure"))
+                        .get("step"));
+        dev.warden.approval.ApprovalStore objectionStore = new dev.warden.approval.ApprovalStore(objected);
+        objectionStore.resolve("io1", objectionStore.read("io1").updatedAt().toString(), "retry",
+                "operator", "waited");
+        TaskLoop.Outcome answered = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(objected, "hello"), UserConfig.load(home), "io2",
+                        false, Map.of(), new TaskLoop.Continuation("io1", null, true));
+        check.eq("carrying the writer's stage but not the reading that objected",
+                Map.of("from", "io1", "stages", List.of("implement")),
+                answered.summaryReport().get("reused_judgements"));
+        check.eq("so the reviewer reads again, and objects again", List.of("loop-review"),
+                steps(answered).stream()
+                        .filter(step -> "review".equals(step.get("stage"))
+                                && step.get("reused_from") == null)
+                        .map(step -> step.get("profile")).toList());
+        check.eq("which sends the work back for the repair that was never made",
+                "rate_limited", answered.reason());
+        check.eq("two calls: the reading and the repair", 2L,
+                answered.summaryReport().get("role_runs"));
+
+        // Restore the ordinary roster for the checks that follow.
+        writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /** Two review stages over two reviewer profiles, with the given failover policy. */
+    private void pairedReviewPolicy(Path home, String failover) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: %s }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                """.formatted(failover));
+    }
+
+    /**
      * A recheck that reads the verdict, not just the exit code.
      *
      * Declaring `recheck_after_fix` on a review stage buys a second reading of the diff after
@@ -1293,8 +1442,12 @@ public final class TaskLoopTest implements Suite {
                 .run(new ConfigLoader().load(crashed, "hello"), UserConfig.load(home),
                         "rk3", false);
         check.that("a recheck that cannot complete stops the run", !broke.ok());
-        check.eq("named after the role, not after the stage that sent work back",
-                "reviewer_failed", broke.reason());
+        // A crash is named for what it was, not for the stage that sent work back: the reviewer
+        // exited 4 with nothing Warden recognises, which is the vendor's call failing.
+        check.eq("named after the failed call, not after the stage that sent work back",
+                "vendor_call_failed", broke.reason());
+        check.eq("and the call it names is the reviewer's recheck", "reviewer",
+                ((Map<?, ?>) broke.summaryReport().get("infrastructure_failure")).get("step"));
         check.that("and the stage it happened in is not counted as passed",
                 !listOf(broke.summaryReport().get("completed_stages")).contains("review"));
         check.eq("the candidate is not claimed to have passed review", Boolean.FALSE,

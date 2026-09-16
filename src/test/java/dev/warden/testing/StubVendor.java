@@ -455,6 +455,37 @@ public final class StubVendor {
                 System.err.println("ERROR transport: worker quit with fatal: Transport channel closed");
                 System.exit(1);
             }
+            // A reviewer whose endpoint refuses its first call and answers every later one. The
+            // refusal is a rate limit or a spent plan, in the shapes QuotaSignal tells apart;
+            // the later answer is a clean pass. It models the stop that is not a verdict and
+            // the retry that should pay only for the reading that never happened.
+            case "rate-limit-once", "quota-once" -> {
+                if (withinFirst(args)) {
+                    String message = mode.equals("rate-limit-once")
+                            ? "Rate limit reached for requests; please retry shortly"
+                            : "You've hit your usage limit. Try again at 9:21 PM.";
+                    System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\"}");
+                    System.exit(1);
+                }
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\","
+                        + "\"task_id\":\"hello\",\"status\":\"completed\",\"verdict\":\"pass\","
+                        + "\"summary\":\"review\",\"findings\":[]},\"total_cost_usd\":0.004}");
+            }
+            // An implementer that writes the result on its first call and is rate limited on
+            // its second — the fix round a reviewer's P1 asked for. The tree is left as the
+            // first call wrote it, so a resume sees the same bytes the objection was about.
+            case "impl-then-rate-limit" -> {
+                if (!withinFirst(args)) {
+                    System.out.println("{\"type\":\"error\",\"message\":\"429 Too Many Requests\"}");
+                    System.exit(1);
+                }
+                Path target = Path.of("src", "result.txt");
+                Files.createDirectories(target.getParent());
+                Files.writeString(target, "ok", StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created\","
+                        + "\"files_changed\":[\"src/result.txt\"]},\"total_cost_usd\":0.012}");
+            }
             // Both live specimens of a spent turn ceiling: a message on stderr, a cost in the
             // envelope on stdout, and exit 1. Grok prints `Error: max turns reached`; claude -p
             // prints `"subtype":"error_max_turns"`. Both charged for the call.

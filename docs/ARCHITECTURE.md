@@ -268,9 +268,10 @@ Every vendor failure resolves to exactly one of these, and the choice is made in
 
 | Outcome | Response | Why not the other one |
 |---|---|---|
-| `role_quota_exhausted` | Fail over to the next eligible vendor; exclude this profile for the rest of the process | Retrying the same vendor refuses identically and spends the budget proving it |
-| `role_command_failed`, `role_timeout`, `role_artifact_*` | Stop the role; the loop may hand the failure text back to the same vendor as a fix round | Failing over would route around a defect instead of surfacing it |
-| `role_prompt_undeliverable`, `authority_denied` | Stop the role; no vendor is dispatched at all | These are configuration faults. Routing around one hides it and pays a second vendor for the same corrupted request |
+| `role_quota_exhausted` | Fail over to the next eligible vendor; exclude this profile for the rest of the process. With no failover the run's reason is `quota_exhausted` | Retrying the same vendor refuses identically and spends the budget proving it |
+| `role_rate_limited` | Stop the role; no failover, and the profile stays eligible. The run's reason is `rate_limited` | A rate limit is transient and says nothing about the plan; the Claude API documents HTTP 429 for request-rate and spend-rate limits alike. Treating it as a spent subscription dropped a working vendor and offered the operator a replacement for it. `QuotaSignal` keeps two phrase lists, and a spent-plan phrase outranks a rate-limit phrase in the same failure, because Claude's session limit is itself a 429 |
+| `role_timeout`, `role_command_failed`, `role_artifact_unparseable`, `role_artifact_incomplete`, `role_artifact_schema_violation` | Stop the role. The run's reason is `role_timed_out`, `vendor_call_failed` or `vendor_protocol_failed`, not `<role>_failed`. A fix round is offered only for an unreadable artifact from the role that would repair it — a writer can be shown its own malformed answer; nobody repairs a reviewer's endpoint | Failing over would route around a defect instead of surfacing it. The old reason, `reviewer_failed`, read as "the reviewer objected", and a continuation treated it as a verdict: on the first external trial a clean first reading was paid for twice because the second reader had been stopped by a session limit |
+| `role_prompt_undeliverable`, `authority_denied` | Stop the role; no vendor is dispatched at all. The run's reason for the first is `prompt_undeliverable` | These are configuration faults. Routing around one hides it and pays a second vendor for the same corrupted request |
 | `role_orca_unavailable`, `role_orca_no_worktree`, `role_orca_no_coordinator`, `role_orca_unsettled`, `role_orca_start_failed`, `role_orca_timeout`, `role_orca_lifecycle_unaccounted` | Stop the role; no failover to Direct CLI; no fix round | The profile declared `runner: orca`. Pretending it was a CLI would hide a missing worktree, an unproven settlement, or a worker that was not fenced. `role_timeout` is reserved for Direct CLI after ProcessRunner has killed the process tree |
 | `role_human_input_required` | Stop the role; retain the worker | A native agent is parked on input only a person can provide. Handing that to a new implementer would abandon a live session |
 | `role_turns_exhausted` | Stop the role; no failover. The run's reason is `turn_ceiling_reached`, and a later `--continue` keeps the verdicts the earlier stages already reached | The vendor was interrupted by a ceiling the operator set, not by anything in the work. Another vendor would meet the same ceiling on the same diff, and `role_command_failed` would send someone to read a transcript with no defect in it. Both measured specimens exit non-zero — grok prints `Error: max turns reached`, `claude -p` reports `error_max_turns` — so the classification is made on both failure paths, not only where a vendor exits 0 without an artifact |
@@ -338,6 +339,20 @@ means: it measures only the calls whose vendor reported a price.
 
 A budget stop leaves earlier verdicts standing, on the same terms as `turn_ceiling_reached` —
 the source fingerprint, the acceptance surface and the judging contract all have to match.
+
+So does every stop the vendor's endpoint caused: `quota_exhausted`, `rate_limited`,
+`role_timed_out`, `vendor_call_failed`, `vendor_protocol_failed`, `prompt_undeliverable` and
+`failover_requires_confirmation`. The summary names the failed call once, as
+`infrastructure_failure` with a one-word `cause`, `verdict_on_the_work: false` and what a
+continuation keeps. A `switch` answered on a failover stop carries verdicts too; before, it
+carried only the authorised substitution, and the writer and every reader were paid again. The
+stage whose call failed has no passing row, so it is always dispatched again, and an objection
+that was on the record when the endpoint failed — a pass carrying a P1, or a reading a repair
+had already overtaken — is never carried as a pass.
+
+`HumanDecision.Kind.FAILOVER` still offers only `abort` and `switch`. Waiting out a quota
+window on a roster with a successor means answering `abort` today; adding `retry` there would
+change the decision file's option list, which existing files are validated against.
 
 ## What a carried verdict has to prove
 

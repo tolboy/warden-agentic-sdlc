@@ -368,8 +368,9 @@ and `skipped_stages`.
 
 ## When a vendor's subscription runs out
 
-An exhausted quota is the one failure that is not about the work. Warden classifies it apart
-from an ordinary error and can hand the role to another vendor, but **asks first by default**:
+An exhausted quota is the one failure another vendor can fix. Warden classifies it apart from
+an ordinary error, and apart from a transient rate limit, and can hand the role to another
+vendor, but **asks first by default**:
 
 ```yaml
 # ~/.warden/policy.yaml

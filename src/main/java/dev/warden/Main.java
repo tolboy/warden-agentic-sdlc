@@ -481,9 +481,10 @@ public final class Main {
      * one role, to one named profile.
      */
     /** Both things a recorded decision can carry forward: an authorised swap, or a rejection. */
-    private record Carried(Map<String, String> failover, TaskLoop.Continuation continuation) {}
+    /** Package-visible so the loop suite can drive a recorded decision into a run. */
+    record Carried(Map<String, String> failover, TaskLoop.Continuation continuation) {}
 
-    private static Carried continuation(Path root, String priorRunId) throws Exception {
+    static Carried continuation(Path root, String priorRunId) throws Exception {
         if (priorRunId == null) return new Carried(Map.of(), TaskLoop.Continuation.NONE);
         HumanDecision decision = new ApprovalStore(root).read(priorRunId);
         // A rejection is feedback, not an authorisation: it grants nothing, it only tells the
@@ -531,8 +532,14 @@ public final class Main {
             throw new IllegalArgumentException("--continue " + priorRunId
                     + ": the recorded failover names no role and profile");
         }
+        // A spent subscription is not a verdict, so the switch keeps what was already judged.
+        // It used to carry nothing: run p2-planner-3 paid its writer thirty minutes to redo a
+        // candidate it had already written, and both readers again, because the only thing
+        // that changed was who would read next. TaskLoop still re-checks the tree, the
+        // acceptance and each stage's roster; the stage whose vendor ran out has no passing
+        // row and is dispatched to the profile the person just chose.
         return new Carried(Map.of(String.valueOf(role), String.valueOf(profile)),
-                new TaskLoop.Continuation(priorRunId, null, false));
+                new TaskLoop.Continuation(priorRunId, null, true));
     }
 
     /** Turn failures before TaskLoop starts into the same durable human boundary. */

@@ -11,6 +11,24 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A stop caused by a vendor's endpoint is no longer a verdict on the work. A timeout, a failed
+  vendor process, an unreadable or schema-invalid artifact and an undeliverable prompt used to
+  stop the run as `<role>_failed`, which every `--continue` treated as an objection and so paid
+  every passed stage again. They are now `role_timed_out`, `vendor_call_failed`,
+  `vendor_protocol_failed` and `prompt_undeliverable`, the summary names the failed call as
+  `infrastructure_failure`, and a continuation reuses the verdicts that still describe the tree.
+  `quota_exhausted` and `failover_requires_confirmation` join them: the first told the operator
+  to wait and continue and then declined every verdict on the continuation. The first external
+  trial paid a second Codex reading this way. No implementer fix round is spent on any of them,
+  except for a writer's own unreadable artifact.
+- A `switch` answered on a failover stop carries earlier verdicts. It used to carry only the
+  substitution, and run `p2-planner-3` paid its writer thirty minutes to redo its own candidate.
+- A rate limit is no longer read as a spent subscription. `QuotaSignal` keeps separate phrase
+  lists; a 429 or "rate limit" becomes `role_rate_limited`, which stops the run as
+  `rate_limited` without dropping the profile or offering a replacement vendor. A spent-plan
+  phrase still wins when both appear, so Claude's session-limit envelope stays a quota stop.
+  Measured only offline, against recorded and synthetic transcripts.
+
 - `warden pilot prepare` no longer interpolates a profile command into `sh -c` on POSIX.
   Presence is a filesystem PATH walk (Windows still uses `where.exe` as argv), so a value
   such as `git; touch marker` cannot run during offline preparation. Live `run`/`role`

@@ -95,6 +95,50 @@ public final class QuotaSignalTest implements Suite {
                 !QuotaSignal.detect(List.of(), "", "recomputing the disk quota table").matched());
         claudeEnvelopeChecks(check);
         turnCeilingChecks(check);
+        rateLimitChecks(check, stderrOnly, codex);
+    }
+
+    /**
+     * A 429 is not a spent plan. The two used to share one list, so a transient rate limit
+     * dropped the profile for the rest of the run and offered the operator a replacement vendor.
+     */
+    private void rateLimitChecks(Check check, QuotaSignal.Detection stderrRateLimit,
+                                 QuotaSignal.Detection codexUsageLimit) {
+        check.eq("a bare 429 on stderr is a rate limit", "rate_limited", stderrRateLimit.kind());
+        check.eq("which the role reports under its own code", "role_rate_limited",
+                stderrRateLimit.roleCode());
+        check.eq("and the evidence says which kind it was", "rate_limited",
+                stderrRateLimit.report().get("kind"));
+        check.eq("a usage limit is still a spent subscription", "quota_exhausted",
+                codexUsageLimit.kind());
+        check.eq("under the code failover listens for", "role_quota_exhausted",
+                codexUsageLimit.roleCode());
+
+        String rateEvent = "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\","
+                + "\"message\":\"Number of requests has exceeded your rate limit\"}}";
+        QuotaSignal.Detection structuredRate = QuotaSignal.detect(List.of(), rateEvent, "");
+        check.eq("a structured rate-limit event is a rate limit", "rate_limited",
+                structuredRate.kind());
+        check.eq("found in the structured event", "structured_error_event",
+                structuredRate.detectedBy());
+
+        // Both sentences at once: the more specific one decides. Claude's session limit is an
+        // HTTP 429 and a vendor may well say "rate limit" beside it.
+        String both = "{\"type\":\"error\",\"message\":\"rate limit: you've hit your usage limit, "
+                + "try again at 9:21 PM\"}";
+        check.eq("a spent-plan phrase outranks a rate-limit phrase in the same message",
+                "quota_exhausted", QuotaSignal.detect(List.of(), both, "").kind());
+        check.eq("and a spent-plan event outranks a rate-limit line on stderr",
+                "quota_exhausted",
+                QuotaSignal.detect(List.of(), CODEX_TRANSCRIPT, "HTTP 429 Too Many Requests").kind());
+        check.eq("the Claude session-limit envelope stays a spent subscription", "quota_exhausted",
+                QuotaSignal.detect(List.of(), CLAUDE_SESSION_LIMIT, "").kind());
+
+        String house = "{\"type\":\"error\",\"message\":\"plan allowance spent for this window\"}";
+        check.eq("a profile's own wording names a spent plan", "quota_exhausted",
+                QuotaSignal.detect(List.of("plan allowance spent"), house, "").kind());
+        check.eq("nothing matched has no kind and no code", null,
+                QuotaSignal.detect(List.of(), "", "").roleCode());
     }
 
     /**

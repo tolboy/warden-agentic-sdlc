@@ -1007,11 +1007,11 @@ public final class OrcaExecutor implements RoleExecutor {
                                        Duration duration, Map<String, Object> evidence) {
         QuotaSignal.Detection detection = QuotaSignal.detect(profile.quotaSignatures(), stdout, stderr);
         if (!detection.matched()) return null;
-        evidence.put("failure", "role_quota_exhausted");
+        evidence.put("failure", detection.roleCode());
         evidence.put("quota", detection.report());
         evidence.put("stderr_tail", tail(stderr, 2000));
         evidence.put("stdout_tail", tail(stdout, 2000));
-        return new Result(false, "role_quota_exhausted", duration, stdout, null, evidence);
+        return new Result(false, detection.roleCode(), duration, stdout, null, evidence);
     }
 
     private static Result fail(String code, Map<String, Object> evidence, Duration duration, String raw) {
