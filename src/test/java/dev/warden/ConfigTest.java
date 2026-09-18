@@ -99,6 +99,8 @@ public final class ConfigTest implements Suite {
                 () -> ProjectConfig.parse("version: 1\nproject: p\n", "project.yaml"));
         check.rejects("unknown top-level key refused", "unsupported key 'chekcs'",
                 () -> ProjectConfig.parse(PROJECT.replace("checks:", "chekcs:"), "project.yaml"));
+        check.rejects("land.note is refused as unknown", "unsupported key 'land.note'",
+                () -> ProjectConfig.parse(PROJECT + "\nland: {note: x}\n", "project.yaml"));
         check.rejects("defaults.checks must name a real set", "which is not defined under checks",
                 () -> ProjectConfig.parse(PROJECT.replace("checks: full", "checks: nonexistent"), "project.yaml"));
         check.rejects("unsafe scope path refused", "not a safe repository-relative path",

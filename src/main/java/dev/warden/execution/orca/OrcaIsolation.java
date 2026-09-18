@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,6 +25,8 @@ public final class OrcaIsolation implements Isolation {
     private final OrcaClient orca;
 
     public OrcaIsolation(ProcessRunner processes) { this.orca = new OrcaClient(processes); }
+
+    public OrcaIsolation(OrcaClient orca) { this.orca = orca; }
 
     @Override
     public Placement isolate(Path project, String name, String baseBranch) throws Exception {
@@ -57,6 +61,9 @@ public final class OrcaIsolation implements Isolation {
             throw new IsolationException("role_orca_unavailable", "Orca did not return a repo id for " + root);
         }
 
+        Placement attached = attachExisting(root, name, repoId);
+        if (attached != null) return attached;
+
         OrcaClient.Rpc created = orca.invoke(root, Duration.ofMinutes(10), List.of(
                 "worktree", "create",
                 "--repo", "id:" + repoId,
@@ -75,6 +82,76 @@ public final class OrcaIsolation implements Isolation {
                     "Orca created a worktree but did not return a usable path");
         }
         return new Placement(true, path, OrcaSettlement.worktreeSelector(created.envelope()), "created");
+    }
+
+    /**
+     * Join a worktree Orca already made for this name, instead of creating another whose
+     * display name collides. Orca appends a numeric suffix when the name is taken; a dry
+     * run followed by a live run with the same task id used to leave two.
+     *
+     * Prefer an exact {@code displayName} match. If several of those exist, prefer the one
+     * whose path's last segment equals {@code name}. If that is still not unique, do not
+     * guess — fall through and create.
+     */
+    @SuppressWarnings("unchecked")
+    private Placement attachExisting(Path root, String name, String repoId) throws Exception {
+        OrcaClient.Rpc listed = orca.invoke(root, Duration.ofSeconds(20), List.of("worktree", "ps"));
+        if (!listed.ok()) return null;
+        Object raw = listed.result().get("worktrees");
+        if (!(raw instanceof List<?> rows)) return null;
+
+        List<Map<String, Object>> byName = new ArrayList<>();
+        List<Map<String, Object>> bySegment = new ArrayList<>();
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> row)) continue;
+            if (Boolean.TRUE.equals(row.get("isMainWorktree"))) continue;
+            if (Boolean.TRUE.equals(row.get("isArchived"))) continue;
+            if (!repoId.equals(string(row.get("repoId")))) continue;
+            Object pathValue = row.get("path");
+            if (pathValue == null) continue;
+            Path path = Path.of(String.valueOf(pathValue));
+            if (!Files.isDirectory(path)) continue;
+            Map<String, Object> asMap = (Map<String, Object>) row;
+            boolean nameMatch = name.equals(string(row.get("displayName")));
+            Path fileName = path.getFileName();
+            boolean segmentMatch = fileName != null && name.equals(fileName.toString());
+            if (nameMatch) byName.add(asMap);
+            else if (segmentMatch) bySegment.add(asMap);
+        }
+        Map<String, Object> chosen = chooseAttachment(byName, bySegment, name);
+        if (chosen == null) return null;
+        Path path = Path.of(String.valueOf(chosen.get("path")));
+        String selector = selectorFor(chosen, path);
+        return new Placement(true, path, selector, "attached");
+    }
+
+    private static Map<String, Object> chooseAttachment(List<Map<String, Object>> byName,
+                                                        List<Map<String, Object>> bySegment,
+                                                        String name) {
+        if (byName.size() == 1) return byName.get(0);
+        if (byName.size() > 1) {
+            List<Map<String, Object>> tighter = new ArrayList<>();
+            for (Map<String, Object> row : byName) {
+                Path path = Path.of(String.valueOf(row.get("path")));
+                Path fileName = path.getFileName();
+                if (fileName != null && name.equals(fileName.toString())) tighter.add(row);
+            }
+            return tighter.size() == 1 ? tighter.get(0) : null;
+        }
+        return bySegment.size() == 1 ? bySegment.get(0) : null;
+    }
+
+    private static String selectorFor(Map<String, Object> worktree, Path path) {
+        Map<String, Object> nested = new LinkedHashMap<>();
+        Object id = worktree.get("worktreeId");
+        if (id == null) id = worktree.get("id");
+        if (id != null) nested.put("id", id);
+        nested.put("path", path.toString());
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("ok", true);
+        envelope.put("result", Map.of("worktree", nested));
+        String selector = OrcaSettlement.worktreeSelector(envelope);
+        return selector != null ? selector : "path:" + path;
     }
 
     @SuppressWarnings("unchecked")

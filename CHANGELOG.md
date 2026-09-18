@@ -177,6 +177,9 @@ that exists in code but has never been run live says so.
 
 ### Changed
 
+- `land.note` in `.warden/project.yaml` is refused as an unknown key. It used to
+  validate and be dropped: `ProjectConfig.LAND_KEYS` listed `note`, but the `Land`
+  record never carried it.
 - The hygiene job now reads every commit a push or a pull request introduces, not only the
   resulting tree. A tip-only gate was green while a commit added three absolute paths to a
   document and the next commit reworded them away, and the paths were still in the history the
