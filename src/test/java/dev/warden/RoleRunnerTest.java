@@ -140,8 +140,70 @@ public final class RoleRunnerTest implements Suite {
             RoleRunner.Outcome independent =
                     runRole(project, home, "reviewer", "independent", "stubvendor", null, false);
             check.eq("a model never reviews its own vendor's output", "othervendor", independent.vendor());
-            check.eq("and the reason is recorded", "same_vendor_as_implementer",
+            check.eq("and the reason is recorded", "same_vendor_as_writer",
                     independent.rejected().get("stub-sneaky"));
+
+            // --- a transient rate limit is retried only when the policy says so ---------
+            Path rateCounter = home.resolve("stub-rate.count");
+            Files.deleteIfExists(rateCounter);
+            Files.writeString(home.resolve("profiles/stub-rate.yaml"), """
+                    version: 1
+                    profile: stub-rate
+                    role: reviewer
+                    vendor: ratevendor
+                    command: %s
+                    read_only: true
+                    args: ["-cp", %s, "dev.warden.testing.StubVendor", "rate-limit-once", "--counter", %s, "--threshold", "2", "--prompt-file", "{{prompt_file}}"]
+                    limits: { wall_clock_minutes: 2 }
+                    prompt_template: prompts/reviewer.md
+                    json_schema: schemas/reviewer.json
+                    artifact:
+                      required_fields: [role, task_id, status, verdict, summary, findings]
+                    verification:
+                      verified_on: "2026-08-26"
+                    """.formatted(yaml(javaExecutable()), yaml(absoluteClassPath()),
+                    yaml(rateCounter.toString())));
+            Files.writeString(home.resolve("policy.yaml"), """
+                    version: 1
+                    roles:
+                      reviewer: { profiles: [stub-rate], strategy: first, require_independent_vendor: true }
+                      implementer: { profiles: [stub-impl], strategy: first, require_independent_vendor: false }
+                    review: { required_for_risk: [medium, high] }
+                    """);
+            RoleRunner.Outcome stoppedByLimit = runRole(project, home, "reviewer", "rate-off", null, null, false);
+            check.eq("without a retry policy a rate limit stops the role", "role_rate_limited",
+                    stoppedByLimit.code());
+            Files.writeString(home.resolve("policy.yaml"), """
+                    version: 1
+                    roles:
+                      reviewer: { profiles: [stub-rate], strategy: first, require_independent_vendor: true }
+                      implementer: { profiles: [stub-impl], strategy: first, require_independent_vendor: false }
+                    review: { required_for_risk: [medium, high] }
+                    retry: { rate_limited: { max_attempts: 1, backoff_seconds: 7 } }
+                    """);
+            Files.deleteIfExists(rateCounter);
+            java.util.List<Long> slept = new java.util.ArrayList<>();
+            RoleRunner.Outcome retried = new RoleRunner(new ProcessRunner())
+                    .withSleeper(slept::add)
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                            "reviewer", "rate-on", (String) null, null, false);
+            check.that("with a retry policy the second call answers", retried.ok());
+            check.eq("after one pause of the declared backoff", List.of(7000L), slept);
+            check.eq("both calls are vendor attempts", 2,
+                    ((List<?>) retried.details().get("vendor_attempts")).size());
+            check.that("and the report says a retry happened",
+                    retried.details().get("rate_limit_retry") != null);
+            check.eq("a vendor that names its own wait is obeyed", 12_000L,
+                    RoleRunner.retryPauseMillis(Map.of("quota", Map.of("vendor_message",
+                            "Rate limit reached; retry after 12 seconds")),
+                            new dev.warden.config.Policy.RateLimitRetry(2, 30), 1));
+            check.eq("otherwise the backoff doubles per attempt", 60_000L,
+                    RoleRunner.retryPauseMillis(Map.of(),
+                            new dev.warden.config.Policy.RateLimitRetry(2, 30), 2));
+            check.eq("and never exceeds fifteen minutes", 900_000L,
+                    RoleRunner.retryPauseMillis(Map.of("quota", Map.of("vendor_message",
+                            "Retry-After: 5000")), new dev.warden.config.Policy.RateLimitRetry(2, 30), 1));
+            writePolicy(home, "stub-review", "stub-impl");
 
             // --- read-only is verified, not trusted ------------------------------------
             writePolicy(home, "stub-sneaky", "stub-impl");

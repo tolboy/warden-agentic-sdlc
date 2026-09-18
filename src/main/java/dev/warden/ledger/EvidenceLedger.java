@@ -178,6 +178,21 @@ public final class EvidenceLedger {
      * join the reservation instead of refusing it as a duplicate.
      */
     public void markPrepared(int roleRuns, double costUsd, int unpriced) throws IOException {
+        markPrepared(roleRuns, costUsd, unpriced, null);
+    }
+
+    /**
+     * @param compiledPlan the call plan measured against the contract preparation compiled,
+     *                     or null when no contract was compiled. The reservation's own plan
+     *                     was measured before a contract existed, against the invocation's
+     *                     risk and no visual contract; a planner is allowed to change both, so
+     *                     the two can name different paying stages. Neither is rewritten: the
+     *                     estimate keeps its phase and the compiled plan becomes the one the
+     *                     loop will be measured by, with the difference recorded rather than
+     *                     silently overwritten.
+     */
+    public void markPrepared(int roleRuns, double costUsd, int unpriced,
+                             Map<String, Object> compiledPlan) throws IOException {
         Path marker = runDirectory.resolve("run.json");
         if (!Files.isRegularFile(marker)) {
             throw new IOException("cannot mark preparation: run id is not reserved");
@@ -187,6 +202,24 @@ public final class EvidenceLedger {
         reservation.put("preparation_role_runs", (long) Math.max(0, roleRuns));
         reservation.put("preparation_cost_usd", costUsd);
         reservation.put("preparation_unpriced", (long) Math.max(0, unpriced));
+        Map<String, Object> estimate = null;
+        if (compiledPlan != null) {
+            Object reserved = reservation.get("budget_plan");
+            if (reserved instanceof Map<?, ?> earlier && !reservation.containsKey("budget_plan_at_reservation")) {
+                Map<String, Object> copied = new LinkedHashMap<>();
+                earlier.forEach((key, value) -> copied.put(String.valueOf(key), value));
+                copied.put("measured_against", "invocation");
+                copied.put("phase", "reserve");
+                reservation.put("budget_plan_at_reservation", copied);
+                estimate = copied;
+            }
+            Map<String, Object> compiled = new LinkedHashMap<>(compiledPlan);
+            compiled.put("measured_against", "compiled_contract");
+            compiled.put("phase", "prepared");
+            reservation.put("budget_plan", compiled);
+            reservation.put("reservation_matched_contract",
+                    estimate == null || sameStages(estimate, compiled));
+        }
         Files.writeString(marker, Json.writePretty(reservation) + System.lineSeparator(),
                 StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
         Map<String, Object> measurement = new LinkedHashMap<>();
@@ -196,7 +229,18 @@ public final class EvidenceLedger {
         measurement.put("role_runs", (long) Math.max(0, roleRuns));
         measurement.put("total_cost_usd", costUsd);
         measurement.put("unpriced_calls", (long) Math.max(0, unpriced));
+        if (compiledPlan != null) {
+            measurement.put("budget_plan", reservation.get("budget_plan"));
+            measurement.put("reservation_matched_contract", reservation.get("reservation_matched_contract"));
+        }
         append("run_prepared", measurement);
+    }
+
+    /** Whether two plans name the same paying stages and the same clean-path cost. */
+    private static boolean sameStages(Map<String, Object> estimate, Map<String, Object> compiled) {
+        return java.util.Objects.equals(estimate.get("paying_stages"), compiled.get("paying_stages"))
+                && java.util.Objects.equals(estimate.get("minimum_success_calls"),
+                        compiled.get("minimum_success_calls"));
     }
 
     /**

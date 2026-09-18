@@ -28,7 +28,18 @@ public record TaskSpec(
         VisualQa visualQa,
         Budget budget,
         Long maxFixAttempts,
-        Long timeoutMinutes) {
+        Long timeoutMinutes,
+        String reviewAssurance) {
+
+    /**
+     * The weakest reading a task will accept as its review.
+     *
+     * `independent` (the default): every reader differs in vendor from every writer of the
+     * candidate. `same_vendor_peer`: a pair the policy declares — one vendor, two different
+     * models — may read instead. The task has to say so, because the policy alone cannot
+     * lower what a contract is judged by, and the label reaches the human gate either way.
+     */
+    public static final Set<String> REVIEW_ASSURANCES = Set.of("independent", "same_vendor_peer");
 
     public record Authority(boolean workspaceWrite, boolean network, boolean land) {}
     public record VisualQa(boolean required, List<String> scenarios, String start, String url) {}
@@ -37,19 +48,40 @@ public record TaskSpec(
      *                          across `--continue`; null when the task declares none. Time a
      *                          stopped run spends waiting for a person is not counted.
      */
-    public record Budget(long maxRoleRuns, double maxCostUsd, Long maxElapsedMinutes) {
+    public record Budget(long maxRoleRuns, double maxCostUsd, Long maxElapsedMinutes,
+                         Long gateTtlHours, String costCap) {
         public Budget(long maxRoleRuns, double maxCostUsd) {
-            this(maxRoleRuns, maxCostUsd, null);
+            this(maxRoleRuns, maxCostUsd, null, null, "threshold");
         }
+
+        public Budget(long maxRoleRuns, double maxCostUsd, Long maxElapsedMinutes) {
+            this(maxRoleRuns, maxCostUsd, maxElapsedMinutes, null, "threshold");
+        }
+
+        /** Whether `max_cost_usd` is a strict cap reserved against, or a threshold on reported spend. */
+        public boolean strictCostCap() { return "strict".equals(costCap); }
     }
+
+    /**
+     * How `max_cost_usd` binds. `threshold` (the default, and everything the number ever
+     * was): the ceiling is compared with the spend vendors have reported so far, so an
+     * unpriced call spends nothing against it and the last call may exceed it. `strict`: a
+     * call is admitted only when the reported spend plus the declared upper bound of that
+     * call and of every paying stage still owed stays under the ceiling, which requires every
+     * profile on the roster to declare `limits.max_cost_usd`; a roster that cannot prove a
+     * bound stops before the first dispatch as `cost_cap_unenforceable` rather than
+     * pretending.
+     */
+    public static final Set<String> COST_CAPS = Set.of("threshold", "strict");
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
-            "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
+            "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes",
+            "review_assurance");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios", "start", "url");
     private static final Set<String> BUDGET_KEYS =
-            Set.of("max_role_runs", "max_cost_usd", "max_elapsed_minutes");
+            Set.of("max_role_runs", "max_cost_usd", "max_elapsed_minutes", "gate_ttl_hours", "cost_cap");
 
     public static TaskSpec parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -105,16 +137,23 @@ public record TaskSpec(
                 budgetNode.optInt("max_role_runs", 6, 1, 50),
                 budgetNode.optDouble("max_cost_usd", 20.0, 0.0, 10000.0),
                 budgetNode.has("max_elapsed_minutes")
-                        ? budgetNode.optInt("max_elapsed_minutes", 60, 1, 1440) : null);
+                        ? budgetNode.optInt("max_elapsed_minutes", 60, 1, 1440) : null,
+                // How long a stopped run's question stays answerable. Waiting for a person is
+                // not execution time and is not charged to `max_elapsed_minutes`; this is the
+                // separate, bounded life of the human gate itself. Omitted, a gate never expires.
+                budgetNode.has("gate_ttl_hours")
+                        ? budgetNode.optInt("gate_ttl_hours", 72, 1, 720) : null,
+                budgetNode.requireEnum("cost_cap", COST_CAPS, "threshold"));
 
         Long maxFixAttempts = root.has("max_fix_attempts")
                 ? root.optInt("max_fix_attempts", 2, 0, 10) : null;
         Long timeoutMinutes = root.has("timeout_minutes")
                 ? root.optInt("timeout_minutes", 30, 1, 240) : null;
+        String reviewAssurance = root.requireEnum("review_assurance", REVIEW_ASSURANCES, "independent");
 
         root.throwIfAny();
         return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance, reproduce,
-                authority, visualQa, budget, maxFixAttempts, timeoutMinutes);
+                authority, visualQa, budget, maxFixAttempts, timeoutMinutes, reviewAssurance);
     }
 
     /**
@@ -214,7 +253,8 @@ public record TaskSpec(
                 visualQa,
                 budget,
                 maxFixAttempts != null ? maxFixAttempts : project.defaultMaxFixAttempts(),
-                timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes());
+                timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes(),
+                reviewAssurance == null ? "independent" : reviewAssurance);
     }
 
     private static List<String> resolveCommands(List<String> requested, boolean bareChecks,
@@ -250,7 +290,18 @@ public record TaskSpec(
             VisualQa visualQa,
             Budget budget,
             long maxFixAttempts,
-            long timeoutMinutes) {
+            long timeoutMinutes,
+            String reviewAssurance) {
+
+        public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
+                            String baseRef, List<String> scopePaths, List<String> baselineCommands,
+                            List<String> acceptanceCommands, List<String> reproduceCommands,
+                            Authority authority, VisualQa visualQa, Budget budget,
+                            long maxFixAttempts, long timeoutMinutes) {
+            this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
+                    acceptanceCommands, reproduceCommands, authority, visualQa, budget,
+                    maxFixAttempts, timeoutMinutes, "independent");
+        }
 
         // Existing internal callers construct planning-only tasks without reproduction.
         public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
@@ -259,7 +310,7 @@ public record TaskSpec(
                             Budget budget, long maxFixAttempts, long timeoutMinutes) {
             this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
                     acceptanceCommands, List.of(), authority, visualQa, budget,
-                    maxFixAttempts, timeoutMinutes);
+                    maxFixAttempts, timeoutMinutes, "independent");
         }
 
         /**
@@ -299,6 +350,11 @@ public record TaskSpec(
             }
             fields.put("authority", authority.workspaceWrite() + "/" + authority.network()
                     + "/" + authority.land());
+            // What a reading may be. Lowering it to a same-vendor pair changes what the verdict
+            // means; a task that never spoke keeps the hash it had before the key existed.
+            if (!"independent".equals(reviewAssurance)) {
+                fields.put("review_assurance", reviewAssurance);
+            }
             fields.put("visual_required", String.valueOf(visualQa.required()));
             fields.put("visual_url", String.valueOf(visualQa.url()));
             fields.put("visual_start", String.valueOf(visualQa.start()));

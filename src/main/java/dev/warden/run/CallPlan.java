@@ -202,7 +202,9 @@ public final class CallPlan {
         // call reserve and no money reserve is entitled to know the second one was considered.
         plan.put("cost_reserve", "not computed: a vendor's price is only known after its call, "
                 + "and some vendors report none, so max_cost_usd stays a ceiling and is never "
-                + "reserved against");
+                + "reserved against. A task may declare budgets.cost_cap: strict, which reserves "
+                + "each profile's declared limits.max_cost_usd instead and refuses a roster that "
+                + "cannot prove a bound");
         // Named for the same reason as the cost. A reader who finds a call reserve and nothing
         // about elapsed time should be told that time was considered and where it stopped,
         // rather than left to assume a deadline is being enforced somewhere.

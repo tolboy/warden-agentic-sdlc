@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Turns an accepted candidate into a commit, a pushed branch and a pull request.
@@ -62,12 +63,26 @@ public final class LandCommand {
 
     public record Options(String runId, boolean commit, boolean push, boolean pullRequest,
                           String title, Path bodyFile, Path messageFile, String base,
-                          String remote) {}
+                          String remote, String type) {
+        public Options {
+            if (type == null || type.isBlank()) type = "feat";
+        }
+
+        /** Callers that predate {@code --type} get the conventional default. */
+        public Options(String runId, boolean commit, boolean push, boolean pullRequest,
+                       String title, Path bodyFile, Path messageFile, String base,
+                       String remote) {
+            this(runId, commit, push, pullRequest, title, bodyFile, messageFile, base, remote, "feat");
+        }
+    }
 
     public record Outcome(boolean ok, String code, Map<String, Object> report) {}
 
     private static final Duration GIT_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration PUSH_TIMEOUT = Duration.ofMinutes(10);
+    private static final Set<String> COMMIT_TYPES = Set.of(
+            "feat", "fix", "docs", "chore", "refactor", "test", "perf");
+    private static final int SUBJECT_LIMIT = 72;
 
     private final ProcessRunner processes;
 
@@ -82,12 +97,19 @@ public final class LandCommand {
         boolean commit = push || has(args, "--commit");
         String bodyFile = option(args, "--body-file", null);
         String messageFile = option(args, "--message-file", null);
+        String type = option(args, "--type", "feat");
+        if (!COMMIT_TYPES.contains(type)) {
+            throw new IllegalArgumentException(
+                    "--type must be feat, fix, docs, chore, refactor, test or perf, not '"
+                            + type + "'");
+        }
         return new Options(args[1], commit, push, pullRequest,
                 option(args, "--title", null),
                 bodyFile == null ? null : Path.of(bodyFile),
                 messageFile == null ? null : Path.of(messageFile),
                 option(args, "--base", null),
-                option(args, "--remote", null));
+                option(args, "--remote", null),
+                type);
     }
 
     public Outcome run(Options options) throws Exception {
@@ -164,7 +186,7 @@ public final class LandCommand {
 
         String message = options.messageFile() != null
                 ? Files.readString(options.messageFile(), StandardCharsets.UTF_8)
-                : commitMessage(report);
+                : commitMessage(report, options.type());
         String title = options.title() != null ? options.title() : firstLine(message);
         String body = options.bodyFile() != null
                 ? Files.readString(options.bodyFile(), StandardCharsets.UTF_8)
@@ -197,8 +219,15 @@ public final class LandCommand {
         ProcessRunner.Result staged = processes.run(add, root, GIT_TIMEOUT);
         if (!staged.ok()) return failed(result, "git_add_failed", staged);
 
-        ProcessRunner.Result committed = processes.run(
-                List.of("git", "commit", "-m", message), root, GIT_TIMEOUT);
+        Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
+        ProcessRunner.Result committed;
+        try {
+            Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
+            committed = processes.run(
+                    List.of("git", "commit", "-F", messageOnDisk.toString()), root, GIT_TIMEOUT);
+        } finally {
+            Files.deleteIfExists(messageOnDisk);
+        }
         if (!committed.ok()) return failed(result, "git_commit_failed", committed);
         result.put("committed", commitSha(root));
 
@@ -264,15 +293,17 @@ public final class LandCommand {
     }
 
     /**
-     * Subject once. Every later claim is answered by {@code stages} and
-     * {@code skipped_stages}: a commit message outlives the run directory, so it
-     * must not name a check nobody performed.
+     * {@code type(task-id): claim}, then the full goal, then what ran. The subject is
+     * what a pull request title becomes by default, so it is cut to 72 characters at a
+     * word boundary rather than taken from the goal verbatim.
      */
-    private static String commitMessage(Map<String, Object> report) {
+    public static String commitMessage(Map<String, Object> report, String type) {
         String goal = String.valueOf(report.getOrDefault("goal", report.get("task_id")));
-        StringBuilder message = new StringBuilder(firstLine(goal)).append("\n\n");
-        String rest = afterFirstLine(goal);
-        if (!rest.isEmpty()) message.append(rest).append("\n\n");
+        String taskId = String.valueOf(report.get("task_id"));
+        StringBuilder message = new StringBuilder(subjectFor(type, taskId, goal)).append("\n\n");
+        message.append(goal);
+        if (!goal.endsWith("\n")) message.append('\n');
+        message.append('\n');
         String checks = checksFrom(report);
         if (!checks.isEmpty()) message.append(checks);
         message.append("the evidence is in .warden/runs/").append(report.get("run_id")).append(".\n");
@@ -281,6 +312,41 @@ public final class LandCommand {
             message.append("\nRan-by: ").append(row.get("vendor")).append('/').append(row.get("model"));
         }
         return message.toString().strip() + "\n";
+    }
+
+    /**
+     * {@code <type>(<task-id>): <claim>} at most 72 characters, cut at a word boundary
+     * with no ellipsis. {@code <claim>} is the first line of the goal, first letter
+     * lower-cased, trailing period dropped.
+     */
+    public static String subjectFor(String type, String taskId, String goal) {
+        String prefix = type + "(" + taskId + "): ";
+        String claim = claimFrom(goal);
+        String raw = prefix + claim;
+        if (raw.length() <= SUBJECT_LIMIT) return raw;
+        int budget = SUBJECT_LIMIT - prefix.length();
+        if (budget <= 0) return raw.substring(0, SUBJECT_LIMIT);
+        return prefix + cutAtWordBoundary(claim, budget);
+    }
+
+    private static String claimFrom(String goal) {
+        String line = firstLine(goal);
+        if (line.endsWith(".")) line = line.substring(0, line.length() - 1);
+        if (line.isEmpty()) return line;
+        char first = line.charAt(0);
+        if (Character.isUpperCase(first)) {
+            return Character.toLowerCase(first) + line.substring(1);
+        }
+        return line;
+    }
+
+    /** Plain cut: last space inside {@code max}, or a hard cut when there is none. */
+    private static String cutAtWordBoundary(String text, int max) {
+        if (text.length() <= max) return text;
+        String head = text.substring(0, max);
+        int space = head.lastIndexOf(' ');
+        if (space <= 0) return head;
+        return head.substring(0, space);
     }
 
     /**
@@ -423,7 +489,7 @@ public final class LandCommand {
                                      ProjectConfig.Land land, String title, Options options) {
         List<String> plan = new ArrayList<>();
         plan.add("git add -- " + String.join(" ", paths));
-        plan.add("git commit -m <the message above>");
+        plan.add("git commit -F <message file>");
         if (options.push() || options.pullRequest()) {
             plan.add("git push -u " + (remote == null ? "<remote>" : remote) + " " + branch);
         }
@@ -542,12 +608,6 @@ public final class LandCommand {
         int newline = text.indexOf('\n');
         String line = newline < 0 ? text : text.substring(0, newline);
         return line.strip();
-    }
-
-    /** The goal after its subject line, or empty when the goal is a single line. */
-    private static String afterFirstLine(String text) {
-        int newline = text.indexOf('\n');
-        return newline < 0 ? "" : text.substring(newline + 1).strip();
     }
 
     private static String textOrNull(Object value) {

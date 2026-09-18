@@ -8,6 +8,7 @@ import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
 import dev.warden.config.ProjectInitializer;
+import dev.warden.config.RosterCommand;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
 import dev.warden.gate.GateRunner;
@@ -18,6 +19,7 @@ import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.json.Json;
 import dev.warden.ledger.CorpusImport;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.LedgerCompare;
 import dev.warden.ledger.LedgerReader;
 import dev.warden.ledger.ProjectIdentity;
 import dev.warden.ledger.RunReport;
@@ -64,6 +66,7 @@ public final class Main {
                 case "visual-qa" -> visualQa(args);
                 case "setup" -> setup();
                 case "profiles" -> profiles(args);
+                case "roster" -> roster(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
                 case "do" -> doIntent(args);
@@ -257,6 +260,17 @@ public final class Main {
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
         System.out.println(Json.write(result));
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
+    }
+
+    /**
+     * See and change which profile fills which role, and a profile's model/effort, without
+     * a YAML round-trip. Line edits only; comments and the rest of the file stay.
+     */
+    private static int roster(String[] args) throws Exception {
+        RosterCommand.Outcome outcome = new RosterCommand().run(UserConfig.defaultHome(), args);
+        if (outcome.text() != null) System.out.print(outcome.text());
+        else System.out.println(Json.write(outcome.report()));
+        return outcome.exitCode();
     }
 
     /**
@@ -532,11 +546,17 @@ public final class Main {
                     + decision.kind().jsonValue() + " decision that is neither a rejection nor a "
                     + "retry; only a failover decision authorises a vendor substitution");
         }
+        // A failover answered `retry` is the person waiting out the quota window with the
+        // same roster: no substitution is authorised, and the spent stop was never about the
+        // work, so the verdicts already reached are kept.
+        if (decision.state() == HumanDecision.State.RESOLVED && "retry".equals(decision.decision())) {
+            return new Carried(Map.of(), new TaskLoop.Continuation(priorRunId, null, true));
+        }
         if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
             throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
-                    + "resolved as 'switch' (state=" + decision.state().jsonValue()
+                    + "resolved as 'switch' or 'retry' (state=" + decision.state().jsonValue()
                     + ", decision=" + decision.decision() + "); record the choice first with "
-                    + "`warden approve " + priorRunId + " --decision switch`");
+                    + "`warden approve " + priorRunId + " --decision switch|retry`");
         }
         Path summary = root.resolve(decision.summaryPath());
         Object pending = Json.parseObject(java.nio.file.Files.readString(summary))
@@ -783,17 +803,28 @@ public final class Main {
 
     private static int ledger(String[] args) throws Exception {
         boolean global = false;
+        boolean compare = false;
+        boolean text = false;
         String projectId = null;
+        Path baselineFile = null;
         List<Path> imports = new ArrayList<>();
         for (int index = 1; index < args.length; index++) {
             String arg = args[index];
             switch (arg) {
                 case "--global" -> global = true;
+                case "--compare" -> compare = true;
+                case "--text" -> text = true;
                 case "--project-id" -> {
                     if (index + 1 >= args.length) {
                         throw new IllegalArgumentException("ledger --project-id needs a value");
                     }
                     projectId = args[++index];
+                }
+                case "--baseline-file" -> {
+                    if (index + 1 >= args.length) {
+                        throw new IllegalArgumentException("ledger --baseline-file needs a path");
+                    }
+                    baselineFile = Path.of(args[++index]);
                 }
                 case "--import" -> {
                     if (index + 1 >= args.length) {
@@ -804,6 +835,10 @@ public final class Main {
                 default -> throw new IllegalArgumentException("ledger: unknown argument '" + arg + "'");
             }
         }
+        if (compare && !imports.isEmpty()) {
+            // Name the flag the operator actually typed, matching --import vs --global.
+            throw new IllegalArgumentException("ledger --compare cannot be combined with --import");
+        }
         if (!imports.isEmpty() && (global || projectId != null)) {
             // Name the flag the operator actually typed. A message about `--global` sends
             // someone who passed `--project-id` looking for an argument that is not there.
@@ -812,6 +847,16 @@ public final class Main {
         }
         if (projectId != null && !global) {
             throw new IllegalArgumentException("ledger --project-id is only valid with --global");
+        }
+        if (compare && (global || projectId != null)) {
+            throw new IllegalArgumentException("ledger --compare cannot be combined with "
+                    + (global ? "--global" : "--project-id"));
+        }
+        if (text && !compare) {
+            throw new IllegalArgumentException("ledger --text is only valid with --compare");
+        }
+        if (baselineFile != null && !compare) {
+            throw new IllegalArgumentException("ledger --baseline-file is only valid with --compare");
         }
         if (!imports.isEmpty()) {
             Map<String, Object> result = CorpusImport.run(UserConfig.defaultHome(), imports);
@@ -834,6 +879,12 @@ public final class Main {
             return 0;
         }
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        if (compare) {
+            Map<String, Object> report = LedgerCompare.compare(root, baselineFile);
+            if (text) System.out.print(LedgerCompare.render(report));
+            else System.out.println(Json.write(report));
+            return 0;
+        }
         System.out.println(Json.write(new LedgerReader().summarize(root)));
         return 0;
     }
@@ -952,6 +1003,18 @@ public final class Main {
             }
             String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
 
+            // A gate past its declared life can still be closed, but not accepted on the
+            // strength of evidence that was current when it was published: a live page, a
+            // deployment, a network observation may all have moved since. Reject, abort and
+            // retry remain available, and an explicit acknowledgement re-opens accept.
+            if ("accept".equals(choice) && pending.expiredAt(java.time.Instant.ofEpochMilli(env.clock.nowMillis()))
+                    && !hasFlag(args, "--acknowledge-expired")) {
+                throw new ApprovalException("gate_expired", "run " + runId + " asked its question "
+                        + "on " + pending.createdAt() + " and its gate expired on "
+                        + pending.expiresAt() + " (budgets.gate_ttl_hours). Re-check anything "
+                        + "that can go stale, then accept with --acknowledge-expired, or answer "
+                        + "reject/retry/abort; no answer is never an acceptance.");
+            }
             // Acceptance is valid only for the exact candidate the human inspected. Reject,
             // abort and retry remain available when the tree moved, because they grant no land.
             if ("accept".equals(choice) && pending.candidateFingerprint() != null) {
@@ -1039,6 +1102,16 @@ public final class Main {
                              Integer waitMinutes) throws Exception {
         long start = env.clock.nowMillis();
         long deadline = waitMinutes == null ? start : start + waitMinutes.longValue() * 60_000L;
+        // The wait never outlives the gate's own life: polling past it would only find an
+        // answer the store then refuses. The deadline is cut, the reason is said.
+        try {
+            HumanDecision pending = store.read(runId);
+            if (pending.expiresAt() != null) {
+                deadline = Math.min(deadline, pending.expiresAt().toEpochMilli());
+            }
+        } catch (Exception unreadable) {
+            // The poll below reports an unreadable decision on its own terms.
+        }
         long delayMs = 5_000L;
         int polls = 0;
         ApprovalException last = null;
@@ -1138,6 +1211,15 @@ public final class Main {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", false);
         result.put("code", "gate_pending");
+        try {
+            HumanDecision pending = store.read(runId);
+            if (pending.expiresAt() != null) {
+                result.put("gate_expires_at", pending.expiresAt().toString());
+                result.put("gate_expired", pending.expiredAt(java.time.Instant.ofEpochMilli(nowMillis)));
+            }
+        } catch (Exception unreadable) {
+            // The timeout report stands without it.
+        }
         result.put("waited_seconds", Math.max(0L, (nowMillis - startMillis) / 1000L));
         result.put("polls", (long) polls);
         result.put("last_error", last == null ? "gate_pending" : last.getMessage());
@@ -1277,6 +1359,19 @@ public final class Main {
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                  warden roster [--text]       which profile fills which role, the workflow,
+                                               and any dangling policy references
+                  warden roster set <role> --profiles a,b[,c] [--strategy first|rotate]
+                                           rewrite that role's profiles (and strategy) in
+                                           policy.yaml; comments and every other byte stay.
+                                           Copies the file to *.before-roster-<timestamp>
+                                           first. --allow-missing permits a name with no
+                                           profiles/<name>.yaml yet
+                  warden roster model <name> --model X [--effort Y] [--keep-verified]
+                                           rewrite model/effort in profiles/<name>.yaml the
+                                           same way. Drops verified_on (the stamp was for
+                                           the old model) unless --keep-verified; prints
+                                           verify_with so the probe is re-run
                   warden init [--base-ref REF] create a conservative project starter config
                   warden pilot prepare --spec FILE --output DIR
                                            write a self-contained offline pilot bundle from
@@ -1340,6 +1435,13 @@ public final class Main {
                                                event_id use a provenance key; an ambiguous match
                                                is flagged, not merged. Contracts, units, lineage
                                                and cost the source never had stay unknown.
+                                               --compare groups local task-run summaries by
+                                               prepare, risk, workflow and roster, folding a
+                                               continued chain into one unit attributed to its
+                                               last run. --baseline-file PATH sits manually
+                                               observed (non-Warden) tasks beside them.
+                                               --text prints a compact table. Refused with
+                                               --import. A stopped task is not a success.
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,
                                                screenshots, changed files, human decision

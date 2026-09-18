@@ -58,11 +58,14 @@ public final class MeasurementProjector {
             "failed_over_from", "exhausted_profiles",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
-            "accounting", "outcomes", "budget_plan",
+            "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
+            "reservation_matched_contract", "plan_review",
             "prompt_template_sha256", "json_schema_sha256", "prompt_sha256", "artifact_sha256",
             "contract_sha256", "acceptance_sha256",
             "diff_base_commit", "worktree_fingerprint",
-            "avoided_vendor",
+            "avoided_vendor", "avoided_vendors", "writer_set_known", "independence",
+            "writer_vendors", "writer_profiles", "writer_provenance", "review_assurance",
+            "review_coverage", "escalation", "chain",
             "failover_declined_by_budget", "failover_declined_by_policy",
             "phase", "view_state");
 
@@ -70,10 +73,10 @@ public final class MeasurementProjector {
             "input", "output", "total", "input_tokens", "output_tokens", "total_tokens");
 
     private static final Set<String> ROLE_CONTRACT = Set.of(
-            "stage", "role", "roster", "strategy", "require_independent_vendor",
+            "stage", "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "read_only",
-            "prompt_template_sha256", "json_schema_sha256",
-            "on_fail", "on_findings", "recheck_after_fix", "fix_with");
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
+            "on_fail", "on_findings", "recheck_after_fix", "fix_with", "evidence");
 
     private static final Set<String> LABEL = Set.of("value", "source");
 
@@ -82,7 +85,7 @@ public final class MeasurementProjector {
     private static final Set<String> CONTEXT = Set.of(
             "schema_version", "warden_version", "adapter_version",
             "wall_clock_minutes", "timeout_minutes", "turn_limit", "grants",
-            "prompt_template_sha256", "json_schema_sha256",
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "model", "effort", "contract_hash");
 
     private static final Set<String> GRANTS = Set.of(
@@ -107,15 +110,37 @@ public final class MeasurementProjector {
     private static final Set<String> BUDGET_PLAN = Set.of(
             "requested_cap", "minimum_success_calls", "paying_stages",
             "sufficient_for_success", "repair_reserve", "recovery_branches",
-            "cost_reserve", "time_reserve");
+            "cost_reserve", "time_reserve", "measured_against", "phase");
+
+    private static final Set<String> PLAN_REVIEW = Set.of(
+            "verdict", "rounds", "blocking_findings");
 
     private static final Set<String> RECOVERY_BRANCH = Set.of(
             "stage", "calls_needed_to_repair", "calls_to_repair_and_be_judged",
             "calls_to_repair_and_finish", "calls_required_here",
             "reachable_under_cap", "repair_allowed_under_cap");
 
+    /** A screenshot the run verified: its digest and size, never its path. */
+    private static final Set<String> IMAGE = Set.of("sha256", "bytes");
+
     private static final Set<String> STEP = Set.of(
-            "step", "stage", "attempt", "ok", "code", "dry_run", "role", "profile", "vendor");
+            "step", "stage", "attempt", "ok", "code", "dry_run", "role", "profile", "vendor",
+            "independence", "fix_for", "fix_round", "reused_from", "blocking_findings",
+            "evidence", "image_evidence");
+
+    private static final Set<String> COVERAGE = Set.of(
+            "stage", "role", "source", "reused_from", "ok", "blocking_findings", "profile",
+            "vendor", "assurance", "candidate_fingerprint");
+
+    private static final Set<String> ESCALATION = Set.of(
+            "rung", "rungs_declared", "after_blocking_reviews", "blocking_reviews_seen",
+            "implementer", "reviewer", "at_stage", "fix_round", "reason", "quality_attempts");
+
+    private static final Set<String> CHAIN = Set.of(
+            "runs", "role_runs", "cost_usd", "unpriced_calls", "fix_attempts",
+            "elapsed_seconds", "elapsed_known", "max_role_runs", "max_cost_usd",
+            "max_fix_attempts", "max_elapsed_minutes", "calls_remaining",
+            "fix_attempts_remaining", "blocking_reviews_seen", "escalation_rung");
 
     private static final Set<String> QUOTA = Set.of("detected_by", "matched_signature");
 
@@ -143,8 +168,13 @@ public final class MeasurementProjector {
             Map.entry("finding_registry", FINDING),
             Map.entry("finding_history", FINDING_HISTORY),
             Map.entry("budget_plan", BUDGET_PLAN),
+            Map.entry("budget_plan_at_reservation", BUDGET_PLAN),
+            Map.entry("plan_review", PLAN_REVIEW),
             Map.entry("recovery_branches", RECOVERY_BRANCH),
             Map.entry("steps", STEP),
+            Map.entry("review_coverage", COVERAGE),
+            Map.entry("escalation", ESCALATION),
+            Map.entry("chain", CHAIN),
             Map.entry("quota", QUOTA),
             Map.entry("vision_capability", VISION),
             Map.entry("accounting", ACCOUNTING),
@@ -157,6 +187,8 @@ public final class MeasurementProjector {
             Map.entry("timeout_minutes", LABEL),
             Map.entry("prompt_template_sha256", LABEL),
             Map.entry("json_schema_sha256", LABEL),
+            Map.entry("mcp_config_sha256", LABEL),
+            Map.entry("image_evidence", IMAGE),
             Map.entry("turn_limit", TRIPLE),
             Map.entry("model", TRIPLE),
             Map.entry("effort", TRIPLE),

@@ -95,6 +95,26 @@ public final class ProfileVerifierTest implements Suite {
             check.that("an already verified profile is not stamped twice", !again.written());
             check.eq("and says why", "already_verified", again.code());
 
+            // --- the answer is checked, not only the exit code ------------------------
+            // A headless CLI whose tool call was auto-denied exited 0 with an empty response
+            // and was stamped verified. With `expect`, the stamp needs the answer.
+            Path answering = write(home, "answering", succeeds(), null, "probe-ran");
+            ProfileVerifier.Probe answered = verifier.run(load(answering), home, Duration.ofSeconds(60));
+            check.that("a probe whose output carries the expected answer passes", answered.ok());
+            check.that("and says the answer was found", answered.answerFound());
+            check.eq("the report names what was expected", "probe-ran",
+                    ProfileVerifier.report(load(answering), answered).get("expected"));
+            Path silent = write(home, "silent", succeeds(), null, "the-value-in-the-file");
+            ProfileVerifier.Probe unanswered = verifier.run(load(silent), home, Duration.ofSeconds(60));
+            check.that("a probe that exits 0 without the expected answer is not a pass", !unanswered.ok());
+            check.eq("even though its exit code was 0", 0, unanswered.exitCode());
+            check.that("and the report says the answer was missing", !unanswered.answerFound());
+            check.contains("the operator is told the tool call was refused or the model guessed",
+                    ProfileVerifier.nextStep(unanswered), "does not contain the expected answer");
+            check.rejects("an empty expectation is refused rather than matching everything",
+                    "verification.expect must be a non-empty string",
+                    () -> load(write(home, "blank", succeeds(), null, "")));
+
             // --- a failing probe is reported, and the caller must not stamp it --------
             Path bad = write(home, "bad", fails(), null);
             ProfileVerifier.Probe failed = verifier.run(load(bad), home, Duration.ofSeconds(60));
@@ -127,6 +147,11 @@ public final class ProfileVerifierTest implements Suite {
     }
 
     private static Path write(Path home, String name, String probe, String verifiedOn) throws IOException {
+        return write(home, name, probe, verifiedOn, null);
+    }
+
+    private static Path write(Path home, String name, String probe, String verifiedOn, String expect)
+            throws IOException {
         StringBuilder builder = new StringBuilder("""
                 version: 1
                 profile: %s
@@ -149,6 +174,7 @@ public final class ProfileVerifierTest implements Suite {
             builder.append("  note: \"nothing to run yet\"\n");
         }
         if (verifiedOn != null) builder.append("  verified_on: \"").append(verifiedOn).append("\"\n");
+        if (expect != null) builder.append("  expect: \"").append(expect).append("\"\n");
         Path file = home.resolve("profiles").resolve(name + ".yaml");
         Files.writeString(file, builder.toString());
         return file;

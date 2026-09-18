@@ -24,9 +24,24 @@ public record HumanDecision(
         String candidateFingerprint,
         String decision,
         String actor,
-        String note) {
+        String note,
+        Instant expiresAt) {
 
     public static final long SCHEMA_VERSION = 1L;
+
+    /** The shape every existing caller and file uses: a gate with no expiry. */
+    public HumanDecision(long schemaVersion, String runId, String taskId, State state, Kind kind,
+                         String reason, List<String> options, Instant createdAt, Instant updatedAt,
+                         String summaryPath, String candidateFingerprint, String decision,
+                         String actor, String note) {
+        this(schemaVersion, runId, taskId, state, kind, reason, options, createdAt, updatedAt,
+                summaryPath, candidateFingerprint, decision, actor, note, null);
+    }
+
+    /** Whether the gate's own life has run out at {@code now}. A gate with no TTL never expires. */
+    public boolean expiredAt(Instant now) {
+        return expiresAt != null && now != null && !now.isBefore(expiresAt);
+    }
 
     public enum State {
         PENDING("pending"),
@@ -59,9 +74,12 @@ public record HumanDecision(
          * what is being asked is whether somebody else may finish it.
          *
          * `abort` is first so that automation which auto-selects the first option declines
-         * the substitution rather than granting one.
+         * the substitution rather than granting one. `retry` is the third answer: wait for
+         * the quota window and continue with the same roster, keeping every verdict. It was
+         * missing, and the only way to wait out a window was `abort` plus a fresh run that
+         * paid the writer again.
          */
-        FAILOVER("failover", List.of("abort", "switch"));
+        FAILOVER("failover", List.of("abort", "switch", "retry"));
 
         private final String jsonValue;
         private final List<String> options;
@@ -85,6 +103,16 @@ public record HumanDecision(
             }
             throw malformed("unknown kind " + Json.write(value));
         }
+
+        /**
+         * The option lists a file of this kind may carry. A decision written before `retry`
+         * was offered to a failover still validates against the list it was written with;
+         * it simply cannot be answered with the option it never offered.
+         */
+        boolean acceptsOptions(List<String> declared) {
+            if (options.equals(declared)) return true;
+            return this == FAILOVER && List.of("abort", "switch").equals(declared);
+        }
     }
 
     public HumanDecision {
@@ -107,6 +135,9 @@ public record HumanDecision(
         value.put("decision", decision);
         value.put("actor", actor);
         value.put("note", note);
+        // Written only when a TTL was declared, so a file from a task without one is
+        // byte-for-byte what it always was.
+        if (expiresAt != null) value.put("expires_at", expiresAt.toString());
         return value;
     }
 
@@ -121,7 +152,7 @@ public record HumanDecision(
         Kind kind = Kind.parse(value.get("kind"));
         String reason = requiredString(value, "reason");
         List<String> options = stringList(value, "options");
-        if (!options.equals(kind.options())) {
+        if (!kind.acceptsOptions(options)) {
             throw malformed("options do not match kind " + kind.jsonValue());
         }
         Instant createdAt = instant(value, "created_at");
@@ -134,6 +165,7 @@ public record HumanDecision(
         String decision = nullableString(value, "decision");
         String actor = nullableString(value, "actor");
         String note = nullableString(value, "note");
+        Instant expiresAt = value.get("expires_at") == null ? null : instant(value, "expires_at");
 
         if (state == State.PENDING && (decision != null || actor != null || note != null)) {
             throw malformed("pending decision contains resolution fields");
@@ -151,7 +183,8 @@ public record HumanDecision(
             }
         }
         return new HumanDecision(schemaVersion, runId, taskId, state, kind, reason, options,
-                createdAt, updatedAt, summaryPath, candidateFingerprint, decision, actor, note);
+                createdAt, updatedAt, summaryPath, candidateFingerprint, decision, actor, note,
+                expiresAt);
     }
 
     private static long integer(Map<String, Object> value, String key) throws ApprovalException {

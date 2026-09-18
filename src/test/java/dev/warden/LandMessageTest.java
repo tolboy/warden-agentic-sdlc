@@ -59,6 +59,46 @@ public final class LandMessageTest implements Suite {
 
         check.eq("a report with no stages at all makes no claim", "",
                 LandCommand.checksFrom(report(List.of(), List.of())));
+
+        check.eq("the subject is type(scope): claim",
+                "docs(task-9): mention the refused key",
+                LandCommand.subjectFor("docs", "task-9", "Mention the refused key."));
+        check.eq("a first letter already lower-case is left alone",
+                "feat(t): already lower",
+                LandCommand.subjectFor("feat", "t", "already lower"));
+
+        int budget = 72 - "feat(ab): ".length();
+        String keep = "alpha beta gamma";
+        String over = keep + " " + "z".repeat(budget);
+        String cut = LandCommand.subjectFor("feat", "ab", over);
+        check.eq("an overlong claim is cut at a word boundary", "feat(ab): " + keep, cut);
+        check.that("the whole subject stays at most 72 characters", cut.length() <= 72);
+        check.that("the cut inserts no ellipsis", !cut.contains("…") && !cut.endsWith("..."));
+
+        String hard = LandCommand.subjectFor("feat", "ab", "A" + "x".repeat(80));
+        check.eq("a single overlong word is cut plain at 72", 72, hard.length());
+        check.eq("and keeps the type(scope): prefix", "feat(ab): a" + "x".repeat(budget - 1), hard);
+
+        String goal = "Add a \"quoted\" heading\nand the rest of the goal";
+        String body = LandCommand.commitMessage(Map.of(
+                "goal", goal,
+                "task_id", "land-1",
+                "run_id", "run-9",
+                "stages", List.of(),
+                "skipped_stages", List.of()), "feat");
+        check.contains("a double quote in the goal survives into the body", body,
+                "Add a \"quoted\" heading");
+        check.contains("a newline in the goal survives into the body", body,
+                "and the rest of the goal");
+        check.that("the subject is the conventional form, not the raw first line",
+                body.startsWith("feat(land-1): add a \"quoted\" heading\n"));
+
+        check.eq("type defaults to feat", "feat",
+                LandCommand.parse(new String[] {"land", "run-1"}).type());
+        check.eq("a known --type is kept", "fix",
+                LandCommand.parse(new String[] {"land", "run-1", "--type", "fix"}).type());
+        check.rejects("an unknown --type is refused", "not 'banana'",
+                () -> LandCommand.parse(new String[] {"land", "run-1", "--type", "banana"}));
     }
 
     private static Map<String, Object> report(List<Object> stages, List<Object> skipped) {

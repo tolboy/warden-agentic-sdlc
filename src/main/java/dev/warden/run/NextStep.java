@@ -101,7 +101,8 @@ public final class NextStep {
             case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
                     "prompt_undeliverable", "turn_ceiling_reached" -> "retry_infrastructure";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
-            case "blocking_findings_remain" -> blockingKind(summary);
+            case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
+            case "escalation_unavailable", "independent_review_unavailable" -> "wait_or_add_vendor";
             case "baseline_failed" -> "fix_baseline";
             case "preflight_outside_scope" -> "fix_scope";
             case "contract_mutated" -> "restore_contract";
@@ -168,6 +169,15 @@ public final class NextStep {
             case "wait_or_add_vendor" -> "rate_limited".equals(reason)
                     ? "The vendor asked to slow down; wait a few minutes, then retry run "
                             + runId + ". Its subscription is not known to be spent."
+                    : "escalation_unavailable".equals(reason)
+                    ? "The escalation ladder's next rung names a profile that cannot be "
+                            + "dispatched now; verify or replace it in policy.yaml, then retry run "
+                            + runId + " so the verdicts already reached are kept."
+                    : "independent_review_unavailable".equals(reason)
+                    ? "No reader on the roster differs from every vendor that wrote this "
+                            + "candidate. Add a reader from another vendor, or set "
+                            + "review_assurance: same_vendor_peer on the task if that weaker "
+                            + "check is acceptable, then retry run " + runId + "."
                     : "Wait for the quota window named in the vendor message, or add a profile "
                             + "from another vendor, then retry run " + runId + ".";
             case "confirm_failover" ->

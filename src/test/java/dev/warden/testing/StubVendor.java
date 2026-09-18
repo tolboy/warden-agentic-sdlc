@@ -588,6 +588,42 @@ public final class StubVendor {
                         + "\"findings\":" + findings + "},"
                         + "\"total_cost_usd\":0.003}");
             }
+            case "eyes-acquire", "eyes-acquire-empty", "eyes-acquire-outside" -> {
+                // A visual reviewer with its own camera. It is handed no images; it is told
+                // where to put the ones it takes, and Warden believes only the files it can
+                // find there afterwards. The -empty variant answers without taking any, and the
+                // -outside variant lists a file it wrote somewhere other than the evidence
+                // directory: both are the claims the verification exists to refuse.
+                List<String> taken = new ArrayList<>();
+                String evidenceDir = flag(args, "--evidence-dir");
+                String outside = flag(args, "--outside");
+                Path shot = null;
+                if (mode.equals("eyes-acquire") && evidenceDir != null) {
+                    shot = Path.of(evidenceDir).resolve("home-1280x720.png");
+                } else if (mode.equals("eyes-acquire-outside") && outside != null) {
+                    shot = Path.of(outside).resolve("elsewhere-1280x720.png");
+                }
+                if (shot != null) {
+                    Files.createDirectories(shot.getParent());
+                    Files.write(shot, new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13});
+                    taken.add(shot.toAbsolutePath().toString().replace("\\", "/"));
+                }
+                boolean passes = succeedsNow(args);
+                String findings = passes ? "[]"
+                        : "[{\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                        + "\"viewport\":\"1280x720\",\"message\":\"the label is clipped\","
+                        + "\"expected\":\"the whole word is readable\","
+                        + "\"actual\":\"it is cut off at the panel edge\","
+                        + "\"scenario\":\"open the home screen at 1280x720\","
+                        + "\"confidence\":\"confirmed\"}]";
+                String listed = taken.isEmpty() ? "" : "\"" + String.join("\",\"", taken) + "\"";
+                System.out.println("{\"structuredOutput\":{\"role\":\"visual_qa\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"" + (passes ? "pass" : "fail") + "\","
+                        + "\"summary\":\"drove the application myself and took " + taken.size()
+                        + " screenshot(s)\",\"screenshots_taken\":[" + listed + "],"
+                        + "\"findings\":" + findings + "},"
+                        + "\"total_cost_usd\":0.004}");
+            }
             case "plan", "plan-shell", "plan-scope", "plan-goal", "plan-access", "plan-sneaky",
                     "plan-commit", "plan-stage", "plan-schema" -> {
                 String prompt = "";
@@ -647,6 +683,37 @@ public final class StubVendor {
                 envelope.put("total_cost_usd", 0.01);
                 envelope.put("num_turns", 2);
                 envelope.put("usage", java.util.Map.of("input_tokens", 4, "output_tokens", 6, "total_tokens", 10));
+                System.out.println(dev.warden.json.Json.write(envelope));
+            }
+            // The second planner. `plan-review-pass` approves the compiled contract;
+            // `plan-review-fail` objects every time; `plan-review-once` objects on its first
+            // reading and approves the redraft, which is the one path that both sends the
+            // first planner back and lets the run go on.
+            case "plan-review-pass", "plan-review-fail", "plan-review-once" -> {
+                boolean objects = mode.equals("plan-review-fail")
+                        || (mode.equals("plan-review-once") && !succeedsNow(args));
+                String promptText = "";
+                String promptFile = flag(args, "--prompt-file");
+                if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
+                    promptText = Files.readString(Path.of(promptFile), StandardCharsets.UTF_8);
+                }
+                boolean sawContract = promptText.contains("The compiled contract you are judging")
+                        && promptText.contains("```yaml");
+                java.util.Map<String, Object> artifact = new java.util.LinkedHashMap<>();
+                artifact.put("role", "plan_reviewer");
+                artifact.put("task_id", "hello");
+                artifact.put("status", "completed");
+                artifact.put("verdict", objects ? "fail" : "pass");
+                artifact.put("summary", "saw_contract=" + sawContract);
+                artifact.put("findings", objects ? List.of(java.util.Map.of(
+                        "id", "PLAN-1", "severity", "P1", "category", "acceptance_gap",
+                        "message", "the acceptance cannot fail for the goal",
+                        "expected", "a check that fails today", "actual", "a check that passes today",
+                        "suggestion", "name a check that exercises the new file",
+                        "confidence", "confirmed")) : List.of());
+                java.util.Map<String, Object> envelope = new java.util.LinkedHashMap<>();
+                envelope.put("structuredOutput", artifact);
+                envelope.put("num_turns", 1);
                 System.out.println(dev.warden.json.Json.write(envelope));
             }
             case "check" -> System.exit(Files.isRegularFile(Path.of("src", "result.txt")) ? 0 : 1);

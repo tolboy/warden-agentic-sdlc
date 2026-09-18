@@ -120,6 +120,20 @@ public final class RoleRunner {
     private final dev.warden.run.Progress progress;
     private Occupied occupied = NOBODY;
     private String stageName;
+    /** How the runner waits between rate-limit retries; the suite replaces it. */
+    private java.util.function.LongConsumer sleeper = millis -> {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    };
+
+    /** The same runner, pausing through {@code sleeper} instead of the clock. */
+    public RoleRunner withSleeper(java.util.function.LongConsumer sleeper) {
+        this.sleeper = sleeper == null ? millis -> { } : sleeper;
+        return this;
+    }
     /** 1-based dispatch of this runner for the current role. A later {@link #run} of the
      *  same role (the planner's protocol retry) must not reuse the first call's report name. */
     private int evidenceDispatch = 1;
@@ -147,6 +161,65 @@ public final class RoleRunner {
 
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
+
+    /**
+     * Assignments a run pinned for the rest of its chain, by role and by stage name.
+     *
+     * The escalation ladder names them: after the declared number of blocking readings the
+     * loop stops asking the roster and hands the repair to the next rung's writer, and the
+     * objecting stage to that rung's reader. A pin is resolved without the roster's rotation
+     * or independence filter, because the pin is the operator's explicit instruction to read
+     * as a co-author; what it keeps is every other check — the profile must exist, fill the
+     * role, be verified, be present and not be spent — and it is labelled `peer_review`
+     * rather than independent whenever the reader's vendor wrote into the candidate.
+     */
+    private final Map<String, String> roleAssignments = new LinkedHashMap<>();
+    private final Map<String, String> stageAssignments = new LinkedHashMap<>();
+
+    /** Pin {@code profile} for every later dispatch of {@code role}. */
+    public RoleRunner assignRole(String role, String profile) {
+        roleAssignments.put(role, profile);
+        return this;
+    }
+
+    /** Pin {@code profile} for every later dispatch of the stage called {@code stage}. */
+    public RoleRunner assignStage(String stage, String profile) {
+        stageAssignments.put(stage, profile);
+        return this;
+    }
+
+    /** The pin that applies to a dispatch of {@code role} at {@code stage}, or null. */
+    private String pinFor(String stage, String role) {
+        if (stage != null && stageAssignments.containsKey(stage)) return stageAssignments.get(stage);
+        return roleAssignments.get(role);
+    }
+
+    /**
+     * A pinned profile, resolved by the same checks the roster applies minus the rotation and
+     * the independence filter, and labelled for what it is.
+     */
+    private RoleResolver.Resolution resolvePinned(String pinned, String role, UserConfig user,
+                                                  RoleResolver.Writers writers) {
+        Profile profile = user.profiles().get(pinned);
+        Map<String, String> rejected = new LinkedHashMap<>();
+        if (profile == null) rejected.put(pinned, "profile_not_found");
+        else if (!profile.role().equals(role)) rejected.put(pinned, "role_mismatch");
+        else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
+            rejected.put(pinned, "vision_capability_unverified");
+        } else if (!profile.verified()) rejected.put(pinned, "profile_unverified");
+        else if (exhausted.contains(pinned)) rejected.put(pinned, "quota_exhausted_this_run");
+        else if (!available(profile)) rejected.put(pinned, "executable_not_found");
+        if (!rejected.isEmpty()) {
+            throw new RoleResolver.Unresolvable("pinned profile cannot fill role " + role + ": "
+                    + rejected, rejected);
+        }
+        String assurance;
+        if (!profile.readOnly()) assurance = RoleResolver.NONE;
+        else if (!writers.known()) assurance = RoleResolver.UNPROVEN;
+        else if (!writers.contains(profile.vendor())) assurance = RoleResolver.INDEPENDENT;
+        else assurance = "peer_review";
+        return new RoleResolver.Resolution(profile, Map.of(), assurance);
+    }
 
     public RoleRunner(ProcessRunner processes) { this(processes, ALWAYS, null, null); }
 
@@ -220,9 +293,77 @@ public final class RoleRunner {
      * @param avoidVendor the vendor a role must differ from, or null when it need not
      */
     public boolean canFill(UserConfig user, String role, String avoidVendor, long rotation) {
+        return canFill(user, role, RoleResolver.Writers.of(avoidVendor), rotation);
+    }
+
+    /** @param writers who has written into the candidate; a reader must differ from all of them */
+    public boolean canFill(UserConfig user, String role, RoleResolver.Writers writers, long rotation) {
+        return canFill(user, null, role, writers, rotation);
+    }
+
+    /**
+     * The profile a dispatch of {@code role} at {@code stage} would get, without dispatching
+     * and without advancing anything, or null when nobody could fill it.
+     *
+     * A preflight asks this for the writer so it can ask {@link #canFill} about every reader
+     * against that writer's vendor before the writer is paid. Rotation state is read, not
+     * written: a single-stage role's counter is consulted the way a dry run consults it.
+     */
+    public Profile peek(Path root, UserConfig user, String stage, String role,
+                        RoleResolver.Writers writers, int stagePosition) {
+        if (user.policy() == null || !user.policy().roles().containsKey(role)) return null;
+        try {
+            RoleResolver.Writers known = writers == null ? RoleResolver.Writers.NONE : writers;
+            String pinned = pinFor(stage, role);
+            if (pinned != null) return resolvePinned(pinned, role, user, known).selected();
+            long rotation = stagePosition >= 0 ? stagePosition : nextRotation(root, role, true);
+            return new RoleResolver().resolve(role, user.policy(), user.profiles(), known,
+                    rotation, this::available, exhausted).selected();
+        } catch (Exception nobody) {
+            return null;
+        }
+    }
+
+    /**
+     * Why nobody can fill {@code role} at {@code stage}, profile by profile, or null when
+     * somebody can. The preflight reports this so an operator reads the resolver's own reason
+     * — a spent subscription, a shared vendor, an invalid peer pair — and not only the fact.
+     */
+    public Map<String, String> explainFill(UserConfig user, String stage, String role,
+                                           RoleResolver.Writers writers, long rotation) {
+        if (user.policy() == null || !user.policy().roles().containsKey(role)) {
+            return Map.of(role, "role_not_configured");
+        }
+        try {
+            String pinned = pinFor(stage, role);
+            if (pinned != null) {
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                return null;
+            }
+            new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
+                    Math.max(0, rotation), this::available, exhausted);
+            return null;
+        } catch (RoleResolver.Unresolvable nobody) {
+            return nobody.rejected();
+        } catch (RuntimeException nobody) {
+            return Map.of(role, String.valueOf(nobody.getMessage()));
+        }
+    }
+
+    /**
+     * The same question for a named stage, so a stage the escalation ladder pinned is judged
+     * by its pin and not by a roster it will not consult.
+     */
+    public boolean canFill(UserConfig user, String stage, String role, RoleResolver.Writers writers,
+                           long rotation) {
         if (user.policy() == null || !user.policy().roles().containsKey(role)) return false;
         try {
-            new RoleResolver().resolve(role, user.policy(), user.profiles(), avoidVendor,
+            String pinned = pinFor(stage, role);
+            if (pinned != null) {
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                return true;
+            }
+            new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
                     Math.max(0, rotation), this::available, exhausted);
             return true;
         } catch (RuntimeException nobody) {
@@ -267,6 +408,19 @@ public final class RoleRunner {
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
                        String implementerVendor, Path contextFile, List<Path> attachments,
                        boolean dryRun, int stagePosition) throws Exception {
+        return run(loaded, user, role, runId, RoleResolver.Writers.of(implementerVendor),
+                contextFile, attachments, dryRun, stagePosition);
+    }
+
+    /**
+     * @param writers every vendor that may have left bytes in the candidate, with whether that
+     *                set is known at all. A reader is resolved against all of them; a writer
+     *                is not measured against itself. See {@link RoleResolver.Writers}.
+     */
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
+                       RoleResolver.Writers writers, Path contextFile, List<Path> attachments,
+                       boolean dryRun, int stagePosition) throws Exception {
+        if (writers == null) writers = RoleResolver.Writers.NONE;
         if (user.policy() == null) {
             throw new IllegalStateException("no policy at " + user.home().resolve("policy.yaml")
                     + " — run `warden setup` to create a starter configuration");
@@ -297,12 +451,17 @@ public final class RoleRunner {
 
         List<Map<String, Object>> attempts = new ArrayList<>();
         double spent = 0;
+        int rateLimitRetries = 0;
+        List<Map<String, Object>> rateLimitPauses = new ArrayList<>();
 
         for (int attempt = 1; ; attempt++) {
             RoleResolver.Resolution resolution;
+            String pinned = pinFor(stageName, role);
             try {
-                resolution = new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                        implementerVendor, rotation, this::available, exhausted);
+                resolution = pinned != null
+                        ? resolvePinned(pinned, role, user, writers)
+                        : new RoleResolver().resolve(role, user.policy(), user.profiles(),
+                                writers, rotation, this::available, exhausted);
             } catch (RoleResolver.Unresolvable failure) {
                 return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId);
             } catch (RuntimeException failure) {
@@ -311,7 +470,31 @@ public final class RoleRunner {
                         roleInvocationId);
             }
 
-            Profile profile = resolution.selected();
+            // The servers a role may reach are the operator's file, resolved against the
+            // config home. A missing file is a configuration fault found before anything is
+            // spent, not a vendor that failed to answer, so no failover applies.
+            Path mcpFile = resolution.selected().mcpConfig() == null ? null
+                    : user.resolve(resolution.selected().mcpConfig());
+            if (mcpFile != null && !Files.isRegularFile(mcpFile)) {
+                Profile named = resolution.selected();
+                Map<String, Object> details = new LinkedHashMap<>();
+                details.put("message", "profile '" + named.name() + "' names mcp.config "
+                        + named.mcpConfig() + ", which does not exist under the config home");
+                details.put("resolution", "write the vendor's MCP configuration there, or remove "
+                        + "mcp.config and the {{mcp_config}} argument from the profile");
+                Map<String, Object> missing = new LinkedHashMap<>();
+                missing.put("role", role);
+                missing.put("profile", named.name());
+                missing.put("vendor", named.vendor());
+                missing.put("ok", false);
+                missing.put("code", "role_mcp_config_missing");
+                missing.put("role_invocation_id", roleInvocationId);
+                ledger.append("role_mcp_config_missing", missing);
+                return new Outcome(false, "role_mcp_config_missing", role, named.name(), named.vendor(),
+                        resolution.rejected(), null, details);
+            }
+            Profile profile = mcpFile == null ? resolution.selected()
+                    : resolution.selected().withMcpConfig(mcpFile.toAbsolutePath().normalize().toString());
             // Published from this resolution, not looked up again: a second resolve would
             // advance rotation and could name a profile that was not dispatched.
             publish(profile);
@@ -341,8 +524,14 @@ public final class RoleRunner {
             String evidenceName = evidenceSerial <= 1 ? role : role + ".attempt-" + evidenceSerial;
             String reportStem = evidenceDispatch <= 1 ? role : role + ".attempt-" + evidenceDispatch;
 
+            // Where a role that takes its own screenshots puts them. Created only for such a
+            // role: the loop believes a picture only if it finds it here afterwards.
+            Path evidenceDirectory = ledger.runDirectory().resolve("screenshots");
+            if (profile.vision() != null && profile.vision().acquires()) {
+                Files.createDirectories(evidenceDirectory);
+            }
             Map<String, String> values = promptValues(loaded, task, runId, mergeBase, user, profile,
-                    contextFile, inheritsUnfinishedWork, attempts, attachments);
+                    contextFile, inheritsUnfinishedWork, attempts, attachments, evidenceDirectory);
 
             if (profile.promptTemplate() == null) {
                 throw new IllegalStateException("profile '" + profile.name()
@@ -383,7 +572,16 @@ public final class RoleRunner {
                     role, spec, profile, user));
             report.put("measurement_context", MeasurementContext.snapshot(profile, task, user));
             report.put("role_invocation_id", roleInvocationId);
-            report.put("avoided_vendor", implementerVendor);
+            // Every vendor that wrote into the candidate, not only the last implementer. The
+            // single-valued key is kept for readers of older reports and carries the first.
+            report.put("avoided_vendors", List.copyOf(new java.util.TreeSet<>(writers.vendors())));
+            report.put("avoided_vendor", writers.vendors().isEmpty() ? null
+                    : new java.util.TreeSet<>(writers.vendors()).first());
+            report.put("writer_set_known", writers.known());
+            // What this resolution may claim about the reader: independent, a declared
+            // same-vendor peer, unproven when the writers are unknown, or none for a writer.
+            report.put("independence", resolution.assurance());
+            if (pinned != null) report.put("assignment", "pinned:" + pinned);
             if (backfilled) report.put("prompt_backfilled", List.of("visual_scenarios"));
             report.put("rejected_profiles", resolution.rejected());
             report.put("prompt_path", root.relativize(promptFile).toString().replace('\\', '/'));
@@ -422,6 +620,7 @@ public final class RoleRunner {
                                 + "inside the prompt");
             }
             report.put("vendor_attempt", (long) attempt);
+            if (!rateLimitPauses.isEmpty()) report.put("rate_limit_retry", List.copyOf(rateLimitPauses));
 
             if (dryRun) {
                 report.put("dry_run", true);
@@ -504,6 +703,23 @@ public final class RoleRunner {
             if (report.get("cost_usd") instanceof Number number) spent += number.doubleValue();
             journalAttempt(ledger, role, roleInvocationId, report, attemptRow);
 
+            // A transient rate limit is the one failure worth asking the same vendor again
+            // for, and only when the policy said how often. The wait honours the seconds the
+            // vendor named when it named any, never a clock time it printed without a date.
+            Policy.RateLimitRetry retry = user.policy().rateLimitRetry();
+            if ("role_rate_limited".equals(result.code()) && rateLimitRetries < retry.maxAttempts()
+                    && gate.hasRoom()) {
+                rateLimitRetries++;
+                long pause = retryPauseMillis(result.evidence(), retry, rateLimitRetries);
+                rateLimitPauses.add(Map.of("attempt", (long) rateLimitRetries,
+                        "of", retry.maxAttempts(), "paused_millis", pause));
+                report.put("rate_limit_retry", List.copyOf(rateLimitPauses));
+                progress.line("      " + profile.name() + " was rate limited; waiting "
+                        + (pause / 1000) + " s, then retrying (" + rateLimitRetries + " of "
+                        + retry.maxAttempts() + ")");
+                sleeper.accept(pause);
+                continue;
+            }
             boolean quota = "role_quota_exhausted".equals(result.code());
             if (quota) {
                 exhausted.add(profile.name());
@@ -514,7 +730,7 @@ public final class RoleRunner {
                 quotaEvent.put("role_invocation_id", roleInvocationId);
                 quotaEvent.put("quota", result.evidence().getOrDefault("quota", Map.of()));
                 ledger.append("role_quota_exhausted", quotaEvent);
-                Profile candidate = failoverCandidate(role, user, implementerVendor, rotation);
+                Profile candidate = failoverCandidate(role, user, writers, rotation);
                 if (candidate != null) {
                     String mode = user.policy().failoverMode();
                     boolean preAuthorized = candidate.name().equals(authorizedFailover.get(role));
@@ -548,7 +764,7 @@ public final class RoleRunner {
                         Map<String, Object> pending = failoverEvent(role, profile, candidate,
                                 result, "pending_human_confirmation");
                         pending.put("independence_after_switch",
-                                independenceNote(candidate, implementerVendor));
+                                independenceNote(candidate, writers));
                         report.put("failover_pending", pending);
                         report.put("vendor_attempts", attempts);
                         report.put("attempts_cost_usd", spent);
@@ -602,16 +818,35 @@ public final class RoleRunner {
     }
 
     /**
+     * How long to pause before a rate-limit retry: the seconds the vendor asked for when its
+     * message carried a plain `retry after N seconds` or `Retry-After: N`, else the policy's
+     * backoff doubled per attempt. Bounded to fifteen minutes either way, and a time of day the
+     * vendor printed without a date is never parsed into an instant.
+     */
+    public static long retryPauseMillis(Map<String, Object> evidence, Policy.RateLimitRetry retry, int attempt) {
+        long seconds = -1;
+        if (evidence != null && evidence.get("quota") instanceof Map<?, ?> quota
+                && quota.get("vendor_message") instanceof String message) {
+            java.util.regex.Matcher named = java.util.regex.Pattern
+                    .compile("(?i)retry[- ]after:?\\s*(\\d{1,4})\\s*(s|sec|seconds?)?\\b")
+                    .matcher(message);
+            if (named.find()) seconds = Long.parseLong(named.group(1));
+        }
+        if (seconds < 0) seconds = retry.backoffSeconds() * (1L << Math.max(0, attempt - 1));
+        return Math.min(seconds, 900L) * 1000L;
+    }
+
+    /**
      * Which profile could fill this role once the exhausted ones are removed, or null when
      * none can. Asked before continuing so that the last vendor's failure is reported as its
      * own outcome rather than as an unresolvable role, and so that an operator being asked to
      * confirm a switch is told who would take over.
      */
-    private Profile failoverCandidate(String role, UserConfig user, String implementerVendor,
+    private Profile failoverCandidate(String role, UserConfig user, RoleResolver.Writers writers,
                                       long rotation) {
         try {
             return new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                    implementerVendor, rotation, this::available, exhausted).selected();
+                    writers, rotation, this::available, exhausted).selected();
         } catch (RuntimeException none) {
             return null;
         }
@@ -637,15 +872,16 @@ public final class RoleRunner {
      * self-review — but the operator confirming it should be told the roster is about to get
      * thin, before the next role fails to resolve.
      */
-    private static String independenceNote(Profile candidate, String implementerVendor) {
-        if (implementerVendor == null) {
-            return "no implementer has run yet in this workflow, so independence is unaffected";
+    private static String independenceNote(Profile candidate, RoleResolver.Writers writers) {
+        if (writers.vendors().isEmpty()) {
+            return "no writer has run yet in this workflow, so independence is unaffected";
         }
-        if (candidate.vendor().equals(implementerVendor)) {
-            return "the candidate shares the implementer's vendor (" + implementerVendor
+        String wrote = String.join(", ", new java.util.TreeSet<>(writers.vendors()));
+        if (writers.contains(candidate.vendor())) {
+            return "the candidate shares a vendor with a writer of this candidate (" + wrote
                     + "); a role that requires an independent vendor will refuse it";
         }
-        return "the candidate is a different vendor from the implementer (" + implementerVendor
+        return "the candidate differs from every vendor that wrote this candidate (" + wrote
                 + "), so independence is preserved";
     }
 
@@ -766,7 +1002,8 @@ public final class RoleRunner {
                                              Profile profile, Path contextFile,
                                              boolean inheritsUnfinishedWork,
                                              List<Map<String, Object>> attempts,
-                                             List<Path> attachments) throws Exception {
+                                             List<Path> attachments, Path evidenceDirectory)
+            throws Exception {
         String schemaPretty = "";
         String schemaJson = "";
         if (profile.jsonSchema() != null) {
@@ -809,7 +1046,9 @@ public final class RoleRunner {
         values.put("context", context);
         values.put("context_path", contextFile == null ? "" : contextFile.toString());
         values.put("screenshots", attachmentList(attachments));
-        values.put("vision_note", visionNote(profile, attachments));
+        values.put("evidence_dir", evidenceDirectory == null ? ""
+                : evidenceDirectory.toAbsolutePath().normalize().toString());
+        values.put("vision_note", visionNote(profile, attachments, evidenceDirectory));
         return values;
     }
 
@@ -871,8 +1110,19 @@ public final class RoleRunner {
      * silent: a `workspace_file` profile told the images are "attached" will answer about
      * filenames, and sound just as confident doing it.
      */
-    private static String visionNote(Profile profile, List<Path> attachments) {
+    private static String visionNote(Profile profile, List<Path> attachments, Path evidenceDirectory) {
         boolean any = attachments != null && !attachments.isEmpty();
+        if (!any && profile.vision() != null && profile.vision().acquires()) {
+            return "No screenshot was handed to you: this role takes its own. Drive the "
+                    + "application with your own tools (the browser, engine or desktop MCP "
+                    + "server this profile is configured with), exercise the scenarios above, "
+                    + "and save every screenshot you judge as a PNG file under `"
+                    + (evidenceDirectory == null ? "the run's screenshots directory"
+                            : evidenceDirectory.toAbsolutePath().normalize())
+                    + "`. List those files, as absolute paths, in `screenshots_taken`. Warden "
+                    + "verifies that each listed file exists there and hashes it; a verdict that "
+                    + "lists none is refused as having no evidence. Do not edit the source tree.";
+        }
         if (!any) return "No screenshot reached this run. Say so and return status: \"aborted\".";
         String delivery = profile.vision() == null ? null : profile.vision().delivery();
         if ("cli_attachment".equals(delivery)) {

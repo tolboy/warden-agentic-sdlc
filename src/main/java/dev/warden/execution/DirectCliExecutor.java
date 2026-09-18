@@ -87,6 +87,10 @@ public final class DirectCliExecutor implements RoleExecutor {
         // (`args: ["--model", "{{model}}"]`); what is provided here is the value.
         argumentValues.put("model", profile.model() == null ? "" : profile.model());
         argumentValues.put("effort", profile.effort() == null ? "" : profile.effort());
+        // Already resolved to an absolute path by the role runner, which also checked it exists.
+        argumentValues.put("mcp_config", profile.mcpConfig() == null ? "" : profile.mcpConfig());
+        argumentValues.put("evidence_dir", runDirectory.resolve("screenshots")
+                .toAbsolutePath().normalize().toString());
 
         List<String> command = new ArrayList<>();
         command.add(resolveExecutable(profile.command(), request.projectRoot()));
@@ -319,7 +323,8 @@ public final class DirectCliExecutor implements RoleExecutor {
         // The planner's draft is compiled into a contract. A profile may skip schema
         // enforcement for other roles; it may not skip it for the planner. Warden does not
         // trust a draft that fails the schema the prompt advertised.
-        boolean mustCheck = profile.enforceSchema() || "planner".equals(request.role());
+        boolean mustCheck = profile.enforceSchema() || "planner".equals(request.role())
+                || "plan_reviewer".equals(request.role());
         if (!mustCheck || request.schemaFile() == null || !Files.isRegularFile(request.schemaFile())) {
             return List.of();
         }

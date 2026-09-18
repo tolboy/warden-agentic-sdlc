@@ -99,6 +99,8 @@ public final class ConfigTest implements Suite {
                 () -> ProjectConfig.parse("version: 1\nproject: p\n", "project.yaml"));
         check.rejects("unknown top-level key refused", "unsupported key 'chekcs'",
                 () -> ProjectConfig.parse(PROJECT.replace("checks:", "chekcs:"), "project.yaml"));
+        check.rejects("land.note is refused as unknown", "unsupported key 'land.note'",
+                () -> ProjectConfig.parse(PROJECT + "\nland: {note: x}\n", "project.yaml"));
         check.rejects("defaults.checks must name a real set", "which is not defined under checks",
                 () -> ProjectConfig.parse(PROJECT.replace("checks: full", "checks: nonexistent"), "project.yaml"));
         check.rejects("unsafe scope path refused", "not a safe repository-relative path",
@@ -316,6 +318,63 @@ public final class ConfigTest implements Suite {
                 """, "codex-eyes.yaml");
         check.eq("direct vision delivery is explicit", "cli_attachment", visual.vision().delivery());
         check.that("verified visual probe makes vision eligible", visual.hasVerifiedVision());
+        check.that("a profile that says nothing about it takes no screenshots of its own",
+                !visual.vision().acquires());
+        check.eq("and names no MCP configuration", null, visual.mcpConfig());
+
+        // The tools a role may reach are the operator's file in the vendor's own format; the
+        // profile names it, hands it to the vendor's flag, and may say the role takes its own
+        // screenshots through what is in it.
+        Profile camera = Profile.parse("""
+                version: 1
+                profile: claude-eyes-mcp
+                role: visual_qa
+                vendor: claude
+                command: claude
+                runner: direct
+                args: ["-p", "--mcp-config", "{{mcp_config}}"]
+                mcp:
+                  config: mcp/visual.json
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                    acquires: true
+                verification:
+                  verified_on: 2026-09-18
+                """, "claude-eyes-mcp.yaml");
+        check.eq("a profile names the MCP configuration its vendor is handed",
+                "mcp/visual.json", camera.mcpConfig());
+        check.that("and may declare that it takes its own screenshots", camera.vision().acquires());
+        check.rejects("the placeholder without the file is refused", "requires mcp.config",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        args: ["--mcp-config", "{{mcp_config}}"]
+                        """, "p.yaml"));
+        check.rejects("and the file without the placeholder, because the servers would never be reached",
+                "no args entry passes {{mcp_config}}",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        mcp: { config: mcp/visual.json }
+                        """, "p.yaml"));
+        check.rejects("a typo under mcp is refused, not ignored", "unsupported key",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        args: ["--mcp-config", "{{mcp_config}}"]
+                        mcp: { configuration: mcp/visual.json }
+                        """, "p.yaml"));
 
         Profile legacyVisual = Profile.parse("""
                 version: 1
@@ -428,6 +487,45 @@ public final class ConfigTest implements Suite {
         check.eq("two roles configured", 2, policy.roles().size());
         check.eq("rotation strategy", "rotate", policy.roles().get("reviewer").strategy());
         check.that("independence required", policy.roles().get("reviewer").requireIndependentVendor());
+        dev.warden.config.TaskSpec bounded = dev.warden.config.TaskSpec.parse("""
+                version: 1
+                id: bounded
+                goal: g
+                risk: low
+                scope: app
+                budgets: { max_role_runs: 4, max_cost_usd: 3.0, gate_ttl_hours: 48, cost_cap: strict }
+                review_assurance: same_vendor_peer
+                """, "bounded.yaml");
+        check.eq("gate_ttl_hours is read", 48L, bounded.budget().gateTtlHours());
+        check.that("cost_cap: strict is read", bounded.budget().strictCostCap());
+        check.eq("review_assurance is read", "same_vendor_peer", bounded.reviewAssurance());
+        check.rejects("an unknown cost cap is refused", "cost_cap", () ->
+                dev.warden.config.TaskSpec.parse("""
+                        version: 1
+                        id: bounded
+                        goal: g
+                        risk: low
+                        scope: app
+                        budgets: { cost_cap: hopeful }
+                        """, "bounded.yaml"));
+        check.rejects("an unknown review assurance is refused", "review_assurance", () ->
+                dev.warden.config.TaskSpec.parse("""
+                        version: 1
+                        id: bounded
+                        goal: g
+                        risk: low
+                        scope: app
+                        review_assurance: whoever
+                        """, "bounded.yaml"));
+        dev.warden.config.Profile priced = dev.warden.config.Profile.parse("""
+                version: 1
+                profile: priced
+                role: reviewer
+                vendor: v
+                command: v
+                limits: { wall_clock_minutes: 5, max_cost_usd: 2.5 }
+                """, "priced.yaml");
+        check.eq("a profile may declare a per-call cost bound", 2.5, priced.maxCostUsd());
         check.that("review required for medium risk", policy.reviewRequired("medium"));
         check.that("review not required for low risk", !policy.reviewRequired("low"));
 
