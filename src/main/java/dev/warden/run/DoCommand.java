@@ -286,6 +286,7 @@ public final class DoCommand {
         boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists);
 
         TaskDraft.Written drafted;
+        Map<String, Object> planReview = null;
         // The mode that was in force, even when auto skipped the planner. TaskLoop writes
         // this into the run summary; defaulting to NONE (off) made --prepare auto look like
         // off after the fact.
@@ -313,13 +314,13 @@ public final class DoCommand {
                 // sufficient_for_success: false on a run that then finished.
                 if (options.draftOnly()) {
                     preparationPlan = new CallPlan(user.policy().workflow(),
-                            stage -> true, List.of("planner"));
-                    preparationCap = 1;
+                            stage -> true, Preparation.payingStages(user));
+                    preparationCap = Preparation.payingStages(user).size();
                 } else {
                     TaskSpec.ResolvedTask measured = measureForReservation(root, project,
                             taskId, options.goal(), scope, risk, contractExists);
                     preparationPlan = TaskLoop.planFor(user.policy().workflow(), user,
-                            measured, List.of("planner"));
+                            measured, Preparation.payingStages(user));
                     preparationCap = measured.budget().maxRoleRuns();
                 }
             }
@@ -344,9 +345,15 @@ public final class DoCommand {
                         prepared.message() == null ? prepared.code() : prepared.message()).report();
                 report.put("prepare", options.prepare());
                 report.put("run_id", runId);
+                report.put("preparation_role_runs", (long) prepared.roleRuns());
+                report.put("preparation_cost_usd", prepared.costUsd());
+                report.put("preparation_unpriced", (long) prepared.unpriced());
+                if (prepared.planReview() != null) report.put("plan_review", prepared.planReview());
+                if (prepared.written() != null) report.put("task_file", prepared.written().file().toString());
                 attachCorpusVisibility(report, root, runId, user.home());
                 return new Outcome(false, prepared.code(), requested, root, taskId, report);
             }
+            if (prepared.planReview() != null) planReview = prepared.planReview();
             if (options.dryRun() && prepared.written() == null && !contractExists) {
                 Map<String, Object> report = new LinkedHashMap<>();
                 report.put("ok", true);
@@ -460,6 +467,7 @@ public final class DoCommand {
                 report.put("budget_plan", preparationPlan.toMap(
                         preparationCap, user.policy().repairReserve()));
             }
+            if (planReview != null) report.put("plan_review", planReview);
             if (dispatchPlanner) {
                 attachCorpusVisibility(report, root, runId, user.home());
             }
@@ -527,6 +535,7 @@ public final class DoCommand {
         report.put("scope", scope);
         report.put("risk", risk);
         report.put("dry_run", options.dryRun());
+        if (planReview != null) report.put("plan_review", planReview);
         report.put("summary", String.valueOf(loop.summary()));
         report.put("steps", loop.summaryReport().get("steps"));
         // Only when there is something to say. A dry run does not stop for these, so if the

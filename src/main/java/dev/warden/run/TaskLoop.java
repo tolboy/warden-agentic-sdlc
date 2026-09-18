@@ -485,7 +485,7 @@ public final class TaskLoop {
         // first dispatch as well as before every repair. The preparation reservation uses
         // the same helper so run.json cannot describe a different chain from this summary.
         CallPlan callPlan = planFor(workflow, user, task,
-                prior.includedInPlan() ? List.of("planner") : List.of());
+                prior.includedInPlan() ? dev.warden.run.Preparation.payingStages(user) : List.of());
 
         List<Map<String, Object>> steps = new ArrayList<>();
         Map<String, Object> summary = new LinkedHashMap<>();

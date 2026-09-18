@@ -84,6 +84,7 @@ public final class PlannerTest implements Suite {
             bootstrapRefusesQuotaFailover(check, sandbox, home);
             failoverThenProtocolKeepsEvidenceNames(check, sandbox, home);
             ledgerCountsPlanner(check, sandbox, home);
+            planReviewChecks(check, sandbox, home);
         } finally {
             deleteTree(sandbox);
         }
@@ -905,6 +906,136 @@ public final class PlannerTest implements Suite {
 
     private void writePolicy(Path home, String planner) throws IOException {
         writePolicy(home, planner, "codex-implement", "confirm");
+    }
+
+    /**
+     * The second planner reads the compiled contract, not the draft; a blocking objection
+     * sends the first planner back once; a second one stops for a person; every reading and
+     * every redraft is a counted call.
+     */
+    @SuppressWarnings("unchecked")
+    private void planReviewChecks(Check check, Path sandbox, Path home) throws Exception {
+        check.that("setup ships the plan-reviewer prompt",
+                Files.isRegularFile(home.resolve("prompts/plan-reviewer.md")));
+        check.that("and its schema", Files.isRegularFile(home.resolve("schemas/plan-reviewer.json")));
+        check.that("and an unverified agy template for it",
+                Files.isRegularFile(home.resolve("profiles/agy-plan-review.yaml")));
+        check.that("the shipped template parses as a plan_reviewer profile",
+                "plan_reviewer".equals(Profile.parse(
+                        Files.readString(home.resolve("profiles/agy-plan-review.yaml")),
+                        "agy-plan-review.yaml").role()));
+
+        writePlannerProfile(home, "stub-plan", "plan", true);
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
+                sandbox.resolve("plan-review-pass.count"), 1);
+        writeReviewingPolicy(home, "stub-plan", "stub-plan-review");
+
+        Path passing = sandbox.resolve("plan-review-pass");
+        scaffoldProject(passing);
+        DoCommand.Outcome passed = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(passing, GOAL, "app", "low", "hello", "do-pr-pass",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.that("a reviewed draft still stops at --draft-only", passed.ok());
+        Map<String, Object> review = (Map<String, Object>) passed.report().get("plan_review");
+        check.eq("the second planner passed", "pass", review == null ? null : review.get("verdict"));
+        check.eq("in one round", 1L, review == null ? null : review.get("rounds"));
+        Map<String, Object> reservation = Json.parseObject(Files.readString(
+                passing.resolve(".warden/runs/do-pr-pass/run.json")));
+        Map<String, Object> reservedPlan = (Map<String, Object>) reservation.get("budget_plan");
+        check.eq("the reservation names both readings", List.of("planner", "plan-review"),
+                reservedPlan.get("paying_stages"));
+        check.eq("two calls were counted for preparation", 2L,
+                reservation.get("preparation_role_runs"));
+        String reviewerArtifact = Files.readString(
+                passing.resolve(".warden/runs/do-pr-pass/artifacts/plan_reviewer.json"));
+        check.contains("the reviewer was handed the compiled contract", reviewerArtifact,
+                "saw_contract=true");
+
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-once",
+                sandbox.resolve("plan-review-once.count"), 2);
+        Path redrafted = sandbox.resolve("plan-review-once");
+        scaffoldProject(redrafted);
+        DoCommand.Outcome redraft = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(redrafted, GOAL, "app", "low", "hello", "do-pr-once",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.that("an objection answered by the redraft still drafts", redraft.ok());
+        Map<String, Object> twice = (Map<String, Object>) redraft.report().get("plan_review");
+        check.eq("the reviewer read twice", 2L, twice.get("rounds"));
+        check.eq("and passed the redraft", "pass", twice.get("verdict"));
+        check.eq("four calls: draft, read, redraft, read", 4L, Json.parseObject(Files.readString(
+                redrafted.resolve(".warden/runs/do-pr-once/run.json"))).get("preparation_role_runs"));
+        check.that("the redraft was briefed with the objection",
+                Files.readString(redrafted.resolve(".warden/runs/do-pr-once/context/prepare-redraft.md"))
+                        .contains("the acceptance cannot fail for the goal"));
+        check.that("and the contract on disk is the redraft's",
+                Files.isRegularFile(redrafted.resolve(".warden/tasks/hello.yaml")));
+
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-fail",
+                sandbox.resolve("plan-review-fail.count"), 1);
+        Path refused = sandbox.resolve("plan-review-fail");
+        scaffoldProject(refused);
+        DoCommand.Outcome stopped = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(refused, GOAL, "app", "low", "hello", "do-pr-fail",
+                        "HEAD", true, false, false, false, false, false, null, "always"),
+                UserConfig.load(home));
+        check.that("a second objection stops before any writer", !stopped.ok());
+        check.eq("under its own name", "plan_review_findings_remain", stopped.code());
+        check.contains("naming the finding", String.valueOf(stopped.report().get("message")),
+                "the acceptance cannot fail for the goal");
+        check.eq("after four counted calls", 4L, stopped.report().get("preparation_role_runs"));
+        check.that("and no implementer ran",
+                !Files.exists(refused.resolve(".warden/runs/do-pr-fail/role-implementer.json")));
+
+        writePolicy(home, "stub-plan");
+    }
+
+    private void writeReviewingPolicy(Path home, String planner, String reviewer) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  planner:
+                    profiles: [%s]
+                    strategy: first
+                    require_independent_vendor: false
+                  plan_reviewer:
+                    profiles: [%s]
+                    strategy: first
+                    require_independent_vendor: false
+                  implementer:
+                    profiles: [codex-implement]
+                    strategy: first
+                    require_independent_vendor: false
+                  reviewer:
+                    profiles: [grok-review]
+                    strategy: first
+                    require_independent_vendor: true
+                review:
+                  required_for_risk: [medium, high]
+                """.formatted(planner, reviewer));
+    }
+
+    private void writeReviewerProfile(Path home, String name, String stubMode, Path counter,
+                                      int threshold) throws IOException {
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: plan_reviewer
+                vendor: reviewvendor
+                command: %s
+                read_only: true
+                args: ["-cp", %s, "dev.warden.testing.StubVendor", "%s", "--counter", %s, "--threshold", "%d", "--prompt-file", "{{prompt_file}}"]
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/plan-reviewer.md
+                json_schema: schemas/plan-reviewer.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  verified_on: "2026-09-18"
+                """.formatted(name, yaml(javaExecutable()), yaml(absoluteClassPath()), stubMode,
+                yaml(counter.toString()), threshold));
     }
 
     private void writePolicy(Path home, String planner, String implementer, String failover)

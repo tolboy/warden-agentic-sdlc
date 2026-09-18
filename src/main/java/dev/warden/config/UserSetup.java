@@ -34,14 +34,17 @@ public final class UserSetup {
         write(home.resolve("profiles/claude-review.yaml"), CLAUDE_REVIEW, created, skipped, home);
         write(home.resolve("profiles/codex-implement.yaml"), CODEX_IMPLEMENT, created, skipped, home);
         write(home.resolve("profiles/codex-visual-qa.yaml"), CODEX_VISUAL_QA, created, skipped, home);
+        write(home.resolve("profiles/agy-plan-review.yaml"), AGY_PLAN_REVIEW, created, skipped, home);
         write(home.resolve("prompts/reviewer.md"), REVIEWER_PROMPT, created, skipped, home);
         write(home.resolve("prompts/implementer.md"), IMPLEMENTER_PROMPT, created, skipped, home);
         write(home.resolve("prompts/visual-qa.md"), VISUAL_QA_PROMPT, created, skipped, home);
         write(home.resolve("prompts/planner.md"), PLANNER_PROMPT, created, skipped, home);
+        write(home.resolve("prompts/plan-reviewer.md"), PLAN_REVIEWER_PROMPT, created, skipped, home);
         write(home.resolve("schemas/reviewer.json"), REVIEWER_SCHEMA, created, skipped, home);
         write(home.resolve("schemas/implementer.json"), IMPLEMENTER_SCHEMA, created, skipped, home);
         write(home.resolve("schemas/visual-qa.json"), VISUAL_QA_SCHEMA, created, skipped, home);
         write(home.resolve("schemas/planner.json"), PLANNER_SCHEMA, created, skipped, home);
+        write(home.resolve("schemas/plan-reviewer.json"), PLAN_REVIEWER_SCHEMA, created, skipped, home);
         return new Result(home, created, skipped);
     }
 
@@ -62,6 +65,9 @@ public final class UserSetup {
      * not trust it.
      */
     public static String plannerSchema() { return PLANNER_SCHEMA; }
+
+    /** The shipped plan-reviewer schema, checked the same way the planner's is. */
+    public static String planReviewerSchema() { return PLAN_REVIEWER_SCHEMA; }
 
     private static final String POLICY = """
             version: 1
@@ -91,9 +97,48 @@ public final class UserSetup {
               #   strategy: first
               #   require_independent_vendor: false
 
+              # A second planner. Declared, `warden do --prepare auto|always` dispatches it once
+              # after the first planner's draft is compiled: it reads the contract Warden
+              # wrote, not the draft, and objects with findings. A blocking objection sends the
+              # first planner back once with those findings; a second objection stops for a
+              # person before any writer is paid. Absent, preparation stays one call.
+              #
+              # plan_reviewer:
+              #   profiles: [agy-plan-review]
+              #   strategy: first
+              #   require_independent_vendor: false
+
+            # A reader is resolved against every vendor that wrote into the candidate, not the
+            # last implementer alone. `require_independent_vendor: false` on a reading role no
+            # longer admits a same-vendor reader on its own: name the pair, two different
+            # models of one vendor, and the reading is labelled `same_vendor_peer` — never
+            # independent — and only on a task whose contract says
+            # `review_assurance: same_vendor_peer`.
+            #
+            #   reviewer:
+            #     profiles: [codex-review-sol]
+            #     strategy: first
+            #     require_independent_vendor: false
+            #     same_vendor_peer: { implementer: codex-implement, reviewer: codex-review-sol }
+
             review:
               # A low-risk task still passes every machine gate; it just does not pay a reviewer.
               required_for_risk: [medium, high]
+
+            # The opt-in escalation ladder. After `after_blocking_reviews` readings of one task
+            # objected with blocking product findings, the repair goes to the next rung's
+            # writer and the objecting stage is re-read by that rung's reader, both pinned for
+            # the rest of the chain. Rungs are climbed forward only; a rung's reader reads as a
+            # co-author (`peer_review`); whatever independent readings the chain still owes are
+            # resolved against every writer afterwards, and `independent_review_unavailable`
+            # stops the run when none is left. The last rung still objected to ends the run as
+            # `quality_exhausted`. Each rung costs a fix round from `max_fix_attempts`.
+            #
+            # escalation:
+            #   after_blocking_reviews: 2
+            #   rungs:
+            #     - { implementer: claude-implement, reviewer: grok-review }
+            #     - { implementer: codex-implement, reviewer: claude-review }
 
             # What happens when the vendor filling a role reports a spent subscription and
             # another profile could take over.
@@ -802,6 +847,160 @@ public final class UserSetup {
             ```json
             {{schema_pretty}}
             ```
+            """;
+
+    private static final String PLAN_REVIEWER_PROMPT = """
+            # Plan reviewer — read-only, the contract is what you judge
+
+            Task `{{task_id}}`, run `{{run_id}}`, project `{{project}}`, risk `{{risk}}`.
+
+            Operator goal (verbatim)
+            : {{operator_goal}}
+
+            A first planner drafted a contract for this goal and Warden compiled it. You are
+            the second planner. You do not redraft; you judge whether the compiled contract,
+            as written, would prove the goal if every check in it passed. Warden hands your
+            findings back to the first planner exactly once; a second objection stops the
+            run for a person before any writer is paid.
+
+            ## Hard constraints
+
+            1. **You are read-only.** Do not create, modify or delete any file, and run no
+               command that changes state. A content fingerprint of the worktree is taken
+               around this call; if anything moved, your verdict is discarded as a protocol
+               failure whatever it says.
+            2. **Judge the contract below, not the draft and not the goal sentence.** The
+               contract is what every later verdict is measured against. Open the files in
+               its scope and the checks it names before you answer.
+            3. **A finding is a claim someone else can check.** Every one carries `expected`
+               and `actual`. Only a `P1` blocks: the contract as written could pass while the
+               goal is not achieved, names a scope that cannot hold the work, asks for access
+               the goal does not need, or misses a visual check a person would obviously make.
+               Style and preference are not findings.
+
+            Named checks in this project
+            {{named_checks}}
+
+            Named scopes in this project
+            {{named_scopes}}
+
+            Authority of this call (you): you have none
+            : {{authority}}
+
+            {{context}}
+
+            ## Output contract
+
+            Print one JSON object on stdout and nothing after it. No markdown fence.
+            `verdict` is `fail` if there is at least one P1, else `pass`.
+
+            ```json
+            {{schema_pretty}}
+            ```
+            """;
+
+    private static final String PLAN_REVIEWER_SCHEMA = """
+            {
+              "title": "Plan reviewer artifact",
+              "type": "object",
+              "required": ["role", "task_id", "status", "verdict", "summary", "findings"],
+              "properties": {
+                "role": { "const": "plan_reviewer" },
+                "task_id": { "type": "string" },
+                "run_id": { "type": "string" },
+                "status": { "enum": ["completed", "blocked", "aborted"] },
+                "verdict": { "enum": ["pass", "fail"] },
+                "summary": { "type": "string" },
+                "findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["severity", "message", "expected", "actual"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "severity": { "enum": ["P1", "P2", "P3"] },
+                      "category": {
+                        "enum": ["acceptance_gap", "scope_gap", "access_gap", "visual_gap",
+                                 "risk_mismatch", "ambiguity", "other"]
+                      },
+                      "field": { "type": "string" },
+                      "message": { "type": "string" },
+                      "expected": { "type": "string" },
+                      "actual": { "type": "string" },
+                      "suggestion": { "type": "string" },
+                      "confidence": { "enum": ["confirmed", "plausible"] }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+    /**
+     * Google Antigravity's `agy` as the second planner. Measured against agy 1.2.x on 2026-09-15
+     * (visual role) and reused here with the same headless quirks: `-p=` carries the whole
+     * prompt-pointer in one token because `-p` otherwise swallows the next flag, the reading
+     * has to be told to use `view_file` rather than a shell, `--add-dir` grants reads inside
+     * the worktree's `.warden/runs`, and the envelope reports no cost and no model, so every
+     * call is unpriced and the model is a claim about the flag. Unverified until its probe runs.
+     */
+    private static final String AGY_PLAN_REVIEW = """
+            version: 1
+            profile: agy-plan-review
+            role: plan_reviewer
+            vendor: google
+            # agy encodes the thinking level in the model id (-high, -low). Warden refuses a
+            # declared effort that does not reach the vendor through {{effort}}, so none is set.
+            model: gemini-3.8-flash-high
+            command: agy
+            runner: direct
+            read_only: true
+
+            # `-p` takes its value from the very next token, so the prompt cannot come through
+            # stdin and a multi-line argument does not survive Windows argv. The prompt stays in
+            # the file Warden writes and this one line names it. No double quote in the line.
+            prompt_delivery: argv
+            args:
+              - "-p=Read the whole file {{prompt_file}} and do exactly what it asks. Open files only with your view_file tool. Never run a shell command and never create or edit a file. Your final answer is the single JSON object that file asks for, with nothing before or after it."
+              - "--output-format"
+              - "json"
+              - "--model"
+              - "{{model}}"
+              - "--mode"
+              - "plan"
+              - "--sandbox"
+              # Inside a Warden run the prompt lives under the worktree's .warden/runs, and
+              # headless agy auto-denies read_file there until the worktree is added.
+              - "--add-dir"
+              - "{{repo_root}}"
+              - "--print-timeout"
+              - "20m"
+
+            limits:
+              wall_clock_minutes: 20
+
+            prompt_template: prompts/plan-reviewer.md
+            json_schema: schemas/plan-reviewer.json
+            artifact:
+              required_fields: [role, task_id, status, verdict, summary, findings]
+
+            quota:
+              # A 503 "No capacity available for model ..." is the vendor being unavailable, not
+              # a verdict on the contract. Only consulted when the call failed.
+              signatures: ["no capacity available", "experiencing high traffic"]
+
+            verification:
+              # Can it read a file in the working directory with view_file and answer from its
+              # contents, in the JSON envelope Warden parses. The probe passes its prompt
+              # inline; the profile passes a file pointer, which is the channel that has been
+              # measured live for the visual role on the same CLI.
+              probe: 'agy -p "Use only your view_file tool to read the file policy.yaml in the current working directory and reply with nothing but the exact value of failover.on_quota_exhausted." --output-format json --mode plan --sandbox --print-timeout 3m --model gemini-3.8-flash-high'
+              what_to_check:
+                - "the answer is the value that is in the file, so view_file reached a real file"
+                - "response is non-empty; an empty response with denied_actions means a tool was refused"
+                - "status can read ERROR beside a correct response after a 503 retry; judge the response"
+                - "the envelope reports usage but no cost and no model: calls are unpriced and the model is a claim"
+              note: "Set verified_on only after the probe answered from the file. The visual role of this CLI was measured 2026-09-15; the planning reading is not yet a live claim."
             """;
 
     private static final String PLANNER_SCHEMA = """

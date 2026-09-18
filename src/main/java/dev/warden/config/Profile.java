@@ -58,7 +58,7 @@ public record Profile(
     private static final Set<String> VERIFICATION = Set.of("verified_on", "status", "probe", "what_to_check", "note");
 
     public static final Set<String> ROLES = Set.of(
-            "implementer", "reviewer", "architect", "visual_qa", "planner");
+            "implementer", "reviewer", "architect", "visual_qa", "planner", "plan_reviewer");
 
     /**
      * How the prompt reaches the vendor.

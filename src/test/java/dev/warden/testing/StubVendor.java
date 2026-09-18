@@ -649,6 +649,37 @@ public final class StubVendor {
                 envelope.put("usage", java.util.Map.of("input_tokens", 4, "output_tokens", 6, "total_tokens", 10));
                 System.out.println(dev.warden.json.Json.write(envelope));
             }
+            // The second planner. `plan-review-pass` approves the compiled contract;
+            // `plan-review-fail` objects every time; `plan-review-once` objects on its first
+            // reading and approves the redraft, which is the one path that both sends the
+            // first planner back and lets the run go on.
+            case "plan-review-pass", "plan-review-fail", "plan-review-once" -> {
+                boolean objects = mode.equals("plan-review-fail")
+                        || (mode.equals("plan-review-once") && !succeedsNow(args));
+                String promptText = "";
+                String promptFile = flag(args, "--prompt-file");
+                if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
+                    promptText = Files.readString(Path.of(promptFile), StandardCharsets.UTF_8);
+                }
+                boolean sawContract = promptText.contains("The compiled contract you are judging")
+                        && promptText.contains("```yaml");
+                java.util.Map<String, Object> artifact = new java.util.LinkedHashMap<>();
+                artifact.put("role", "plan_reviewer");
+                artifact.put("task_id", "hello");
+                artifact.put("status", "completed");
+                artifact.put("verdict", objects ? "fail" : "pass");
+                artifact.put("summary", "saw_contract=" + sawContract);
+                artifact.put("findings", objects ? List.of(java.util.Map.of(
+                        "id", "PLAN-1", "severity", "P1", "category", "acceptance_gap",
+                        "message", "the acceptance cannot fail for the goal",
+                        "expected", "a check that fails today", "actual", "a check that passes today",
+                        "suggestion", "name a check that exercises the new file",
+                        "confidence", "confirmed")) : List.of());
+                java.util.Map<String, Object> envelope = new java.util.LinkedHashMap<>();
+                envelope.put("structuredOutput", artifact);
+                envelope.put("num_turns", 1);
+                System.out.println(dev.warden.json.Json.write(envelope));
+            }
             case "check" -> System.exit(Files.isRegularFile(Path.of("src", "result.txt")) ? 0 : 1);
             default -> {
                 System.err.println("unknown stub vendor mode: " + mode);
