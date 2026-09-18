@@ -8,6 +8,7 @@ import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
 import dev.warden.config.ProjectInitializer;
+import dev.warden.config.RosterCommand;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
 import dev.warden.gate.GateRunner;
@@ -65,6 +66,7 @@ public final class Main {
                 case "visual-qa" -> visualQa(args);
                 case "setup" -> setup();
                 case "profiles" -> profiles(args);
+                case "roster" -> roster(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
                 case "do" -> doIntent(args);
@@ -258,6 +260,17 @@ public final class Main {
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
         System.out.println(Json.write(result));
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
+    }
+
+    /**
+     * See and change which profile fills which role, and a profile's model/effort, without
+     * a YAML round-trip. Line edits only; comments and the rest of the file stay.
+     */
+    private static int roster(String[] args) throws Exception {
+        RosterCommand.Outcome outcome = new RosterCommand().run(UserConfig.defaultHome(), args);
+        if (outcome.text() != null) System.out.print(outcome.text());
+        else System.out.println(Json.write(outcome.report()));
+        return outcome.exitCode();
     }
 
     /**
@@ -1309,6 +1322,19 @@ public final class Main {
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                  warden roster [--text]       which profile fills which role, the workflow,
+                                               and any dangling policy references
+                  warden roster set <role> --profiles a,b[,c] [--strategy first|rotate]
+                                           rewrite that role's profiles (and strategy) in
+                                           policy.yaml; comments and every other byte stay.
+                                           Copies the file to *.before-roster-<timestamp>
+                                           first. --allow-missing permits a name with no
+                                           profiles/<name>.yaml yet
+                  warden roster model <name> --model X [--effort Y] [--keep-verified]
+                                           rewrite model/effort in profiles/<name>.yaml the
+                                           same way. Drops verified_on (the stamp was for
+                                           the old model) unless --keep-verified; prints
+                                           verify_with so the probe is re-run
                   warden init [--base-ref REF] create a conservative project starter config
                   warden pilot prepare --spec FILE --output DIR
                                            write a self-contained offline pilot bundle from

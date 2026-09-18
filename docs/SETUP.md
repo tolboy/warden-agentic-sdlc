@@ -94,6 +94,31 @@ carries whatever auto-approval flag its vendor needs. Run its probe standalone, 
 `warden role implementer <task> --dry-run`, and only then let the loop drive it. What protects
 the repository is not the date: it is the fingerprint taken around every role.
 
+## Changing the roster
+
+`warden roster` prints which profile fills which role, and the workflow those roles run in,
+without opening the files. JSON is the default; `--text` is a table.
+
+```text
+warden roster
+warden roster --text
+warden roster set reviewer --profiles grok-review,claude-review --strategy rotate
+warden roster model grok-review --model grok-4.6-build --effort high
+```
+
+`set` rewrites only the `profiles:` line (and `strategy:` if you pass it) under that role in
+`policy.yaml`. Comments, spacing and the rest of the file stay as they were. A copy is written
+first as `policy.yaml.before-roster-<timestamp>`. If the role is not in `roles:` yet, a block
+is appended there rather than invented elsewhere.
+
+`model` does the same to `profiles/<name>.yaml`. Changing the model invalidates
+`verification.verified_on` — that date stamped a probe against the old model — so the line is
+removed unless you pass `--keep-verified`. The command prints `verify_with` for
+`warden profiles --verify <name>`.
+
+Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
+`~/.warden`.
+
 ## 4. Connect a project
 
 From the root of the target repository:
