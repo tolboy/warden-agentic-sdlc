@@ -44,7 +44,8 @@ public final class TestMain {
                 new dev.warden.PilotPrepareTest(),
                 new dev.warden.ApprovalStoreTest(),
                 new dev.warden.StatusCommandTest(),
-                new dev.warden.InitializerTest()
+                new dev.warden.InitializerTest(),
+                new dev.warden.RosterTest()
         );
 
         Check check = new Check();
