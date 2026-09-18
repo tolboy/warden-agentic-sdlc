@@ -546,11 +546,17 @@ public final class Main {
                     + decision.kind().jsonValue() + " decision that is neither a rejection nor a "
                     + "retry; only a failover decision authorises a vendor substitution");
         }
+        // A failover answered `retry` is the person waiting out the quota window with the
+        // same roster: no substitution is authorised, and the spent stop was never about the
+        // work, so the verdicts already reached are kept.
+        if (decision.state() == HumanDecision.State.RESOLVED && "retry".equals(decision.decision())) {
+            return new Carried(Map.of(), new TaskLoop.Continuation(priorRunId, null, true));
+        }
         if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
             throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
-                    + "resolved as 'switch' (state=" + decision.state().jsonValue()
+                    + "resolved as 'switch' or 'retry' (state=" + decision.state().jsonValue()
                     + ", decision=" + decision.decision() + "); record the choice first with "
-                    + "`warden approve " + priorRunId + " --decision switch`");
+                    + "`warden approve " + priorRunId + " --decision switch|retry`");
         }
         Path summary = root.resolve(decision.summaryPath());
         Object pending = Json.parseObject(java.nio.file.Files.readString(summary))
@@ -997,6 +1003,18 @@ public final class Main {
             }
             String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
 
+            // A gate past its declared life can still be closed, but not accepted on the
+            // strength of evidence that was current when it was published: a live page, a
+            // deployment, a network observation may all have moved since. Reject, abort and
+            // retry remain available, and an explicit acknowledgement re-opens accept.
+            if ("accept".equals(choice) && pending.expiredAt(java.time.Instant.ofEpochMilli(env.clock.nowMillis()))
+                    && !hasFlag(args, "--acknowledge-expired")) {
+                throw new ApprovalException("gate_expired", "run " + runId + " asked its question "
+                        + "on " + pending.createdAt() + " and its gate expired on "
+                        + pending.expiresAt() + " (budgets.gate_ttl_hours). Re-check anything "
+                        + "that can go stale, then accept with --acknowledge-expired, or answer "
+                        + "reject/retry/abort; no answer is never an acceptance.");
+            }
             // Acceptance is valid only for the exact candidate the human inspected. Reject,
             // abort and retry remain available when the tree moved, because they grant no land.
             if ("accept".equals(choice) && pending.candidateFingerprint() != null) {
@@ -1084,6 +1102,16 @@ public final class Main {
                              Integer waitMinutes) throws Exception {
         long start = env.clock.nowMillis();
         long deadline = waitMinutes == null ? start : start + waitMinutes.longValue() * 60_000L;
+        // The wait never outlives the gate's own life: polling past it would only find an
+        // answer the store then refuses. The deadline is cut, the reason is said.
+        try {
+            HumanDecision pending = store.read(runId);
+            if (pending.expiresAt() != null) {
+                deadline = Math.min(deadline, pending.expiresAt().toEpochMilli());
+            }
+        } catch (Exception unreadable) {
+            // The poll below reports an unreadable decision on its own terms.
+        }
         long delayMs = 5_000L;
         int polls = 0;
         ApprovalException last = null;
@@ -1183,6 +1211,15 @@ public final class Main {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", false);
         result.put("code", "gate_pending");
+        try {
+            HumanDecision pending = store.read(runId);
+            if (pending.expiresAt() != null) {
+                result.put("gate_expires_at", pending.expiresAt().toString());
+                result.put("gate_expired", pending.expiredAt(java.time.Instant.ofEpochMilli(nowMillis)));
+            }
+        } catch (Exception unreadable) {
+            // The timeout report stands without it.
+        }
         result.put("waited_seconds", Math.max(0L, (nowMillis - startMillis) / 1000L));
         result.put("polls", (long) polls);
         result.put("last_error", last == null ? "gate_pending" : last.getMessage());

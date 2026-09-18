@@ -49,6 +49,18 @@ public final class ApprovalStore {
                 summaryPath, candidateFingerprint);
     }
 
+    /** @param ttl how long the question stays answerable, or null for a gate that never expires */
+    public HumanDecision createSuccess(
+            String runId,
+            String taskId,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint,
+            java.time.Duration ttl) throws IOException {
+        return createPending(runId, taskId, HumanDecision.Kind.SUCCESS, reason,
+                summaryPath, candidateFingerprint, ttl);
+    }
+
     public HumanDecision createFailure(
             String runId,
             String taskId,
@@ -80,6 +92,17 @@ public final class ApprovalStore {
             String reason,
             Path summaryPath,
             String candidateFingerprint) throws IOException {
+        return createPending(runId, taskId, kind, reason, summaryPath, candidateFingerprint, null);
+    }
+
+    public synchronized HumanDecision createPending(
+            String runId,
+            String taskId,
+            HumanDecision.Kind kind,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint,
+            java.time.Duration ttl) throws IOException {
         validateRunId(runId);
         requireNonBlank("task_id", taskId);
         requireNonBlank("reason", reason);
@@ -114,7 +137,8 @@ public final class ApprovalStore {
                     candidateFingerprint,
                     null,
                     null,
-                    null);
+                    null,
+                    ttl == null ? null : now.plus(ttl));
             writeAtomically(target, pending.toMap());
             return pending;
         });
@@ -160,7 +184,8 @@ public final class ApprovalStore {
                     current.candidateFingerprint(),
                     decision,
                     actor,
-                    note == null ? "" : note);
+                    note == null ? "" : note,
+                    current.expiresAt());
             writeAtomically(target, resolved.toMap());
             return resolved;
         });

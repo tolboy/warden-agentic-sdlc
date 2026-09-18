@@ -92,8 +92,15 @@ public final class TaskLoop {
      * @param includedInPlan  whether {@link CallPlan} should reserve a planner call
      */
     public record Preparation(String mode, boolean runReserved, int roleRuns, double costUsd,
-                              int unpriced, boolean includedInPlan) {
+                              int unpriced, boolean includedInPlan,
+                              Map<String, Object> estimateAtReservation,
+                              Boolean reservationMatchedContract) {
         public static final Preparation NONE = new Preparation("off", false, 0, 0, 0, false);
+
+        public Preparation(String mode, boolean runReserved, int roleRuns, double costUsd,
+                           int unpriced, boolean includedInPlan) {
+            this(mode, runReserved, roleRuns, costUsd, unpriced, includedInPlan, null, null);
+        }
 
         /**
          * Rebuild what {@code warden do --prepare} recorded on the reservation, so a second
@@ -112,7 +119,15 @@ public final class TaskLoop {
             if (reservation.get("budget_plan") instanceof Map<?, ?> plan) {
                 included = String.valueOf(plan.get("paying_stages")).contains("planner");
             }
-            return new Preparation(mode, true, runs, cost, unpriced, included);
+            Map<String, Object> estimate = null;
+            if (reservation.get("budget_plan_at_reservation") instanceof Map<?, ?> earlier) {
+                Map<String, Object> copied = new LinkedHashMap<>();
+                earlier.forEach((key, value) -> copied.put(String.valueOf(key), value));
+                estimate = copied;
+            }
+            Boolean matched = reservation.get("reservation_matched_contract") instanceof Boolean flag
+                    ? flag : null;
+            return new Preparation(mode, true, runs, cost, unpriced, included, estimate, matched);
         }
     }
 
@@ -434,7 +449,12 @@ public final class TaskLoop {
         Preparation prior = preparation;
         Path reservation = ledger.runDirectory().resolve("run.json");
         if (prior.runReserved()) {
-            ledger.claimPreparedLoop(task.id());
+            // The in-process caller knows the spend; the reservation on disk knows what the
+            // plan was measured against before the contract existed. Both are kept.
+            Preparation onDisk = Preparation.fromReservation(ledger.claimPreparedLoop(task.id()));
+            prior = new Preparation(prior.mode(), true, prior.roleRuns(), prior.costUsd(),
+                    prior.unpriced(), prior.includedInPlan(), onDisk.estimateAtReservation(),
+                    onDisk.reservationMatchedContract());
         } else if (Files.isRegularFile(reservation)) {
             prior = Preparation.fromReservation(ledger.claimPreparedLoop(task.id()));
         } else {
@@ -536,6 +556,15 @@ public final class TaskLoop {
                     "calls_remaining_under_cap", (long) budget.remaining()));
         }
         summary.put("budget_plan", plan);
+        // The estimate the reservation was made on, when a planner compiled the contract
+        // afterwards. It is kept beside the plan the loop measures by, with its own phase, so
+        // a reader can see what was predicted before any contract existed and whether the
+        // compiled contract changed the paying stages — rather than finding run.json and
+        // task-run.json naming different stages with no record of why.
+        if (prior.estimateAtReservation() != null) {
+            summary.put("budget_plan_at_reservation", prior.estimateAtReservation());
+            summary.put("reservation_matched_contract", prior.reservationMatchedContract());
+        }
         // Which stages this task excludes, decided before the walk rather than during it.
         //
         // `skipped_stages` is a record of what the engine reached and passed over, so a run
@@ -595,6 +624,22 @@ public final class TaskLoop {
         // differ from is paid. A two-vendor roster with one hat on each head used to find
         // out at the review stage, after the implementer had already written; the arithmetic
         // was available before anything was spent, and a person is entitled to it then.
+        // A strict money cap has to be provable before it is promised. Every paying profile
+        // on the roster declares an upper bound per call, or the cap cannot be enforced and
+        // the run says so instead of spending under a number that was never a cap.
+        if (task.budget().strictCostCap()) {
+            Map<String, Object> unbounded = strictCapGap(workflow, user, task, reviewByRisk);
+            if (unbounded != null) {
+                summary.put("cost_cap", "strict");
+                summary.put("cost_cap_gap", unbounded);
+                summary.put("resolution", String.valueOf(unbounded.get("message")));
+                if (!dryRun) return stop(ledger, summary, "cost_cap_unenforceable", steps, 0, budget);
+                summary.putIfAbsent("would_stop", "cost_cap_unenforceable");
+            } else {
+                summary.put("cost_cap", "strict");
+                budget.strictBounds(strictBounds(workflow, user, task, reviewByRisk));
+            }
+        }
         Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
         if (readerGap != null) {
             summary.put("unavailable_role", readerGap);
@@ -886,7 +931,10 @@ public final class TaskLoop {
                     + " never completed";
         }
         HumanDecision decision = new ApprovalStore(root).createSuccess(runId, task.id(),
-                verdict, file, git.sourceFingerprint(diffBaseCommit));
+                verdict, file, git.sourceFingerprint(diffBaseCommit),
+                task.budget().gateTtlHours() == null ? null
+                        : java.time.Duration.ofHours(task.budget().gateTtlHours()));
+        if (decision.expiresAt() != null) summary.put("gate_expires_at", decision.expiresAt().toString());
         addDecision(summary, root, decision);
         publishGate(summary, root, decision, task.goal());
         ledger.writeReport("task-run", summary);
@@ -1003,6 +1051,60 @@ public final class TaskLoop {
             return gap;
         }
         return null;
+    }
+
+    /**
+     * The paying profile with no declared per-call bound, when the task asked for a strict
+     * money cap, or null when every candidate declares one.
+     */
+    private static Map<String, Object> strictCapGap(Workflow workflow, UserConfig user,
+                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+        if (user.policy() == null) return null;
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            Policy.RoleSpec spec = user.policy().roles().get(stage.role());
+            if (spec == null) continue;
+            for (String name : spec.profiles()) {
+                dev.warden.config.Profile profile = user.profiles().get(name);
+                if (profile == null || profile.maxCostUsd() != null) continue;
+                Map<String, Object> gap = new LinkedHashMap<>();
+                gap.put("stage", stage.name());
+                gap.put("role", stage.role());
+                gap.put("profile", name);
+                gap.put("message", "budgets.cost_cap: strict needs a proven upper bound for every "
+                        + "call it may admit, and profile '" + name + "' (stage '" + stage.name()
+                        + "') declares no limits.max_cost_usd. Declare one from that vendor's "
+                        + "measured worst case, or set cost_cap: threshold to keep max_cost_usd as "
+                        + "a threshold on reported spend; nothing was dispatched.");
+                return gap;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The worst-case price of each paying stage under a strict cap: the largest declared
+     * bound among the profiles that could fill it. Preparation stages are already spent when
+     * the loop starts and do not need reserving.
+     */
+    private static Map<String, Double> strictBounds(Workflow workflow, UserConfig user,
+                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+        Map<String, Double> bounds = new LinkedHashMap<>();
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            Policy.RoleSpec spec = user.policy().roles().get(stage.role());
+            double worst = 0;
+            for (String name : spec.profiles()) {
+                dev.warden.config.Profile profile = user.profiles().get(name);
+                if (profile != null && profile.maxCostUsd() != null) {
+                    worst = Math.max(worst, profile.maxCostUsd());
+                }
+            }
+            bounds.put(stage.name(), worst);
+        }
+        return bounds;
     }
 
     /**
@@ -1646,6 +1748,8 @@ public final class TaskLoop {
             // call, after the operator has already spent half an hour — was the one place that
             // said nothing at all.
             RoleRunner.Outcome fix;
+            Workflow.Stage writerStage = writerStageOf(role);
+            budget.dispatching(writerStage == null ? stage.name() + "/fix" : writerStage.name());
             try (Heartbeat alive = beating(role)) {
                 heartbeat = alive;
                 heartbeatNote = (profile, vendor) -> fixNote(stage, profile, vendor);
@@ -2541,6 +2645,7 @@ public final class TaskLoop {
             // Independence is measured against everyone who wrote the code, not the last
             // implementer alone; a writer is not measured against itself.
             RoleResolver.Writers avoid = "implementer".equals(role) ? RoleResolver.Writers.NONE : writers();
+            budget.dispatching(stage.name());
             RoleRunner.Outcome outcome;
             if ("visual_qa".equals(role)) {
                 outcome = runVisualRole(loaded, user, roles, runId, attempt, avoid,
@@ -2996,6 +3101,15 @@ public final class TaskLoop {
         private Chain inherited = Chain.NONE;
         /** Execution time the chain may spend in all, in seconds; null when undeclared. */
         private final Long maxElapsedSeconds;
+        /**
+         * Worst-case price per paying stage under a strict cap, or null under a threshold.
+         * A call is admitted only while the reported spend plus every bound still owed
+         * fits under the ceiling; the bound of the stage being dispatched is retired when
+         * its actual price is accounted for.
+         */
+        private Map<String, Double> strictBounds;
+        private final java.util.Set<String> stagesPaid = new java.util.LinkedHashSet<>();
+        private String dispatchingStage;
         private final java.util.function.LongSupplier clock;
         private final long startedNanos;
 
@@ -3012,6 +3126,24 @@ public final class TaskLoop {
 
         int runs() { return runs; }
         double spent() { return spent; }
+
+        void strictBounds(Map<String, Double> bounds) { this.strictBounds = new LinkedHashMap<>(bounds); }
+
+        boolean strict() { return strictBounds != null; }
+
+        /** The stage about to dispatch, so its own bound counts once and is retired after. */
+        void dispatching(String stage) { this.dispatchingStage = stage; }
+
+        /** Bounds still owed: every paying stage not yet paid, the dispatching one included. */
+        double outstandingBounds() {
+            if (strictBounds == null) return 0;
+            double sum = 0;
+            for (Map.Entry<String, Double> bound : strictBounds.entrySet()) {
+                if (stagesPaid.contains(bound.getKey())) continue;
+                sum += bound.getValue();
+            }
+            return sum;
+        }
 
         void inherit(Chain chain) { this.inherited = chain; }
 
@@ -3085,6 +3217,19 @@ public final class TaskLoop {
                 throw new ExceededException("max_cost_usd",
                         "max_cost_usd of " + maxCost + " reached, spent " + chainSpent() + earlier);
             }
+            // Under a strict cap the reported spend plus the worst case of every call still
+            // owed has to fit, so the last call cannot be the one that overruns. A repair is
+            // a call the plan did not reserve; its stage is owed again when it re-dispatches.
+            if (strictBounds != null && maxCost > 0) {
+                if (dispatchingStage != null) stagesPaid.remove(dispatchingStage);
+                double owed = outstandingBounds();
+                if (chainSpent() + owed > maxCost) {
+                    throw new ExceededException("max_cost_usd", "max_cost_usd of " + maxCost
+                            + " is a strict cap: reported spend " + chainSpent()
+                            + " plus the declared worst case of the calls still owed (" + owed
+                            + ") would exceed it" + earlier);
+                }
+            }
             // A call is not started with less than a minute left. The wall clock a profile
             // declares is in whole minutes, and a call admitted with seconds to spare would be
             // given a minute it does not have.
@@ -3101,6 +3246,10 @@ public final class TaskLoop {
         void account(Object cost) {
             if (cost instanceof Number number) spent += number.doubleValue();
             else unpriced++;
+            if (strictBounds != null && dispatchingStage != null) {
+                stagesPaid.add(dispatchingStage);
+                dispatchingStage = null;
+            }
         }
     }
 

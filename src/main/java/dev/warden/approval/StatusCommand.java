@@ -253,6 +253,10 @@ public final class StatusCommand {
         row.put("task_id", decision.taskId());
         row.put("kind", decision.kind().jsonValue());
         row.put("options", decision.options());
+        if (decision.expiresAt() != null) {
+            row.put("expires_at", decision.expiresAt().toString());
+            row.put("expired", decision.expiredAt(java.time.Instant.now()));
+        }
         row.put("approve", approveInstructions(directory, decision));
         return row;
     }

@@ -430,6 +430,45 @@ public final class ConfigTest implements Suite {
         check.eq("two roles configured", 2, policy.roles().size());
         check.eq("rotation strategy", "rotate", policy.roles().get("reviewer").strategy());
         check.that("independence required", policy.roles().get("reviewer").requireIndependentVendor());
+        dev.warden.config.TaskSpec bounded = dev.warden.config.TaskSpec.parse("""
+                version: 1
+                id: bounded
+                goal: g
+                risk: low
+                scope: app
+                budgets: { max_role_runs: 4, max_cost_usd: 3.0, gate_ttl_hours: 48, cost_cap: strict }
+                review_assurance: same_vendor_peer
+                """, "bounded.yaml");
+        check.eq("gate_ttl_hours is read", 48L, bounded.budget().gateTtlHours());
+        check.that("cost_cap: strict is read", bounded.budget().strictCostCap());
+        check.eq("review_assurance is read", "same_vendor_peer", bounded.reviewAssurance());
+        check.rejects("an unknown cost cap is refused", "cost_cap", () ->
+                dev.warden.config.TaskSpec.parse("""
+                        version: 1
+                        id: bounded
+                        goal: g
+                        risk: low
+                        scope: app
+                        budgets: { cost_cap: hopeful }
+                        """, "bounded.yaml"));
+        check.rejects("an unknown review assurance is refused", "review_assurance", () ->
+                dev.warden.config.TaskSpec.parse("""
+                        version: 1
+                        id: bounded
+                        goal: g
+                        risk: low
+                        scope: app
+                        review_assurance: whoever
+                        """, "bounded.yaml"));
+        dev.warden.config.Profile priced = dev.warden.config.Profile.parse("""
+                version: 1
+                profile: priced
+                role: reviewer
+                vendor: v
+                command: v
+                limits: { wall_clock_minutes: 5, max_cost_usd: 2.5 }
+                """, "priced.yaml");
+        check.eq("a profile may declare a per-call cost bound", 2.5, priced.maxCostUsd());
         check.that("review required for medium risk", policy.reviewRequired("medium"));
         check.that("review not required for low risk", !policy.reviewRequired("low"));
 

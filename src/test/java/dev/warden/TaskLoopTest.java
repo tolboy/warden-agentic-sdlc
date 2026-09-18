@@ -261,6 +261,7 @@ public final class TaskLoopTest implements Suite {
             infrastructureResumeChecks(check, sandbox, home);
             chainBudgetChecks(check, sandbox, home);
             provenanceChecks(check, sandbox, home);
+            gateTtlAndStrictCapChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -539,7 +540,7 @@ public final class TaskLoopTest implements Suite {
         check.eq("the human is asked a different question from retry-or-give-up",
                 "failover", decision.kind().jsonValue());
         check.eq("and abort is offered first, so automation declines rather than grants",
-                List.of("abort", "switch"), decision.options());
+                List.of("abort", "switch", "retry"), decision.options());
         check.contains("the question names both vendors", decision.reason(), "spentvendor");
         check.contains("and says what the switch costs in independence",
                 decision.reason(), "independence");
@@ -1306,8 +1307,142 @@ public final class TaskLoopTest implements Suite {
         check.eq("two calls: the reading and the repair", 2L,
                 answered.summaryReport().get("role_runs"));
 
+        // A failover answered `retry` is the person waiting out the window with the same
+        // roster. It used to be impossible: the only answers were abort and switch, so a
+        // person who wanted the same vendor tomorrow had to abort and pay the writer again.
+        Path waited = newProject(sandbox, "infra-failover-retry");
+        writeProfiles(home, sandbox, "infra-failover-retry", 1, 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota-once", sandbox.resolve("infra-failover-retry-review2.count"), 2);
+        pairedReviewPolicy(home, "confirm");
+        TaskLoop.Outcome askedAgain = loop(waited, home, "fr1");
+        check.eq("a spent second reader with a successor asks who should read",
+                "failover_requires_confirmation", askedAgain.reason());
+        dev.warden.approval.ApprovalStore waitStore = new dev.warden.approval.ApprovalStore(waited);
+        check.eq("and the question now offers retry beside abort and switch",
+                List.of("abort", "switch", "retry"), waitStore.read("fr1").options());
+        waitStore.resolve("fr1", waitStore.read("fr1").updatedAt().toString(), "retry", "operator",
+                "the window rolled over");
+        Main.Carried carriedRetry = Main.continuation(waited, "fr1");
+        check.that("retry authorises no substitution", carriedRetry.failover().isEmpty());
+        check.that("and keeps the verdicts", carriedRetry.continuation().reuseJudgements());
+        TaskLoop.Outcome afterWait = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(waited, "hello"), UserConfig.load(home), "fr2",
+                        false, carriedRetry.failover(), carriedRetry.continuation());
+        check.that("the same roster finishes once the window rolled over", afterWait.ok());
+        check.eq("without paying the writer or the first reader again",
+                Map.of("from", "fr1", "stages", List.of("implement", "review")),
+                afterWait.summaryReport().get("reused_judgements"));
+        check.eq("and the second reading is the vendor that had run out", List.of("loop-review-2"),
+                steps(afterWait).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .map(step -> step.get("profile")).toList());
+
         // Restore the ordinary roster for the checks that follow.
         writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /**
+     * The two P4 bounds a run can declare beyond calls and time: a gate that expires, and a
+     * money cap that is a cap. Neither changes a task that does not declare it.
+     */
+    @SuppressWarnings("unchecked")
+    private void gateTtlAndStrictCapChecks(Check check, Path sandbox, Path home) throws Exception {
+        // A gate with a life. Accept refuses past it unless the person says they re-checked;
+        // reject, retry and abort stay open, because they grant nothing.
+        Path timed = newProject(sandbox, "gate-ttl");
+        writeProfiles(home, sandbox, "gate-ttl", 1, 1);
+        editTask(timed, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  gate_ttl_hours: 1");
+        TaskLoop.Outcome ttl = loop(timed, home, "gt1");
+        check.that("a task with a gate TTL still reaches the gate", ttl.ok());
+        dev.warden.approval.HumanDecision pending =
+                new dev.warden.approval.ApprovalStore(timed).read("gt1");
+        check.that("the decision carries an expiry", pending.expiresAt() != null);
+        check.that("one hour after it was asked", pending.expiresAt()
+                .equals(pending.createdAt().plus(java.time.Duration.ofHours(1))));
+        check.that("and the summary says when", ttl.summaryReport().get("gate_expires_at") != null);
+        long later = pending.expiresAt().toEpochMilli() + 60_000L;
+        Main.ApproveEnv expired = new Main.ApproveEnv(() -> later, millis -> { },
+                (root, gate) -> null, home);
+        Main.ApproveOutcome refused = Main.approveDecision(timed,
+                new String[] {"approve", "gt1", "--decision", "accept"}, expired);
+        check.that("an acceptance after the gate expired is refused", !refused.ok());
+        check.eq("under its own code", "gate_expired", refused.report().get("code"));
+        check.eq("and the decision is still pending", "pending",
+                new dev.warden.approval.ApprovalStore(timed).read("gt1").state().jsonValue());
+        Main.ApproveOutcome acknowledged = Main.approveDecision(timed,
+                new String[] {"approve", "gt1", "--decision", "accept", "--acknowledge-expired"},
+                expired);
+        check.that("an acknowledged acceptance after expiry is recorded", acknowledged.ok());
+
+        Path timedReject = newProject(sandbox, "gate-ttl-reject");
+        writeProfiles(home, sandbox, "gate-ttl-reject", 1, 1);
+        editTask(timedReject, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  gate_ttl_hours: 1");
+        loop(timedReject, home, "gt2");
+        long past = new dev.warden.approval.ApprovalStore(timedReject).read("gt2").expiresAt()
+                .toEpochMilli() + 60_000L;
+        Main.ApproveOutcome rejected = Main.approveDecision(timedReject,
+                new String[] {"approve", "gt2", "--decision", "reject", "--note", "stale"},
+                new Main.ApproveEnv(() -> past, millis -> { }, (root, gate) -> null, home));
+        check.that("a rejection after expiry needs no acknowledgement", rejected.ok());
+
+        Path untimed = newProject(sandbox, "gate-no-ttl");
+        writeProfiles(home, sandbox, "gate-no-ttl", 1, 1);
+        loop(untimed, home, "gt3");
+        check.that("a task without a TTL writes no expiry",
+                new dev.warden.approval.ApprovalStore(untimed).read("gt3").expiresAt() == null);
+
+        // A strict money cap. Without a bound on every paying profile it cannot be enforced,
+        // and the run says so before spending under a number that was never a cap.
+        Path unbounded = newProject(sandbox, "strict-unbounded");
+        writeProfiles(home, sandbox, "strict-unbounded", 1, 1);
+        editTask(unbounded, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  cost_cap: strict");
+        TaskLoop.Outcome unenforceable = loop(unbounded, home, "sc1");
+        check.eq("a strict cap over an unbounded roster stops before the first call",
+                "cost_cap_unenforceable", unenforceable.reason());
+        check.eq("with nothing spent", 0L, unenforceable.summaryReport().get("role_runs"));
+        check.contains("naming the profile without a bound",
+                Json.write(unenforceable.summaryReport().get("cost_cap_gap")), "loop-impl");
+
+        Path bounded = newProject(sandbox, "strict-bounded", "medium", 20, "0.03");
+        writeBoundedProfiles(home, sandbox, "strict-bounded", 0.02, 0.02);
+        TaskLoop.Outcome tooTight = loop(bounded, home, "sc2");
+        check.eq("a strict cap that the worst case of the owed calls exceeds refuses the first call",
+                "budget_exhausted", tooTight.reason());
+        check.eq("on the money ceiling", "max_cost_usd", tooTight.summaryReport().get("budget_limit_hit"));
+        check.eq("before anything was dispatched", 0L, tooTight.summaryReport().get("role_runs"));
+        check.contains("and says it was the strict reserve, not the reported spend",
+                String.valueOf(tooTight.summaryReport().get("budget_stop")), "strict cap");
+
+        Path roomy = newProject(sandbox, "strict-roomy", "medium", 20, "0.10");
+        writeBoundedProfiles(home, sandbox, "strict-roomy", 0.02, 0.02);
+        TaskLoop.Outcome fits = loop(roomy, home, "sc3");
+        check.that("a strict cap the worst case fits under runs to the gate", fits.ok());
+        check.eq("and the summary records the cap mode", "strict",
+                fits.summaryReport().get("cost_cap"));
+
+        writeProfiles(home, sandbox, "strict-restore", 1, 1);
+    }
+
+    /** The ordinary stand-ins, each declaring a per-call worst case, under a strict-cap task. */
+    private void writeBoundedProfiles(Path home, Path sandbox, String scenario, double implBound,
+                                      double reviewBound) throws IOException {
+        writeProfiles(home, sandbox, scenario, 1, 1);
+        editTask(sandbox.resolve(scenario), "max_fix_attempts: 2", "max_fix_attempts: 2\n"
+                + "budgets_marker: []");
+        // `budgets` already carries max_cost_usd; the cap mode is added beside it.
+        Path task = sandbox.resolve(scenario).resolve(".warden/tasks/hello.yaml");
+        String text = Files.readString(task).replace("budgets_marker: []\n", "");
+        text = text.replace("max_role_runs:", "cost_cap: strict\n  max_role_runs:");
+        Files.writeString(task, text);
+        for (String[] profile : List.of(new String[] {"loop-impl", String.valueOf(implBound)},
+                new String[] {"loop-review", String.valueOf(reviewBound)})) {
+            Path file = home.resolve("profiles/" + profile[0] + ".yaml");
+            Files.writeString(file, Files.readString(file).replace(
+                    "limits: { wall_clock_minutes: 2 }",
+                    "limits: { wall_clock_minutes: 2, max_cost_usd: " + profile[1] + " }"));
+        }
     }
 
     /**

@@ -24,7 +24,29 @@ import java.util.Set;
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                      Workflow workflow, boolean workflowDeclared, String failoverMode,
-                     String repairReserve, Escalation escalation) {
+                     String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry) {
+
+    public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                  Workflow workflow, boolean workflowDeclared, String failoverMode,
+                  String repairReserve, Escalation escalation) {
+        this(roles, reviewRequiredForRisk, workflow, workflowDeclared, failoverMode,
+                repairReserve, escalation, RateLimitRetry.OFF);
+    }
+
+    /**
+     * The bounded retry a transient rate limit gets before the run stops for a person.
+     *
+     * Off by default (`max_attempts: 0`): a rate-limited call stops the run as `rate_limited`
+     * and a `retry` continuation keeps every verdict, as before. Declared, the same profile is
+     * dispatched again after a pause — `backoff_seconds`, doubled per attempt, or the seconds
+     * the vendor asked for when its message named them — at most `max_attempts` more times.
+     * Every attempt is a vendor call: counted, journaled, charged, and admitted through the
+     * same dispatch gate as any other, so a retry cannot spend what the chain has not got.
+     * The spent subscription is a different kind and is never retried here.
+     */
+    public record RateLimitRetry(long maxAttempts, long backoffSeconds) {
+        public static final RateLimitRetry OFF = new RateLimitRetry(0, 30);
+    }
 
     public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                   Workflow workflow, boolean workflowDeclared, String failoverMode,
@@ -124,7 +146,9 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     public static final Set<String> STRATEGIES = Set.of("rotate", "first");
 
     private static final Set<String> TOP_LEVEL =
-            Set.of("version", "roles", "review", "workflow", "failover", "budget", "escalation");
+            Set.of("version", "roles", "review", "workflow", "failover", "budget", "escalation", "retry");
+    private static final Set<String> RETRY_KEYS = Set.of("rate_limited", "note");
+    private static final Set<String> RATE_LIMIT_KEYS = Set.of("max_attempts", "backoff_seconds", "note");
     private static final Set<String> ESCALATION_KEYS = Set.of("after_blocking_reviews", "rungs", "note");
     private static final Set<String> RUNG_KEYS = Set.of("implementer", "reviewer");
     private static final Set<String> FAILOVER_KEYS = Set.of("on_quota_exhausted", "note");
@@ -221,6 +245,14 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         boolean workflowDeclared = root.has("workflow");
         Workflow workflow = workflowDeclared ? Workflow.parse(root, "workflow") : Workflow.builtIn();
 
+        RateLimitRetry rateLimitRetry = RateLimitRetry.OFF;
+        if (root.has("retry")) {
+            Values retry = root.optMap("retry").rejectUnknownKeys(RETRY_KEYS);
+            Values rate = retry.optMap("rate_limited").rejectUnknownKeys(RATE_LIMIT_KEYS);
+            rateLimitRetry = new RateLimitRetry(rate.optInt("max_attempts", 0, 0, 5),
+                    rate.optInt("backoff_seconds", 30, 1, 900));
+        }
+
         Escalation escalation = null;
         if (root.has("escalation")) {
             Values ladder = root.optMap("escalation").rejectUnknownKeys(ESCALATION_KEYS);
@@ -254,7 +286,7 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
 
         root.throwIfAny();
         return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
-                failoverMode, repairReserve, escalation);
+                failoverMode, repairReserve, escalation, rateLimitRetry);
     }
 
     public boolean reviewRequired(String risk) {

@@ -387,8 +387,29 @@ public final class DoCommand {
             // So a later `warden run` or the Conductor inner process can join this reservation
             // instead of refusing it as a duplicate. The planner wrote evidence here; the loop
             // has not started yet.
+            //
+            // The plan is measured again, now against the contract the planner compiled. The
+            // reservation was measured before any contract existed — against the invocation's
+            // risk and no visual contract — and a planner is allowed to change both, so the
+            // two can name different paying stages (P2PLAN-17). The loop measures the compiled
+            // contract; so must the record a person reads before the loop starts. The earlier
+            // estimate is kept under its own phase rather than rewritten as if the final facts
+            // had been known in advance.
+            Map<String, Object> compiledPlan = null;
+            if (user.policy() != null && !options.draftOnly()) {
+                try {
+                    TaskSpec.ResolvedTask compiled = loader.load(root, taskId).resolved();
+                    compiledPlan = TaskLoop.planFor(user.policy().workflow(), user, compiled,
+                            Preparation.payingStages(user))
+                            .toMap(compiled.budget().maxRoleRuns(), user.policy().repairReserve());
+                } catch (Exception unreadable) {
+                    // The loop refuses an unreadable contract on its own; the estimate stands.
+                    compiledPlan = null;
+                }
+            }
             new EvidenceLedger(root, runId, user.home())
-                    .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced());
+                    .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced(),
+                            compiledPlan);
         } else if ("auto".equals(options.prepare()) && contractExists) {
             // A ready contract is not rewritten, but it is still this invocation's contract.
             // TaskDraft.write compares the operator's goal for equality, which would refuse

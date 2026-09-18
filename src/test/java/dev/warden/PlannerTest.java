@@ -85,6 +85,7 @@ public final class PlannerTest implements Suite {
             failoverThenProtocolKeepsEvidenceNames(check, sandbox, home);
             ledgerCountsPlanner(check, sandbox, home);
             planReviewChecks(check, sandbox, home);
+            reservationMeasuresTheContract(check, sandbox, home);
         } finally {
             deleteTree(sandbox);
         }
@@ -988,6 +989,53 @@ public final class PlannerTest implements Suite {
         check.that("and no implementer ran",
                 !Files.exists(refused.resolve(".warden/runs/do-pr-fail/role-implementer.json")));
 
+        writePolicy(home, "stub-plan");
+    }
+
+    /**
+     * P2PLAN-17. The reservation is measured before any contract exists, against the
+     * invocation's risk; the planner then compiles a contract with another risk, and the
+     * loop measures that. The record a person reads before the loop must name the stages
+     * the loop will pay for, and must keep the earlier estimate as an estimate.
+     */
+    @SuppressWarnings("unchecked")
+    private void reservationMeasuresTheContract(Check check, Path sandbox, Path home) throws Exception {
+        writePlannerProfile(home, "stub-plan", "plan", true);
+        writeImplementerProfile(home);
+        writePolicy(home, "stub-plan", "stub-impl", "confirm");
+        Path project = sandbox.resolve("reservation-risk");
+        scaffoldProject(project);
+        // The invocation says medium, so the reservation reserves a review. The stub planner
+        // compiles the contract as low, so the loop skips it.
+        DoCommand.Outcome outcome = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(project, GOAL, "app", "medium", "hello", "do-res-risk",
+                        "HEAD", true, false, false, false, false, false, null, "always"),
+                UserConfig.load(home));
+        check.that("the run reaches the loop", outcome.ok() || "ready_for_human".equals(outcome.code()));
+        Map<String, Object> reservation = Json.parseObject(Files.readString(
+                project.resolve(".warden/runs/do-res-risk/run.json")));
+        Map<String, Object> reservedPlan = (Map<String, Object>) reservation.get("budget_plan");
+        Map<String, Object> estimate = (Map<String, Object>) reservation.get("budget_plan_at_reservation");
+        check.that("the pre-contract estimate is kept", estimate != null);
+        check.eq("under its own phase", "reserve", estimate == null ? null : estimate.get("phase"));
+        check.eq("and named as measured against the invocation", "invocation",
+                estimate == null ? null : estimate.get("measured_against"));
+        check.that("the estimate reserved a review for the medium-risk invocation",
+                estimate != null && String.valueOf(estimate.get("paying_stages")).contains("review"));
+        check.eq("the plan in force is measured against the compiled contract", "compiled_contract",
+                reservedPlan.get("measured_against"));
+        check.that("and no longer names the review the low-risk contract skips",
+                !String.valueOf(reservedPlan.get("paying_stages")).contains("review"));
+        check.eq("the difference is recorded, not hidden", Boolean.FALSE,
+                reservation.get("reservation_matched_contract"));
+        Map<String, Object> summary = Json.parseObject(Files.readString(
+                project.resolve(".warden/runs/do-res-risk/task-run.json")));
+        Map<String, Object> loopPlan = (Map<String, Object>) summary.get("budget_plan");
+        check.eq("run.json and task-run.json name the same paying stages",
+                loopPlan.get("paying_stages"), reservedPlan.get("paying_stages"));
+        check.eq("and the summary carries the estimate too", "reserve",
+                ((Map<String, Object>) summary.get("budget_plan_at_reservation")).get("phase"));
+        check.eq("with the mismatch visible", Boolean.FALSE, summary.get("reservation_matched_contract"));
         writePolicy(home, "stub-plan");
     }
 

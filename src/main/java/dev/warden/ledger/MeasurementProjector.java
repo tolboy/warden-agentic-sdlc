@@ -58,7 +58,8 @@ public final class MeasurementProjector {
             "failed_over_from", "exhausted_profiles",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
-            "accounting", "outcomes", "budget_plan",
+            "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
+            "reservation_matched_contract", "plan_review",
             "prompt_template_sha256", "json_schema_sha256", "prompt_sha256", "artifact_sha256",
             "contract_sha256", "acceptance_sha256",
             "diff_base_commit", "worktree_fingerprint",
@@ -109,7 +110,10 @@ public final class MeasurementProjector {
     private static final Set<String> BUDGET_PLAN = Set.of(
             "requested_cap", "minimum_success_calls", "paying_stages",
             "sufficient_for_success", "repair_reserve", "recovery_branches",
-            "cost_reserve", "time_reserve");
+            "cost_reserve", "time_reserve", "measured_against", "phase");
+
+    private static final Set<String> PLAN_REVIEW = Set.of(
+            "verdict", "rounds", "blocking_findings");
 
     private static final Set<String> RECOVERY_BRANCH = Set.of(
             "stage", "calls_needed_to_repair", "calls_to_repair_and_be_judged",
@@ -160,6 +164,8 @@ public final class MeasurementProjector {
             Map.entry("finding_registry", FINDING),
             Map.entry("finding_history", FINDING_HISTORY),
             Map.entry("budget_plan", BUDGET_PLAN),
+            Map.entry("budget_plan_at_reservation", BUDGET_PLAN),
+            Map.entry("plan_review", PLAN_REVIEW),
             Map.entry("recovery_branches", RECOVERY_BRANCH),
             Map.entry("steps", STEP),
             Map.entry("review_coverage", COVERAGE),

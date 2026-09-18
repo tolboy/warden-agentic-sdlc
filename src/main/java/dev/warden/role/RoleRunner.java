@@ -120,6 +120,20 @@ public final class RoleRunner {
     private final dev.warden.run.Progress progress;
     private Occupied occupied = NOBODY;
     private String stageName;
+    /** How the runner waits between rate-limit retries; the suite replaces it. */
+    private java.util.function.LongConsumer sleeper = millis -> {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    };
+
+    /** The same runner, pausing through {@code sleeper} instead of the clock. */
+    public RoleRunner withSleeper(java.util.function.LongConsumer sleeper) {
+        this.sleeper = sleeper == null ? millis -> { } : sleeper;
+        return this;
+    }
     /** 1-based dispatch of this runner for the current role. A later {@link #run} of the
      *  same role (the planner's protocol retry) must not reuse the first call's report name. */
     private int evidenceDispatch = 1;
@@ -411,6 +425,8 @@ public final class RoleRunner {
 
         List<Map<String, Object>> attempts = new ArrayList<>();
         double spent = 0;
+        int rateLimitRetries = 0;
+        List<Map<String, Object>> rateLimitPauses = new ArrayList<>();
 
         for (int attempt = 1; ; attempt++) {
             RoleResolver.Resolution resolution;
@@ -548,6 +564,7 @@ public final class RoleRunner {
                                 + "inside the prompt");
             }
             report.put("vendor_attempt", (long) attempt);
+            if (!rateLimitPauses.isEmpty()) report.put("rate_limit_retry", List.copyOf(rateLimitPauses));
 
             if (dryRun) {
                 report.put("dry_run", true);
@@ -630,6 +647,23 @@ public final class RoleRunner {
             if (report.get("cost_usd") instanceof Number number) spent += number.doubleValue();
             journalAttempt(ledger, role, roleInvocationId, report, attemptRow);
 
+            // A transient rate limit is the one failure worth asking the same vendor again
+            // for, and only when the policy said how often. The wait honours the seconds the
+            // vendor named when it named any, never a clock time it printed without a date.
+            Policy.RateLimitRetry retry = user.policy().rateLimitRetry();
+            if ("role_rate_limited".equals(result.code()) && rateLimitRetries < retry.maxAttempts()
+                    && gate.hasRoom()) {
+                rateLimitRetries++;
+                long pause = retryPauseMillis(result.evidence(), retry, rateLimitRetries);
+                rateLimitPauses.add(Map.of("attempt", (long) rateLimitRetries,
+                        "of", retry.maxAttempts(), "paused_millis", pause));
+                report.put("rate_limit_retry", List.copyOf(rateLimitPauses));
+                progress.line("      " + profile.name() + " was rate limited; waiting "
+                        + (pause / 1000) + " s, then retrying (" + rateLimitRetries + " of "
+                        + retry.maxAttempts() + ")");
+                sleeper.accept(pause);
+                continue;
+            }
             boolean quota = "role_quota_exhausted".equals(result.code());
             if (quota) {
                 exhausted.add(profile.name());
@@ -725,6 +759,25 @@ public final class RoleRunner {
             return new Outcome(result.ok(), result.code(), role, profile.name(), profile.vendor(),
                     resolution.rejected(), path, report);
         }
+    }
+
+    /**
+     * How long to pause before a rate-limit retry: the seconds the vendor asked for when its
+     * message carried a plain `retry after N seconds` or `Retry-After: N`, else the policy's
+     * backoff doubled per attempt. Bounded to fifteen minutes either way, and a time of day the
+     * vendor printed without a date is never parsed into an instant.
+     */
+    public static long retryPauseMillis(Map<String, Object> evidence, Policy.RateLimitRetry retry, int attempt) {
+        long seconds = -1;
+        if (evidence != null && evidence.get("quota") instanceof Map<?, ?> quota
+                && quota.get("vendor_message") instanceof String message) {
+            java.util.regex.Matcher named = java.util.regex.Pattern
+                    .compile("(?i)retry[- ]after:?\\s*(\\d{1,4})\\s*(s|sec|seconds?)?\\b")
+                    .matcher(message);
+            if (named.find()) seconds = Long.parseLong(named.group(1));
+        }
+        if (seconds < 0) seconds = retry.backoffSeconds() * (1L << Math.max(0, attempt - 1));
+        return Math.min(seconds, 900L) * 1000L;
     }
 
     /**

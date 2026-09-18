@@ -29,6 +29,7 @@ public record Profile(
         List<String> args,
         boolean readOnly,
         long wallClockMinutes,
+        Double maxCostUsd,
         String promptTemplate,
         String jsonSchema,
         boolean enforceSchema,
@@ -49,7 +50,7 @@ public record Profile(
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
             "verification", "notes");
-    private static final Set<String> LIMITS = Set.of("wall_clock_minutes");
+    private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
     private static final Set<String> QUOTA = Set.of("signatures");
     private static final Set<String> ATTACHMENTS = Set.of("flag");
@@ -96,8 +97,8 @@ public record Profile(
      */
     public Profile withWallClockMinutes(long minutes) {
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
-                promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields, quotaSignatures,
-                promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
                 verificationProbe, verificationChecks, verified);
     }
 
@@ -154,6 +155,11 @@ public record Profile(
 
         Values limits = root.optMap("limits").rejectUnknownKeys(LIMITS);
         long wallClock = limits.optInt("wall_clock_minutes", 20, 1, 240);
+        // A proven upper bound on what one call of this profile can cost, for tasks that
+        // declare a strict money cap. Absent means unknown, never zero: a vendor that reports
+        // no price cannot honestly declare one, and a strict cap then refuses the roster.
+        Double maxCostUsd = limits.has("max_cost_usd")
+                ? limits.optDouble("max_cost_usd", 1.0, 0.0, 10000.0) : null;
 
         String promptTemplate = root.optString("prompt_template", null);
         String jsonSchema = root.optString("json_schema", null);
@@ -252,7 +258,7 @@ public record Profile(
 
         root.throwIfAny();
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClock,
-                promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
                 probe, whatToCheck, verified);
     }
