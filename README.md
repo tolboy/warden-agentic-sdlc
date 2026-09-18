@@ -238,7 +238,9 @@ commands. Do not copy Warden's own `.warden/`: that is Warden's contract, not a 
 
 The loop runs for tens of minutes. It used to print nothing for all of it and then emit one
 JSON object at the end, so "where are we now" had to be worked out from file timestamps in
-four run directories. Now `do` and `run` narrate themselves **on stderr**:
+four run directories. Now `do` and `run` narrate themselves **on stderr**. The same picture is
+on the local page `warden dashboard` serves (and `--open-orca` opens in an Orca tab): every
+run with its stage timeline, verdicts, cost and decision.
 
 ```text
 run   chapter-hearth-4
@@ -471,7 +473,7 @@ resolver refuses these rather than pretending.
 | Per-vendor tool allowlists | ❌ | ❌ | A profile's args are whatever you wrote — see [`SECURITY.md`](SECURITY.md) |
 | Visual QA pixel-diff and baselines | ❌ | ❌ | The harness asserts; it does not compare images |
 
-Commands: `do`, `setup`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
+Commands: `do`, `setup`, `dashboard`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
 `doctor`, `ledger`, `report`, `status`, `approve`, `land`.
 
 The live runs were made on Windows against a SvelteKit project, with Orca 1.4.190 and Codex,
