@@ -28,6 +28,7 @@ public final class TestMain {
                 new dev.warden.PlannerTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),
+                new dev.warden.OrcaIsolationTest(),
                 new dev.warden.LaunchSettingsTest(),
                 new dev.warden.DashboardTest(),
                 new dev.warden.OrcaSettlementTest(),

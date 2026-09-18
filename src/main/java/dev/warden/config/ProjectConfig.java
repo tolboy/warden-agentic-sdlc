@@ -56,7 +56,7 @@ public record ProjectConfig(
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "project", "base_ref", "checks", "scopes", "setup", "defaults", "land");
-    private static final Set<String> LAND_KEYS = Set.of("remote", "base", "pull_request", "note");
+    private static final Set<String> LAND_KEYS = Set.of("remote", "base", "pull_request");
     private static final Set<String> DEFAULTS = Set.of(
             "checks", "baseline_checks", "risk", "max_fix_attempts", "timeout_minutes");
 
