@@ -62,7 +62,9 @@ public final class MeasurementProjector {
             "prompt_template_sha256", "json_schema_sha256", "prompt_sha256", "artifact_sha256",
             "contract_sha256", "acceptance_sha256",
             "diff_base_commit", "worktree_fingerprint",
-            "avoided_vendor",
+            "avoided_vendor", "avoided_vendors", "writer_set_known", "independence",
+            "writer_vendors", "writer_profiles", "writer_provenance", "review_assurance",
+            "review_coverage", "escalation", "chain",
             "failover_declined_by_budget", "failover_declined_by_policy",
             "phase", "view_state");
 
@@ -70,7 +72,7 @@ public final class MeasurementProjector {
             "input", "output", "total", "input_tokens", "output_tokens", "total_tokens");
 
     private static final Set<String> ROLE_CONTRACT = Set.of(
-            "stage", "role", "roster", "strategy", "require_independent_vendor",
+            "stage", "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "read_only",
             "prompt_template_sha256", "json_schema_sha256",
             "on_fail", "on_findings", "recheck_after_fix", "fix_with");
@@ -115,7 +117,22 @@ public final class MeasurementProjector {
             "reachable_under_cap", "repair_allowed_under_cap");
 
     private static final Set<String> STEP = Set.of(
-            "step", "stage", "attempt", "ok", "code", "dry_run", "role", "profile", "vendor");
+            "step", "stage", "attempt", "ok", "code", "dry_run", "role", "profile", "vendor",
+            "independence", "fix_for", "fix_round", "reused_from", "blocking_findings");
+
+    private static final Set<String> COVERAGE = Set.of(
+            "stage", "role", "source", "reused_from", "ok", "blocking_findings", "profile",
+            "vendor", "assurance", "candidate_fingerprint");
+
+    private static final Set<String> ESCALATION = Set.of(
+            "rung", "rungs_declared", "after_blocking_reviews", "blocking_reviews_seen",
+            "implementer", "reviewer", "at_stage", "fix_round", "reason", "quality_attempts");
+
+    private static final Set<String> CHAIN = Set.of(
+            "runs", "role_runs", "cost_usd", "unpriced_calls", "fix_attempts",
+            "elapsed_seconds", "elapsed_known", "max_role_runs", "max_cost_usd",
+            "max_fix_attempts", "max_elapsed_minutes", "calls_remaining",
+            "fix_attempts_remaining", "blocking_reviews_seen", "escalation_rung");
 
     private static final Set<String> QUOTA = Set.of("detected_by", "matched_signature");
 
@@ -145,6 +162,9 @@ public final class MeasurementProjector {
             Map.entry("budget_plan", BUDGET_PLAN),
             Map.entry("recovery_branches", RECOVERY_BRANCH),
             Map.entry("steps", STEP),
+            Map.entry("review_coverage", COVERAGE),
+            Map.entry("escalation", ESCALATION),
+            Map.entry("chain", CHAIN),
             Map.entry("quota", QUOTA),
             Map.entry("vision_capability", VISION),
             Map.entry("accounting", ACCOUNTING),

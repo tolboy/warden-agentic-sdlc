@@ -148,6 +148,65 @@ public final class RoleRunner {
     /** Profiles that reported a spent subscription during the life of this runner. */
     private final Set<String> exhausted = new LinkedHashSet<>();
 
+    /**
+     * Assignments a run pinned for the rest of its chain, by role and by stage name.
+     *
+     * The escalation ladder names them: after the declared number of blocking readings the
+     * loop stops asking the roster and hands the repair to the next rung's writer, and the
+     * objecting stage to that rung's reader. A pin is resolved without the roster's rotation
+     * or independence filter, because the pin is the operator's explicit instruction to read
+     * as a co-author; what it keeps is every other check — the profile must exist, fill the
+     * role, be verified, be present and not be spent — and it is labelled `peer_review`
+     * rather than independent whenever the reader's vendor wrote into the candidate.
+     */
+    private final Map<String, String> roleAssignments = new LinkedHashMap<>();
+    private final Map<String, String> stageAssignments = new LinkedHashMap<>();
+
+    /** Pin {@code profile} for every later dispatch of {@code role}. */
+    public RoleRunner assignRole(String role, String profile) {
+        roleAssignments.put(role, profile);
+        return this;
+    }
+
+    /** Pin {@code profile} for every later dispatch of the stage called {@code stage}. */
+    public RoleRunner assignStage(String stage, String profile) {
+        stageAssignments.put(stage, profile);
+        return this;
+    }
+
+    /** The pin that applies to a dispatch of {@code role} at {@code stage}, or null. */
+    private String pinFor(String stage, String role) {
+        if (stage != null && stageAssignments.containsKey(stage)) return stageAssignments.get(stage);
+        return roleAssignments.get(role);
+    }
+
+    /**
+     * A pinned profile, resolved by the same checks the roster applies minus the rotation and
+     * the independence filter, and labelled for what it is.
+     */
+    private RoleResolver.Resolution resolvePinned(String pinned, String role, UserConfig user,
+                                                  RoleResolver.Writers writers) {
+        Profile profile = user.profiles().get(pinned);
+        Map<String, String> rejected = new LinkedHashMap<>();
+        if (profile == null) rejected.put(pinned, "profile_not_found");
+        else if (!profile.role().equals(role)) rejected.put(pinned, "role_mismatch");
+        else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
+            rejected.put(pinned, "vision_capability_unverified");
+        } else if (!profile.verified()) rejected.put(pinned, "profile_unverified");
+        else if (exhausted.contains(pinned)) rejected.put(pinned, "quota_exhausted_this_run");
+        else if (!available(profile)) rejected.put(pinned, "executable_not_found");
+        if (!rejected.isEmpty()) {
+            throw new RoleResolver.Unresolvable("pinned profile cannot fill role " + role + ": "
+                    + rejected, rejected);
+        }
+        String assurance;
+        if (!profile.readOnly()) assurance = RoleResolver.NONE;
+        else if (!writers.known()) assurance = RoleResolver.UNPROVEN;
+        else if (!writers.contains(profile.vendor())) assurance = RoleResolver.INDEPENDENT;
+        else assurance = "peer_review";
+        return new RoleResolver.Resolution(profile, Map.of(), assurance);
+    }
+
     public RoleRunner(ProcessRunner processes) { this(processes, ALWAYS, null, null); }
 
     public RoleRunner(ProcessRunner processes, DispatchGate gate) {
@@ -220,9 +279,28 @@ public final class RoleRunner {
      * @param avoidVendor the vendor a role must differ from, or null when it need not
      */
     public boolean canFill(UserConfig user, String role, String avoidVendor, long rotation) {
+        return canFill(user, role, RoleResolver.Writers.of(avoidVendor), rotation);
+    }
+
+    /** @param writers who has written into the candidate; a reader must differ from all of them */
+    public boolean canFill(UserConfig user, String role, RoleResolver.Writers writers, long rotation) {
+        return canFill(user, null, role, writers, rotation);
+    }
+
+    /**
+     * The same question for a named stage, so a stage the escalation ladder pinned is judged
+     * by its pin and not by a roster it will not consult.
+     */
+    public boolean canFill(UserConfig user, String stage, String role, RoleResolver.Writers writers,
+                           long rotation) {
         if (user.policy() == null || !user.policy().roles().containsKey(role)) return false;
         try {
-            new RoleResolver().resolve(role, user.policy(), user.profiles(), avoidVendor,
+            String pinned = pinFor(stage, role);
+            if (pinned != null) {
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                return true;
+            }
+            new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
                     Math.max(0, rotation), this::available, exhausted);
             return true;
         } catch (RuntimeException nobody) {
@@ -267,6 +345,19 @@ public final class RoleRunner {
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
                        String implementerVendor, Path contextFile, List<Path> attachments,
                        boolean dryRun, int stagePosition) throws Exception {
+        return run(loaded, user, role, runId, RoleResolver.Writers.of(implementerVendor),
+                contextFile, attachments, dryRun, stagePosition);
+    }
+
+    /**
+     * @param writers every vendor that may have left bytes in the candidate, with whether that
+     *                set is known at all. A reader is resolved against all of them; a writer
+     *                is not measured against itself. See {@link RoleResolver.Writers}.
+     */
+    public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
+                       RoleResolver.Writers writers, Path contextFile, List<Path> attachments,
+                       boolean dryRun, int stagePosition) throws Exception {
+        if (writers == null) writers = RoleResolver.Writers.NONE;
         if (user.policy() == null) {
             throw new IllegalStateException("no policy at " + user.home().resolve("policy.yaml")
                     + " — run `warden setup` to create a starter configuration");
@@ -300,9 +391,12 @@ public final class RoleRunner {
 
         for (int attempt = 1; ; attempt++) {
             RoleResolver.Resolution resolution;
+            String pinned = pinFor(stageName, role);
             try {
-                resolution = new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                        implementerVendor, rotation, this::available, exhausted);
+                resolution = pinned != null
+                        ? resolvePinned(pinned, role, user, writers)
+                        : new RoleResolver().resolve(role, user.policy(), user.profiles(),
+                                writers, rotation, this::available, exhausted);
             } catch (RoleResolver.Unresolvable failure) {
                 return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId);
             } catch (RuntimeException failure) {
@@ -383,7 +477,16 @@ public final class RoleRunner {
                     role, spec, profile, user));
             report.put("measurement_context", MeasurementContext.snapshot(profile, task, user));
             report.put("role_invocation_id", roleInvocationId);
-            report.put("avoided_vendor", implementerVendor);
+            // Every vendor that wrote into the candidate, not only the last implementer. The
+            // single-valued key is kept for readers of older reports and carries the first.
+            report.put("avoided_vendors", List.copyOf(new java.util.TreeSet<>(writers.vendors())));
+            report.put("avoided_vendor", writers.vendors().isEmpty() ? null
+                    : new java.util.TreeSet<>(writers.vendors()).first());
+            report.put("writer_set_known", writers.known());
+            // What this resolution may claim about the reader: independent, a declared
+            // same-vendor peer, unproven when the writers are unknown, or none for a writer.
+            report.put("independence", resolution.assurance());
+            if (pinned != null) report.put("assignment", "pinned:" + pinned);
             if (backfilled) report.put("prompt_backfilled", List.of("visual_scenarios"));
             report.put("rejected_profiles", resolution.rejected());
             report.put("prompt_path", root.relativize(promptFile).toString().replace('\\', '/'));
@@ -514,7 +617,7 @@ public final class RoleRunner {
                 quotaEvent.put("role_invocation_id", roleInvocationId);
                 quotaEvent.put("quota", result.evidence().getOrDefault("quota", Map.of()));
                 ledger.append("role_quota_exhausted", quotaEvent);
-                Profile candidate = failoverCandidate(role, user, implementerVendor, rotation);
+                Profile candidate = failoverCandidate(role, user, writers, rotation);
                 if (candidate != null) {
                     String mode = user.policy().failoverMode();
                     boolean preAuthorized = candidate.name().equals(authorizedFailover.get(role));
@@ -548,7 +651,7 @@ public final class RoleRunner {
                         Map<String, Object> pending = failoverEvent(role, profile, candidate,
                                 result, "pending_human_confirmation");
                         pending.put("independence_after_switch",
-                                independenceNote(candidate, implementerVendor));
+                                independenceNote(candidate, writers));
                         report.put("failover_pending", pending);
                         report.put("vendor_attempts", attempts);
                         report.put("attempts_cost_usd", spent);
@@ -607,11 +710,11 @@ public final class RoleRunner {
      * own outcome rather than as an unresolvable role, and so that an operator being asked to
      * confirm a switch is told who would take over.
      */
-    private Profile failoverCandidate(String role, UserConfig user, String implementerVendor,
+    private Profile failoverCandidate(String role, UserConfig user, RoleResolver.Writers writers,
                                       long rotation) {
         try {
             return new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                    implementerVendor, rotation, this::available, exhausted).selected();
+                    writers, rotation, this::available, exhausted).selected();
         } catch (RuntimeException none) {
             return null;
         }
@@ -637,15 +740,16 @@ public final class RoleRunner {
      * self-review — but the operator confirming it should be told the roster is about to get
      * thin, before the next role fails to resolve.
      */
-    private static String independenceNote(Profile candidate, String implementerVendor) {
-        if (implementerVendor == null) {
-            return "no implementer has run yet in this workflow, so independence is unaffected";
+    private static String independenceNote(Profile candidate, RoleResolver.Writers writers) {
+        if (writers.vendors().isEmpty()) {
+            return "no writer has run yet in this workflow, so independence is unaffected";
         }
-        if (candidate.vendor().equals(implementerVendor)) {
-            return "the candidate shares the implementer's vendor (" + implementerVendor
+        String wrote = String.join(", ", new java.util.TreeSet<>(writers.vendors()));
+        if (writers.contains(candidate.vendor())) {
+            return "the candidate shares a vendor with a writer of this candidate (" + wrote
                     + "); a role that requires an independent vendor will refuse it";
         }
-        return "the candidate is a different vendor from the implementer (" + implementerVendor
+        return "the candidate differs from every vendor that wrote this candidate (" + wrote
                 + "), so independence is preserved";
     }
 

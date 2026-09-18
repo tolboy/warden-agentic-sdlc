@@ -28,7 +28,18 @@ public record TaskSpec(
         VisualQa visualQa,
         Budget budget,
         Long maxFixAttempts,
-        Long timeoutMinutes) {
+        Long timeoutMinutes,
+        String reviewAssurance) {
+
+    /**
+     * The weakest reading a task will accept as its review.
+     *
+     * `independent` (the default): every reader differs in vendor from every writer of the
+     * candidate. `same_vendor_peer`: a pair the policy declares — one vendor, two different
+     * models — may read instead. The task has to say so, because the policy alone cannot
+     * lower what a contract is judged by, and the label reaches the human gate either way.
+     */
+    public static final Set<String> REVIEW_ASSURANCES = Set.of("independent", "same_vendor_peer");
 
     public record Authority(boolean workspaceWrite, boolean network, boolean land) {}
     public record VisualQa(boolean required, List<String> scenarios, String start, String url) {}
@@ -45,7 +56,8 @@ public record TaskSpec(
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
-            "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
+            "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes",
+            "review_assurance");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS = Set.of("required", "scenarios", "start", "url");
     private static final Set<String> BUDGET_KEYS =
@@ -111,10 +123,11 @@ public record TaskSpec(
                 ? root.optInt("max_fix_attempts", 2, 0, 10) : null;
         Long timeoutMinutes = root.has("timeout_minutes")
                 ? root.optInt("timeout_minutes", 30, 1, 240) : null;
+        String reviewAssurance = root.requireEnum("review_assurance", REVIEW_ASSURANCES, "independent");
 
         root.throwIfAny();
         return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance, reproduce,
-                authority, visualQa, budget, maxFixAttempts, timeoutMinutes);
+                authority, visualQa, budget, maxFixAttempts, timeoutMinutes, reviewAssurance);
     }
 
     /**
@@ -214,7 +227,8 @@ public record TaskSpec(
                 visualQa,
                 budget,
                 maxFixAttempts != null ? maxFixAttempts : project.defaultMaxFixAttempts(),
-                timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes());
+                timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes(),
+                reviewAssurance == null ? "independent" : reviewAssurance);
     }
 
     private static List<String> resolveCommands(List<String> requested, boolean bareChecks,
@@ -250,7 +264,18 @@ public record TaskSpec(
             VisualQa visualQa,
             Budget budget,
             long maxFixAttempts,
-            long timeoutMinutes) {
+            long timeoutMinutes,
+            String reviewAssurance) {
+
+        public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
+                            String baseRef, List<String> scopePaths, List<String> baselineCommands,
+                            List<String> acceptanceCommands, List<String> reproduceCommands,
+                            Authority authority, VisualQa visualQa, Budget budget,
+                            long maxFixAttempts, long timeoutMinutes) {
+            this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
+                    acceptanceCommands, reproduceCommands, authority, visualQa, budget,
+                    maxFixAttempts, timeoutMinutes, "independent");
+        }
 
         // Existing internal callers construct planning-only tasks without reproduction.
         public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
@@ -259,7 +284,7 @@ public record TaskSpec(
                             Budget budget, long maxFixAttempts, long timeoutMinutes) {
             this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
                     acceptanceCommands, List.of(), authority, visualQa, budget,
-                    maxFixAttempts, timeoutMinutes);
+                    maxFixAttempts, timeoutMinutes, "independent");
         }
 
         /**
@@ -299,6 +324,11 @@ public record TaskSpec(
             }
             fields.put("authority", authority.workspaceWrite() + "/" + authority.network()
                     + "/" + authority.land());
+            // What a reading may be. Lowering it to a same-vendor pair changes what the verdict
+            // means; a task that never spoke keeps the hash it had before the key existed.
+            if (!"independent".equals(reviewAssurance)) {
+                fields.put("review_assurance", reviewAssurance);
+            }
             fields.put("visual_required", String.valueOf(visualQa.required()));
             fields.put("visual_url", String.valueOf(visualQa.url()));
             fields.put("visual_start", String.valueOf(visualQa.start()));

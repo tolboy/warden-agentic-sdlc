@@ -38,7 +38,7 @@ public final class RoleContract {
 
     /** The keys compared on resume, in the order a person would want to hear about them. */
     private static final List<String> COMPARED = List.of(
-            "role", "roster", "strategy", "require_independent_vendor",
+            "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "read_only",
             "prompt_template_sha256", "json_schema_sha256",
             // The stage's own routing. A stage name is stable across a workflow edit, so
@@ -72,6 +72,9 @@ public final class RoleContract {
         contract.put("strategy", spec == null ? null : spec.strategy());
         contract.put("require_independent_vendor",
                 spec != null && spec.requireIndependentVendor());
+        // A declared pair is a term of the reading: a verdict admitted under one pair is not
+        // evidence for a stage whose pair has since been changed or removed.
+        contract.put("same_vendor_peer", spec == null || spec.peer() == null ? null : spec.peer().label());
         contract.put("profile", profile.name());
         contract.put("vendor", profile.vendor());
         contract.put("model", profile.model());

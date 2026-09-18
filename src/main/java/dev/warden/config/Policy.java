@@ -24,15 +24,109 @@ import java.util.Set;
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                      Workflow workflow, boolean workflowDeclared, String failoverMode,
-                     String repairReserve) {
+                     String repairReserve, Escalation escalation) {
+
+    public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                  Workflow workflow, boolean workflowDeclared, String failoverMode,
+                  String repairReserve) {
+        this(roles, reviewRequiredForRisk, workflow, workflowDeclared, failoverMode,
+                repairReserve, null);
+    }
+
+    /**
+     * The opt-in adaptive ladder: after {@code afterBlockingReviews} readings that objected
+     * with blocking product findings in one task, the repair goes to the next rung's writer
+     * and the objecting stage is re-read by that rung's reader, instead of another repair by
+     * the same writer. Rungs are climbed forward only, one per transition, and a rung's reader
+     * reads as a co-author (`peer_review`) of the candidate; whatever independent readings the
+     * chain still owes are resolved against every writer afterwards.
+     *
+     * Absent by default. A policy that does not declare it keeps the short loop: repair by
+     * the same writer until `max_fix_attempts`, then stop for a person.
+     */
+    public record Escalation(long afterBlockingReviews, List<Rung> rungs) {
+        public Escalation {
+            rungs = List.copyOf(rungs);
+        }
+
+        public record Rung(String implementer, String reviewer) {
+            public String label() { return implementer + " -> " + reviewer; }
+        }
+
+        public Map<String, Object> toMap() {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("after_blocking_reviews", afterBlockingReviews);
+            List<Map<String, Object>> rows = new java.util.ArrayList<>();
+            for (Rung rung : rungs) {
+                rows.add(Map.of("implementer", rung.implementer(), "reviewer", rung.reviewer()));
+            }
+            value.put("rungs", rows);
+            return value;
+        }
+    }
 
     public record RoleSpec(String role, List<String> profiles, String strategy,
-                           boolean requireIndependentVendor) {}
+                           boolean requireIndependentVendor, PeerPair peer) {
+        public RoleSpec(String role, List<String> profiles, String strategy,
+                        boolean requireIndependentVendor) {
+            this(role, profiles, strategy, requireIndependentVendor, null);
+        }
+    }
+
+    /**
+     * An explicitly declared same-vendor pair: one writer, one reader, two different models.
+     *
+     * The rule that runs two vendors exists because a model reviewing its own output shares
+     * its own blind spots. An operator with one subscription may still want a second reading,
+     * and the plan admits that as a weaker assurance called `same_vendor_peer` — never as
+     * independence — provided the pair is named in advance and the two are different models,
+     * not the same model at another effort. `require_independent_vendor: false` used to admit
+     * any same-vendor reader with no mark on the verdict; now it admits only this pair.
+     *
+     * A pair cannot be declared beside `require_independent_vendor: true`. A strict policy
+     * stays strict; contradictory settings are refused rather than resolved in the reader's
+     * favour.
+     */
+    public record PeerPair(String implementer, String reviewer) {
+
+        /**
+         * Why the pair cannot be trusted against the loaded profiles, or null when it can.
+         * Checked at resolution rather than at parse, because the policy is parsed before the
+         * profiles it names are known to exist.
+         */
+        public String problem(Map<String, Profile> profiles, String readerRole) {
+            Profile writer = profiles.get(implementer);
+            Profile reader = profiles.get(reviewer);
+            if (writer == null) return "implementer profile '" + implementer + "' not found";
+            if (reader == null) return "reviewer profile '" + reviewer + "' not found";
+            if (writer.readOnly()) return "'" + implementer + "' is read-only and cannot be the writer";
+            if (!readerRole.equals(reader.role())) {
+                return "'" + reviewer + "' fills role '" + reader.role() + "', not '" + readerRole + "'";
+            }
+            if (!writer.vendor().equals(reader.vendor())) {
+                return "the pair spans two vendors (" + writer.vendor() + ", " + reader.vendor()
+                        + "); that is ordinary independence, not a same-vendor peer";
+            }
+            if (writer.model() == null || reader.model() == null) {
+                return "both profiles must pin a model; a peer is a different model, and an "
+                        + "unpinned one is whatever the CLI defaults to";
+            }
+            if (writer.model().equals(reader.model())) {
+                return "both profiles pin model '" + writer.model() + "'; a different effort is "
+                        + "not a different model";
+            }
+            return null;
+        }
+
+        public String label() { return implementer + " -> " + reviewer; }
+    }
 
     public static final Set<String> STRATEGIES = Set.of("rotate", "first");
 
     private static final Set<String> TOP_LEVEL =
-            Set.of("version", "roles", "review", "workflow", "failover", "budget");
+            Set.of("version", "roles", "review", "workflow", "failover", "budget", "escalation");
+    private static final Set<String> ESCALATION_KEYS = Set.of("after_blocking_reviews", "rungs", "note");
+    private static final Set<String> RUNG_KEYS = Set.of("implementer", "reviewer");
     private static final Set<String> FAILOVER_KEYS = Set.of("on_quota_exhausted", "note");
     private static final Set<String> BUDGET_KEYS = Set.of("repair_reserve", "note");
 
@@ -62,7 +156,9 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
      * of the result, which is the operator's to make.
      */
     public static final Set<String> FAILOVER_MODES = Set.of("confirm", "auto", "stop");
-    private static final Set<String> ROLE_KEYS = Set.of("profiles", "strategy", "require_independent_vendor");
+    private static final Set<String> ROLE_KEYS = Set.of(
+            "profiles", "strategy", "require_independent_vendor", "same_vendor_peer");
+    private static final Set<String> PEER_KEYS = Set.of("implementer", "reviewer");
     private static final Set<String> REVIEW_KEYS = Set.of("required_for_risk", "note");
 
     public static Policy parse(String yamlText, String source) {
@@ -81,7 +177,24 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
             List<String> profiles = spec.requireStringList("profiles");
             String strategy = spec.requireEnum("strategy", STRATEGIES, "rotate");
             boolean independent = spec.optBool("require_independent_vendor", roleName.equals("reviewer"));
-            roles.put(roleName, new RoleSpec(roleName, profiles, strategy, independent));
+            PeerPair peer = null;
+            if (spec.has("same_vendor_peer")) {
+                Values pair = spec.optMap("same_vendor_peer").rejectUnknownKeys(PEER_KEYS);
+                String writer = pair.requireString("implementer");
+                String reader = pair.requireString("reviewer");
+                if (independent) {
+                    root.collector().add("roles." + roleName + ": require_independent_vendor: true "
+                            + "and same_vendor_peer conflict; a strict policy stays strict, so "
+                            + "drop one of them");
+                } else if (writer != null && reader != null) {
+                    if (!profiles.contains(reader)) {
+                        root.collector().add("roles." + roleName + ".same_vendor_peer.reviewer '"
+                                + reader + "' must be one of this role's profiles " + profiles);
+                    }
+                    peer = new PeerPair(writer, reader);
+                }
+            }
+            roles.put(roleName, new RoleSpec(roleName, profiles, strategy, independent, peer));
         }
         if (roles.isEmpty()) {
             root.collector().add("roles must declare at least one role");
@@ -108,9 +221,40 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         boolean workflowDeclared = root.has("workflow");
         Workflow workflow = workflowDeclared ? Workflow.parse(root, "workflow") : Workflow.builtIn();
 
+        Escalation escalation = null;
+        if (root.has("escalation")) {
+            Values ladder = root.optMap("escalation").rejectUnknownKeys(ESCALATION_KEYS);
+            long after = ladder.optInt("after_blocking_reviews", 2, 1, 10);
+            List<Escalation.Rung> rungs = new java.util.ArrayList<>();
+            Set<String> seen = new java.util.LinkedHashSet<>();
+            for (Values rung : ladder.mapList("rungs")) {
+                rung.rejectUnknownKeys(RUNG_KEYS);
+                String writer = rung.requireString("implementer");
+                String reader = rung.requireString("reviewer");
+                if (writer == null || reader == null) continue;
+                if (writer.equals(reader)) {
+                    root.collector().add("escalation.rungs: '" + writer + "' cannot both write and "
+                            + "read its own rung");
+                    continue;
+                }
+                if (!seen.add(writer)) {
+                    root.collector().add("escalation.rungs: '" + writer + "' writes on two rungs; "
+                            + "a ladder climbs forward through different writers");
+                    continue;
+                }
+                rungs.add(new Escalation.Rung(writer, reader));
+            }
+            if (rungs.isEmpty()) {
+                root.collector().add("escalation.rungs must declare at least one rung with an "
+                        + "implementer and a reviewer");
+            } else {
+                escalation = new Escalation(after, rungs);
+            }
+        }
+
         root.throwIfAny();
         return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
-                failoverMode, repairReserve);
+                failoverMode, repairReserve, escalation);
     }
 
     public boolean reviewRequired(String risk) {

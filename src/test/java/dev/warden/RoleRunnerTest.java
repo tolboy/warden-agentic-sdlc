@@ -140,7 +140,7 @@ public final class RoleRunnerTest implements Suite {
             RoleRunner.Outcome independent =
                     runRole(project, home, "reviewer", "independent", "stubvendor", null, false);
             check.eq("a model never reviews its own vendor's output", "othervendor", independent.vendor());
-            check.eq("and the reason is recorded", "same_vendor_as_implementer",
+            check.eq("and the reason is recorded", "same_vendor_as_writer",
                     independent.rejected().get("stub-sneaky"));
 
             // --- read-only is verified, not trusted ------------------------------------
