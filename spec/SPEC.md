@@ -223,6 +223,21 @@ Without it the screenshots only reach the prompt text; a vendor with its own rea
 open them, a vendor without one will read the paths as prose. Warden records in the report
 which of the two happened.
 
+```yaml
+mcp:
+  config: mcp/visual.json   # the vendor's MCP configuration, in the vendor's own format
+capabilities:
+  vision: { delivery: workspace_file, verification: required, acquires: true }
+```
+
+`mcp.config` names the file that declares which MCP servers the vendor may reach; Warden does
+not read its format. It reaches the vendor only through `{{mcp_config}}` in `args` (declaring
+one without the other is refused for a direct runner), the file must exist when the role is
+dispatched (`role_mcp_config_missing`), and its digest is a term of the role contract. With
+`acquires: true` the visual role takes its own screenshots through those servers and lists
+them in `screenshots_taken`; a workflow stage that declares `evidence: agent` refuses a
+profile without it.
+
 `prompt_delivery: stdin` is the only channel that survives a Windows `.cmd` shim: cmd.exe
 truncates a multi-line argument at the first newline and silently drops every argument after
 it. Warden refuses to launch that combination (`role_prompt_undeliverable`) rather than
@@ -468,6 +483,11 @@ Properties that are there on purpose:
    filenames (`attachments.flag`, `-i` for codex), and answers only what a machine cannot
    measure — clipped text, overlap, a collapsed layout. The role is enabled in the policy and
    is off by default: the harness is the floor, and paying for a look is the operator's call.
+   Where no harness can drive the application, a stage declared `evidence: agent` lets the
+   role take its own screenshots through the MCP servers its profile names; Warden verifies
+   the files it lists exist inside the run's evidence, hashes them (`image_evidence`), and
+   refuses a verdict that lists none as `visual_qa_no_evidence`. What a picture shows is not
+   verified by Warden; the profile's probe is where that is proven.
 5. **A visual failure returns to the implementer**, like a failed gate or review, under the
    same attempt limit. `visual_qa_unavailable` and `visual_qa_port_occupied` are the
    exceptions: an implementer can fix neither a missing browser nor somebody else's server on
@@ -559,7 +579,11 @@ Available in any role prompt template:
 {{screenshots}}                       — absolute screenshot paths; for visual_qa
 {{visual_scenarios}}                  — what the harness was told to check
 {{changed_files}}                     — the paths changed since the diff base, resolved
+{{evidence_dir}}                      — where a self-acquiring visual role saves its screenshots
 ```
+
+In `args:` additionally `{{model}}`, `{{effort}}`, `{{mcp_config}}` (the profile's MCP
+configuration, resolved to an absolute path) and `{{evidence_dir}}`.
 
 `{{changed_files}}` exists because a prompt must not depend on tools the profile may not have.
 The reviewer template used to name `git diff` and `git ls-files` as the way to find the diff,

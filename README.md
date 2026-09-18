@@ -148,6 +148,16 @@ never as bare filenames passed off as pictures. It answers only what a machine c
 clipped text, overlap, a collapsed layout. It is off by default in the policy: the harness is
 free, a model's look costs a vendor call.
 
+Where no browser harness can drive the application — a Unity scene, a Tauri window, a
+canvas-heavy page — the role can bring its own camera. A stage declared `evidence: agent`
+dispatches a profile that names its MCP servers (`mcp.config`) and declares
+`capabilities.vision.acquires: true`; the model drives the application with those tools, saves
+what it judged into the run's `screenshots/` directory and lists the files in
+`screenshots_taken`. Warden checks that each listed file exists there and is not empty, hashes
+it onto the step row, and refuses a verdict that lists none as `visual_qa_no_evidence`. It does
+not check what the picture shows; that is what the profile's probe is for. See
+[`docs/SETUP.md`](docs/SETUP.md#visual-qa-through-the-vendors-own-tools-mcp).
+
 A failure in either layer comes back to the implementer as an ordinary failed check.
 
 ## Why a separate repository
@@ -360,7 +370,10 @@ condition is a configuration error rather than a silent "false", because false h
 permissive answer. `on_fail: fix` returns the exact failure text to the implementer, no more
 than `max_fix_attempts` times, and re-runs every earlier stage marked `recheck_after_fix` —
 otherwise fixing one check can break one already passed. `sees:` binds the role with eyes to a
-specific browser stage: you cannot look at pixels nobody photographed.
+specific browser stage: you cannot look at pixels nobody photographed. `evidence: agent`
+instead lets that role take its own pictures through the MCP servers its profile names —
+a game engine, a desktop window, a page the harness cannot drive — and Warden verifies the
+files it lists exist inside the run's evidence before believing the verdict.
 
 What is **not** configurable: what a failure is called (`gates_not_satisfied` is not renamed
 along with your stage), the budget boundary, and the fact that the last word is a human's. The
@@ -463,6 +476,11 @@ resolver refuses these rather than pretending.
 | Bounded loop: implement → gates → review → browser → look, fix ≤ N | ✅ | ✅ | Run `chapter-hearth-3`: six vendor calls, $3.91, one fix round |
 | Browser harness (CDP, project-neutral) | ✅ | ✅ | Six scenarios across three viewports |
 | `visual_qa` role on real screenshots | ✅ | ✅ | Filed a P1 the harness could not see; routed back as a fix round |
+| `visual_qa` role taking its own screenshots through MCP (`evidence: agent`) | ✅ | ❌ | Suite-covered with a stand-in vendor; the shipped `claude-visual-qa-mcp` template is unverified until its probe is run against a server of yours |
+| Writer provenance, assurance labels, `same_vendor_peer`, escalation ladder | ✅ | ❌ | Suite-covered; the reader preflight stops before the writer is paid |
+| Second planner (`plan_reviewer`), reservation re-measured against the contract | ✅ | ❌ | The shipped `agy-plan-review` profile's probe has not been run |
+| Gate TTL, strict money cap, bounded rate-limit retry, failover `retry` | ✅ | ❌ | Suite-covered with test clocks and sleepers |
+| `warden ledger --compare`, `warden roster`, dashboard run timeline | ✅ | ❌ | Offline against the corpus and the configuration files |
 | Human gate: durable, cross-process-locked decisions | ✅ | ✅ | `accept` / `reject` / `switch` / `retry` |
 | Carrying a rejection or a verdict into the next run | ✅ | ✅ | `--continue` |
 | `warden do`: Orca worktree isolation, task draft | ✅ | ✅ | Cut from the branch the operator is actually on |
@@ -485,6 +503,7 @@ Grok and Claude on the operator's own subscriptions.
 |---|---|
 | [`spec/SPEC.md`](spec/SPEC.md) | The full specification: every file, every command, every invariant |
 | [`docs/adr/0001-layer-split.md`](docs/adr/0001-layer-split.md) | Why Warden is a policy/evidence engine, Orca is the cockpit, and Conductor stays optional |
+| [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md) | The deterministic-workflow hypothesis: what counts as evidence, the A/B protocol, the decision rule, Conductor evaluated, and the plugin exit if it fails |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Per-block status, and what each failure is allowed to do |
 | [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) | A guided tour on stub vendors — nothing spent |
 | [`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md) | Transcripts of real runs, including what they broke |

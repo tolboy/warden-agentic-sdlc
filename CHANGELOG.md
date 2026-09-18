@@ -85,6 +85,95 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- **Who wrote the code is measured, and every reading says how far it is from them.** The
+  summary carries `writer_vendors`, `writer_profiles` and `writer_provenance`: the set grows
+  with every writer call, including a failed one and a continuation, and is restored from the
+  `chain` block. A reader is independent of the whole set, not only of the last implementer,
+  and each reading carries an assurance label: `independent`, `same_vendor_peer`, `peer_review`
+  (a pinned assignment), `coauthor`, or `unproven` when the provenance is not known — which is
+  never read as independent. `same_vendor_peer` is opt-in twice: a named implementer/reviewer
+  pair with different models under `roles.reviewer.same_vendor_peer` in policy, and
+  `review_assurance: same_vendor_peer` on the task. `require_independent_vendor: true` stays
+  strict; a contradictory configuration is refused; the human gate shows the label. The reader
+  preflight asks every reader against the writer's vendor before the writer is paid:
+  `independent_review_unavailable` with zero calls and `rejected_profiles` naming the resolver's
+  reason per profile. Suite-covered; not run live.
+- **An escalation ladder by explicit policy.** `escalation.after_blocking_reviews: N` and
+  `rungs: [{implementer, reviewer}, …]` pin a different pair to the stages after N blocking
+  reviews of the same candidate; assignments are pinned per stage and restored on a
+  continuation, never chosen by rotation over a changed roster. Running out is
+  `quality_exhausted`; a rung nobody can fill is `escalation_unavailable`. Suite-covered.
+- **A continuation reuses the writer's last fix round.** When a fix round moved the tree, the
+  writer's own row for that tree is reused under the implement stage instead of paying the
+  writer to reproduce a candidate it already wrote; a retired review is still not carried.
+- **A second planner.** The `plan_reviewer` role (read-only) reads the compiled contract, not
+  the draft. Blocking findings send the first planner back once with a `prepare-redraft.md`
+  context; a second refusal stops as `plan_review_findings_remain`; a reviewer that moved the
+  tree is `plan_reviewer_protocol_violation`. The summary carries `plan_review`, both calls
+  count in the preparation budget, and `warden setup` ships `prompts/plan-reviewer.md`,
+  `schemas/plan-reviewer.json` and an unverified `agy-plan-review` profile (Gemini 3.8 Flash
+  through the `agy` CLI, whose calls report no price). Suite-covered; the profile's probe has
+  not been run.
+- **The reservation is re-measured against the compiled contract** (`P2PLAN-17`). The
+  estimate made before a contract exists is kept as `budget_plan_at_reservation` (phase
+  `reserve`); once the planner has compiled the contract the plan is measured again against
+  it (`budget_plan.measured_against: compiled_contract`, phase `prepared`), and
+  `reservation_matched_contract` says whether the two named the same paying stages. The
+  historical estimate is never rewritten.
+- **`retry` on a failover decision.** After the cause is removed, the same profile runs again
+  and earlier verdicts are carried, alongside `abort` and `switch`.
+- **A human gate that expires.** `budgets.gate_ttl_hours` writes `expires_at` on the decision;
+  `warden status` shows `expired`; accepting after expiry is refused as `gate_expired` unless
+  `--acknowledge-expired` is passed; waiting on a gate ends at its expiry.
+- **A money cap that is a cap.** `budgets.cost_cap: strict` reserves a proven upper bound per
+  call from each profile's `limits.max_cost_usd`; a roster without one stops as
+  `cost_cap_unenforceable` before the first call. Without it, `max_cost_usd` stays what it
+  was: a threshold on reported spend, and the preview still says so.
+- **A bounded retry on a transient rate limit**, opt-in: `retry.rate_limited: { max_attempts,
+  backoff_seconds }` in policy (default `max_attempts: 0`). The pause is the vendor's reported
+  retry-after when the evidence carries one, otherwise exponential backoff; every pause is on
+  the role report as `rate_limit_retry`. No failover, no dropped profile. Suite-covered with a
+  test sleeper; no live rate limit was retried.
+- **`warden ledger --compare [--baseline-file PATH] [--text]`** (P6b, the small form): two
+  slices of the corpus side by side — calls, reported cost and unpriced calls, duration, fix
+  rounds, stops by class, roster — with no new dashboard. The protocol for using it is in
+  [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md).
+- **`warden roster`**: which profile fills which role and in which workflow, `roster set` to
+  change a role's profiles and strategy, `roster model` to change a profile's model and effort,
+  each with a timestamped backup of the file it rewrote; changing a model drops
+  `verification.verified_on` unless `--keep-verified`.
+- **A run timeline on the dashboard**: stages, calls, fix rounds and stops of a run, read from
+  the ledger.
+- **A visual role that takes its own screenshots.** A workflow stage may declare
+  `evidence: agent` instead of `sees:`; it needs no browser harness. The profile names the
+  MCP servers the vendor may reach (`mcp.config`, in the vendor's own format, handed to the
+  vendor's own flag through `{{mcp_config}}`) and declares `capabilities.vision.acquires:
+  true`. The role saves what it judged under the run's `screenshots/` directory (the prompt
+  is told where, and `{{evidence_dir}}` is available in args) and lists the files in
+  `screenshots_taken`; Warden verifies each one exists inside the run's evidence and is not
+  empty, hashes it onto the step row as `image_evidence`, and refuses a verdict that lists
+  none as `visual_qa_no_evidence` — a stop that is not about the work, with no fix round.
+  The configuration file's digest is a term of the role contract (`mcp_config_sha256`).
+  Before the first call, a stage with `evidence: agent` filled by a profile that does not
+  acquire stops as `visual_qa_unavailable`, and a profile whose `mcp.config` file is missing
+  stops as `mcp_config_missing`; the dry run names both. `warden setup` ships an unverified
+  `claude-visual-qa-mcp` template whose probe must be run against a server of yours. Suite-
+  covered with a stand-in vendor; no real MCP server has been tried, and what a screenshot is
+  a picture of is not verified by Warden.
+- **`verification.expect`**: a substring the probe's stdout has to contain before
+  `warden profiles --verify` stamps `verified_on`. Without it the stamp was exit code alone,
+  and a headless CLI whose tool call was auto-denied exited 0 with an empty response and was
+  stamped verified (measured with `agy` on 2026-09-18). The report carries `expected` and
+  `answer_found`; the next step names the refusal. The shipped `agy-plan-review` profile now
+  expects the schema title it is asked to read, adds `--add-dir .` to its probe and
+  `--dangerously-skip-permissions` to its args, with the measured consequence spelled out in
+  the file: `--mode plan --sandbox` do not stop that CLI from writing inside `--add-dir`, so
+  the read-only guarantee for the role is Warden's fingerprint check, not the CLI.
+- **A policy file that does not parse stops the run** as `policy_invalid`, with the parser's
+  complaint in `policy_problem`, before anything is dispatched — dry run included. It used to
+  be treated as no policy: the built-in chain ran, every role stage was skipped as
+  `role_not_configured`, and a dry run previewed `ok` over a candidate nobody would write.
+  Measured on a multi-line flow mapping in `roles:`.
 - `budgets.max_elapsed_minutes`: an execution deadline for a task, summed across the runs a
   `--continue` links and not counting time spent waiting for a person. No vendor call starts
   with less than a minute left, each call's wall clock is lowered to what is left, and a

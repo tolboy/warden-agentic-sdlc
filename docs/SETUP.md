@@ -86,7 +86,10 @@ warden profiles --verify grok-review                  run this profile's probe; 
 `--verify` keeps the transcript and prints `what_to_check`. Read it: that list is where you
 find out which envelope key carries the answer, whether the vendor opens an interactive prompt,
 and whether it reports a cost at all. The date does not claim you read it — it once did, and
-nothing enforced that.
+nothing enforced that. What it can enforce is `verification.expect`: a substring the probe's
+output has to contain, or nothing is stamped. Use it whenever the probe asks a question with
+a known answer; a headless CLI whose file read was silently refused exits 0 with an empty
+reply, and exit code alone would have stamped it.
 
 **Do the implementer last, and do it deliberately.** It is the only role with
 `read_only: false` — the only one that writes to your worktree, and the one whose profile
@@ -118,6 +121,89 @@ removed unless you pass `--keep-verified`. The command prints `verify_with` for
 
 Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
 `~/.warden`.
+
+## Visual QA through the vendor's own tools (MCP)
+
+The browser harness drives a page over CDP. It cannot drive a Unity scene, a Tauri window, or
+a canvas that answers only to the application's own events. For those, the visual role can
+bring its own camera: a profile that names the MCP servers the vendor may reach, and a workflow
+stage that says the agent takes the pictures.
+
+```yaml
+# ~/.warden/profiles/claude-visual-qa-mcp.yaml  (shipped by `warden setup`, unverified)
+mcp:
+  config: mcp/visual.json          # the vendor's own format; Warden hands it to the flag below
+args: [..., "--mcp-config", "{{mcp_config}}", "--allowedTools", "Read,Glob,mcp__browser"]
+capabilities:
+  vision: { delivery: workspace_file, verification: required, acquires: true }
+```
+
+```yaml
+# ~/.warden/policy.yaml
+workflow:
+  stages:
+    - { stage: look, run: role, role: visual_qa, when: [visual_qa_required],
+        evidence: agent, on_fail: stop, on_findings: fix }
+```
+
+`evidence: agent` needs no `browser` stage and cannot also `sees:` one. What Warden adds is the
+same for every target: the role is told where to save its screenshots (the run's
+`screenshots/` directory; `{{evidence_dir}}` in args if the vendor wants it as a flag) and to
+list them in `screenshots_taken`; each listed file must exist there and be non-empty, its
+digest goes onto the step row as `image_evidence`, and a verdict that lists none is refused as
+`visual_qa_no_evidence` — no fix round, because no implementer can make a model take a
+picture. The configuration file's digest is recorded on the role contract. Warden never reads
+the file's format and never checks what a picture shows: that is what the profile's probe is
+for, and the template's `verification.probe` asks the model to take one screenshot, open it
+with its own read tool and name two words visible in it. Run that against **your** server, look
+at `probe.png` yourself, and only then stamp `verified_on`.
+
+Which server drives which target is your choice, and outside what this repository has tried:
+
+| Target | What the profile's `mcp/visual.json` names | What the probe has to show |
+|---|---|---|
+| Svelte, React, plain browser UI | a browser-automation MCP server (Playwright- or DevTools-based) with a screenshot tool | the dev server's page, not `about:blank` |
+| Tauri 2 desktop | a desktop-automation server that can focus the application's window and capture it; or the app's WebView through the same browser server when it exposes a DevTools port | the window, at the size the scenario names |
+| Unity | an editor bridge exposing play-mode control and a screenshot or camera capture tool | the scene in play mode, not the editor chrome |
+| Node.js services | usually nothing to look at; keep `visual_qa.required: false` and let the machine gates judge | — |
+
+Grant the role only the server's tools and `Read`: it is read-only, and it does not need a
+shell to take a picture. For `runner: orca` Warden cannot hand the file to the worker; name
+the servers in the vendor's own settings and keep `mcp.config` pointing at a copy so its digest
+is still recorded. Before the first call the loop checks that the profile chosen for an
+`evidence: agent` stage declares `acquires: true` (`visual_qa_unavailable` otherwise) and that
+the configuration file exists (`mcp_config_missing`); `--dry-run` reports the same.
+
+## The five-role loop
+
+The shape this branch was built to run, written as policy — two planners, one writer, two
+readers, every hand-back bounded:
+
+```yaml
+roles:
+  planner:       { profiles: [claude-plan],      strategy: first }
+  plan_reviewer: { profiles: [agy-plan-review],  strategy: first, require_independent_vendor: true }
+  implementer:   { profiles: [grok-implement],   strategy: first }
+  reviewer:      { profiles: [astra-review, claude-review], strategy: rotate,
+                   require_independent_vendor: true }
+workflow:
+  stages:
+    - { stage: implement,     run: role, role: implementer, on_fail: stop }
+    - { stage: gates,         run: machine_gates, on_fail: fix, recheck_after_fix: true }
+    - { stage: review,        run: role, role: reviewer, when: [review_required],
+        on_fail: stop, on_findings: fix, recheck_after_fix: true }
+    - { stage: review-second, run: role, role: reviewer, when: [review_required],
+        on_fail: stop, on_findings: fix }
+```
+
+`warden do <goal> --prepare always` runs the planner, then the plan reviewer over the compiled
+contract; blocking findings send the planner back once. The implementer writes; the first
+reviewer stage takes the first profile of the rotation and the second stage the second, on
+every run; each reader's blocking findings go back to the implementer under
+`max_fix_attempts`, and `recheck_after_fix` on the first review means a repair made for the
+second reader is read again by the first. The run ends at the human gate. Profile names are
+yours: `warden roster` shows what fills what. Nothing here has run live yet; `--dry-run`
+prices it without dispatching anyone.
 
 ## 4. Connect a project
 

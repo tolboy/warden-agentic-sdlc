@@ -134,6 +134,9 @@ missed is not worth carrying either.
 ## 7. What this document does not claim
 
 No pair has been run. The five-role loop has not run live (GPT Astra's limits were not
-restored on 2026-09-18, and the operator asked that the loop not be started). The MCP profile
-template has not been probed against any server. The baseline file format exists and the
-compare command reads it; both were exercised only by their suites.
+restored on 2026-09-18, and the operator asked that the loop not be started); its `--dry-run`
+in an isolated config home priced a clean pass at three calls with both readers
+`independent`, which is the shape, not the result. The MCP profile template has not been
+probed against any server. The `agy-plan-review` profile's probe has passed with its answer
+checked; the plan reviewer itself has not read a real contract. The baseline file format
+exists and the compare command reads it; both were exercised only by their suites.
