@@ -38,6 +38,7 @@ public final class TestMain {
                 new dev.warden.NextStepTest(),
                 new dev.warden.LocalHttpExecutorTest(),
                 new dev.warden.LedgerTest(),
+                new dev.warden.LedgerCompareTest(),
                 new dev.warden.HomeCorpusTest(),
                 new dev.warden.CorpusReaderTest(),
                 new dev.warden.PilotConfigTest(),

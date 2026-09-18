@@ -240,3 +240,89 @@ failure to recover its project does not establish that the loss cannot affect th
 one being summarised. An incomplete corpus does not print an unconditional success
 rate or an exact total spend: `telemetry.cost_usd.total` is `null` even when some
 priced rows were readable.
+
+## Comparing runs: `warden ledger --compare`
+
+Plain `warden ledger` still prints one aggregate over a project. After several
+comparable tasks the question is different: did the prepared, gated loop pay for
+itself against an operator's ordinary agent workflow, under the same conditions.
+
+```bash
+./bin/warden ledger --compare
+./bin/warden ledger --compare --baseline-file PATH [--text]
+```
+
+`--compare` reads every `.warden/runs/<run-id>/task-run.json` in the local project
+tree, plus `decision.json` beside it. It does not read the home corpus, does not
+consult a model, and does not change the default `warden ledger` output. Combined
+with `--import` it is refused, naming `--import`. `--global` is untouched.
+
+Dry runs (`dry_run: true`, or `reason: dry_run`) and preview rows are ignored. A
+file that cannot be parsed is listed under `skipped` with its run id and relative
+path, and the report is marked `incomplete: true`. Nothing is guessed to fill the
+gap. Goal text, prompt text, finding text and absolute paths never appear in the
+output.
+
+### Grouping
+
+Warden units are grouped by a condition key recorded on the group: `prepare`
+(`off` / `auto` / `always`), `risk`, `workflow_sha256` (SHA-256 of the JSON of
+the summary's `workflow` list, or `unknown` when that list is missing), and
+`roster` (sorted distinct profile names from `steps` rows that name a `profile`;
+preview step rows are skipped).
+
+A continued chain is one unit of work. `chain.runs` on a later run lists the
+earlier ones; the report keeps only runs that are not listed inside another
+run's `chain.runs` except as the last element, and attributes the chain to that
+last run. `units` is the number of such chains (or standalone runs). `runs` is
+the number of physical `task-run.json` files that belonged to them, including
+the folded earlier links. Identical conditions do not prove equal task
+difficulty.
+
+### Metrics
+
+Each measured quantity keeps the three-field form this document already uses:
+`known_count`, `unknown_count`, and `total` / `mean` over the known values
+only. A missing number stays `null`. It never becomes a zero.
+
+| Field | Meaning |
+|---|---|
+| `outcomes.reasons` | Counts of each summary `reason` |
+| `outcomes.ready_for_human` | Units still waiting at the human gate |
+| `outcomes.accepted` | `decision.json` resolved `accept` |
+| `outcomes.rejected` | `decision.json` resolved `reject` |
+| `outcomes.stopped` | Everything else. A stopped chain is not a success |
+| `fix_rounds` | `chain.fix_attempts`, or `attempts_used` when the chain did not record one |
+| `role_runs` | `chain.role_runs` |
+| `cost_usd` | `chain.cost_usd`. Unknown when `chain.unpriced_calls` is greater than zero — the group reports the known sum and the unpriced count together |
+| `elapsed_seconds` | `chain.elapsed_seconds` when `chain.elapsed_known` is not `false` |
+| `human_wait_millis` | `decision.json` `updated_at - created_at` when the decision is resolved |
+| `open_blocking_findings` | Recorded blocker count |
+| `candidate_review_passed` | How many units recorded a true candidate review, as a total over known booleans |
+
+`sample_size` is `units`. A group with fewer than three units is marked
+`comparable: false` with the reason `fewer than 3 units`, so one run cannot be
+read as a trend.
+
+### Baseline file
+
+`--baseline-file PATH` is a JSON object `{"rows":[...]}`. Each row is one
+manually observed task done **without** Warden:
+
+```json
+{"label":"hermes+grok","task_kind":"fix","risk":"medium","completed":true,
+ "operator_minutes":35,"elapsed_minutes":50,"cost_usd":null,"calls":null,"note":"..."}
+```
+
+Unknown keys are refused. `completed` must be a boolean. Numbers must be
+numbers or `null`; a missing number is unknown, not zero. Rows form their own
+groups with `source: "manual_baseline"`, keyed by `label`, `task_kind` and
+`risk`. `elapsed_minutes` is converted to seconds so it sits beside Warden's
+`elapsed_seconds`. The `note` is accepted as input and is not copied to the
+report.
+
+`--text` prints one compact row per group: conditions, units,
+accepted/ready/stopped, fix-round mean, call mean, cost known/unknown, elapsed
+known/unknown, operator wait, and the comparable marker. The same note as the
+JSON — identical conditions do not prove equal task difficulty, and a stopped
+task is not a success — is printed under the table.

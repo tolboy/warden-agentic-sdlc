@@ -18,6 +18,7 @@ import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.json.Json;
 import dev.warden.ledger.CorpusImport;
 import dev.warden.ledger.EvidenceLedger;
+import dev.warden.ledger.LedgerCompare;
 import dev.warden.ledger.LedgerReader;
 import dev.warden.ledger.ProjectIdentity;
 import dev.warden.ledger.RunReport;
@@ -783,17 +784,28 @@ public final class Main {
 
     private static int ledger(String[] args) throws Exception {
         boolean global = false;
+        boolean compare = false;
+        boolean text = false;
         String projectId = null;
+        Path baselineFile = null;
         List<Path> imports = new ArrayList<>();
         for (int index = 1; index < args.length; index++) {
             String arg = args[index];
             switch (arg) {
                 case "--global" -> global = true;
+                case "--compare" -> compare = true;
+                case "--text" -> text = true;
                 case "--project-id" -> {
                     if (index + 1 >= args.length) {
                         throw new IllegalArgumentException("ledger --project-id needs a value");
                     }
                     projectId = args[++index];
+                }
+                case "--baseline-file" -> {
+                    if (index + 1 >= args.length) {
+                        throw new IllegalArgumentException("ledger --baseline-file needs a path");
+                    }
+                    baselineFile = Path.of(args[++index]);
                 }
                 case "--import" -> {
                     if (index + 1 >= args.length) {
@@ -804,6 +816,10 @@ public final class Main {
                 default -> throw new IllegalArgumentException("ledger: unknown argument '" + arg + "'");
             }
         }
+        if (compare && !imports.isEmpty()) {
+            // Name the flag the operator actually typed, matching --import vs --global.
+            throw new IllegalArgumentException("ledger --compare cannot be combined with --import");
+        }
         if (!imports.isEmpty() && (global || projectId != null)) {
             // Name the flag the operator actually typed. A message about `--global` sends
             // someone who passed `--project-id` looking for an argument that is not there.
@@ -812,6 +828,16 @@ public final class Main {
         }
         if (projectId != null && !global) {
             throw new IllegalArgumentException("ledger --project-id is only valid with --global");
+        }
+        if (compare && (global || projectId != null)) {
+            throw new IllegalArgumentException("ledger --compare cannot be combined with "
+                    + (global ? "--global" : "--project-id"));
+        }
+        if (text && !compare) {
+            throw new IllegalArgumentException("ledger --text is only valid with --compare");
+        }
+        if (baselineFile != null && !compare) {
+            throw new IllegalArgumentException("ledger --baseline-file is only valid with --compare");
         }
         if (!imports.isEmpty()) {
             Map<String, Object> result = CorpusImport.run(UserConfig.defaultHome(), imports);
@@ -834,6 +860,12 @@ public final class Main {
             return 0;
         }
         Path root = new ConfigLoader().findProjectRoot(Path.of("."));
+        if (compare) {
+            Map<String, Object> report = LedgerCompare.compare(root, baselineFile);
+            if (text) System.out.print(LedgerCompare.render(report));
+            else System.out.println(Json.write(report));
+            return 0;
+        }
         System.out.println(Json.write(new LedgerReader().summarize(root)));
         return 0;
     }
@@ -1340,6 +1372,13 @@ public final class Main {
                                                event_id use a provenance key; an ambiguous match
                                                is flagged, not merged. Contracts, units, lineage
                                                and cost the source never had stay unknown.
+                                               --compare groups local task-run summaries by
+                                               prepare, risk, workflow and roster, folding a
+                                               continued chain into one unit attributed to its
+                                               last run. --baseline-file PATH sits manually
+                                               observed (non-Warden) tasks beside them.
+                                               --text prints a compact table. Refused with
+                                               --import. A stopped task is not a success.
                   warden report <run-id> [--text]
                                                one run joined: stages, vendors, cost, tokens,
                                                screenshots, changed files, human decision
