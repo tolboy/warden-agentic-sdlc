@@ -266,6 +266,10 @@ public final class TaskLoop {
      */
     private static final java.util.Set<String> NOT_ABOUT_THE_WORK = java.util.Set.of(
             "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope",
+            // A visual role that brought no pixels, or a vendor whose MCP configuration file
+            // is missing, is the tooling failing, not a verdict on the candidate; the readings
+            // before it stand.
+            "visual_qa_no_evidence", "mcp_config_missing",
             // A malformed scenario usually gets fixed in the contract, which moves the
             // fingerprint and declines reuse on its own. It is listed anyway for the case
             // where the fix is in the harness rather than the contract — which is how this
@@ -640,6 +644,21 @@ public final class TaskLoop {
                 budget.strictBounds(strictBounds(workflow, user, task, reviewByRisk));
             }
         }
+        // A policy file that exists and does not parse is not the same as no policy. Treating
+        // it as none ran the built-in chain, skipped every role stage as `role_not_configured`
+        // and previewed `ok` over a candidate nobody would write and nobody would read.
+        // Measured on a dry run whose multi-line flow mapping the strict YAML reader refused.
+        if (user.policyPresent() && user.policy() == null) {
+            String problem = user.problems() == null ? null : user.problems().get("policy.yaml");
+            summary.put("policy_problem", problem);
+            summary.put("resolution", "policy.yaml does not parse: " + problem + ". Fix the file "
+                    + "(warden doctor and warden roster both list the problem) before anything "
+                    + "is dispatched; the built-in chain is not a substitute for a policy you wrote.");
+            progress.line("      policy.yaml does not parse: " + problem);
+            progress.line("      stopping before the first dispatch rather than running the "
+                    + "built-in chain over it");
+            return stop(ledger, summary, "policy_invalid", steps, 0, budget);
+        }
         Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
         if (readerGap != null) {
             summary.put("unavailable_role", readerGap);
@@ -648,6 +667,16 @@ public final class TaskLoop {
             progress.line("      stopping before the first dispatch rather than after it");
             if (!dryRun) return stop(ledger, summary, "independent_review_unavailable", steps, 0, budget);
             summary.putIfAbsent("would_stop", "independent_review_unavailable");
+        }
+        Map<String, Object> toolingGap = toolingGap(root, workflow, user, task, reviewByRisk, roles);
+        if (toolingGap != null) {
+            String stopReason = String.valueOf(toolingGap.get("stop_reason"));
+            summary.put("unavailable_role", toolingGap);
+            summary.put("resolution", String.valueOf(toolingGap.get("message")));
+            progress.line("      " + toolingGap.get("message"));
+            progress.line("      stopping before the first dispatch rather than after it");
+            if (!dryRun) return stop(ledger, summary, stopReason, steps, 0, budget);
+            summary.putIfAbsent("would_stop", stopReason);
         }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         summary.put("candidate_fingerprint", candidateFingerprint);
@@ -1033,18 +1062,20 @@ public final class TaskLoop {
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
-            if (roles.canFill(user, stage.name(), stage.role(), wouldWrite,
-                    workflow.rotationPositionOf(stage))) continue;
+            Map<String, String> refused = roles.explainFill(user, stage.name(), stage.role(),
+                    wouldWrite, workflow.rotationPositionOf(stage));
+            if (refused == null) continue;
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("role", stage.role());
             gap.put("needed_for", stage.name());
             gap.put("blocked_at", "preflight");
+            gap.put("rejected_profiles", refused);
             gap.put("must_differ_from_vendor", writer.vendor());
             gap.put("writer_profile", writer.name());
             gap.put("exhausted_profiles", List.copyOf(roles.exhaustedProfiles()));
             gap.put("message", "no profile can fill role '" + stage.role() + "' for stage '"
                     + stage.name() + "' once " + writer.name() + " (" + writer.vendor()
-                    + ") has written the candidate. Add a profile from another vendor, "
+                    + ") has written the candidate (" + refused + "). Add a profile from another vendor, "
                     + "or declare a same_vendor_peer pair in policy.yaml and set "
                     + "review_assurance: same_vendor_peer on the task if that weaker check is "
                     + "acceptable; nothing was dispatched.");
@@ -1143,6 +1174,52 @@ public final class TaskLoop {
         return null;
     }
 
+    /**
+     * The tools a stage's profile would need, checked before anyone is paid.
+     *
+     * Two faults are visible from the roster alone. A stage that declares `evidence: agent`
+     * needs a visual profile that declared it takes its own screenshots; a profile that
+     * names an MCP configuration needs the file to exist. Either one found at dispatch has
+     * already spent the implementer and every reader before it — measured on the harness's
+     * missing browser, where the same lesson cost an implementer and a passed review.
+     */
+    private Map<String, Object> toolingGap(Path root, Workflow workflow, UserConfig user,
+                                           TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                           RoleRunner roles) {
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+            // Nobody to fill it is the dispatch's own report, with the roster's reasons.
+            if (chosen == null) continue;
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("stage", stage.name());
+            gap.put("role", stage.role());
+            gap.put("profile", chosen.name());
+            if (chosen.mcpConfig() != null && !Files.isRegularFile(user.resolve(chosen.mcpConfig()))) {
+                gap.put("code", "mcp_config_missing");
+                gap.put("stop_reason", "mcp_config_missing");
+                gap.put("message", "profile '" + chosen.name() + "' names mcp.config "
+                        + chosen.mcpConfig() + ", which does not exist under the config home. "
+                        + "Write the vendor's MCP configuration there, or remove mcp.config and "
+                        + "the {{mcp_config}} argument from the profile.");
+                return gap;
+            }
+            if (stage.acquiresEvidence() && (chosen.vision() == null || !chosen.vision().acquires())) {
+                gap.put("code", "visual_qa_no_acquiring_profile");
+                gap.put("stop_reason", "visual_qa_unavailable");
+                gap.put("message", "stage '" + stage.name() + "' declares evidence: agent, so the "
+                        + "visual role has to take its own screenshots, and profile '" + chosen.name()
+                        + "' does not declare capabilities.vision.acquires: true. Declare it on a "
+                        + "profile whose tools can drive the application, or give the stage a "
+                        + "harness with sees:.");
+                return gap;
+            }
+        }
+        return null;
+    }
+
     private static boolean holds(String condition, TaskSpec.ResolvedTask task, boolean reviewByRisk) {
         return switch (condition) {
             case "review_required" -> reviewByRisk;
@@ -1175,6 +1252,8 @@ public final class TaskLoop {
      * reason {@code visual_qa_unavailable} and the {@code role_orca_*} codes are terminal.
      */
     private static final java.util.Set<String> ROLE_OPERATOR_MUST_RESOLVE = java.util.Set.of(
+            "role_visual_no_evidence",
+            "role_mcp_config_missing",
             "role_local_endpoint_unreachable",
             "role_local_api_key_missing",
             "role_local_http_error",
@@ -2649,7 +2728,11 @@ public final class TaskLoop {
             RoleRunner.Outcome outcome;
             if ("visual_qa".equals(role)) {
                 outcome = runVisualRole(loaded, user, roles, runId, attempt, avoid,
-                        harness.get(stage.sees()), dryRun, steps, budget);
+                        stage.acquiresEvidence() ? null : harness.get(stage.sees()), dryRun, steps,
+                        budget, stage.acquiresEvidence());
+                // The same claim as for every other role: how the stage routes, and here also
+                // who took the pictures, are terms the verdict was reached under.
+                stampRouting(stage);
             } else {
                 outcome = roles.run(loaded, user, role, stageRunId(runId, workflow, stage, attempt),
                         avoid, contextFor(stage), List.of(), dryRun, workflow.rotationPositionOf(stage));
@@ -3587,7 +3670,14 @@ public final class TaskLoop {
                 } else {
                     continue;
                 }
-                if (!Boolean.TRUE.equals(row.get("ok"))) { reusable.remove(key); continue; }
+                if (!Boolean.TRUE.equals(row.get("ok"))) {
+                    // A repair that failed before it could write — rate limited, timed out —
+                    // says nothing about the writer's last product; if it did move the tree,
+                    // the fingerprint check below declines the stage row on its own. A stage
+                    // row that failed is the stage's own verdict and still retires the key.
+                    if (row.get("fix_for") == null) reusable.remove(key);
+                    continue;
+                }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> entry = (Map<String, Object>) row;
                 reusable.put(key, entry);
@@ -3884,6 +3974,14 @@ public final class TaskLoop {
             }
             entry.put("cost_usd", step.details().get("cost_usd"));
             entry.put("attempts_cost_usd", step.details().get("attempts_cost_usd"));
+            // The pictures a self-acquiring visual role was verified to have taken, as digests.
+            if (step.details().get("image_evidence") != null) {
+                entry.put("evidence", step.details().get("evidence"));
+                entry.put("image_evidence", step.details().get("image_evidence"));
+            }
+            if (step.details().get("screenshots_refused") != null) {
+                entry.put("screenshots_refused", step.details().get("screenshots_refused"));
+            }
             if (step.details().get("independence") != null) {
                 entry.put("independence", step.details().get("independence"));
             }
@@ -3906,6 +4004,8 @@ public final class TaskLoop {
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
         }
+        if ("role_visual_no_evidence".equals(step.code())) return "visual_qa_no_evidence";
+        if ("role_mcp_config_missing".equals(step.code())) return "mcp_config_missing";
         String infrastructure = INFRASTRUCTURE_REASONS.get(step.code());
         return infrastructure != null ? infrastructure : genericReason;
     }
@@ -4010,6 +4110,19 @@ public final class TaskLoop {
                                              RoleResolver.Writers writers, VisualQaRunner.Outcome visual,
                                              boolean dryRun, List<Map<String, Object>> steps,
                                              Budget budget) throws Exception {
+        return runVisualRole(loaded, user, roles, runId, attempt, writers, visual, dryRun, steps,
+                budget, false);
+    }
+
+    /**
+     * @param acquires the stage expects the role to take its own screenshots; a verdict that
+     *                 lists none it actually wrote inside the run's evidence is refused
+     */
+    private RoleRunner.Outcome runVisualRole(ConfigLoader.Loaded loaded, UserConfig user,
+                                             RoleRunner roles, String runId, int attempt,
+                                             RoleResolver.Writers writers, VisualQaRunner.Outcome visual,
+                                             boolean dryRun, List<Map<String, Object>> steps,
+                                             Budget budget, boolean acquires) throws Exception {
         List<Path> screenshots = visual == null ? List.of() : screenshotsOf(visual);
         Path context = null;
         if (visual != null) {
@@ -4023,9 +4136,63 @@ public final class TaskLoop {
         RoleRunner.Outcome outcome = roles.run(loaded, user, "visual_qa",
                 stepRunId(runId, "visual-role", attempt), writers, context, screenshots, dryRun,
                 RoleRunner.UNSTAGED);
+        if (!dryRun && acquires && outcome.ok()) outcome = verifyAcquiredEvidence(loaded.root(), outcome);
         record(steps, budget, "visual_qa", attempt, outcome);
         if (dryRun) return null;
         return outcome;
+    }
+
+    /**
+     * The pixels a self-acquiring visual role says it looked at, checked rather than believed.
+     *
+     * Each path in {@code screenshots_taken} has to be an existing, non-empty file inside the
+     * project's own run evidence; anything else is a claim about a file Warden cannot vouch
+     * for. What survives is hashed onto the outcome as {@code image_evidence}, the same shape
+     * the harness records, so a report reads both kinds alike. A verdict that lists nothing
+     * that survives is not a verdict: the role answered from something other than pictures.
+     */
+    private RoleRunner.Outcome verifyAcquiredEvidence(Path root, RoleRunner.Outcome outcome)
+            throws Exception {
+        Map<String, Object> artifact = readArtifact(root, outcome);
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        List<String> refused = new ArrayList<>();
+        Path runs = root.resolve(".warden/runs").toAbsolutePath().normalize();
+        if (artifact != null && artifact.get("screenshots_taken") instanceof List<?> listed) {
+            for (Object item : listed) {
+                if (!(item instanceof String text) || text.isBlank()) continue;
+                Path file = Path.of(text);
+                if (!file.isAbsolute()) file = root.resolve(file);
+                file = file.toAbsolutePath().normalize();
+                if (!file.startsWith(runs) || !Files.isRegularFile(file)) {
+                    refused.add(text + " (not a file inside the run's evidence)");
+                    continue;
+                }
+                if (Files.size(file) == 0) {
+                    refused.add(text + " (empty)");
+                    continue;
+                }
+                Map<String, Object> image = new LinkedHashMap<>();
+                image.put("path", file.toString());
+                image.put("sha256", GitRepository.contentSha256(file));
+                image.put("bytes", Files.size(file));
+                evidence.add(image);
+            }
+        }
+        Map<String, Object> details = new LinkedHashMap<>(
+                outcome.details() == null ? Map.of() : outcome.details());
+        details.put("evidence", "agent");
+        details.put("image_evidence", evidence);
+        if (!refused.isEmpty()) details.put("screenshots_refused", refused);
+        if (!evidence.isEmpty()) {
+            return new RoleRunner.Outcome(true, outcome.code(), outcome.role(), outcome.profile(),
+                    outcome.vendor(), outcome.rejected(), outcome.report(), details);
+        }
+        details.put("resolution", "the visual role answered without listing a screenshot it took "
+                + "inside the run's evidence directory. A verdict on pictures nobody can find is "
+                + "not evidence; check that the profile's MCP servers can drive the application "
+                + "and that the role writes its screenshots where the prompt says.");
+        return new RoleRunner.Outcome(false, "role_visual_no_evidence", outcome.role(),
+                outcome.profile(), outcome.vendor(), outcome.rejected(), outcome.report(), details);
     }
 
     /** The screenshot files the harness actually wrote, in the order it wrote them. */

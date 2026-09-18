@@ -84,13 +84,14 @@ public final class PilotConfigTest implements Suite {
             check.eq("dry run leaves the target file unchanged", "baseline\n", Files.readString(root.resolve("src/example.txt")));
 
             // The same files with a reviewer nobody verified. The preview still finishes, since
-            // it has no candidate to protect, but it has to say the live run would stop at review
-            // and why, rather than leave the refusal inside its steps.
+            // it has no candidate to protect, but it has to say the live run would stop — before
+            // the writer is paid, now that readers are checked first — and why, rather than
+            // leave the refusal inside its steps.
             profile(home, "pilot-review", "reviewer", "reader", true, false);
             TaskLoop.Outcome refused = new TaskLoop(processes)
                     .run(loaded, UserConfig.load(home), "pilot-unresolved", true);
             check.eq("an unresolvable roster still previews", "dry_run", refused.reason());
-            check.eq("but names the stop the live run would reach", "reviewer_failed",
+            check.eq("but names the stop the live run would reach", "independent_review_unavailable",
                     refused.summaryReport().get("would_stop"));
             check.contains("and why the profile was refused",
                     String.valueOf(refused.summaryReport().get("resolution")), "profile_unverified");

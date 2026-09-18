@@ -325,6 +325,32 @@ public final class RoleRunner {
     }
 
     /**
+     * Why nobody can fill {@code role} at {@code stage}, profile by profile, or null when
+     * somebody can. The preflight reports this so an operator reads the resolver's own reason
+     * — a spent subscription, a shared vendor, an invalid peer pair — and not only the fact.
+     */
+    public Map<String, String> explainFill(UserConfig user, String stage, String role,
+                                           RoleResolver.Writers writers, long rotation) {
+        if (user.policy() == null || !user.policy().roles().containsKey(role)) {
+            return Map.of(role, "role_not_configured");
+        }
+        try {
+            String pinned = pinFor(stage, role);
+            if (pinned != null) {
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                return null;
+            }
+            new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
+                    Math.max(0, rotation), this::available, exhausted);
+            return null;
+        } catch (RoleResolver.Unresolvable nobody) {
+            return nobody.rejected();
+        } catch (RuntimeException nobody) {
+            return Map.of(role, String.valueOf(nobody.getMessage()));
+        }
+    }
+
+    /**
      * The same question for a named stage, so a stage the escalation ladder pinned is judged
      * by its pin and not by a roster it will not consult.
      */
@@ -444,7 +470,31 @@ public final class RoleRunner {
                         roleInvocationId);
             }
 
-            Profile profile = resolution.selected();
+            // The servers a role may reach are the operator's file, resolved against the
+            // config home. A missing file is a configuration fault found before anything is
+            // spent, not a vendor that failed to answer, so no failover applies.
+            Path mcpFile = resolution.selected().mcpConfig() == null ? null
+                    : user.resolve(resolution.selected().mcpConfig());
+            if (mcpFile != null && !Files.isRegularFile(mcpFile)) {
+                Profile named = resolution.selected();
+                Map<String, Object> details = new LinkedHashMap<>();
+                details.put("message", "profile '" + named.name() + "' names mcp.config "
+                        + named.mcpConfig() + ", which does not exist under the config home");
+                details.put("resolution", "write the vendor's MCP configuration there, or remove "
+                        + "mcp.config and the {{mcp_config}} argument from the profile");
+                Map<String, Object> missing = new LinkedHashMap<>();
+                missing.put("role", role);
+                missing.put("profile", named.name());
+                missing.put("vendor", named.vendor());
+                missing.put("ok", false);
+                missing.put("code", "role_mcp_config_missing");
+                missing.put("role_invocation_id", roleInvocationId);
+                ledger.append("role_mcp_config_missing", missing);
+                return new Outcome(false, "role_mcp_config_missing", role, named.name(), named.vendor(),
+                        resolution.rejected(), null, details);
+            }
+            Profile profile = mcpFile == null ? resolution.selected()
+                    : resolution.selected().withMcpConfig(mcpFile.toAbsolutePath().normalize().toString());
             // Published from this resolution, not looked up again: a second resolve would
             // advance rotation and could name a profile that was not dispatched.
             publish(profile);
@@ -474,8 +524,14 @@ public final class RoleRunner {
             String evidenceName = evidenceSerial <= 1 ? role : role + ".attempt-" + evidenceSerial;
             String reportStem = evidenceDispatch <= 1 ? role : role + ".attempt-" + evidenceDispatch;
 
+            // Where a role that takes its own screenshots puts them. Created only for such a
+            // role: the loop believes a picture only if it finds it here afterwards.
+            Path evidenceDirectory = ledger.runDirectory().resolve("screenshots");
+            if (profile.vision() != null && profile.vision().acquires()) {
+                Files.createDirectories(evidenceDirectory);
+            }
             Map<String, String> values = promptValues(loaded, task, runId, mergeBase, user, profile,
-                    contextFile, inheritsUnfinishedWork, attempts, attachments);
+                    contextFile, inheritsUnfinishedWork, attempts, attachments, evidenceDirectory);
 
             if (profile.promptTemplate() == null) {
                 throw new IllegalStateException("profile '" + profile.name()
@@ -946,7 +1002,8 @@ public final class RoleRunner {
                                              Profile profile, Path contextFile,
                                              boolean inheritsUnfinishedWork,
                                              List<Map<String, Object>> attempts,
-                                             List<Path> attachments) throws Exception {
+                                             List<Path> attachments, Path evidenceDirectory)
+            throws Exception {
         String schemaPretty = "";
         String schemaJson = "";
         if (profile.jsonSchema() != null) {
@@ -989,7 +1046,9 @@ public final class RoleRunner {
         values.put("context", context);
         values.put("context_path", contextFile == null ? "" : contextFile.toString());
         values.put("screenshots", attachmentList(attachments));
-        values.put("vision_note", visionNote(profile, attachments));
+        values.put("evidence_dir", evidenceDirectory == null ? ""
+                : evidenceDirectory.toAbsolutePath().normalize().toString());
+        values.put("vision_note", visionNote(profile, attachments, evidenceDirectory));
         return values;
     }
 
@@ -1051,8 +1110,19 @@ public final class RoleRunner {
      * silent: a `workspace_file` profile told the images are "attached" will answer about
      * filenames, and sound just as confident doing it.
      */
-    private static String visionNote(Profile profile, List<Path> attachments) {
+    private static String visionNote(Profile profile, List<Path> attachments, Path evidenceDirectory) {
         boolean any = attachments != null && !attachments.isEmpty();
+        if (!any && profile.vision() != null && profile.vision().acquires()) {
+            return "No screenshot was handed to you: this role takes its own. Drive the "
+                    + "application with your own tools (the browser, engine or desktop MCP "
+                    + "server this profile is configured with), exercise the scenarios above, "
+                    + "and save every screenshot you judge as a PNG file under `"
+                    + (evidenceDirectory == null ? "the run's screenshots directory"
+                            : evidenceDirectory.toAbsolutePath().normalize())
+                    + "`. List those files, as absolute paths, in `screenshots_taken`. Warden "
+                    + "verifies that each listed file exists there and hashes it; a verdict that "
+                    + "lists none is refused as having no evidence. Do not edit the source tree.";
+        }
         if (!any) return "No screenshot reached this run. Say so and return status: \"aborted\".";
         String delivery = profile.vision() == null ? null : profile.vision().delivery();
         if ("cli_attachment".equals(delivery)) {

@@ -75,8 +75,8 @@ public final class MeasurementProjector {
     private static final Set<String> ROLE_CONTRACT = Set.of(
             "stage", "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "read_only",
-            "prompt_template_sha256", "json_schema_sha256",
-            "on_fail", "on_findings", "recheck_after_fix", "fix_with");
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
+            "on_fail", "on_findings", "recheck_after_fix", "fix_with", "evidence");
 
     private static final Set<String> LABEL = Set.of("value", "source");
 
@@ -85,7 +85,7 @@ public final class MeasurementProjector {
     private static final Set<String> CONTEXT = Set.of(
             "schema_version", "warden_version", "adapter_version",
             "wall_clock_minutes", "timeout_minutes", "turn_limit", "grants",
-            "prompt_template_sha256", "json_schema_sha256",
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "model", "effort", "contract_hash");
 
     private static final Set<String> GRANTS = Set.of(
@@ -120,9 +120,13 @@ public final class MeasurementProjector {
             "calls_to_repair_and_finish", "calls_required_here",
             "reachable_under_cap", "repair_allowed_under_cap");
 
+    /** A screenshot the run verified: its digest and size, never its path. */
+    private static final Set<String> IMAGE = Set.of("sha256", "bytes");
+
     private static final Set<String> STEP = Set.of(
             "step", "stage", "attempt", "ok", "code", "dry_run", "role", "profile", "vendor",
-            "independence", "fix_for", "fix_round", "reused_from", "blocking_findings");
+            "independence", "fix_for", "fix_round", "reused_from", "blocking_findings",
+            "evidence", "image_evidence");
 
     private static final Set<String> COVERAGE = Set.of(
             "stage", "role", "source", "reused_from", "ok", "blocking_findings", "profile",
@@ -183,6 +187,8 @@ public final class MeasurementProjector {
             Map.entry("timeout_minutes", LABEL),
             Map.entry("prompt_template_sha256", LABEL),
             Map.entry("json_schema_sha256", LABEL),
+            Map.entry("mcp_config_sha256", LABEL),
+            Map.entry("image_evidence", IMAGE),
             Map.entry("turn_limit", TRIPLE),
             Map.entry("model", TRIPLE),
             Map.entry("effort", TRIPLE),

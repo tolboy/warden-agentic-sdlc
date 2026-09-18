@@ -405,9 +405,13 @@ public final class TaskLoopTest implements Suite {
     private void landMessageTellsTheTruth(Check check, Map<String, Object> report, String message,
                                           Map<String, Object> landReport) {
         String goal = String.valueOf(report.get("goal"));
-        int newline = goal.indexOf('\n');
-        String subject = (newline < 0 ? goal : goal.substring(0, newline)).strip();
+        // The subject is the conventional `type(task): claim` form, cut to 72 characters; the
+        // goal itself follows in the body, once, however long it is.
+        String subject = dev.warden.run.LandCommand.subjectFor("feat",
+                String.valueOf(report.get("task_id")), goal);
         check.eq("the subject appears once and not twice", 1, countExactLines(message, subject));
+        check.that("and is the conventional form, not the goal verbatim",
+                subject.startsWith("feat(") && subject.length() <= 72);
         check.eq("the pull request title is that subject",
                 subject, landReport.get("pull_request_title"));
         check.contains("the evidence directory is pointed at", message,
@@ -799,6 +803,8 @@ public final class TaskLoopTest implements Suite {
                 !Files.exists(noBrowser.resolve(".warden/runs/v3/context/fix-1-visual.md")));
 
         visualRoleChecks(check, sandbox, home);
+        acquiredEvidenceChecks(check, sandbox, home);
+        policyInvalidChecks(check, sandbox, home);
     }
 
     /**
@@ -981,6 +987,230 @@ public final class TaskLoopTest implements Suite {
         check.eq("and is named as such", "repair_made_no_progress", unresolved.reason());
         check.that("the cost of finding that out is in the summary",
                 ((Number) unresolved.summaryReport().get("total_cost_usd")).doubleValue() > 0);
+    }
+
+    /**
+     * The role with its own camera. A browser harness cannot drive a game engine or a desktop
+     * window, so a visual role may take its own screenshots through the tools its profile
+     * declares — and Warden believes exactly the files it can find inside the run's evidence
+     * afterwards, hashed, and nothing the vendor merely says it looked at.
+     */
+    @SuppressWarnings("unchecked")
+    private void acquiredEvidenceChecks(Check check, Path sandbox, Path home) throws Exception {
+        Files.createDirectories(home.resolve("mcp"));
+        Files.writeString(home.resolve("mcp/visual.json"),
+                "{\"mcpServers\":{\"browser\":{\"command\":\"stand-in\"}}}\n");
+
+        // Takes one screenshot into the run's evidence and lists it: the reading stands, and
+        // the picture is on the step row as a digest, the same shape the harness records.
+        Path taking = newProject(sandbox, "eyes-acquire", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire", "eyes-acquire", 1, "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        int[] harnessCalls = {0};
+        TaskLoop.Outcome took = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> { harnessCalls[0]++; return stubVisual(true); }).run(
+                        new ConfigLoader().load(taking, "hello"), UserConfig.load(home), "va1", false);
+        check.that("a visual role that took its own picture finishes green", took.ok());
+        check.eq("and no harness ran, because the stage said the agent takes the pictures",
+                0, harnessCalls[0]);
+        Map<String, Object> eyes = visualStep(took);
+        check.eq("the step row says where the pictures came from", "agent", eyes.get("evidence"));
+        List<Object> images = listOf(eyes.get("image_evidence"));
+        check.eq("one screenshot was verified", 1, images.size());
+        Map<String, Object> image = (Map<String, Object>) images.get(0);
+        Path shot = Path.of(String.valueOf(image.get("path")));
+        Path runs = taking.resolve(".warden/runs").toAbsolutePath().normalize();
+        check.that("it lives inside the run's evidence directory", shot.startsWith(runs));
+        check.eq("and its digest is the file's own",
+                dev.warden.git.GitRepository.contentSha256(shot), image.get("sha256"));
+        Map<String, Object> report = readJson(
+                taking.resolve(".warden/runs/va1--visual-role-0/role-visual_qa.json"));
+        check.eq("nothing was attached to it", 0L, report.get("attachment_count"));
+        String command = Json.write(report.get("command")).replace("\\\\", "/");
+        check.contains("the vendor was handed its MCP configuration", command, "--mcp-config");
+        check.contains("resolved against the config home", command, "/mcp/visual.json");
+        Map<String, Object> contract = (Map<String, Object>) eyes.get("role_contract");
+        check.eq("and the configuration's digest is a term of the reading",
+                dev.warden.git.GitRepository.sha256(home.resolve("mcp/visual.json")),
+                contract.get("mcp_config_sha256"));
+        check.eq("as is who took the pictures", "agent", contract.get("evidence"));
+        String prompt = Files.readString(
+                taking.resolve(".warden/runs/va1--visual-role-0/prompts/visual_qa.md"));
+        check.contains("the prompt told it to take its own pictures", prompt, "this role takes its own");
+        check.contains("and where to put them", prompt, "screenshots_taken");
+
+        // Answers without taking any: not a verdict. The tooling failed, not the code, so
+        // nobody is paid to fix anything and the readings before it stand.
+        Path empty = newProject(sandbox, "eyes-acquire-empty", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-empty", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-empty", "eyes-acquire-empty", 1,
+                "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome bare = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(empty, "hello"), UserConfig.load(home), "va2", false);
+        check.that("a verdict that took no picture is refused", !bare.ok());
+        check.eq("and the run says why", "visual_qa_no_evidence", bare.reason());
+        check.eq("the step row carries the refusal", "role_visual_no_evidence", visualStep(bare).get("code"));
+        check.eq("and no implementer was paid to fix a picture nobody took", 1L,
+                steps(bare).stream().filter(row -> "implementer".equals(row.get("step"))).count());
+
+        // Lists a file it wrote somewhere other than the run's evidence: refused by name.
+        Path strayed = newProject(sandbox, "eyes-acquire-outside", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-outside", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-outside", "eyes-acquire-outside", 1,
+                "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome stray = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(strayed, "hello"), UserConfig.load(home), "va3", false);
+        check.eq("a picture outside the run's evidence is no evidence", "visual_qa_no_evidence",
+                stray.reason());
+        check.eq("and the row names what was refused", 1,
+                listOf(visualStep(stray).get("screenshots_refused")).size());
+        check.that("the file itself was really written elsewhere",
+                Files.isRegularFile(sandbox.resolve("eyes-acquire-outside-elsewhere/elsewhere-1280x720.png")));
+
+        // A stage that expects the role to bring its own pictures, filled by a profile that
+        // never said it could: found before anyone is paid, not after the implementer and the
+        // reviewer have both run.
+        Path blind = newProject(sandbox, "eyes-acquire-blind", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-blind", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-blind", "eyes-acquire", 1, "mcp/visual.json", false);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome unfit = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(blind, "hello"), UserConfig.load(home), "va4", false);
+        check.eq("a profile that cannot take pictures stops the run before it starts",
+                "visual_qa_unavailable", unfit.reason());
+        check.that("and the implementer never ran",
+                !Files.exists(sandbox.resolve("eyes-acquire-blind-impl.count")));
+        Map<String, Object> gap = (Map<String, Object>) unfit.summaryReport().get("unavailable_role");
+        check.eq("naming the profile", "loop-eyes-mcp", gap.get("profile"));
+        check.contains("and what it lacks", String.valueOf(gap.get("message")), "acquires: true");
+
+        // A profile whose MCP configuration file is missing: the same preflight, the same
+        // zero calls, and a reason that says which file.
+        Path unplugged = newProject(sandbox, "eyes-acquire-unplugged", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-unplugged", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-unplugged", "eyes-acquire", 1, "mcp/missing.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome missing = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unplugged, "hello"), UserConfig.load(home), "va5", false);
+        check.eq("a missing MCP configuration stops the run before it starts", "mcp_config_missing",
+                missing.reason());
+        check.that("with nobody paid",
+                !Files.exists(sandbox.resolve("eyes-acquire-unplugged-impl.count")));
+        check.contains("and the file is named", String.valueOf(missing.summaryReport().get("resolution")),
+                "mcp/missing.json");
+        // The dry run says the same, so an operator sees it before spending anything.
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unplugged, "hello"), UserConfig.load(home), "va5-dry", true);
+        check.eq("and the preview names the stop it would make", "mcp_config_missing",
+                preview.summaryReport().get("would_stop"));
+    }
+
+    /**
+     * A policy file that does not parse used to be treated as no policy: the built-in chain
+     * ran, every role stage was skipped as not configured, and a dry run previewed `ok` over
+     * a candidate nobody would write. Measured on a multi-line flow mapping.
+     */
+    private void policyInvalidChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "policy-invalid", "medium", 20, false);
+        writeProfiles(home, sandbox, "policy-invalid", 1, 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl],
+                                 strategy: first }
+                """);
+        UserConfig broken = UserConfig.load(home);
+        check.that("the policy is present", broken.policyPresent());
+        check.that("and did not load", broken.policy() == null);
+        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), broken, "pi1", false);
+        check.eq("a run under a policy that does not parse stops before dispatching",
+                "policy_invalid", refused.reason());
+        check.that("with nobody paid", !Files.exists(sandbox.resolve("policy-invalid-impl.count")));
+        check.contains("and the summary carries the parser's own complaint",
+                String.valueOf(refused.summaryReport().get("policy_problem")), "flow mapping");
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), broken, "pi1-dry", true);
+        check.eq("and so does the dry run, rather than previewing the built-in chain",
+                "policy_invalid", preview.reason());
+        // Restore a parseable policy for whatever runs next.
+        writeProfiles(home, sandbox, "policy-invalid", 1, 1);
+    }
+
+    private Map<String, Object> visualStep(TaskLoop.Outcome outcome) {
+        return steps(outcome).stream()
+                .filter(step -> "visual_qa".equals(step.get("step")) && step.get("profile") != null)
+                .findFirst().orElseThrow();
+    }
+
+    /**
+     * @param mode     the stand-in's behaviour: takes a picture, takes none, or takes one
+     *                 outside the evidence directory
+     * @param acquires whether the profile declares that it takes its own screenshots
+     */
+    private void writeAcquiringEyes(Path home, Path sandbox, String scenario, String mode, int passesOn,
+                                    String mcpConfig, boolean acquires) throws IOException {
+        Path counter = sandbox.resolve(scenario + "-eyes.count");
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/loop-eyes-mcp.yaml"), """
+                version: 1
+                profile: loop-eyes-mcp
+                role: visual_qa
+                vendor: eyesvendor
+                command: %s
+                read_only: true
+                mcp:
+                  config: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--evidence-dir"
+                  - "{{evidence_dir}}"
+                  - "--outside"
+                  - %s
+                  - "--mcp-config"
+                  - "{{mcp_config}}"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                    acquires: %s
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/visual-qa.md
+                json_schema: schemas/visual-qa.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  verified_on: "2026-09-18"
+                """.formatted(yaml(javaExecutable()), yaml(mcpConfig), yaml(absoluteClassPath()), mode,
+                yaml(sandbox.resolve(scenario + "-elsewhere").toString()), yaml(counter.toString()),
+                passesOn, acquires));
+    }
+
+    private void policyWithAcquiringEyes(Path home) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                  visual_qa: { profiles: [loop-eyes-mcp], strategy: first, require_independent_vendor: false }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: look, run: role, role: visual_qa, when: [visual_qa_required], evidence: agent, on_fail: stop, on_findings: fix }
+                """);
     }
 
     private void writeEyesProfile(Path home, Path sandbox, String scenario, int passesOn)
@@ -2564,11 +2794,17 @@ public final class TaskLoopTest implements Suite {
         TaskLoop.Outcome a2resumed = continueFrom(a2, home, "sr-first", "sr-second");
         check.that("the resume does not resurrect the retired review",
                 !reusedStages(a2resumed).contains("review"));
-        // The repair superseded the implement stage's own tree, so that stage verdict is stale
-        // too: the tree it produced was replaced before the run ended. Nothing is carried, and
-        // the resume rebuilds honestly rather than reusing a verdict about a vanished revision.
-        check.that("nothing stale is carried across the repair",
-                reusedStages(a2resumed).isEmpty());
+        // The repair superseded the implement stage's own tree, so that stage row is stale.
+        // The repair's own row is not: the tree the fix round left is the tree being resumed,
+        // and it is the writer's last product. It is reused under the implement stage rather
+        // than paying the writer to reproduce a candidate it already wrote; the retired review
+        // is still not carried.
+        check.eq("only the writer's fix round is carried across the repair",
+                List.of("implement"), reusedStages(a2resumed));
+        Map<String, Object> carriedWriter = steps(a2resumed).stream()
+                .filter(row -> "implementer".equals(row.get("step"))).findFirst().orElseThrow();
+        check.eq("and it is the fix round, not the superseded first attempt", "browser",
+                carriedWriter.get("fix_for"));
         check.contains("and the decline says the prior run had already retired the review",
                 declinedReason(a2resumed, "review"), "retired");
         check.that("the resume reaches the human gate", a2resumed.ok());

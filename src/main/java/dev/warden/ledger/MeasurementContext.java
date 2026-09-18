@@ -42,6 +42,8 @@ public final class MeasurementContext {
                 profile.promptTemplate() == null ? "unknown" : "profile"));
         context.put("json_schema_sha256", labelled(digest(user, profile.jsonSchema()),
                 profile.jsonSchema() == null ? "unknown" : "profile"));
+        context.put("mcp_config_sha256", labelled(digest(user, profile.mcpConfig()),
+                profile.mcpConfig() == null ? "unknown" : "profile"));
         context.put("model", triple(profile.model(), "profile", null, "unknown", null, "unknown"));
         context.put("effort", triple(profile.effort(), "profile", null, "unknown", null, "unknown"));
         return context;

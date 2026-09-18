@@ -35,6 +35,7 @@ public final class UserSetup {
         write(home.resolve("profiles/codex-implement.yaml"), CODEX_IMPLEMENT, created, skipped, home);
         write(home.resolve("profiles/codex-visual-qa.yaml"), CODEX_VISUAL_QA, created, skipped, home);
         write(home.resolve("profiles/agy-plan-review.yaml"), AGY_PLAN_REVIEW, created, skipped, home);
+        write(home.resolve("profiles/claude-visual-qa-mcp.yaml"), CLAUDE_VISUAL_QA_MCP, created, skipped, home);
         write(home.resolve("prompts/reviewer.md"), REVIEWER_PROMPT, created, skipped, home);
         write(home.resolve("prompts/implementer.md"), IMPLEMENTER_PROMPT, created, skipped, home);
         write(home.resolve("prompts/visual-qa.md"), VISUAL_QA_PROMPT, created, skipped, home);
@@ -192,6 +193,14 @@ public final class UserSetup {
             #   recheck_after_fix: re-run this stage after any later stage's fix round, so a
             #                      fix cannot satisfy one check by breaking an earlier one
             #   sees:              the visual_harness stage whose screenshots a role receives
+            #   evidence:          harness | agent — who takes a visual_qa role's screenshots.
+            #                      `agent` needs no harness: the role drives the application
+            #                      through its own MCP servers (a browser, a game engine, a
+            #                      desktop window), saves what it judged into the run's
+            #                      evidence, and lists it in screenshots_taken; Warden checks
+            #                      the files exist there and hashes them. Requires a profile
+            #                      with capabilities.vision.acquires: true (see
+            #                      profiles/claude-visual-qa-mcp.yaml).
             #
             # A role stage is skipped when `roles:` above does not name that role, so the
             # visual_qa stage below costs nothing until you turn the role on.
@@ -435,6 +444,11 @@ public final class UserSetup {
 
             {{screenshots}}
 
+            If the note above says this role takes its own screenshots, there is no harness
+            report below: you are the harness. Drive the application through the tools you were
+            given, save every screenshot you judge under the directory the note names, and list
+            those files in `screenshots_taken`. Warden verifies that they exist there.
+
             ## What has already been settled without you
 
             A headless browser loaded the page at each viewport, located the elements the
@@ -510,6 +524,10 @@ public final class UserSetup {
                 "verdict": { "enum": ["pass", "fail"] },
                 "summary": { "type": "string" },
                 "images_seen": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "screenshots_taken": {
                   "type": "array",
                   "items": { "type": "string" }
                 },
@@ -849,6 +867,79 @@ public final class UserSetup {
             ```
             """;
 
+    /**
+     * A visual role that takes its own pictures. Unverified on purpose: which MCP server can
+     * drive which application (a browser for a Svelte or React page, a game-engine bridge for
+     * Unity, a desktop driver for a Tauri window) is the operator's file, and the probe has to
+     * be run against it. What Warden adds is the same for all of them: the screenshots the
+     * role lists in `screenshots_taken` must exist inside the run's evidence directory, they
+     * are hashed onto the step row, and a verdict that lists none is `visual_qa_no_evidence`.
+     */
+    private static final String CLAUDE_VISUAL_QA_MCP = """
+            version: 1
+            profile: claude-visual-qa-mcp
+            role: visual_qa
+            vendor: claude
+            model: opus
+            effort: high
+            command: claude
+            runner: direct
+            read_only: true
+
+            # The servers this role may reach, in the Claude CLI's own --mcp-config format.
+            # Warden checks the file exists at dispatch and records its digest as a term of the
+            # reading; it does not read the format. Write it at ~/.warden/mcp/visual.json: for
+            # example a browser automation server for a web page, a Unity bridge for a game, or
+            # a desktop driver for a Tauri window. Grant only its tools below.
+            mcp:
+              config: mcp/visual.json
+
+            prompt_delivery: stdin
+            args:
+              - "-p"
+              - "--output-format"
+              - "json"
+              - "--max-turns"
+              - "60"
+              - "--model"
+              - "{{model}}"
+              - "--effort"
+              - "{{effort}}"
+              - "--mcp-config"
+              - "{{mcp_config}}"
+              # Read is how it looks at the PNGs it saved; the mcp__ entry names the server
+              # declared in the file above. Replace `browser` with your server's name.
+              - "--allowedTools"
+              - "Read,Glob,mcp__browser"
+
+            capabilities:
+              vision:
+                delivery: workspace_file
+                verification: required
+                # It takes the screenshots itself and lists them in screenshots_taken.
+                acquires: true
+
+            limits:
+              wall_clock_minutes: 30
+
+            prompt_template: prompts/visual-qa.md
+            json_schema: schemas/visual-qa.json
+            artifact:
+              required_fields: [role, task_id, status, verdict, summary, findings]
+
+            verification:
+              # The probe has to prove two things against YOUR server: that the role can drive
+              # the application through it, and that a file it saves is a real picture of the
+              # screen. Point it at a page or scene you can see yourself.
+              probe: 'claude -p "Using only the MCP server named in your configuration, open the application, take one screenshot, save it as probe.png in the current directory with your tools, then open probe.png with your Read tool and reply with the two most prominent words visible in it." --mcp-config mcp/visual.json --allowedTools Read,mcp__browser --output-format json --model opus'
+              what_to_check:
+                - "probe.png exists afterwards and is a picture of the application, not a blank"
+                - "the two words are on that screen; a model that answered without opening the file has no evidence"
+                - "the MCP server named in mcp/visual.json actually started; a refused or missing tool is a failed probe"
+                - "whether a cost figure is reported, and under which key"
+              note: "Unverified template. Set verified_on only after the probe passed against the server you configured; the pixels it takes are only as trustworthy as that server."
+            """;
+
     private static final String PLAN_REVIEWER_PROMPT = """
             # Plan reviewer — read-only, the contract is what you judge
 
@@ -975,6 +1066,15 @@ public final class UserSetup {
               - "{{repo_root}}"
               - "--print-timeout"
               - "20m"
+              # Headless agy cannot prompt for the read_file permission and auto-denies it: the
+              # envelope then says SUCCESS with an empty response and denied_actions. This flag
+              # is what Orca launches the same CLI with. Measured 2026-09-18: with it, --mode
+              # plan and --sandbox do NOT stop the CLI from writing inside --add-dir, so the
+              # read-only guarantee for this role is Warden's fingerprint around the call
+              # (role_violated_read_only discards the artifact), not the CLI. Tighter: an
+              # allow-rule for read_file under permissions.allow in agy's settings.json, and
+              # then drop this flag.
+              - "--dangerously-skip-permissions"
 
             limits:
               wall_clock_minutes: 20
@@ -994,13 +1094,20 @@ public final class UserSetup {
               # contents, in the JSON envelope Warden parses. The probe passes its prompt
               # inline; the profile passes a file pointer, which is the channel that has been
               # measured live for the visual role on the same CLI.
-              probe: 'agy -p "Use only your view_file tool to read the file policy.yaml in the current working directory and reply with nothing but the exact value of failover.on_quota_exhausted." --output-format json --mode plan --sandbox --print-timeout 3m --model gemini-3.8-flash-high'
+              #
+              # Without --add-dir the CLI answered about a policy.yaml that was not the one in
+              # the working directory and reported a write that never happened (2026-09-18):
+              # the directory has to be added, and the answer has to be checked. `expect` is
+              # that check — the stamp needs the shipped schema's title in the output, not
+              # only exit code 0.
+              probe: 'agy -p "Use only your view_file tool to read the file schemas/plan-reviewer.json in the current working directory and reply with nothing but the exact value of its top-level title field." --output-format json --mode plan --sandbox --add-dir . --print-timeout 3m --model gemini-3.8-flash-high --dangerously-skip-permissions'
+              expect: "Plan reviewer artifact"
               what_to_check:
                 - "the answer is the value that is in the file, so view_file reached a real file"
                 - "response is non-empty; an empty response with denied_actions means a tool was refused"
                 - "status can read ERROR beside a correct response after a 503 retry; judge the response"
                 - "the envelope reports usage but no cost and no model: calls are unpriced and the model is a claim"
-              note: "Set verified_on only after the probe answered from the file. The visual role of this CLI was measured 2026-09-15; the planning reading is not yet a live claim."
+              note: "The stamp needs the probe to answer from the file (expect). The visual role of this CLI was measured 2026-09-15; the planning reading is not yet a live claim."
             """;
 
     private static final String PLANNER_SCHEMA = """

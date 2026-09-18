@@ -40,7 +40,7 @@ public final class RoleContract {
     private static final List<String> COMPARED = List.of(
             "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "read_only",
-            "prompt_template_sha256", "json_schema_sha256",
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             // The stage's own routing. A stage name is stable across a workflow edit, so
             // `review` can keep its identity while changing what a finding from it does —
             // and a verdict reached under `on_findings: fix` is not evidence for a stage that
@@ -54,6 +54,8 @@ public final class RoleContract {
         routing.put("on_findings", stage.onFindings());
         routing.put("recheck_after_fix", stage.recheckAfterFix());
         routing.put("fix_with", stage.fixWith());
+        // Who took the pictures is part of what a visual verdict is about.
+        if (stage.acquiresEvidence() || stage.sees() != null) routing.put("evidence", stage.evidence());
         return routing;
     }
 
@@ -82,6 +84,9 @@ public final class RoleContract {
         contract.put("read_only", profile.readOnly());
         contract.put("prompt_template_sha256", digestOf(user, profile.promptTemplate()));
         contract.put("json_schema_sha256", digestOf(user, profile.jsonSchema()));
+        // The tools a reader may reach are a term of its reading: a reviewer that could drive
+        // a browser yesterday and cannot today is a different reviewer.
+        contract.put("mcp_config_sha256", digestOf(user, profile.mcpConfig()));
         return contract;
     }
 

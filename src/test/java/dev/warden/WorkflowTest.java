@@ -164,6 +164,42 @@ public final class WorkflowTest implements Suite {
                 bound.workflow().stages().get(1).failureReason());
         check.eq("and its own findings reason", "visual_findings_remain",
                 bound.workflow().stages().get(1).findingsReason());
+        check.eq("and says its pictures come from the harness", "harness",
+                bound.workflow().stages().get(1).toMap().get("evidence"));
+
+        // A role that takes its own pictures needs no harness: a browser cannot drive a game
+        // engine or a desktop window, and the tools that can are the role's own. The stage
+        // says so, and cannot also claim to see a harness it does not have.
+        Policy acquiring = Policy.parse(ROLES + """
+                workflow:
+                  stages:
+                    - { stage: look, run: role, role: visual_qa, evidence: agent, on_fail: stop, on_findings: fix }
+                """, "policy.yaml");
+        Workflow.Stage camera = acquiring.workflow().stages().get(0);
+        check.that("a visual_qa role with evidence: agent needs no harness", camera.acquiresEvidence());
+        check.eq("and sees none", null, camera.sees());
+        check.eq("and says so when written out", "agent", camera.toMap().get("evidence"));
+        check.that("a stage fed by the harness does not take its own",
+                !bound.workflow().stages().get(1).acquiresEvidence());
+        check.rejects("it cannot also see a harness", "cannot also see a harness",
+                () -> Policy.parse(ROLES + """
+                        workflow:
+                          stages:
+                            - { stage: shots, run: visual_harness, on_fail: fix }
+                            - { stage: look, run: role, role: visual_qa, evidence: agent, sees: shots, on_fail: stop }
+                        """, "policy.yaml"));
+        check.rejects("evidence names one of the two sources", "evidence must be one of",
+                () -> Policy.parse(ROLES + """
+                        workflow:
+                          stages:
+                            - { stage: look, run: role, role: visual_qa, evidence: telepathy, on_fail: stop }
+                        """, "policy.yaml"));
+        check.rejects("and only a visual_qa stage has one", "does not run the visual_qa role",
+                () -> Policy.parse(ROLES + """
+                        workflow:
+                          stages:
+                            - { stage: review, run: role, role: reviewer, evidence: agent, on_fail: stop }
+                        """, "policy.yaml"));
 
         // Two stages, one role: the shape `rotate` exists for, and the shape that used to be
         // at the mercy of a counter shared by every run in the project. A run that died before

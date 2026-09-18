@@ -43,20 +43,60 @@ public record Profile(
         String apiKeyEnv,
         String verificationProbe,
         List<String> verificationChecks,
-        boolean verified) {
+        boolean verified,
+        String mcpConfig,
+        String verificationExpect) {
+
+    /** A profile with an MCP configuration and no expected probe answer. */
+    public Profile(String name, String role, String vendor, String model, String effort,
+                   String command, List<String> args, boolean readOnly, long wallClockMinutes,
+                   Double maxCostUsd, String promptTemplate, String jsonSchema, boolean enforceSchema,
+                   List<String> requiredArtifactFields, List<String> quotaSignatures,
+                   String promptDelivery, String attachmentFlag, VisionCapability vision,
+                   String runner, String endpoint, String apiKeyEnv, String verificationProbe,
+                   List<String> verificationChecks, boolean verified, String mcpConfig) {
+        this(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, mcpConfig, null);
+    }
+
+    /** Every earlier caller: a profile with no MCP configuration. */
+    public Profile(String name, String role, String vendor, String model, String effort,
+                   String command, List<String> args, boolean readOnly, long wallClockMinutes,
+                   Double maxCostUsd, String promptTemplate, String jsonSchema, boolean enforceSchema,
+                   List<String> requiredArtifactFields, List<String> quotaSignatures,
+                   String promptDelivery, String attachmentFlag, VisionCapability vision,
+                   String runner, String endpoint, String apiKeyEnv, String verificationProbe,
+                   List<String> verificationChecks, boolean verified) {
+        this(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, null);
+    }
+
+    /** The same profile with its MCP configuration resolved to an absolute path for one dispatch. */
+    public Profile withMcpConfig(String resolved) {
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, resolved, verificationExpect);
+    }
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
-            "verification", "notes");
+            "verification", "notes", "mcp");
+    private static final Set<String> MCP = Set.of("config", "note");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
     private static final Set<String> QUOTA = Set.of("signatures");
     private static final Set<String> ATTACHMENTS = Set.of("flag");
     private static final Set<String> CAPABILITIES = Set.of("vision");
-    private static final Set<String> VISION = Set.of("delivery", "verification");
-    private static final Set<String> VERIFICATION = Set.of("verified_on", "status", "probe", "what_to_check", "note");
+    private static final Set<String> VISION = Set.of("delivery", "verification", "acquires");
+    private static final Set<String> VERIFICATION = Set.of(
+            "verified_on", "status", "probe", "what_to_check", "note", "expect");
 
     public static final Set<String> ROLES = Set.of(
             "implementer", "reviewer", "architect", "visual_qa", "planner", "plan_reviewer");
@@ -83,8 +123,21 @@ public record Profile(
     public static final Set<String> VISION_DELIVERIES = Set.of("cli_attachment", "workspace_file");
     public static final Set<String> CAPABILITY_VERIFICATION = Set.of("required");
 
-    /** A declared and human-probed way for the model to inspect pixels, not just filenames. */
-    public record VisionCapability(String delivery, boolean verificationRequired) {}
+    /**
+     * A declared and human-probed way for the model to inspect pixels, not just filenames.
+     *
+     * @param acquires the role takes its own screenshots with its own tools — a browser or
+     *                 game-engine MCP server, a desktop driver — and lists the files it wrote
+     *                 in {@code screenshots_taken}. Warden then verifies that each listed file
+     *                 exists inside the run's evidence directory and hashes it; it does not
+     *                 verify what the file is a picture of. A workflow stage that declares
+     *                 {@code evidence: agent} refuses a profile without this.
+     */
+    public record VisionCapability(String delivery, boolean verificationRequired, boolean acquires) {
+        public VisionCapability(String delivery, boolean verificationRequired) {
+            this(delivery, verificationRequired, false);
+        }
+    }
 
     /**
      * A profile-level verification stamp proves vision only when the profile declared that its
@@ -99,7 +152,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect);
     }
 
     public boolean hasVerifiedVision() {
@@ -147,6 +200,22 @@ public record Profile(
         if ("orca".equals(runner) && !args.isEmpty()) {
             root.collector().add("runner: orca cannot forward args (including tool grants, sandbox and turn limits); "
                     + "keep runner: direct for those constraints instead of dropping them");
+        }
+        // The MCP servers a role may reach — a browser, a game engine, a desktop driver — are
+        // declared by the operator in the vendor's own configuration file and handed to the
+        // vendor's own flag through {{mcp_config}}. Warden does not read the file's format; it
+        // checks the file exists at dispatch and records its digest as a term of the reading,
+        // because a reviewer with different tools is a different reviewer.
+        Values mcp = root.optMap("mcp").rejectUnknownKeys(MCP);
+        String mcpConfig = mcp.optString("config", null);
+        if (mcpConfig != null && mcpConfig.isBlank()) mcpConfig = null;
+        boolean usesMcp = args.stream().anyMatch(a -> a.contains("{{mcp_config}}"));
+        if (usesMcp && mcpConfig == null) {
+            root.collector().add("{{mcp_config}} in args requires mcp.config naming the configuration file");
+        }
+        if (mcpConfig != null && !usesMcp && "direct".equals(runner)) {
+            root.collector().add("mcp.config is declared but no args entry passes {{mcp_config}} to the "
+                    + "vendor, so the servers would never be reached");
         }
 
         // Default true: a role is read-only unless it explicitly says otherwise, so a typo
@@ -208,6 +277,7 @@ public record Profile(
             String delivery = configuredVision.requireEnum("delivery", VISION_DELIVERIES, null);
             String verificationRequirement = configuredVision.requireEnum(
                     "verification", CAPABILITY_VERIFICATION, null);
+            boolean acquires = configuredVision.optBool("acquires", false);
             if (delivery == null) {
                 root.collector().add("capabilities.vision.delivery is required and must be one of "
                         + VISION_DELIVERIES);
@@ -216,7 +286,7 @@ public record Profile(
                 root.collector().add("capabilities.vision.verification is required and must be 'required'");
             }
             if (delivery != null && verificationRequirement != null) {
-                vision = new VisionCapability(delivery, true);
+                vision = new VisionCapability(delivery, true, acquires);
             }
         } else if (attachmentFlag != null && "direct".equals(runner)) {
             // Compatibility for pre-capability profiles: an already verified direct `-i`
@@ -255,12 +325,20 @@ public record Profile(
         // rather than making the operator retype it from a comment.
         String probe = verification.optString("probe", null);
         List<String> whatToCheck = verification.optStringList("what_to_check", List.of());
+        // A substring the probe's stdout has to contain before the date is stamped. Without
+        // it the stamp is exit code alone — and a headless CLI whose tool call was refused
+        // exited 0 with an empty answer and was stamped verified. Measured 2026-09-18.
+        String expect = verification.optString("expect", null);
+        if (expect != null && expect.isBlank()) {
+            root.collector().add("verification.expect must be a non-empty string when present");
+            expect = null;
+        }
 
         root.throwIfAny();
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClock,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                probe, whatToCheck, verified);
+                probe, whatToCheck, verified, mcpConfig, expect);
     }
 
     /**

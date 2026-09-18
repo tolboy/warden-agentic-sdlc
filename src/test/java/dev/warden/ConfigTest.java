@@ -318,6 +318,63 @@ public final class ConfigTest implements Suite {
                 """, "codex-eyes.yaml");
         check.eq("direct vision delivery is explicit", "cli_attachment", visual.vision().delivery());
         check.that("verified visual probe makes vision eligible", visual.hasVerifiedVision());
+        check.that("a profile that says nothing about it takes no screenshots of its own",
+                !visual.vision().acquires());
+        check.eq("and names no MCP configuration", null, visual.mcpConfig());
+
+        // The tools a role may reach are the operator's file in the vendor's own format; the
+        // profile names it, hands it to the vendor's flag, and may say the role takes its own
+        // screenshots through what is in it.
+        Profile camera = Profile.parse("""
+                version: 1
+                profile: claude-eyes-mcp
+                role: visual_qa
+                vendor: claude
+                command: claude
+                runner: direct
+                args: ["-p", "--mcp-config", "{{mcp_config}}"]
+                mcp:
+                  config: mcp/visual.json
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                    acquires: true
+                verification:
+                  verified_on: 2026-09-18
+                """, "claude-eyes-mcp.yaml");
+        check.eq("a profile names the MCP configuration its vendor is handed",
+                "mcp/visual.json", camera.mcpConfig());
+        check.that("and may declare that it takes its own screenshots", camera.vision().acquires());
+        check.rejects("the placeholder without the file is refused", "requires mcp.config",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        args: ["--mcp-config", "{{mcp_config}}"]
+                        """, "p.yaml"));
+        check.rejects("and the file without the placeholder, because the servers would never be reached",
+                "no args entry passes {{mcp_config}}",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        mcp: { config: mcp/visual.json }
+                        """, "p.yaml"));
+        check.rejects("a typo under mcp is refused, not ignored", "unsupported key",
+                () -> Profile.parse("""
+                        version: 1
+                        profile: p
+                        role: reviewer
+                        vendor: v
+                        command: c
+                        args: ["--mcp-config", "{{mcp_config}}"]
+                        mcp: { configuration: mcp/visual.json }
+                        """, "p.yaml"));
 
         Profile legacyVisual = Profile.parse("""
                 version: 1

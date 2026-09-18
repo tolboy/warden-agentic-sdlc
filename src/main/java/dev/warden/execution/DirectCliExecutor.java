@@ -87,6 +87,10 @@ public final class DirectCliExecutor implements RoleExecutor {
         // (`args: ["--model", "{{model}}"]`); what is provided here is the value.
         argumentValues.put("model", profile.model() == null ? "" : profile.model());
         argumentValues.put("effort", profile.effort() == null ? "" : profile.effort());
+        // Already resolved to an absolute path by the role runner, which also checked it exists.
+        argumentValues.put("mcp_config", profile.mcpConfig() == null ? "" : profile.mcpConfig());
+        argumentValues.put("evidence_dir", runDirectory.resolve("screenshots")
+                .toAbsolutePath().normalize().toString());
 
         List<String> command = new ArrayList<>();
         command.add(resolveExecutable(profile.command(), request.projectRoot()));

@@ -588,6 +588,42 @@ public final class StubVendor {
                         + "\"findings\":" + findings + "},"
                         + "\"total_cost_usd\":0.003}");
             }
+            case "eyes-acquire", "eyes-acquire-empty", "eyes-acquire-outside" -> {
+                // A visual reviewer with its own camera. It is handed no images; it is told
+                // where to put the ones it takes, and Warden believes only the files it can
+                // find there afterwards. The -empty variant answers without taking any, and the
+                // -outside variant lists a file it wrote somewhere other than the evidence
+                // directory: both are the claims the verification exists to refuse.
+                List<String> taken = new ArrayList<>();
+                String evidenceDir = flag(args, "--evidence-dir");
+                String outside = flag(args, "--outside");
+                Path shot = null;
+                if (mode.equals("eyes-acquire") && evidenceDir != null) {
+                    shot = Path.of(evidenceDir).resolve("home-1280x720.png");
+                } else if (mode.equals("eyes-acquire-outside") && outside != null) {
+                    shot = Path.of(outside).resolve("elsewhere-1280x720.png");
+                }
+                if (shot != null) {
+                    Files.createDirectories(shot.getParent());
+                    Files.write(shot, new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13});
+                    taken.add(shot.toAbsolutePath().toString().replace("\\", "/"));
+                }
+                boolean passes = succeedsNow(args);
+                String findings = passes ? "[]"
+                        : "[{\"severity\":\"P1\",\"path\":\"src/result.txt\","
+                        + "\"viewport\":\"1280x720\",\"message\":\"the label is clipped\","
+                        + "\"expected\":\"the whole word is readable\","
+                        + "\"actual\":\"it is cut off at the panel edge\","
+                        + "\"scenario\":\"open the home screen at 1280x720\","
+                        + "\"confidence\":\"confirmed\"}]";
+                String listed = taken.isEmpty() ? "" : "\"" + String.join("\",\"", taken) + "\"";
+                System.out.println("{\"structuredOutput\":{\"role\":\"visual_qa\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"" + (passes ? "pass" : "fail") + "\","
+                        + "\"summary\":\"drove the application myself and took " + taken.size()
+                        + " screenshot(s)\",\"screenshots_taken\":[" + listed + "],"
+                        + "\"findings\":" + findings + "},"
+                        + "\"total_cost_usd\":0.004}");
+            }
             case "plan", "plan-shell", "plan-scope", "plan-goal", "plan-access", "plan-sneaky",
                     "plan-commit", "plan-stage", "plan-schema" -> {
                 String prompt = "";
