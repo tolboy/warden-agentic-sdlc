@@ -288,6 +288,29 @@ public final class RoleRunner {
     }
 
     /**
+     * The profile a dispatch of {@code role} at {@code stage} would get, without dispatching
+     * and without advancing anything, or null when nobody could fill it.
+     *
+     * A preflight asks this for the writer so it can ask {@link #canFill} about every reader
+     * against that writer's vendor before the writer is paid. Rotation state is read, not
+     * written: a single-stage role's counter is consulted the way a dry run consults it.
+     */
+    public Profile peek(Path root, UserConfig user, String stage, String role,
+                        RoleResolver.Writers writers, int stagePosition) {
+        if (user.policy() == null || !user.policy().roles().containsKey(role)) return null;
+        try {
+            RoleResolver.Writers known = writers == null ? RoleResolver.Writers.NONE : writers;
+            String pinned = pinFor(stage, role);
+            if (pinned != null) return resolvePinned(pinned, role, user, known).selected();
+            long rotation = stagePosition >= 0 ? stagePosition : nextRotation(root, role, true);
+            return new RoleResolver().resolve(role, user.policy(), user.profiles(), known,
+                    rotation, this::available, exhausted).selected();
+        } catch (Exception nobody) {
+            return null;
+        }
+    }
+
+    /**
      * The same question for a named stage, so a stage the escalation ladder pinned is judged
      * by its pin and not by a roster it will not consult.
      */

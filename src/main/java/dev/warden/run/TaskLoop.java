@@ -591,6 +591,19 @@ public final class TaskLoop {
         if (carried.carriesRejection()) {
             summary.put("carries_human_rejection", true);
         }
+        // Every reader the chain will need, asked about before the writer it will need to
+        // differ from is paid. A two-vendor roster with one hat on each head used to find
+        // out at the review stage, after the implementer had already written; the arithmetic
+        // was available before anything was spent, and a person is entitled to it then.
+        Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        if (readerGap != null) {
+            summary.put("unavailable_role", readerGap);
+            summary.put("resolution", String.valueOf(readerGap.get("message")));
+            progress.line("      " + readerGap.get("message"));
+            progress.line("      stopping before the first dispatch rather than after it");
+            if (!dryRun) return stop(ledger, summary, "independent_review_unavailable", steps, 0, budget);
+            summary.putIfAbsent("would_stop", "independent_review_unavailable");
+        }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         summary.put("candidate_fingerprint", candidateFingerprint);
         Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
@@ -938,6 +951,58 @@ public final class TaskLoop {
         chain.put("blocking_reviews_seen", seen);
         chain.put("escalation_rung", rung);
         summary.put("chain", chain);
+    }
+
+    /**
+     * The first judging stage no reader could fill against the writer the chain would
+     * dispatch, or null when every one can be. Asked once, before the first paid call.
+     *
+     * The writer is the profile the roster would actually choose, so a `first` strategy is
+     * answered exactly and a rotating one is answered for the profile whose turn it is. A
+     * chain with no writing stage has nothing to differ from here; its provenance question is
+     * answered by the writer set instead.
+     */
+    private static Map<String, Object> readerGap(Path root, Workflow workflow, UserConfig user,
+                                                 TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                                 RoleRunner roles) {
+        Workflow.Stage writerStage = null;
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() == Workflow.Kind.ROLE && "implementer".equals(stage.role())
+                    && skipReason(stage, user, task, reviewByRisk) == null) {
+                writerStage = stage;
+                break;
+            }
+        }
+        if (writerStage == null) return null;
+        dev.warden.config.Profile writer = roles.peek(root, user, writerStage.name(), "implementer",
+                RoleResolver.Writers.NONE, workflow.rotationPositionOf(writerStage));
+        // A writer nobody can fill is reported by the dispatch itself, with the roster's
+        // own reasons; this check is about the readers.
+        if (writer == null) return null;
+        RoleResolver.Writers wouldWrite = new RoleResolver.Writers(java.util.Set.of(writer.vendor()),
+                java.util.Set.of(writer.name()), true,
+                "same_vendor_peer".equals(task.reviewAssurance()));
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            if (roles.canFill(user, stage.name(), stage.role(), wouldWrite,
+                    workflow.rotationPositionOf(stage))) continue;
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("role", stage.role());
+            gap.put("needed_for", stage.name());
+            gap.put("blocked_at", "preflight");
+            gap.put("must_differ_from_vendor", writer.vendor());
+            gap.put("writer_profile", writer.name());
+            gap.put("exhausted_profiles", List.copyOf(roles.exhaustedProfiles()));
+            gap.put("message", "no profile can fill role '" + stage.role() + "' for stage '"
+                    + stage.name() + "' once " + writer.name() + " (" + writer.vendor()
+                    + ") has written the candidate. Add a profile from another vendor, "
+                    + "or declare a same_vendor_peer pair in policy.yaml and set "
+                    + "review_assurance: same_vendor_peer on the task if that weaker check is "
+                    + "acceptable; nothing was dispatched.");
+            return gap;
+        }
+        return null;
     }
 
     /**
@@ -2467,7 +2532,10 @@ public final class TaskLoop {
                 // fingerprint had just been checked to justify. Reproduced on run `ru2`.
                 carryCoverage(stage, standing);
                 progress.line("      reused from " + carried.fromRunId() + ": "
-                        + standing.get("profile") + " already passed this exact tree");
+                        + standing.get("profile") + (standing.get("fix_for") != null
+                            ? " already produced this exact tree in a fix round for "
+                                + standing.get("fix_for")
+                            : " already passed this exact tree"));
                 return null;
             }
             // Independence is measured against everyone who wrote the code, not the last
@@ -3354,6 +3422,17 @@ public final class TaskLoop {
                 String key;
                 if (row.get("stage") != null) {
                     key = String.valueOf(row.get("stage"));
+                } else if (row.get("fix_for") != null && writerStageNamed(workflow, role) != null) {
+                    // A fix round is the writer's latest product, not an intermediate step of
+                    // someone else's stage. When the repair is the last thing the writer did,
+                    // the tree it left is the tree being resumed, and paying the writer again
+                    // to reproduce it bought nothing: measured, a continuation re-paid thirty
+                    // minutes of implementer to redo a candidate it had already written. The
+                    // row is admitted under the writer stage's name, and the fingerprint check
+                    // below still decides whether it describes this tree. A judging stage's
+                    // fix row never reaches here: those rows carry no `fix_for` of their own
+                    // role, and a reader's verdict is never derived from a repair.
+                    key = writerStageNamed(workflow, role);
                 } else if (!stageKeyed && workflow.stagesFor(role).size() == 1) {
                     key = role;
                 } else {
@@ -3460,6 +3539,16 @@ public final class TaskLoop {
      * contract has to match: a stage that kept its name but changed its role is a different
      * job, and returning only routing hid exactly that change.
      */
+    /**
+     * The stage a writing role owns, by name, or null when the chain dispatches that role
+     * only in repairs. A fix row is admitted for reuse only under a stage that exists now.
+     */
+    private static String writerStageNamed(Workflow workflow, String role) {
+        if (!"implementer".equals(role)) return null;
+        List<Workflow.Stage> owned = workflow.stagesFor(role);
+        return owned.size() == 1 ? owned.get(0).name() : null;
+    }
+
     private static Workflow.Stage currentStageFor(Workflow workflow, String key, String role) {
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.name().equals(key)) return stage;

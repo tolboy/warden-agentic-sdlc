@@ -260,6 +260,7 @@ public final class TaskLoopTest implements Suite {
             reusedJudgementChecks(check, sandbox, home);
             infrastructureResumeChecks(check, sandbox, home);
             chainBudgetChecks(check, sandbox, home);
+            provenanceChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -1806,10 +1807,12 @@ public final class TaskLoopTest implements Suite {
                 .withProgress(printed::add)
                 .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu1", false);
 
-        check.that("a repair no later stage could judge is refused", !refused.ok());
+        check.that("a chain no reader could ever judge is refused", !refused.ok());
         check.eq("and the stop is about the roster, not about the reviewer",
                 "independent_review_unavailable", refused.reason());
-        check.eq("nothing was spent on the repair", 1L, refused.summaryReport().get("role_runs"));
+        // Before this preflight the writer was paid first and the gap found at the review
+        // stage; the roster was the same fact before the first call as after it.
+        check.eq("nothing at all was spent", 0L, refused.summaryReport().get("role_runs"));
         check.eq("and no fix round was counted", 0L, refused.summaryReport().get("attempts_used"));
         Map<String, Object> gap =
                 (Map<String, Object>) refused.summaryReport().get("unavailable_role");
@@ -1820,8 +1823,218 @@ public final class TaskLoopTest implements Suite {
         check.contains("the operator is told to widen the roster, not to read a transcript",
                 String.valueOf(refused.summaryReport().get("resolution")),
                 "Add a profile from another vendor");
-        check.contains("and the terminal says it stopped before the repair",
-                String.join("\n", printed), "stopping before the repair rather than after it");
+        check.contains("and the terminal says it stopped before the first dispatch",
+                String.join("\n", printed), "stopping before the first dispatch");
+        TaskLoop.Outcome previewed = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu2", true);
+        check.eq("a dry run names the same stop", "independent_review_unavailable",
+                previewed.summaryReport().get("would_stop"));
+    }
+
+    /**
+     * Who wrote the candidate decides who may read it, and the label the reading gets.
+     *
+     * Four legs. The writer set is recorded on an ordinary run and every reading is
+     * independent. A same-vendor reader is refused before the writer is paid unless the
+     * policy declares the pair and the task admits it, and then it is labelled a peer, never
+     * independent. The escalation ladder climbs after the declared number of objecting
+     * readings, pins the next rung's pair, and its reader is labelled a co-author. And a
+     * writer's last fix round is its product: a continuation reuses it rather than paying
+     * the writer to reproduce a tree it already left.
+     */
+    @SuppressWarnings("unchecked")
+    private void provenanceChecks(Check check, Path sandbox, Path home) throws Exception {
+        String implFields = "role, task_id, status, summary, files_changed";
+        String reviewFields = "role, task_id, status, verdict, summary, findings";
+
+        // Leg 1: recorded, independent.
+        Path plain = newProject(sandbox, "prov-plain");
+        writeProfiles(home, sandbox, "prov-plain", 1, 1);
+        TaskLoop.Outcome ok = loop(plain, home, "pv1");
+        check.that("an ordinary run reaches the gate", ok.ok());
+        check.eq("the writer set names the implementer's vendor", List.of("implvendor"),
+                ok.summaryReport().get("writer_vendors"));
+        check.eq("and its profile", List.of("loop-impl"), ok.summaryReport().get("writer_profiles"));
+        check.eq("provenance is recorded, because the tree was clean at the start", "recorded",
+                ok.summaryReport().get("writer_provenance"));
+        check.eq("the reading is independent", "independent",
+                ok.summaryReport().get("review_assurance"));
+        List<Map<String, Object>> coverage =
+                (List<Map<String, Object>>) ok.summaryReport().get("review_coverage");
+        check.eq("and the coverage row says so", "independent", coverage.get(0).get("assurance"));
+
+        // Leg 2: one vendor, two hats, a declared pair.
+        Path peer = newProject(sandbox, "prov-peer");
+        writeModelledProfile(home, "peer-impl", "implementer", "onevendor", "model-a", false,
+                "implementer", implFields, "impl", sandbox.resolve("prov-peer-impl.count"), 1);
+        writeModelledProfile(home, "peer-review", "reviewer", "onevendor", "model-b", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-peer-review.count"), 1);
+        peerPolicy(home, "peer-review", "peer-impl");
+        TaskLoop.Outcome refused = loop(peer, home, "pv2");
+        check.eq("a task that did not admit the pair is refused before anyone is paid",
+                "independent_review_unavailable", refused.reason());
+        check.eq("with nothing spent", 0L, refused.summaryReport().get("role_runs"));
+        editTask(peer, "max_fix_attempts: 2", "max_fix_attempts: 2\nreview_assurance: same_vendor_peer");
+        TaskLoop.Outcome peered = loop(peer, home, "pv3");
+        check.that("a task that admits the pair runs", peered.ok());
+        check.eq("and the reading is labelled a same-vendor peer", "same_vendor_peer",
+                peered.summaryReport().get("review_assurance"));
+        check.contains("which the human gate says out loud",
+                new dev.warden.approval.ApprovalStore(peer).read("pv3").reason(),
+                "not an independent review");
+        writeModelledProfile(home, "peer-review", "reviewer", "onevendor", "model-a", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-peer-review.count"), 1);
+        TaskLoop.Outcome sameModel = loop(peer, home, "pv4");
+        check.eq("the same model at another name is not a peer", "independent_review_unavailable",
+                sameModel.reason());
+        check.contains("and the refusal says why", Json.write(sameModel.summaryReport().get("unavailable_role")),
+                "peer_pair_invalid");
+
+        // Leg 3: the ladder.
+        Path ladder = newProject(sandbox, "prov-ladder");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-ladder-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-ladder-review.count"), 3);
+        writeProfile(home, "rung-impl", "implementer", "rungvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-ladder-rung-impl.count"), 1);
+        writeProfile(home, "rung-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-ladder-rung-review.count"), 1);
+        ladderPolicy(home, 2);
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome climbed = new TaskLoop(new ProcessRunner()).withProgress(printed::add)
+                .run(new ConfigLoader().load(ladder, "hello"), UserConfig.load(home), "pv5", false);
+        check.that("the ladder ends green", climbed.ok());
+        Map<String, Object> state = (Map<String, Object>) climbed.summaryReport().get("escalation");
+        check.eq("one rung was climbed", 1L, state.get("rung"));
+        check.eq("after two objecting readings", 2L, state.get("blocking_reviews_seen"));
+        check.eq("the rung's writer took the repair", "rung-impl", state.get("implementer"));
+        check.eq("and its reader re-read the objecting stage", "review", state.get("at_stage"));
+        List<Map<String, Object>> rows = steps(climbed);
+        Map<String, Object> lastFix = rows.stream()
+                .filter(row -> "implementer".equals(row.get("step")) && row.get("fix_for") != null)
+                .reduce((a, b) -> b).orElseThrow();
+        check.eq("the second repair was written by the rung", "rung-impl", lastFix.get("profile"));
+        Map<String, Object> lastRead = rows.stream()
+                .filter(row -> "review".equals(row.get("stage"))).reduce((a, b) -> b).orElseThrow();
+        check.eq("and read by the rung's reader", "rung-review", lastRead.get("profile"));
+        check.eq("both writers are in the writer set", List.of("implvendor", "rungvendor"),
+                climbed.summaryReport().get("writer_vendors"));
+        check.eq("a reader that wrote earlier is a co-author, not independent", "peer_review",
+                climbed.summaryReport().get("review_assurance"));
+        check.eq("the chain carries the rung", 1L,
+                ((Map<String, Object>) climbed.summaryReport().get("chain")).get("escalation_rung"));
+        check.contains("and the terminal said who climbed", String.join("\n", printed),
+                "escalation rung 1 of 1");
+
+        Path exhausted = newProject(sandbox, "prov-exhausted");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-exhausted-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-exhausted-review.count"), 3);
+        writeProfile(home, "rung-impl", "implementer", "rungvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-exhausted-rung-impl.count"), 1);
+        writeProfile(home, "rung-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-exhausted-rung-review.count"), 99);
+        ladderPolicy(home, 2);
+        TaskLoop.Outcome spent = loop(exhausted, home, "pv6");
+        check.eq("a last rung that still objects exhausts the ladder", "quality_exhausted",
+                spent.reason());
+        check.eq("with the rung recorded", 1L,
+                ((Map<String, Object>) spent.summaryReport().get("escalation")).get("rung"));
+
+        // Leg 4: a fix round is the writer's product, and a continuation reuses it.
+        Path reuse = newProject(sandbox, "prov-reuse");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-reuse-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "sequence:p1,rate,pass",
+                sandbox.resolve("prov-reuse-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome limited = loop(reuse, home, "pv7");
+        check.eq("the reader objects, the writer repairs, the re-read is rate limited",
+                "rate_limited", limited.reason());
+        check.eq("after one fix round", 1L, limited.summaryReport().get("attempts_used"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(reuse);
+        store.resolve("pv7", store.read("pv7").updatedAt().toString(), "retry", "operator", "waited");
+        TaskLoop.Outcome resumed = continued(reuse, home, "pv8", "pv7");
+        check.that("the retry reaches the gate", resumed.ok());
+        check.eq("reusing the writer's fix round as the implement stage",
+                Map.of("from", "pv7", "stages", List.of("implement")),
+                resumed.summaryReport().get("reused_judgements"));
+        check.eq("and paying only for the reading", 1L, resumed.summaryReport().get("role_runs"));
+        Map<String, Object> reusedRow = steps(resumed).stream()
+                .filter(row -> "implementer".equals(row.get("step"))).findFirst().orElseThrow();
+        check.eq("the reused row is the fix round, not the first attempt", "review",
+                reusedRow.get("fix_for"));
+        check.eq("and the writer set survived the continuation", List.of("implvendor"),
+                resumed.summaryReport().get("writer_vendors"));
+
+        writeProfiles(home, sandbox, "prov-restore", 1, 1);
+    }
+
+    private void peerPolicy(Path home, String reviewer, String implementer) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [%s], strategy: first, require_independent_vendor: false }
+                  reviewer:
+                    profiles: [%s]
+                    strategy: first
+                    require_independent_vendor: false
+                    same_vendor_peer: { implementer: %s, reviewer: %s }
+                review: { required_for_risk: [medium, high] }
+                """.formatted(implementer, reviewer, implementer, reviewer));
+    }
+
+    private void ladderPolicy(Path home, int after) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                escalation:
+                  after_blocking_reviews: %d
+                  rungs:
+                    - { implementer: rung-impl, reviewer: rung-review }
+                """.formatted(after));
+    }
+
+    private void writeModelledProfile(Path home, String name, String role, String vendor,
+                                      String model, boolean readOnly, String promptAndSchema,
+                                      String requiredFields, String mode, Path counter,
+                                      int threshold) throws IOException {
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: %s
+                vendor: %s
+                model: %s
+                command: %s
+                read_only: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                  - "--prompt-file"
+                  - "{{prompt_file}}"
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/%s.md
+                json_schema: schemas/%s.json
+                artifact:
+                  required_fields: [%s]
+                verification:
+                  verified_on: "2026-08-26"
+                """.formatted(name, role, vendor, model, yaml(javaExecutable()), readOnly,
+                yaml(absoluteClassPath()), mode, yaml(counter.toString()), threshold,
+                promptAndSchema, promptAndSchema, requiredFields));
     }
 
     /**
