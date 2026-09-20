@@ -815,6 +815,43 @@ public final class PlannerTest implements Suite {
         check.contains("and the existing file is not truncated",
                 Files.readString(conflict.resolve(".warden/tasks/hello.yaml")),
                 "a different goal");
+        check.that("and no planner was dispatched to find that out",
+                !Files.exists(conflict.resolve(".warden/runs/do-trunc-3/prompts/planner.md")));
+
+        // A contract a person wrote by hand holds the operator's goal and nothing the planner
+        // would append, so comparing the compiled goal to it could never match: `--prepare
+        // always` used to pay a planner and then refuse its own work as task_conflict.
+        // Measured on the Crumb Raiders trial, 2026-09-19. The plan is applied now, and the
+        // ceilings that are the operator's - which render() does not write at all - come
+        // across with it.
+        Path handMade = sandbox.resolve("hand-written");
+        scaffoldProject(handMade);
+        Path handFile = handMade.resolve(".warden/tasks/hello.yaml");
+        new TaskDraft().write(handMade, "hello", GOAL, "app", "low");
+        Files.writeString(handFile, Files.readString(handFile, StandardCharsets.UTF_8)
+                + """
+                budgets:
+                  # Five roles before a single repair; six is not enough.
+                  max_role_runs: 11
+                  max_cost_usd: 33.0
+                max_fix_attempts: 3
+                """, StandardCharsets.UTF_8);
+        DoCommand.Outcome replanned = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(handMade, GOAL, "app", "low", "hello", "do-replan",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                user);
+        check.eq("--prepare always over a hand-written contract drafts rather than conflicting",
+                "drafted", replanned.code());
+        String replannedYaml = Files.readString(handFile, StandardCharsets.UTF_8);
+        check.contains("the plan is applied", replannedYaml, "checks: fast");
+        check.contains("the operator's call ceiling survives it", replannedYaml, "max_role_runs: 11");
+        check.contains("with the comment that explains the number", replannedYaml,
+                "Five roles before a single repair");
+        check.contains("and so does the repair ceiling", replannedYaml, "max_fix_attempts: 3");
+        check.eq("the contract still parses", "hello",
+                TaskSpec.parse(replannedYaml, handFile.toString()).id());
+        check.eq("and the ceiling is what the loop would read", 11L,
+                TaskSpec.parse(replannedYaml, handFile.toString()).budget().maxRoleRuns());
     }
 
     private void prepareAlwaysVisualParity(Check check, Path sandbox, Path home) throws Exception {

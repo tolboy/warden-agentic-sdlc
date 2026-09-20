@@ -284,6 +284,23 @@ public final class DoCommand {
         Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
         boolean contractExists = Files.isRegularFile(taskFile);
         boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists);
+        // Asked before a planner is dispatched, not after it has answered. The conflict is
+        // knowable from the file on disk: same id, same scope, same risk, and an existing
+        // goal that still carries the operator's. Discovering it afterwards is how a plan
+        // gets bought and discarded, which is what run bakery-1 of the Crumb Raiders trial
+        // did on 2026-09-19 - four minutes and $0.27, for an answer the file already held.
+        if (dispatchPlanner && contractExists) {
+            try {
+                TaskSpec existing = TaskSpec.parse(
+                        Files.readString(taskFile, StandardCharsets.UTF_8), taskFile.toString());
+                String conflict = PlannerDraft.intentConflict(taskId, options.goal(), scope, risk,
+                        existing, taskFile);
+                if (conflict != null) return fail("task_conflict", requested, root, taskId, conflict);
+            } catch (RuntimeException unreadable) {
+                return fail("task_conflict", requested, root, taskId, "task '" + taskId
+                        + "' already exists but cannot be validated: " + unreadable.getMessage());
+            }
+        }
 
         TaskDraft.Written drafted;
         Map<String, Object> planReview = null;
