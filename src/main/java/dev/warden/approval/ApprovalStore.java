@@ -153,6 +153,15 @@ public final class ApprovalStore {
             String decision,
             String actor,
             String note) throws IOException {
+        return resolve(runId, expectedUpdatedAt, decision, actor, note, current -> {});
+    }
+
+    @FunctionalInterface
+    public interface BeforeResolve { void run(HumanDecision current) throws IOException; }
+
+    /** Validate and apply a digest-bound contract proposal under the decision lock. */
+    public synchronized HumanDecision resolve(String runId, String expectedUpdatedAt, String decision,
+                                               String actor, String note, BeforeResolve action) throws IOException {
         validateRunId(runId);
         Path target = decisionPath(runId);
         return underExclusiveLock(target, () -> {
@@ -169,6 +178,7 @@ public final class ApprovalStore {
                         "decision must be one of " + current.options() + " for run " + runId);
             }
             requireNonBlank("actor", actor);
+            action.run(current);
 
             HumanDecision resolved = new HumanDecision(
                     current.schemaVersion(),

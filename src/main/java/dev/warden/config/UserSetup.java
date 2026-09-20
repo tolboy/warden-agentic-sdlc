@@ -436,7 +436,7 @@ public final class UserSetup {
             Goal
             : {{goal}}
 
-            Scenarios the machine harness was asked to check
+            Scenarios
             {{visual_scenarios}}
 
             How the images reach you
@@ -444,17 +444,19 @@ public final class UserSetup {
 
             {{screenshots}}
 
-            If the note above says this role takes its own screenshots, there is no harness
-            report below: you are the harness. Drive the application through the tools you were
-            given, save every screenshot you judge under the directory the note names, and list
-            those files in `screenshots_taken`. Warden verifies that they exist there.
+            If the note above says this role takes its own screenshots, there is no browser
+            harness and nothing has been settled without you. Drive the application (Unity
+            play mode, a desktop window, a page) with the MCP tools you were granted. Save
+            every PNG you judge under the evidence directory the note names — a file written
+            only under `Assets/Screenshots` is not evidence. List those absolute paths in
+            `screenshots_taken`. Do not edit the source tree.
 
             ## What has already been settled without you
 
-            A headless browser loaded the page at each viewport, located the elements the
-            scenarios name, and asserted their visibility, their reaction to a click and the
-            absence of console errors. Those facts are in the report below. **Do not re-litigate
-            them.** If the harness says a control is visible, it measured it.
+            If screenshots were handed to you, a headless browser may already have loaded the
+            page at each viewport and asserted visibility, clicks and console silence. Those
+            facts are in the report below. **Do not re-litigate them.** If you took the
+            pictures yourself, ignore this section: you are the harness.
 
             Each scenario's `a11y` list is ranked so the control it named is first, and each
             node carries a bounding box. Use those boxes to judge clipping and overlap; do
@@ -605,6 +607,10 @@ public final class UserSetup {
             2. **Emit your answer as JSON on stdout**, matching the schema below. Do not write it
                to a file.
             3. **Report, do not repair.**
+               For a contract_gap with an exact executable acceptance fix, you may include
+               proposed_acceptance: an array of the complete replacement acceptance commands.
+               Named checks stay unchanged. This is a proposal for a human gate, never permission
+               to edit the task. Omit it when uncertain; do not put prose in this command array.
 
             ## What counts as a finding
 
@@ -910,7 +916,7 @@ public final class UserSetup {
               # Read is how it looks at the PNGs it saved; the mcp__ entry names the server
               # declared in the file above. Replace `browser` with your server's name.
               - "--allowedTools"
-              - "Read,Glob,mcp__browser"
+              - "Read,Glob,mcp__browser,mcp__unity"
 
             capabilities:
               vision:
@@ -931,7 +937,7 @@ public final class UserSetup {
               # The probe has to prove two things against YOUR server: that the role can drive
               # the application through it, and that a file it saves is a real picture of the
               # screen. Point it at a page or scene you can see yourself.
-              probe: 'claude -p "Using only the MCP server named in your configuration, open the application, take one screenshot, save it as probe.png in the current directory with your tools, then open probe.png with your Read tool and reply with the two most prominent words visible in it." --mcp-config mcp/visual.json --allowedTools Read,mcp__browser --output-format json --model opus'
+              probe: 'claude -p "Using only the MCP server named in your configuration, open the application, take one screenshot, save it as probe.png in the current directory with your tools, then open probe.png with your Read tool and reply with the two most prominent words visible in it." --mcp-config mcp/visual.json --allowedTools Read,mcp__browser,mcp__unity --output-format json --model opus'
               what_to_check:
                 - "probe.png exists afterwards and is a picture of the application, not a blank"
                 - "the two words are on that screen; a model that answered without opening the file has no evidence"

@@ -183,8 +183,8 @@ public final class RoleResolver {
      * `require_independent_vendor: false` alone used to admit any same-vendor reader, silently
      * and with no mark on the verdict; it no longer does.
      */
-    private static String assuranceOf(Policy.RoleSpec spec, Profile profile,
-                                      Map<String, Profile> profiles, Writers writers) {
+    static String assuranceOf(Policy.RoleSpec spec, Profile profile,
+                              Map<String, Profile> profiles, Writers writers) {
         if (!profile.readOnly()) return NONE;
         if (!writers.known()) return UNPROVEN;
         if (!writers.contains(profile.vendor())) return INDEPENDENT;

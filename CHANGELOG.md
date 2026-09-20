@@ -9,8 +9,75 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Added
+
+- Per-run roster overlays so a Unity loop does not rewrite `~/.warden`. `warden run` and
+  `warden do` take `--use <stage>=<profile>`, `--effort <stage>=<level>` and
+  `--host <stage>=orca`; a task may declare the same under `use:`, and flags win. Overlays
+  carry into `warden do --conductor` through the run's own `run-override.json`, and survive
+  a replan: `use:` is an operator block like `visual_qa`. `verified_on` is never touched.
+  Every overlay is checked against the roster before the first paid stage, and refused there
+  rather than honoured in name: a stage nobody in the workflow answers to, an effort the
+  runner cannot deliver, a host the profile cannot travel to. Suite `run-override`.
+- `--host <stage>=orca` moves a stage to the `runner: orca` profile the operator declared
+  for that role and vendor, so the Agent Dashboard shows a WORKING row. It does **not**
+  rewrite a direct profile into an Orca one: `worker-start` forwards agent, model and effort
+  and nothing else, so tool grants, sandbox, turn ceiling and MCP configuration would be
+  dropped and the direct profile's stamp would be carried onto a channel it never probed.
+  A profile with none of those is hosted in place; anything else is refused before a vendor
+  is paid, with the twin to declare named in the message. Not live-proven against
+  `worker-start` on this change.
+- `cast` on the run header and in `task-run.json`: which profile fills each stage, at what
+  model, effort and runner, with a per-run overlay marked. Printed before the first dispatch
+  and in `--dry-run`, so a roster change can be checked without paying for one. The Orca
+  card carries the short form (`implement(grok) -> review(openai) -> look(claude)`).
+- Screenshots reach the board. When a run stops for a person, up to four of the images the
+  visual stage was judged on are opened in Orca through `file open`, so an `accept` answered
+  from a phone is answered while looking at the pixels rather than at a digest.
+- `advance` on a failure gate. It closes the run and starts the next id of the same task
+  (`--continue`, writers carry, verdicts do not). `--no-start` records the decision and
+  prints the command. The Orca gate question names the next step and that advance starts
+  the following run. Older `retry`/`abort` files still parse. Conductor's own human gate
+  still offers only abort and retry: a decision node that started a nested run would put a
+  second retry controller inside the one Warden already is.
+- A task may require visual QA with `evidence: agent` and no browser viewport grammar. The
+  loop then drops the CDP harness for that run and the visual role takes its own pictures.
+  Copy `examples/mcp/unity.json` to `~/.warden/mcp/visual.json` (default
+  `http://127.0.0.1:8081/mcp`), and `warden profiles --verify claude-visual-qa-mcp --confirm`
+  before a paid look. An unverified camera now stops the run *before* the writer is paid.
+  The Bakery task opts in.
+
 ### Fixed
 
+- A new run id on a tree an earlier run of this task left no longer marks every reader
+  `unproven`. Bakery-7 paid two independent vendors and was then told nobody could be called
+  independent, because the run folder had a different name. The writer set is inherited from
+  the run whose recorded closing tree **is** this tree — same immutable diff base, same
+  candidate fingerprint as the human decision recorded — and from no other. A prior run that
+  did not know its own writers is not a source, and a writer dispatched by *this* run proves
+  nothing about bytes that were in the tree before it: an unexplained candidate stays
+  `unknown_preexisting_candidate`, and every reading over it stays `unproven`.
+- A confirmed vendor substitution survives `advance` and `apply`. Those decisions used to
+  start the next run with an empty failover map, so a second reader switched after a quota
+  stop was silently put back on the spent profile. The substitutions recorded on the prior
+  summary travel with the continuation; verdicts still do not, because the contract moved.
+- An operator pin that has already reported a spent subscription this run is dropped rather
+  than re-dispatched. Rotation and failover can then pick the backup the roster still has.
+- Direct stages are named as Orca orchestration tasks on the run the card belongs to, so a
+  phone can see `review-second · claude-review` without rewriting the roster onto
+  `runner: orca`. Agent Dashboard WORKING rows still need a verified Orca profile. Not
+  live-proven against `task-create` on this change.
+- `--use <stage>=<profile>` no longer waives the task's `require_independent_vendor`. The pin
+  reached the roster through the escalation ladder's path, which skips the independence
+  filter by design, so choosing a reader quietly bought a `peer_review` the contract had not
+  agreed to. An operator's pin is now filtered like any other choice and refused with the
+  resolver's own reason; the ladder keeps its exception, because a rung is a pair the policy
+  declared.
+- `advance` no longer spends a run id proving nothing changed. The stops it is offered for
+  are caused outside the loop — a scope that excludes the file, a contract that forbids the
+  change, a failing baseline — and a second pass over an unchanged contract and an unchanged
+  tree reaches the same line. When neither has moved, `advance` says so and prints the
+  `warden run` command for starting one anyway.
 - A task's limits bound the chain of runs `--continue` links, not each run. A `retry` or
   `switch` continuation inherits the calls, reported cost, unpriced calls and fix rounds the
   earlier runs spent, read from the new `chain` block of their summary; before, every

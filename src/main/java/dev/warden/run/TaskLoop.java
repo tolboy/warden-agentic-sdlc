@@ -4,6 +4,7 @@ import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Policy;
+import dev.warden.config.RunOverride;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
@@ -137,6 +138,7 @@ public final class TaskLoop {
     private final Workspace workspace;
     private final boolean orcaGate;
     private final Preparation preparation;
+    private final RunOverride override;
     /** Nanoseconds, as {@link System#nanoTime}; replaced only by the suite. */
     private java.util.function.LongSupplier clock = System::nanoTime;
 
@@ -155,7 +157,7 @@ public final class TaskLoop {
      */
     public TaskLoop withProgress(Progress narration) {
         return keepClock(new TaskLoop(processes, visualCheck, narration, workspace, orcaGate,
-                preparation));
+                preparation, override));
     }
 
     /**
@@ -164,7 +166,7 @@ public final class TaskLoop {
      */
     public TaskLoop withClock(java.util.function.LongSupplier nanos) {
         TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
-                orcaGate, preparation));
+                orcaGate, preparation, override));
         copy.clock = nanos;
         return copy;
     }
@@ -181,7 +183,7 @@ public final class TaskLoop {
      */
     public TaskLoop withWorkspace(Workspace board) {
         return keepClock(new TaskLoop(processes, visualCheck, progress, Workspace.guarded(board),
-                orcaGate, preparation));
+                orcaGate, preparation, override));
     }
 
     /**
@@ -195,12 +197,17 @@ public final class TaskLoop {
      */
     public TaskLoop withOrcaGate(boolean publish) {
         return keepClock(new TaskLoop(processes, visualCheck, progress, workspace, publish,
-                preparation));
+                preparation, override));
     }
 
     public TaskLoop withPreparation(Preparation preparation) {
         return keepClock(new TaskLoop(processes, visualCheck, progress, workspace, orcaGate,
-                preparation == null ? Preparation.NONE : preparation));
+                preparation == null ? Preparation.NONE : preparation, override));
+    }
+
+    public TaskLoop withOverride(RunOverride next) {
+        return keepClock(new TaskLoop(processes, visualCheck, progress, workspace, orcaGate,
+                preparation, next == null ? RunOverride.NONE : next));
     }
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress) {
@@ -219,12 +226,19 @@ public final class TaskLoop {
 
     public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
                     Workspace workspace, boolean orcaGate, Preparation preparation) {
+        this(processes, visualCheck, progress, workspace, orcaGate, preparation, RunOverride.NONE);
+    }
+
+    public TaskLoop(ProcessRunner processes, VisualCheck visualCheck, Progress progress,
+                    Workspace workspace, boolean orcaGate, Preparation preparation,
+                    RunOverride override) {
         this.processes = processes;
         this.visualCheck = visualCheck;
         this.progress = progress;
         this.workspace = workspace;
         this.orcaGate = orcaGate;
         this.preparation = preparation == null ? Preparation.NONE : preparation;
+        this.override = override == null ? RunOverride.NONE : override;
     }
 
     /**
@@ -496,9 +510,30 @@ public final class TaskLoop {
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
+        if (carried.continuesRun() && !authorizedFailover.isEmpty()
+                && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
+            Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
+                    .resolve(carried.fromRunId()).resolve("task-run.json")));
+            if (previous.get("failover_pending") instanceof Map<?, ?> pending
+                    && pending.get("exhausted_profiles") instanceof List<?> names) {
+                java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                names.forEach(name -> excluded.add(String.valueOf(name)));
+                roles.excluding(excluded);
+            }
+        }
+        // Contract, then whatever the outer command left for this run id, then this
+        // process's own flags. Conductor's inner `warden run` has no flags of its own, so
+        // the middle term is how `warden do --conductor --use ...` reaches the roster at all.
+        RunOverride overlay = loaded.task().use()
+                .merged(carried.reuseJudgements() ? priorOverride(root, carried.fromRunId()) : RunOverride.NONE)
+                .merged(handedOver(root, runId))
+                .merged(this.override);
+        overlay.pin(roles);
+        roles.overlay(overlay);
         GateRunner gates = new GateRunner(processes).withHome(user.home());
 
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
+        if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
         boolean reviewRequired = reviewByRisk
                 && user.policy().roles().containsKey("reviewer");
@@ -515,6 +550,7 @@ public final class TaskLoop {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("run_id", runId);
         summary.put("task_id", task.id());
+        if (!overlay.isEmpty()) summary.put("run_override", overlay.toMap());
         summary.put("diff_base_commit", diffBaseCommit);
         summary.put("contract_sha256", contractHash);
         // The narrower hash a later run compares against when deciding whether a verdict it
@@ -659,14 +695,15 @@ public final class TaskLoop {
                     + "built-in chain over it");
             return stop(ledger, summary, "policy_invalid", steps, 0, budget);
         }
-        Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
-        if (readerGap != null) {
-            summary.put("unavailable_role", readerGap);
-            summary.put("resolution", String.valueOf(readerGap.get("message")));
-            progress.line("      " + readerGap.get("message"));
+        Map<String, Object> overlayGap = overlayGap(root, workflow, user, task, reviewByRisk, roles,
+                overlay);
+        if (overlayGap != null) {
+            summary.put("unavailable_role", overlayGap);
+            summary.put("resolution", String.valueOf(overlayGap.get("message")));
+            progress.line("      " + overlayGap.get("message"));
             progress.line("      stopping before the first dispatch rather than after it");
-            if (!dryRun) return stop(ledger, summary, "independent_review_unavailable", steps, 0, budget);
-            summary.putIfAbsent("would_stop", "independent_review_unavailable");
+            if (!dryRun) return stop(ledger, summary, "run_override_invalid", steps, 0, budget);
+            summary.putIfAbsent("would_stop", "run_override_invalid");
         }
         Map<String, Object> toolingGap = toolingGap(root, workflow, user, task, reviewByRisk, roles);
         if (toolingGap != null) {
@@ -678,14 +715,28 @@ public final class TaskLoop {
             if (!dryRun) return stop(ledger, summary, stopReason, steps, 0, budget);
             summary.putIfAbsent("would_stop", stopReason);
         }
+        Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        if (readerGap != null) {
+            summary.put("unavailable_role", readerGap);
+            summary.put("resolution", String.valueOf(readerGap.get("message")));
+            progress.line("      " + readerGap.get("message"));
+            progress.line("      stopping before the first dispatch rather than after it");
+            if (!dryRun) return stop(ledger, summary, "independent_review_unavailable", steps, 0, budget);
+            summary.putIfAbsent("would_stop", "independent_review_unavailable");
+        }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         summary.put("candidate_fingerprint", candidateFingerprint);
         Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
                 ? reusableJudgements(root, carried.fromRunId(), contractHash,
                         String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
-                        workflow, user, summary)
+                        workflow, user, summary, overlay, authorizedFailover)
                 : Map.of();
-        header(task, runId, workflow, dryRun, callPlan, budget);
+        // After the preflights, so a stage nobody can fill has already been reported as the
+        // fault it is rather than as a blank in a table, and before the header, because the
+        // header is the last thing printed before money starts being spent.
+        List<Map<String, Object>> cast = cast(root, workflow, user, task, reviewByRisk, roles, overlay);
+        summary.put("cast", cast);
+        header(task, runId, workflow, dryRun, callPlan, budget, cast);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
                     + "; the implementer is given its reason verbatim");
@@ -973,7 +1024,7 @@ public final class TaskLoop {
         ledger.append("task_run", summary);
         ledger.recordCorpusVisibility(summary);
         ledger.writeReport("task-run", summary);
-        footer(runId, "ready_for_human", "human_gate", budget, summary);
+        footer(root, runId, "ready_for_human", "human_gate", budget, summary);
         return new Outcome(true, "ready_for_human", "human_gate", file, summary);
     }
 
@@ -1175,6 +1226,177 @@ public final class TaskLoop {
     }
 
     /**
+     * Who would fill each stage, resolved from the roster before anything is paid.
+     *
+     * The header used to print the chain as stage names — `implement -> review -> look` —
+     * which answers what will happen and not who will do it. Everything an operator actually
+     * changes lives in the second question: which vendor, which model, at what effort, on
+     * which runner, and whether a `--use` they typed landed on the stage they meant. Finding
+     * that out required reading the summary of a run that had already been paid for.
+     *
+     * A preview, and honestly labelled as one. Rotation is read without advancing, the writer
+     * set is taken as empty because nobody has written yet, and a mid-run failover can still
+     * put a different vendor in a chair — the row says who the roster names now, which is the
+     * question being asked now.
+     */
+    private List<Map<String, Object>> cast(Path root, Workflow workflow, UserConfig user,
+                                           TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                           RoleRunner roles, RunOverride overlay) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.name());
+            row.put("role", stage.role());
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+            if (chosen == null) {
+                row.put("profile", null);
+                Map<String, String> why = roles.explainFill(user, stage.name(), stage.role(),
+                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                row.put("unresolved", why == null ? Map.of() : why);
+            } else {
+                row.put("profile", chosen.name());
+                row.put("vendor", chosen.vendor());
+                row.put("model", chosen.model());
+                row.put("effort", chosen.effort());
+                row.put("runner", chosen.runner());
+                // Named by the overlay is not the same as changed by it. A refused overlay
+                // is about to stop the run, and a row that still said "this run only" would
+                // be describing a dispatch that is not going to happen.
+                if (overlay.stages().contains(stage.name())) {
+                    row.put("from_overlay",
+                            overlay.problem(stage.name(), chosen, user.profiles()) == null);
+                }
+            }
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /** The cast as a person reads it: one stage per line, aligned, with the overlay marked. */
+    private void printCast(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return;
+        int width = rows.stream().mapToInt(row -> String.valueOf(row.get("stage")).length())
+                .max().orElse(0);
+        String label = "cast  ";
+        for (Map<String, Object> row : rows) {
+            StringBuilder line = new StringBuilder(label);
+            label = "      ";
+            line.append(String.format("%-" + width + "s  ", row.get("stage")));
+            if (row.get("profile") == null) {
+                line.append("nobody can fill it");
+                Object why = row.get("unresolved");
+                if (why instanceof Map<?, ?> reasons && !reasons.isEmpty()) {
+                    line.append(" — ").append(reasons);
+                }
+                progress.line(line.toString());
+                continue;
+            }
+            line.append(row.get("profile")).append("  ").append(row.get("vendor"));
+            if (row.get("model") != null) line.append('/').append(row.get("model"));
+            if (row.get("effort") != null) line.append(' ').append(row.get("effort"));
+            if (!"direct".equals(row.get("runner"))) line.append(" · ").append(row.get("runner"));
+            if (Boolean.TRUE.equals(row.get("from_overlay"))) line.append("   (this run only)");
+            if (Boolean.FALSE.equals(row.get("from_overlay"))) line.append("   (overlay refused)");
+            progress.line(line.toString());
+        }
+    }
+
+    /**
+     * The overlay the outer command left in this run's directory, or none.
+     *
+     * A malformed handover refuses dispatch: silently falling back could spend a different
+     * subscription from the one the operator chose.
+     */
+    static RunOverride handedOver(Path root, String runId) {
+        Path file = root.resolve(".warden/runs").resolve(runId)
+                .resolve(dev.warden.ledger.EvidenceLedger.RUN_OVERRIDE);
+        if (!Files.isRegularFile(file)) return RunOverride.NONE;
+        try {
+            return RunOverride.fromMap(Json.parseObject(Files.readString(file)));
+        } catch (Exception unreadable) {
+            throw new IllegalArgumentException("cannot read run override " + file, unreadable);
+        }
+    }
+
+    public static RunOverride priorOverride(Path root, String runId) throws java.io.IOException {
+        Map<String, Object> summary = Json.parseObject(Files.readString(root.resolve(".warden/runs")
+                .resolve(runId).resolve("task-run.json")));
+        Object raw = summary.get("run_override");
+        if (raw == null) return RunOverride.NONE;
+        if (!(raw instanceof Map<?, ?> map)) throw new IllegalArgumentException("invalid prior run override");
+        Map<String, Object> value = new LinkedHashMap<>();
+        map.forEach((key, item) -> value.put(String.valueOf(key), item));
+        return RunOverride.fromMap(value);
+    }
+
+    /** Leave an overlay for the run {@code runId} will be, before its process exists. */
+    public static void handOver(Path root, String runId, RunOverride overlay)
+            throws java.io.IOException {
+        if (overlay == null || overlay.isEmpty()) return;
+        Path directory = root.resolve(".warden/runs").resolve(runId);
+        Files.createDirectories(directory);
+        Files.writeString(directory.resolve(dev.warden.ledger.EvidenceLedger.RUN_OVERRIDE),
+                Json.writePretty(overlay.toMap()) + System.lineSeparator(),
+                java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The operator's overlay, checked against the roster before anyone is paid.
+     *
+     * Three faults are knowable from configuration alone and all three used to surface as
+     * something other than themselves. A stage name nobody in this workflow answers to
+     * simply did nothing, silently — the commonest way to type one of these flags wrong.
+     * An effort a runner cannot deliver was written into the evidence and never sent. A
+     * {@code host: orca} on a profile with tool grants dropped them and kept the stamp. So
+     * this runs first among the preflights: it is the cheapest of them, and the one whose
+     * mistakes are a person's typing rather than a roster that has thinned.
+     */
+    private Map<String, Object> overlayGap(Path root, Workflow workflow, UserConfig user,
+                                           TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                           RoleRunner roles, RunOverride overlay) {
+        if (overlay == null || overlay.isEmpty()) return null;
+        java.util.Set<String> named = new java.util.LinkedHashSet<>();
+        for (Workflow.Stage stage : workflow.stages()) named.add(stage.name());
+        for (String stage : overlay.stages()) {
+            if (named.contains(stage)) continue;
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("stage", stage);
+            gap.put("code", "run_override_unknown_stage");
+            gap.put("stop_reason", "run_override_invalid");
+            gap.put("known_stages", List.copyOf(named));
+            gap.put("message", "no stage called '" + stage + "' in this workflow, so the overlay "
+                    + "naming it would do nothing. The stages that run are " + named
+                    + ". Overlays are keyed by stage, not by role: two reviewer stages share a "
+                    + "role and only one of them is the one you meant.");
+            return gap;
+        }
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            // `peek` has already applied whatever the overlay could honour, so what comes
+            // back is either the adapted profile — asked again, it reports no problem — or
+            // the untouched one, which is exactly the case with something to say.
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+            if (chosen == null) continue;
+            String problem = overlay.problem(stage.name(), chosen, user.profiles());
+            if (problem == null) continue;
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("stage", stage.name());
+            gap.put("role", stage.role());
+            gap.put("profile", chosen.name());
+            gap.put("code", "run_override_undeliverable");
+            gap.put("stop_reason", "run_override_invalid");
+            gap.put("message", problem);
+            return gap;
+        }
+        return null;
+    }
+
+    /**
      * The tools a stage's profile would need, checked before anyone is paid.
      *
      * Two faults are visible from the roster alone. A stage that declares `evidence: agent`
@@ -1191,8 +1413,27 @@ public final class TaskLoop {
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
             dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
                     RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
-            // Nobody to fill it is the dispatch's own report, with the roster's reasons.
-            if (chosen == null) continue;
+            // Nobody to fill a required visual role used to fall through to dispatch, so the
+            // writer and both readers ran and then the look stage died unverified. Bakery
+            // would have paid that bill. Surface it here, with the resolver's reasons.
+            if (chosen == null) {
+                if (!"visual_qa".equals(stage.role())) continue;
+                Map<String, Object> gap = new LinkedHashMap<>();
+                gap.put("stage", stage.name());
+                gap.put("role", stage.role());
+                gap.put("code", "visual_qa_unavailable");
+                gap.put("stop_reason", "visual_qa_unavailable");
+                Map<String, String> rejected = roles.explainFill(user, stage.name(), stage.role(),
+                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                gap.put("rejected_profiles", rejected == null ? Map.of() : rejected);
+                gap.put("message", "visual QA is required and no eligible profile can fill stage '"
+                        + stage.name() + "'"
+                        + (rejected == null || rejected.isEmpty() ? "." : ": " + rejected)
+                        + " For an MCP camera, run the profile's probe against your server, then "
+                        + "`warden profiles --verify <profile> --confirm`. Do not start the loop "
+                        + "until that stamp exists.");
+                return gap;
+            }
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("stage", stage.name());
             gap.put("role", stage.role());
@@ -1572,6 +1813,10 @@ public final class TaskLoop {
                 if (outcome.vendor() != null) writerVendors.add(outcome.vendor());
                 if (outcome.profile() != null) writerProfiles.add(outcome.profile());
             }
+            // Deliberately no promotion here. A writer dispatched now accounts for the bytes
+            // it just wrote and for nothing that was in the tree before it. Treating a known
+            // new author as proof of the whole candidate is how an unexplained file becomes
+            // an `independent` verdict over work nobody can name.
             publishWriters();
         }
 
@@ -1591,6 +1836,93 @@ public final class TaskLoop {
          * with no run to account for it, or a continued tree that is not the one the prior
          * run left, is unknown, and stays unknown rather than being called clean.
          */
+        /**
+         * A new run id on a tree an earlier run of this task left, identified by fingerprint.
+         *
+         * Bakery-7 paid two independent vendors and was then told nobody could be called
+         * independent, because the run folder had a different name. That complaint is real,
+         * and the answer is not to believe whichever run was written most recently: it is to
+         * find the run whose recorded closing tree IS this tree. Two facts have to agree —
+         * the immutable diff base, so "changed since" means the same thing in both runs, and
+         * the closing candidate fingerprint the human decision recorded, so the prior writer
+         * set accounts for every byte here and not merely for some earlier state.
+         *
+         * Anything less and the inheritance is a guess. A prior run whose own provenance was
+         * unknown proves nothing either, however confidently it listed vendors, so it is not
+         * a source. When no run matches, the tree stays {@code unknown_preexisting_candidate}
+         * and every reading over it is labelled {@code unproven} — which is the honest
+         * answer to "who wrote this", not a failure of the loop.
+         */
+        private boolean inheritWritersFromLatestSameTask() {
+            Path runs = loaded.root().resolve(".warden/runs");
+            if (!Files.isDirectory(runs)) return false;
+            Object here = summary.get("candidate_fingerprint");
+            if (!(here instanceof String fingerprint) || fingerprint.isBlank()) return false;
+            ApprovalStore decisions = new ApprovalStore(loaded.root());
+            Map<String, Object> match = null;
+            long matchTime = Long.MIN_VALUE;
+            try (var stream = Files.list(runs)) {
+                for (Path dir : stream.toList()) {
+                    if (!Files.isDirectory(dir)) continue;
+                    String priorRunId = dir.getFileName().toString();
+                    if (priorRunId.equals(runId)) continue;
+                    Path file = dir.resolve("task-run.json");
+                    if (!Files.isRegularFile(file)) continue;
+                    long modified = Files.getLastModifiedTime(file).toMillis();
+                    if (modified < matchTime) continue;
+                    Map<String, Object> prior;
+                    try {
+                        prior = Json.parseObject(Files.readString(file));
+                    } catch (Exception unreadable) {
+                        continue;
+                    }
+                    if (Boolean.TRUE.equals(prior.get("dry_run"))) continue;
+                    if (!task.id().equals(prior.get("task_id"))) continue;
+                    if (!diffBaseCommit.equals(prior.get("diff_base_commit"))) continue;
+                    if (!(prior.get("writer_vendors") instanceof List<?> vendors) || vendors.isEmpty()) {
+                        continue;
+                    }
+                    if (!(prior.get("writer_provenance") instanceof String provenance)
+                            || provenance.startsWith("unknown")) {
+                        continue;
+                    }
+                    String closed;
+                    try {
+                        closed = decisions.read(priorRunId).candidateFingerprint();
+                    } catch (Exception noDecision) {
+                        continue;
+                    }
+                    if (closed == null || !closed.equals(fingerprint)) continue;
+                    match = prior;
+                    matchTime = modified;
+                }
+            } catch (Exception listing) {
+                return false;
+            }
+            if (match == null) return false;
+            // Read into locals first: a half-applied inheritance would leave profile names in
+            // the writer set with no vendor to account for them, which is a worse state than
+            // the unknown one this is trying to improve on.
+            java.util.Set<String> vendorsFound = new java.util.LinkedHashSet<>();
+            java.util.Set<String> profilesFound = new java.util.LinkedHashSet<>();
+            if (match.get("writer_vendors") instanceof List<?> vendorsListed) {
+                for (Object vendor : vendorsListed) vendorsFound.add(String.valueOf(vendor));
+            }
+            if (match.get("writer_profiles") instanceof List<?> profilesListed) {
+                for (Object profile : profilesListed) profilesFound.add(String.valueOf(profile));
+            }
+            if (vendorsFound.isEmpty()) return false;
+            writerVendors.addAll(vendorsFound);
+            writerProfiles.addAll(profilesFound);
+            // The prior run's own word for how well it knew its writers, not a better one.
+            writerProvenance = String.valueOf(match.get("writer_provenance"));
+            if (match.get("run_id") != null) {
+                summary.put("writers_inherited_from", String.valueOf(match.get("run_id")));
+            }
+            publishWriters();
+            return true;
+        }
+
         private void restoreWriters() {
             boolean candidatePresent;
             try {
@@ -1600,7 +1932,9 @@ public final class TaskLoop {
                 candidatePresent = true;
             }
             if (!carried.continuesRun()) {
-                if (candidatePresent) writerProvenance = "unknown_preexisting_candidate";
+                if (candidatePresent && !inheritWritersFromLatestSameTask()) {
+                    writerProvenance = "unknown_preexisting_candidate";
+                }
                 return;
             }
             Path file = loaded.root().resolve(".warden/runs").resolve(carried.fromRunId())
@@ -1627,6 +1961,9 @@ public final class TaskLoop {
                 if (prior.get("writer_profiles") instanceof List<?> profilesListed) {
                     for (Object profile : profilesListed) writerProfiles.add(String.valueOf(profile));
                 }
+                // An unknown prior stays unknown however many vendors it managed to name:
+                // the names are of runs that wrote, not of whatever was in the tree before
+                // them, and that gap is exactly what `unknown` is the word for.
                 String recorded = prior.get("writer_provenance") instanceof String text ? text : "recorded";
                 writerProvenance = recorded.startsWith("unknown") ? recorded : "recorded";
             } else {
@@ -2467,6 +2804,7 @@ public final class TaskLoop {
             java.util.function.BinaryOperator<String> note = heartbeatNote;
             if (dryRun || note == null) return;
             workspace.note(note.apply(profile, vendor));
+            workspace.stage(note.apply(profile, vendor));
         }
 
         /**
@@ -2517,6 +2855,7 @@ public final class TaskLoop {
             // the role, and named() rewrites it with the pair as soon as it is.
             if (!dryRun) {
                 workspace.note(runningNote(stage, null, null));
+                workspace.stage(position(stage) + " " + stage.name());
             }
         }
 
@@ -3563,7 +3902,7 @@ public final class TaskLoop {
     private Map<String, Map<String, Object>> reusableJudgements(
             Path root, String priorRunId, String contractHash, String acceptanceHash,
             String fingerprint, Workflow workflow, UserConfig user,
-            Map<String, Object> summary) throws Exception {
+            Map<String, Object> summary, RunOverride overlay, Map<String, String> substitutions) throws Exception {
         Path priorSummary = root.resolve(".warden/runs").resolve(priorRunId).resolve("task-run.json");
         if (!Files.isRegularFile(priorSummary)) return declineReuse(summary, "no summary for " + priorRunId);
         Map<String, Object> prior = Json.parseObject(Files.readString(priorSummary));
@@ -3748,7 +4087,7 @@ public final class TaskLoop {
         for (String key : List.copyOf(reusable.keySet())) {
             String difference = RoleContract.differenceFrom(
                     reusable.get(key).get("role_contract"),
-                    currentStageFor(workflow, key, keyToRole.get(key)), user);
+                    currentStageFor(workflow, key, keyToRole.get(key)), user, overlay, substitutions);
             if (difference == null) continue;
             reusable.remove(key);
             declined.put(key, difference);
@@ -3808,7 +4147,7 @@ public final class TaskLoop {
 
     /** What is about to happen, before the first vendor is paid to do any of it. */
     private void header(TaskSpec.ResolvedTask task, String runId, Workflow workflow, boolean dryRun,
-                        CallPlan plan, Budget budget) {
+                        CallPlan plan, Budget budget, List<Map<String, Object>> cast) {
         progress.blank();
         progress.line("run   " + runId + (dryRun ? "   (dry run: nothing is dispatched)" : ""));
         progress.line("task  " + task.id() + "   risk=" + task.risk()
@@ -3817,6 +4156,7 @@ public final class TaskLoop {
         if (!task.baselineCommands().isEmpty()) names.add("baseline");
         for (Workflow.Stage stage : workflow.stages()) names.add(stage.name());
         progress.line("plan  " + String.join(" -> ", names));
+        printCast(cast);
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
                 + Progress.money(task.budget().maxCostUsd()) + " of reported spend, fix rounds <= "
                 + task.maxFixAttempts()
@@ -3851,12 +4191,29 @@ public final class TaskLoop {
         progress.blank();
         if (!dryRun) {
             workspace.state(Workspace.State.RUNNING);
-            workspace.note(task.id() + " · " + String.join(" -> ", names) + " · starting");
+            // The chain with its cast, not the chain alone. "implement -> review -> look" is
+            // the same sentence on every card an operator owns; "implement(grok) ->
+            // review(openai) -> look(claude)" is the one that tells them which run to stop.
+            workspace.note(task.id() + " · " + String.join(" -> ", castNames(names, cast))
+                    + " · starting");
         }
     }
 
+    /** Stage names with the vendor in brackets where the roster named one. */
+    private static List<String> castNames(List<String> names, List<Map<String, Object>> cast) {
+        Map<String, Object> vendors = new LinkedHashMap<>();
+        for (Map<String, Object> row : cast) {
+            if (row.get("vendor") != null) vendors.put(String.valueOf(row.get("stage")), row.get("vendor"));
+        }
+        List<String> labelled = new ArrayList<>();
+        for (String name : names) {
+            labelled.add(vendors.containsKey(name) ? name + "(" + vendors.get(name) + ")" : name);
+        }
+        return labelled;
+    }
+
     /** Where the run ended and what the person watching is now expected to do about it. */
-    private void footer(String runId, String reason, String nextAction, Budget budget,
+    private void footer(Path root, String runId, String reason, String nextAction, Budget budget,
                         Map<String, Object> summary) {
         progress.blank();
         progress.line("done  " + reason + "   " + budget.runs() + " vendor call(s), "
@@ -3928,7 +4285,62 @@ public final class TaskLoop {
         }
         if (gate != null) note.append(" · or orca gate ").append(gate);
         workspace.note(note.toString());
+        revealVisualEvidence(root, runId, summary);
     }
+
+    /**
+     * The pictures the visual stage was judged on, opened on the board at the gate.
+     *
+     * The verdict a person is about to accept or reject is a verdict about pixels, and the
+     * only trace of those on the board was a digest in the ledger — so answering from a
+     * phone meant answering on the role's word. The verified set comes first, because that
+     * is what the verdict was measured against; a harness run that wrote its shots straight
+     * into the evidence directory falls back to the directory.
+     *
+     * A few are opened, not all: a stage that photographed eleven states would bury the card
+     * it was meant to support, and {@code warden report} has the rest. Failing to open one
+     * changes nothing — the run has already stopped and already decided.
+     */
+    private void revealVisualEvidence(Path root, String runId, Map<String, Object> summary) {
+        List<Path> pictures = new ArrayList<>();
+        if (summary.get("steps") instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (!(row instanceof Map<?, ?> step)) continue;
+                if (!(step.get("image_evidence") instanceof List<?> images)) continue;
+                for (Object item : images) {
+                    if (item instanceof Map<?, ?> image && image.get("path") instanceof String path) {
+                        pictures.add(Path.of(path));
+                    }
+                }
+            }
+        }
+        if (pictures.isEmpty()) {
+            // The harness does not write into the run's own directory: each stage gets a
+            // sibling, `tally-3--visual-qa-0`, and the PNGs are under that. Found by
+            // running this against a live browser stage and revealing nothing at all.
+            Path runs = root.resolve(".warden/runs");
+            try (var siblings = Files.list(runs)) {
+                for (Path directory : siblings.sorted().toList()) {
+                    String name = directory.getFileName().toString();
+                    if (!Files.isDirectory(directory)) continue;
+                    if (!name.equals(runId) && !name.startsWith(runId + "--")) continue;
+                    try (var found = Files.walk(directory, 3)) {
+                        found.filter(Files::isRegularFile)
+                                .filter(file -> file.getFileName().toString().toLowerCase()
+                                        .endsWith(".png"))
+                                .sorted()
+                                .forEach(pictures::add);
+                    }
+                }
+            } catch (Exception nothingToShow) {
+                return;
+            }
+        }
+        pictures.stream().limit(MAX_REVEALED_IMAGES).forEach(workspace::reveal);
+    }
+
+    /** Enough to judge by, few enough that the board still reads as a board. */
+    private static final int MAX_REVEALED_IMAGES = 4;
 
     private void record(List<Map<String, Object>> steps, Budget budget, String role, int attempt,
                         RoleRunner.Outcome step) {
@@ -4156,19 +4568,20 @@ public final class TaskLoop {
         Map<String, Object> artifact = readArtifact(root, outcome);
         List<Map<String, Object>> evidence = new ArrayList<>();
         List<String> refused = new ArrayList<>();
-        Path runs = root.resolve(".warden/runs").toAbsolutePath().normalize();
+        Path runs = outcome.report().toAbsolutePath().normalize().getParent();
         if (artifact != null && artifact.get("screenshots_taken") instanceof List<?> listed) {
             for (Object item : listed) {
                 if (!(item instanceof String text) || text.isBlank()) continue;
                 Path file = Path.of(text);
                 if (!file.isAbsolute()) file = root.resolve(file);
                 file = file.toAbsolutePath().normalize();
-                if (!file.startsWith(runs) || !Files.isRegularFile(file)) {
+                if (!file.startsWith(runs) || !Files.isRegularFile(file)
+                        || !file.toRealPath().startsWith(runs.toRealPath())) {
                     refused.add(text + " (not a file inside the run's evidence)");
                     continue;
                 }
-                if (Files.size(file) == 0) {
-                    refused.add(text + " (empty)");
+                if (!AgentImageEvidence.isImage(file)) {
+                    refused.add(text + " (not a decodable bounded image)");
                     continue;
                 }
                 Map<String, Object> image = new LinkedHashMap<>();
@@ -4246,6 +4659,8 @@ public final class TaskLoop {
         describeInfrastructureStop(reason, summary, steps);
         summary.put("safe_next_step", safeNextStep(reason, summary));
         summary.put("next_step", NextStep.of(reason, summary, ledger.projectRoot()));
+        Map<String, Object> proposal = ContractProposal.prepare(ledger.projectRoot(), summary);
+        if (!proposal.isEmpty()) summary.put("contract_proposal", proposal);
         Path file = ledger.writeReport("task-run", summary);
         Path root = ledger.projectRoot();
         Object base = summary.get("diff_base_commit");
@@ -4262,6 +4677,9 @@ public final class TaskLoop {
             summary.put("failover_pending", pending);
             decision = store.createFailover(runIdentity, taskIdentity,
                     failoverQuestion(pending), file, fingerprint);
+        } else if (!proposal.isEmpty()) {
+            decision = store.createPending(runIdentity, taskIdentity, HumanDecision.Kind.CONTRACT_CHANGE,
+                    ContractProposal.question(proposal), file, fingerprint);
         } else {
             decision = store.createFailure(runIdentity, taskIdentity, reason, file, fingerprint);
         }
@@ -4275,7 +4693,7 @@ public final class TaskLoop {
         ledger.append("task_run", summary);
         ledger.recordCorpusVisibility(summary);
         ledger.writeReport("task-run", summary);
-        footer(runIdentity, reason, "human_escalation", budget, summary);
+        footer(root, runIdentity, reason, "human_escalation", budget, summary);
         return new Outcome(false, reason, "human_escalation", file, summary);
     }
 

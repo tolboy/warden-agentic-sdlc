@@ -81,7 +81,8 @@ public final class ApprovalStoreTest implements Suite {
         HumanDecision resolved = store.resolve("run-failure", pending.updatedAt().toString(),
                 "retry", "operator@example.test", "retry after fixing credentials");
 
-        check.eq("failure choices are retry/abort", List.of("retry", "abort"), pending.options());
+        check.eq("failure choices are retry/abort/advance",
+                List.of("retry", "abort", "advance"), pending.options());
         check.eq("resolution changes state", HumanDecision.State.RESOLVED, resolved.state());
         check.eq("resolution records choice", "retry", resolved.decision());
         check.eq("resolution records actor", "operator@example.test", resolved.actor());

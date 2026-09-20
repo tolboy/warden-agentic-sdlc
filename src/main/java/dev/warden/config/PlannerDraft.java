@@ -100,13 +100,16 @@ public final class PlannerDraft {
     /**
      * The keys a person owns in a contract, in the order they are written.
      *
-     * A planner drafts what the work is; these say what it may spend and what a person must
-     * be shown. `visual_qa` is here because a hand-written browser contract is a promise
-     * about the product, and a planner that has never seen the screen must not quietly
-     * withdraw it.
+     * A planner drafts what the work is; these say what it may spend, who does it, and what
+     * a person must be shown. `visual_qa` is here because a hand-written browser contract is
+     * a promise about the product, and a planner that has never seen the screen must not
+     * quietly withdraw it. `use` is here for the same reason one rung down: it names the
+     * profile, the effort and the Orca host a person chose for a stage, and a replan that
+     * dropped it would send the next run back to the default roster without saying so —
+     * losing precisely the settings the overlay exists to keep out of `~/.warden`.
      */
     private static final List<String> OPERATOR_BLOCKS =
-            List.of("visual_qa", "budgets", "max_fix_attempts", "timeout_minutes");
+            List.of("visual_qa", "use", "budgets", "max_fix_attempts", "timeout_minutes");
 
     /**
      * The compiled contract with the operator's own blocks taken from the file it replaces.

@@ -83,6 +83,33 @@ public record Profile(
                 verificationProbe, verificationChecks, verified, resolved, verificationExpect);
     }
 
+    /** Effort for one dispatch. Does not rewrite the home file or drop {@code verified_on}. */
+    public Profile withEffort(String next) {
+        return new Profile(name, role, vendor, model, next, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect);
+    }
+
+    /**
+     * Host this profile as an Orca worker for one dispatch so the Agent Dashboard can show it.
+     *
+     * Only ever called on a profile with nothing that could be lost on the way — no args, no
+     * MCP configuration, no vision delivery — because Orca's {@code worker-start} forwards
+     * agent, model and effort and not one thing more. {@link RunOverride} is where
+     * that is decided, and it sends everything else to the operator's declared
+     * {@code runner: orca} twin or refuses before a vendor is paid. Read-only is still the
+     * worktree fingerprint's guarantee, as on every other channel.
+     */
+    public Profile hostedOnOrca() {
+        if ("orca".equals(runner)) return this;
+        return new Profile(name, role, vendor, model, effort, command, List.of(), readOnly,
+                wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
+                requiredArtifactFields, quotaSignatures, "workspace_file", attachmentFlag,
+                vision, "orca", endpoint, apiKeyEnv, verificationProbe, verificationChecks,
+                verified, mcpConfig, verificationExpect);
+    }
+
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",

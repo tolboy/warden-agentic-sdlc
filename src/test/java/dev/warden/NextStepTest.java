@@ -118,7 +118,9 @@ public final class NextStepTest implements Suite {
         check.contains("names the current acceptance", blob, "echo water visible");
         check.contains("names the reviewer's suggestion", blob, "require an exact match, not a substring");
         check.contains("names the current acceptance_sha256", blob, "abc123sha");
-        check.contains("aborts this run", String.valueOf(step.get("commands")),
+        check.contains("advances this run", String.valueOf(step.get("commands")),
+                "warden approve gap-review-2 --decision advance");
+        check.contains("or aborts this run", String.valueOf(step.get("commands")),
                 "warden approve gap-review-2 --decision abort");
         check.contains("validates the task", String.valueOf(step.get("commands")),
                 "warden validate hello");

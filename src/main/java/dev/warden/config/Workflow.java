@@ -183,6 +183,26 @@ public record Workflow(List<Stage> stages) {
      * The chain Warden ran before it could be declared, kept as the default so an operator
      * who never writes a `workflow:` block gets exactly the documented loop.
      */
+    /**
+     * A Unity scene, a Tauri window, a canvas — anything the CDP harness cannot drive.
+     * Drop the browser stages and tell the visual role to take its own pictures, without
+     * editing the operator's policy.yaml.
+     */
+    public Workflow forAgentEvidence() {
+        List<Stage> next = new ArrayList<>();
+        for (Stage stage : stages) {
+            if (stage.kind() == Kind.VISUAL_HARNESS) continue;
+            if (stage.kind() == Kind.ROLE && "visual_qa".equals(stage.role())) {
+                next.add(new Stage(stage.name(), stage.kind(), stage.role(), stage.when(),
+                        stage.onFail(), stage.onFindings(), stage.recheckAfterFix(),
+                        stage.fixWith(), null, "agent"));
+            } else {
+                next.add(stage);
+            }
+        }
+        return new Workflow(next);
+    }
+
     public static Workflow builtIn() {
         return new Workflow(List.of(
                 new Stage("implement", Kind.ROLE, "implementer", List.of(),

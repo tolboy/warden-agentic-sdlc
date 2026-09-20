@@ -87,6 +87,7 @@ public final class DoCommand {
     private final Workspace.Source board;
     private final boolean watch;
     private final boolean orcaGate;
+    private final dev.warden.config.RunOverride override;
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
@@ -101,16 +102,26 @@ public final class DoCommand {
 
     public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
                      boolean watch, boolean orcaGate) {
+        this(processes, progress, board, watch, orcaGate, dev.warden.config.RunOverride.NONE);
+    }
+
+    public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
+                     boolean watch, boolean orcaGate, dev.warden.config.RunOverride override) {
         this.processes = processes;
         this.progress = progress;
         this.board = board;
         this.watch = watch;
         this.orcaGate = orcaGate;
+        this.override = override == null ? dev.warden.config.RunOverride.NONE : override;
     }
 
     /** Publish the run's pending decision to Orca as a gate, so it can be answered elsewhere. */
     public DoCommand withOrcaGate(boolean publish) {
-        return new DoCommand(processes, progress, board, watch, publish);
+        return new DoCommand(processes, progress, board, watch, publish, override);
+    }
+
+    public DoCommand withOverride(dev.warden.config.RunOverride next) {
+        return new DoCommand(processes, progress, board, watch, orcaGate, next);
     }
 
     /**
@@ -119,7 +130,7 @@ public final class DoCommand {
      * worktree partway through and the operator's own checkout is the wrong one to write on.
      */
     public DoCommand withWorkspace(Workspace.Source source, boolean watch) {
-        return new DoCommand(processes, progress, source, watch, orcaGate);
+        return new DoCommand(processes, progress, source, watch, orcaGate, override);
     }
 
     /**
@@ -548,6 +559,7 @@ public final class DoCommand {
                     .withWorkspace(card)
                     .withOrcaGate(orcaGate && !options.dryRun())
                     .withPreparation(preparation)
+                    .withOverride(override)
                     .run(loaded, user, runId, options.dryRun());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
@@ -606,6 +618,12 @@ public final class DoCommand {
             return fail("conductor_dry_run_unsupported", requested, root, taskId,
                     "use ordinary `warden do --dry-run`; Conductor exists to present a real human gate");
         }
+        // Conductor's workflow file declares five inputs and Warden does not rewrite it, so
+        // the flags an operator typed here cannot ride along as arguments. They are left in
+        // the run's own directory instead, which the inner `warden run` reads before it
+        // resolves anyone. Without this, `--conductor --use ... --effort ...` started the
+        // loop on the default roster and said nothing about it.
+        TaskLoop.handOver(root, runId, override);
         // Agent execution has its own task budget. This outer bound is the separate human-gate
         // TTL; Conductor checkpoints the workflow if the operator does not answer within a day.
         ConductorBridge.Outcome conductor = new ConductorBridge().run(root, taskId, runId,

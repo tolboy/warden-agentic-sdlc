@@ -41,6 +41,8 @@ public final class OrcaWorkspace implements Workspace {
     /** The live view this run opened, if it opened one. Null until {@link #watch} succeeds. */
     private String terminal;
     private String runId;
+    /** Orca orchestration run that owns the stage tasks on this board. */
+    private String orcaRunId;
 
     /**
      * The last line written to the card, so a beat can re-say it with the clock attached.
@@ -200,6 +202,7 @@ public final class OrcaWorkspace implements Workspace {
             if (opened.ok()) {
                 this.runId = runId;
                 this.terminal = handleOf(opened.result());
+                ensureRun();
             }
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
@@ -241,6 +244,57 @@ public final class OrcaWorkspace implements Workspace {
                 : "sh " + relative;
     }
 
+    /**
+     * A row on the Orca run for a Warden stage that has no Agent Dashboard worker.
+     *
+     * Direct CLIs never become WORKING sessions. Creating a task still puts the stage on
+     * the run the card belongs to, so a phone can see `review-second · claude-review`
+     * without rewriting the roster onto {@code runner: orca}. Never starts a worker.
+     */
+    @Override
+    public void stage(String label) {
+        if (stopped || label == null || label.isBlank()) return;
+        try {
+            ensureRun();
+            if (orcaRunId == null || terminal == null) return;
+            String title = clip(label);
+            orca.invoke(worktree, TIMEOUT, List.of(
+                    "orchestration", "task-create",
+                    "--spec", "Warden stage: " + title,
+                    "--task-title", title,
+                    "--display-name", title,
+                    "--run", orcaRunId,
+                    "--from", terminal));
+        } catch (Exception notOurProblem) {
+            // A missing task row is not a missing stage.
+        }
+    }
+
+    private void ensureRun() {
+        if (orcaRunId != null || terminal == null || runId == null) return;
+        try {
+            OrcaClient.Rpc created = orca.invoke(worktree, TIMEOUT, List.of(
+                    "orchestration", "run-create",
+                    "--objective", "warden " + runId,
+                    "--from", terminal));
+            if (!created.ok()) return;
+            String id = nestedRunId(created.result());
+            if (id != null) orcaRunId = id;
+        } catch (Exception notOurProblem) {
+            // The card and the tab still name the stage.
+        }
+    }
+
+    private static String nestedRunId(Map<String, Object> result) {
+        if (result == null) return null;
+        Object run = result.get("run");
+        if (run instanceof Map<?, ?> map && map.get("id") != null) return String.valueOf(map.get("id"));
+        for (String key : List.of("runId", "id", "run_id")) {
+            if (result.get(key) != null) return String.valueOf(result.get(key));
+        }
+        return null;
+    }
+
     @Override
     public void show(Path file, String runId, String title) {
         try {
@@ -252,6 +306,30 @@ public final class OrcaWorkspace implements Workspace {
                     "--command", showCommand(worktree, file, runId, windows())));
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
+        }
+    }
+
+    /**
+     * `orca file open`, which is how a picture gets onto the board and onto the phone.
+     *
+     * A relative path on purpose. Orca resolves it inside the worktree it was given, so
+     * nothing quoted or absolute goes on the command line — the same rule the followed
+     * terminal obeys, and for the same Windows argv reason. A file outside the worktree is
+     * not revealed at all rather than reached for with an absolute path Warden would have
+     * to escape.
+     */
+    @Override
+    public void reveal(Path file) {
+        try {
+            if (file == null || !Files.isRegularFile(file)) return;
+            Path absolute = file.toAbsolutePath().normalize();
+            Path base = worktree.toAbsolutePath().normalize();
+            if (!absolute.startsWith(base)) return;
+            String relative = base.relativize(absolute).toString().replace('\\', '/');
+            orca.invoke(worktree, TIMEOUT, List.of(
+                    "file", "open", "--worktree", selector, "--path", relative));
+        } catch (Exception notOurProblem) {
+            // A picture that did not open is not a run that failed.
         }
     }
 

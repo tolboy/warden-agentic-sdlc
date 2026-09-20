@@ -1106,6 +1106,27 @@ public final class TaskLoopTest implements Suite {
                 new ConfigLoader().load(unplugged, "hello"), UserConfig.load(home), "va5-dry", true);
         check.eq("and the preview names the stop it would make", "mcp_config_missing",
                 preview.summaryReport().get("would_stop"));
+
+        // Same preflight when the camera profile exists but has never been probed: the
+        // resolver refuses it, and that used to look like "nobody to fill the stage" and
+        // fall through until after the writer had been paid.
+        Path unstamped = newProject(sandbox, "eyes-acquire-unstamped", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-unstamped", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-unstamped", "eyes-acquire", 1,
+                "mcp/visual.json", true);
+        Files.writeString(home.resolve("profiles/loop-eyes-mcp.yaml"),
+                Files.readString(home.resolve("profiles/loop-eyes-mcp.yaml"))
+                        .replace("verified_on: \"2026-09-18\"\n", ""));
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome unproven = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unstamped, "hello"), UserConfig.load(home), "va6", false);
+        check.eq("an unverified MCP camera stops the run before it starts",
+                "visual_qa_unavailable", unproven.reason());
+        check.that("and the implementer never ran",
+                !Files.exists(sandbox.resolve("eyes-acquire-unstamped-impl.count")));
+        Map<String, Object> unprovenGap = (Map<String, Object>) unproven.summaryReport().get("unavailable_role");
+        check.contains("naming the refusal", String.valueOf(unprovenGap.get("rejected_profiles")),
+                "vision_capability_unverified");
     }
 
     /**
@@ -1451,8 +1472,8 @@ public final class TaskLoopTest implements Suite {
                     String.valueOf(stopped.summaryReport().get("safe_next_step")), "review is reused");
 
             dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
-            check.eq(mode + ": the person is asked retry or abort",
-                    List.of("retry", "abort"), store.read(first).options());
+            check.eq(mode + ": the person is asked retry, abort or advance",
+                    List.of("retry", "abort", "advance"), store.read(first).options());
             store.resolve(first, store.read(first).updatedAt().toString(), "retry", "operator",
                     "waited for the window");
 
@@ -2334,6 +2355,65 @@ public final class TaskLoopTest implements Suite {
                 reusedRow.get("fix_for"));
         check.eq("and the writer set survived the continuation", List.of("implvendor"),
                 resumed.summaryReport().get("writer_vendors"));
+
+        // Leg 5: what Warden may and may not say about a tree it did not start clean.
+        Path stranger = newProject(sandbox, "prov-stranger");
+        writeProfiles(home, sandbox, "prov-stranger", 1, 1);
+        // A file no recorded run wrote. The implementer this run dispatches accounts for
+        // what IT writes and for nothing that was already here.
+        Files.writeString(stranger.resolve("src/stranger.txt"), "written by nobody" + System.lineSeparator());
+        TaskLoop.Outcome unexplained = loop(stranger, home, "pv9");
+        check.that("the run still reaches the gate", unexplained.ok());
+        check.eq("a known new author does not explain the bytes that were already there",
+                "unknown_preexisting_candidate", unexplained.summaryReport().get("writer_provenance"));
+        check.eq("so nothing read over that tree is called independent", "unproven",
+                unexplained.summaryReport().get("review_assurance"));
+
+        // The same tree, a new run id and no --continue: the run that left this tree is
+        // found by its recorded closing fingerprint, not by being the newest folder.
+        Path inherit = newProject(sandbox, "prov-inherit");
+        writeProfiles(home, sandbox, "prov-inherit", 1, 1);
+        TaskLoop.Outcome first = loop(inherit, home, "pv10");
+        check.that("the first run reaches the gate", first.ok());
+        check.eq("and knows who wrote", "recorded", first.summaryReport().get("writer_provenance"));
+        TaskLoop.Outcome next = loop(inherit, home, "pv11");
+        check.eq("a new run id over that tree inherits its writers", List.of("implvendor"),
+                next.summaryReport().get("writer_vendors"));
+        check.eq("naming the run it took them from", "pv10",
+                next.summaryReport().get("writers_inherited_from"));
+        check.eq("so the reading is independent again, and says so", "independent",
+                next.summaryReport().get("review_assurance"));
+
+        // Now move the tree behind the recorded fingerprint. The same run folders are on
+        // disk and the newest of them still names a writer; none of them accounts for this.
+        Files.writeString(inherit.resolve("src/after-the-fact.txt"), "edited outside Warden" + System.lineSeparator());
+        TaskLoop.Outcome moved = loop(inherit, home, "pv12");
+        check.eq("a tree no recorded run left is not inherited from the newest one",
+                "unknown_preexisting_candidate", moved.summaryReport().get("writer_provenance"));
+        check.eq("and the label goes with it", "unproven",
+                moved.summaryReport().get("review_assurance"));
+
+        // Leg 6: choosing a reader is not waiving the contract.
+        Path pinned = newProject(sandbox, "prov-pinned");
+        writeProfiles(home, sandbox, "prov-pinned", 1, 1);
+        writeProfile(home, "same-vendor-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-pinned-review.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, same-vendor-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                """);
+        TaskLoop.Outcome waived = new TaskLoop(new ProcessRunner())
+                .withOverride(dev.warden.config.RunOverride.fromArgs(
+                        new String[] {"--use", "review=same-vendor-review"}))
+                .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home), "pv13", false);
+        check.eq("an operator's pin is filtered like any other choice",
+                "independent_review_unavailable", waived.reason());
+        check.eq("and nothing was spent finding out", 0L, waived.summaryReport().get("role_runs"));
+        check.contains("with the resolver's own reason, not a pin error",
+                Json.write(waived.summaryReport().get("unavailable_role")), "same_vendor_as_writer");
 
         writeProfiles(home, sandbox, "prov-restore", 1, 1);
     }

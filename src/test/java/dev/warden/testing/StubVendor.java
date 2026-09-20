@@ -605,7 +605,8 @@ public final class StubVendor {
                 }
                 if (shot != null) {
                     Files.createDirectories(shot.getParent());
-                    Files.write(shot, new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13});
+                    javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(32, 24,
+                            java.awt.image.BufferedImage.TYPE_INT_RGB), "png", shot.toFile());
                     taken.add(shot.toAbsolutePath().toString().replace("\\", "/"));
                 }
                 boolean passes = succeedsNow(args);

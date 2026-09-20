@@ -512,7 +512,27 @@ const PROBE = `(matcher) => {
     orientation: window.innerWidth >= window.innerHeight ? "landscape" : "portrait",
     found: element ? visibleEnough(element) : null,
     considered,
-    digest: document.body ? document.body.innerHTML.length + ":" + (document.body.innerText || "").length : "0:0",
+    // Content, not its length. This was two character counts, and a counter going
+    // from "0" to "1" is the same length twice — so the click that proved the page
+    // worked was reported as "changed nothing in the DOM", and a correct page was
+    // sent back for a paid fix round. Measured on a live run, tally-3. The lengths
+    // stay in the digest because they are free and they localise a difference; the
+    // two hashes are what make a same-length edit visible.
+    digest: (function () {
+      if (!document.body) return "0:0";
+      var html = document.body.innerHTML;
+      var text = document.body.innerText || "";
+      var source = html + " " + text;
+      var fnv = 0x811c9dc5;
+      var sum = 0;
+      for (var i = 0; i < source.length; i++) {
+        var code = source.charCodeAt(i);
+        fnv = (fnv ^ code) >>> 0;
+        fnv = (fnv + ((fnv << 1) + (fnv << 4) + (fnv << 7) + (fnv << 8) + (fnv << 24))) >>> 0;
+        sum = (sum + code * (i + 1)) >>> 0;
+      }
+      return html.length + ":" + text.length + ":" + fnv.toString(36) + ":" + sum.toString(36);
+    })(),
   };
 }`;
 

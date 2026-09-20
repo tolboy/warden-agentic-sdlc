@@ -129,7 +129,10 @@ public final class RosterCommand {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("stage", stage.name());
                 row.put("run", stage.kind().jsonValue());
-                if (stage.role() != null) row.put("role", stage.role());
+                if (stage.role() != null) {
+                    row.put("role", stage.role());
+                    row.put("fills", wouldFill(user, chain, stage));
+                }
                 row.put("when", stage.when());
                 workflow.add(row);
             }
@@ -139,6 +142,32 @@ public final class RosterCommand {
         report.put("dangling_policy_references", user.danglingProfileReferences());
         String table = text ? renderText(report) : null;
         return new Outcome(loaded, report, table);
+    }
+
+    /**
+     * Which profile this stage would get, by the roster's own arithmetic.
+     *
+     * A `rotate` role reads as one cell in the ROLE table and fills two stages with two
+     * different vendors; which stage gets which was only ever visible in the summary of a
+     * run that had already been paid for. The stage's position in the chain is what decides
+     * it, and that position is knowable from the policy alone.
+     *
+     * Configuration only. A run additionally probes that the executable is there, refuses a
+     * reader that shares a vendor with whoever wrote the candidate, and honours whatever
+     * per-run overlay was typed — so this is what the roster says, and `warden run --dry-run`
+     * is what the run says.
+     */
+    private static String wouldFill(UserConfig user, Workflow chain, Workflow.Stage stage) {
+        Policy.RoleSpec spec = user.policy() == null ? null : user.policy().roles().get(stage.role());
+        if (spec == null) return null;
+        List<String> eligible = new ArrayList<>();
+        for (String name : spec.profiles()) {
+            Profile profile = user.profiles().get(name);
+            if (profile != null && profile.role().equals(stage.role())) eligible.add(name);
+        }
+        if (eligible.isEmpty()) return null;
+        if ("first".equals(spec.strategy())) return eligible.get(0);
+        return eligible.get(Math.floorMod(chain.rotationPositionOf(stage), eligible.size()));
     }
 
     private static Map<String, Object> profileRow(UserConfig user, String name) {
@@ -200,6 +229,7 @@ public final class RosterCommand {
                 out.append("  ").append(row.get("stage"));
                 out.append("  run=").append(row.get("run"));
                 if (row.get("role") != null) out.append("  role=").append(row.get("role"));
+                if (row.get("fills") != null) out.append("  fills=").append(row.get("fills"));
                 Object when = row.get("when");
                 out.append("  when=").append(when instanceof List<?> w && w.isEmpty() ? "always" : when);
                 out.append('\n');

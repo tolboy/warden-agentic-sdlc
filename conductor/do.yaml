@@ -37,6 +37,7 @@ agents:
       - "dev.warden.Main"
       - "run"
       - "{{ workflow.input.task }}"
+      - "--no-wait-for-gate"
       - "--run-id"
       - "{{ workflow.input.run_id }}"
       - "--prepare"

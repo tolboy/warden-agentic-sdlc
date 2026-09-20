@@ -3,6 +3,7 @@ package dev.warden.role;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Policy;
 import dev.warden.config.Profile;
+import dev.warden.config.RunOverride;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.execution.Executors;
@@ -175,6 +176,24 @@ public final class RoleRunner {
      */
     private final Map<String, String> roleAssignments = new LinkedHashMap<>();
     private final Map<String, String> stageAssignments = new LinkedHashMap<>();
+    /**
+     * Stages whose pin came from the operator rather than from the escalation ladder.
+     *
+     * The two are not the same instruction and must not share a resolution path. The ladder
+     * climbs to a named pair *because* a reading objected, and the pair is declared in the
+     * policy the independence rule itself comes from: that is a documented exception. A
+     * person typing {@code --use review=claude-review} is choosing a reader, and choosing a
+     * reader has never been permission to waive the contract's
+     * {@code require_independent_vendor}. Without this set, it silently was.
+     */
+    private final Set<String> operatorPinnedStages = new LinkedHashSet<>();
+    private RunOverride overlay = RunOverride.NONE;
+    private final Map<String, String> replacements = new LinkedHashMap<>();
+
+    public RoleRunner excluding(Set<String> profiles) {
+        exhausted.addAll(profiles);
+        return this;
+    }
 
     /** Pin {@code profile} for every later dispatch of {@code role}. */
     public RoleRunner assignRole(String role, String profile) {
@@ -182,24 +201,82 @@ public final class RoleRunner {
         return this;
     }
 
-    /** Pin {@code profile} for every later dispatch of the stage called {@code stage}. */
+    /**
+     * Pin {@code profile} for every later dispatch of the stage called {@code stage}.
+     *
+     * The escalation ladder's pin, and it takes the stage over: a rung reached after a
+     * reading objected replaces whatever the operator chose for that stage, so the choice
+     * is no longer theirs and must not keep being judged as theirs. Leaving the flag set
+     * would apply the independence filter to a pair the policy declared for exactly the
+     * case where the ordinary rotation has run out.
+     */
     public RoleRunner assignStage(String stage, String profile) {
         stageAssignments.put(stage, profile);
+        operatorPinnedStages.remove(stage);
+        return this;
+    }
+
+    /**
+     * The same pin, made by a person for one run, and judged by the roster's own filters.
+     *
+     * Everything {@link #assignStage} checks is checked here too; what is added back is the
+     * independence question the ladder is allowed to skip. A refusal names the resolver's own
+     * reason, so the operator reads `same_vendor_as_writer` and not `pinned profile cannot
+     * fill role`.
+     */
+    public RoleRunner pinForRun(String stage, String profile) {
+        stageAssignments.put(stage, profile);
+        operatorPinnedStages.add(stage);
+        return this;
+    }
+
+    /**
+     * Per-run effort and host overlays. Pins are applied separately through
+     * {@link #pinForRun}; this only rewrites the profile after it is chosen.
+     */
+    public RoleRunner overlay(RunOverride next) {
+        this.overlay = next == null ? RunOverride.NONE : next;
         return this;
     }
 
     /** The pin that applies to a dispatch of {@code role} at {@code stage}, or null. */
     private String pinFor(String stage, String role) {
-        if (stage != null && stageAssignments.containsKey(stage)) return stageAssignments.get(stage);
-        return roleAssignments.get(role);
+        String key = stage == null ? role : stage;
+        String named = usable(replacements.get(key));
+        if (named != null) return named;
+        named = usable(authorizedFailover.get(key));
+        if (named == null) named = usable(authorizedFailover.get(role));
+        if (named != null) return named;
+        if (stage != null && stageAssignments.containsKey(stage)) {
+            named = usable(stageAssignments.get(stage));
+            if (named != null) return named;
+            // The operator pinned a profile that has already reported a spent subscription
+            // this run. Keeping the pin would re-dispatch it and never reach the backup the
+            // roster still has; dropping it lets rotation (and failover) pick the next one.
+            return null;
+        }
+        return usable(roleAssignments.get(role));
+    }
+
+    private String usable(String profile) {
+        return profile == null || exhausted.contains(profile) ? null : profile;
     }
 
     /**
-     * A pinned profile, resolved by the same checks the roster applies minus the rotation and
-     * the independence filter, and labelled for what it is.
+     * A pinned profile, resolved by the same checks the roster applies minus the rotation,
+     * and labelled for what it is.
+     *
+     * @param operatorChoice whether a person named this profile for this run. When they did,
+     *                       the independence filter applies exactly as it would to a rotated
+     *                       choice: a run that would have refused a same-vendor reader still
+     *                       refuses it, and the only thing the pin decided is which of the
+     *                       admissible profiles runs. The escalation ladder passes false,
+     *                       because a rung is a pair the policy declared for precisely the
+     *                       case where the ordinary rotation has nothing left.
      */
     private RoleResolver.Resolution resolvePinned(String pinned, String role, UserConfig user,
-                                                  RoleResolver.Writers writers) {
+                                                  RoleResolver.Writers writers,
+                                                  boolean operatorChoice) {
         Profile profile = user.profiles().get(pinned);
         Map<String, String> rejected = new LinkedHashMap<>();
         if (profile == null) rejected.put(pinned, "profile_not_found");
@@ -213,12 +290,35 @@ public final class RoleRunner {
             throw new RoleResolver.Unresolvable("pinned profile cannot fill role " + role + ": "
                     + rejected, rejected);
         }
+        if (operatorChoice) {
+            Policy.RoleSpec spec = user.policy() == null ? null : user.policy().roles().get(role);
+            if (spec != null) {
+                String assurance = RoleResolver.assuranceOf(spec, profile, user.profiles(), writers);
+                if (assurance.startsWith("refused:")) {
+                    rejected.put(pinned, assurance.substring("refused:".length()));
+                    throw new RoleResolver.Unresolvable("pinned profile cannot fill role " + role
+                            + ": " + rejected, rejected);
+                }
+                return new RoleResolver.Resolution(profile, Map.of(), assurance);
+            }
+        }
         String assurance;
         if (!profile.readOnly()) assurance = RoleResolver.NONE;
         else if (!writers.known()) assurance = RoleResolver.UNPROVEN;
         else if (!writers.contains(profile.vendor())) assurance = RoleResolver.INDEPENDENT;
         else assurance = "peer_review";
         return new RoleResolver.Resolution(profile, Map.of(), assurance);
+    }
+
+    /** Whether the pin in force at {@code stage} was typed by a person for this run. */
+    private boolean pinnedByOperator(String stage, String role) {
+        String key = stage == null ? role : stage;
+        if (replacements.containsKey(key) || authorizedFailover.containsKey(key)
+                || authorizedFailover.containsKey(role)) return true;
+        if (stage != null && stageAssignments.containsKey(stage)) {
+            return operatorPinnedStages.contains(stage);
+        }
+        return false;
     }
 
     public RoleRunner(ProcessRunner processes) { this(processes, ALWAYS, null, null); }
@@ -315,10 +415,12 @@ public final class RoleRunner {
         try {
             RoleResolver.Writers known = writers == null ? RoleResolver.Writers.NONE : writers;
             String pinned = pinFor(stage, role);
-            if (pinned != null) return resolvePinned(pinned, role, user, known).selected();
-            long rotation = stagePosition >= 0 ? stagePosition : nextRotation(root, role, true);
-            return new RoleResolver().resolve(role, user.policy(), user.profiles(), known,
-                    rotation, this::available, exhausted).selected();
+            Profile selected = pinned != null
+                    ? resolvePinned(pinned, role, user, known, pinnedByOperator(stage, role)).selected()
+                    : new RoleResolver().resolve(role, user.policy(), user.profiles(), known,
+                            stagePosition >= 0 ? stagePosition : nextRotation(root, role, true),
+                            this::available, exhausted).selected();
+            return overlay.adapt(stage, selected, user.profiles());
         } catch (Exception nobody) {
             return null;
         }
@@ -337,7 +439,8 @@ public final class RoleRunner {
         try {
             String pinned = pinFor(stage, role);
             if (pinned != null) {
-                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers,
+                        pinnedByOperator(stage, role));
                 return null;
             }
             new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
@@ -360,7 +463,8 @@ public final class RoleRunner {
         try {
             String pinned = pinFor(stage, role);
             if (pinned != null) {
-                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers);
+                resolvePinned(pinned, role, user, writers == null ? RoleResolver.Writers.NONE : writers,
+                        pinnedByOperator(stage, role));
                 return true;
             }
             new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
@@ -459,7 +563,7 @@ public final class RoleRunner {
             String pinned = pinFor(stageName, role);
             try {
                 resolution = pinned != null
-                        ? resolvePinned(pinned, role, user, writers)
+                        ? resolvePinned(pinned, role, user, writers, pinnedByOperator(stageName, role))
                         : new RoleResolver().resolve(role, user.policy(), user.profiles(),
                                 writers, rotation, this::available, exhausted);
             } catch (RoleResolver.Unresolvable failure) {
@@ -473,10 +577,25 @@ public final class RoleRunner {
             // The servers a role may reach are the operator's file, resolved against the
             // config home. A missing file is a configuration fault found before anything is
             // spent, not a vendor that failed to answer, so no failover applies.
-            Path mcpFile = resolution.selected().mcpConfig() == null ? null
-                    : user.resolve(resolution.selected().mcpConfig());
+            Profile chosen = overlay.adapt(stageName, resolution.selected(), user.profiles());
+            String overlayProblem = overlay.problem(stageName, resolution.selected(), user.profiles());
+            if (overlayProblem != null || exhausted.contains(chosen.name())) {
+                return unresolved(ledger, role, user, attempts,
+                        new RoleResolver.Unresolvable(overlayProblem == null
+                                ? "profile exhausted: " + chosen.name() : overlayProblem,
+                                Map.of(chosen.name(), "run_override_unavailable")), spent, roleInvocationId);
+            }
+            if (!available(chosen)) {
+                Map<String, String> rejected = new LinkedHashMap<>(resolution.rejected());
+                rejected.put(chosen.name(), "executable_not_found");
+                return unresolved(ledger, role, user, attempts,
+                        new RoleResolver.Unresolvable("no eligible profile for role " + role
+                                + ": " + rejected, rejected), spent, roleInvocationId);
+            }
+            Path mcpFile = chosen.mcpConfig() == null ? null
+                    : user.resolve(chosen.mcpConfig());
             if (mcpFile != null && !Files.isRegularFile(mcpFile)) {
-                Profile named = resolution.selected();
+                Profile named = chosen;
                 Map<String, Object> details = new LinkedHashMap<>();
                 details.put("message", "profile '" + named.name() + "' names mcp.config "
                         + named.mcpConfig() + ", which does not exist under the config home");
@@ -493,8 +612,8 @@ public final class RoleRunner {
                 return new Outcome(false, "role_mcp_config_missing", role, named.name(), named.vendor(),
                         resolution.rejected(), null, details);
             }
-            Profile profile = mcpFile == null ? resolution.selected()
-                    : resolution.selected().withMcpConfig(mcpFile.toAbsolutePath().normalize().toString());
+            Profile profile = mcpFile == null ? chosen
+                    : chosen.withMcpConfig(mcpFile.toAbsolutePath().normalize().toString());
             // Published from this resolution, not looked up again: a second resolve would
             // advance rotation and could name a profile that was not dispatched.
             publish(profile);
@@ -563,6 +682,19 @@ public final class RoleRunner {
             report.put("stage", stageName == null ? role : stageName);
             report.put("read_only", profile.readOnly());
             report.put("runner", profile.runner());
+            // What the roster chose, beside what the overlay made of it. Recorded because a
+            // reading is a reading by a named profile on a named channel, and "the operator
+            // asked for this stage on Orca" is not visible from the dispatched profile alone.
+            Profile requested = resolution.selected();
+            if (!requested.name().equals(profile.name())) {
+                report.put("profile_overlay", Map.of(
+                        "from", requested.name(), "to", profile.name(), "reason", "host"));
+            } else if (!requested.runner().equals(profile.runner())) {
+                report.put("runner_overlay", profile.runner());
+            }
+            if (profile.effort() != null && !profile.effort().equals(requested.effort())) {
+                report.put("effort_overlay", profile.effort());
+            }
             report.put("rotation_counter", rotation);
             report.put("strategy", spec.strategy());
             report.put("independence_required", spec.requireIndependentVendor());
@@ -733,7 +865,9 @@ public final class RoleRunner {
                 Profile candidate = failoverCandidate(role, user, writers, rotation);
                 if (candidate != null) {
                     String mode = user.policy().failoverMode();
-                    boolean preAuthorized = candidate.name().equals(authorizedFailover.get(role));
+                    boolean preAuthorized = candidate.name().equals(authorizedFailover.get(
+                            stageName == null ? role : stageName))
+                            || candidate.name().equals(authorizedFailover.get(role));
                     if ("auto".equals(mode) || preAuthorized) {
                         if (!gate.hasRoom()) {
                             // A one-call bound (the planner bootstrap) cannot spend a second
@@ -758,6 +892,7 @@ public final class RoleRunner {
                                 result, preAuthorized ? "human_switch_decision" : "policy_auto");
                         failover.put("role_invocation_id", roleInvocationId);
                         ledger.append("role_failover", failover);
+                        replacements.put(stageName == null ? role : stageName, candidate.name());
                         continue;
                     }
                     if ("confirm".equals(mode)) {
@@ -765,6 +900,11 @@ public final class RoleRunner {
                                 result, "pending_human_confirmation");
                         pending.put("independence_after_switch",
                                 independenceNote(candidate, writers));
+                        pending.put("stage", stageName == null ? role : stageName);
+                        pending.put("exhausted_profiles", List.copyOf(exhausted));
+                        pending.put("to_model", candidate.model());
+                        pending.put("to_runner", candidate.runner());
+                        pending.put("to_effort", candidate.effort());
                         report.put("failover_pending", pending);
                         report.put("vendor_attempts", attempts);
                         report.put("attempts_cost_usd", spent);
@@ -845,8 +985,13 @@ public final class RoleRunner {
     private Profile failoverCandidate(String role, UserConfig user, RoleResolver.Writers writers,
                                       long rotation) {
         try {
-            return new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                    writers, rotation, this::available, exhausted).selected();
+            Profile candidate = new RoleResolver().resolve(role, user.policy(), user.profiles(),
+                    writers, rotation, profile -> {
+                        if (overlay.problem(stageName, profile, user.profiles()) != null) return false;
+                        Profile effective = overlay.adapt(stageName, profile, user.profiles());
+                        return !exhausted.contains(effective.name()) && available(effective);
+                    }, exhausted).selected();
+            return overlay.adapt(stageName, candidate, user.profiles());
         } catch (RuntimeException none) {
             return null;
         }

@@ -119,6 +119,43 @@ is appended there rather than invented elsewhere.
 removed unless you pass `--keep-verified`. The command prints `verify_with` for
 `warden profiles --verify <name>`.
 
+To change effort, profile or runner **for one run** without touching those files:
+
+```text
+warden run level-bakery --effort review-second=xhigh --host review-second=orca
+warden do "…" --use look=claude-visual-qa-mcp
+```
+
+`--host <stage>=orca` runs that stage as an Orca worker, so Agent Dashboard can show
+WORKING. It finds the profile you declared for that role and vendor with `runner: orca` —
+the twin of your direct one — and uses that. It does not turn your direct profile into an
+Orca one: `worker-start` forwards agent, model and effort and nothing else, so
+`--allowedTools`, a Codex sandbox, a turn ceiling and `mcp.config` would all be dropped,
+and the `verified_on` you earned on the direct channel would be carried onto one it never
+probed. If the profile has none of those, it is hosted in place; otherwise the run refuses
+before anything is paid and names the twin to write. Read-only is the worktree fingerprint
+on both channels, as always.
+
+Every overlay is checked against the roster before the first paid stage — a stage name this
+workflow does not have, an effort the runner cannot deliver, a host that cannot travel — so
+a mistyped flag costs nothing. `warden run --dry-run` prints the resulting cast:
+
+```text
+plan  implement -> review -> review-second -> look
+cast  implement      grok-implement        xai/grok-4.6
+      review         codex-review          openai/gpt-5.2 high
+      review-second  orca-claude-review    claude/opus max · orca   (this run only)
+      look           claude-visual-qa-mcp  claude/opus
+```
+
+The same map may live on the task as `use:`, where a replan preserves it and
+`--conductor` carries it into the inner run. Flags win over the task.
+
+A failure gate also offers `advance`: it closes this run and starts the next id of the same
+task after you dealt with the blocker. `--no-start` records the decision and prints the
+command instead. If neither the contract nor the tree has changed since the stop, `advance`
+refuses rather than spending a run id to reach the same wall.
+
 Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
 `~/.warden`.
 
@@ -164,7 +201,7 @@ Which server drives which target is your choice, and outside what this repositor
 |---|---|---|
 | Svelte, React, plain browser UI | a browser-automation MCP server (Playwright- or DevTools-based) with a screenshot tool | the dev server's page, not `about:blank` |
 | Tauri 2 desktop | a desktop-automation server that can focus the application's window and capture it; or the app's WebView through the same browser server when it exposes a DevTools port | the window, at the size the scenario names |
-| Unity | an editor bridge exposing play-mode control and a screenshot or camera capture tool | the scene in play mode, not the editor chrome |
+| Unity | an editor bridge exposing play-mode control and a screenshot or camera capture tool. Start from `examples/mcp/unity.json` (`http://127.0.0.1:8081/mcp`) and copy it to `~/.warden/mcp/visual.json` | the scene in play mode, not the editor chrome. A task opts in with `visual_qa.required: true` and `evidence: agent`; that run skips the CDP harness. |
 | Node.js services | usually nothing to look at; keep `visual_qa.required: false` and let the machine gates judge | — |
 
 Grant the role only the server's tools and `Read`: it is read-only, and it does not need a

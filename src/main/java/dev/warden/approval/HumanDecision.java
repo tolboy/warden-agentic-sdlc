@@ -67,7 +67,13 @@ public record HumanDecision(
 
     public enum Kind {
         SUCCESS("success", List.of("accept", "reject")),
-        FAILURE("failure", List.of("retry", "abort")),
+        /**
+         * {@code advance} starts the next run of the same task after this one is closed.
+         * The operator (or a supervisor answering the gate) is saying the blocker was
+         * dealt with — a contract edit, a scope fix, a repaired tree — without typing the
+         * four follow-up commands. Older files that offered only retry/abort still parse.
+         */
+        FAILURE("failure", List.of("retry", "abort", "advance")),
         /**
          * A vendor ran out mid-run and another could take over. Distinct from FAILURE
          * because the choice is not "try again or give up" — the work so far is fine, and
@@ -79,7 +85,8 @@ public record HumanDecision(
          * missing, and the only way to wait out a window was `abort` plus a fresh run that
          * paid the writer again.
          */
-        FAILOVER("failover", List.of("abort", "switch", "retry"));
+        FAILOVER("failover", List.of("abort", "switch", "retry")),
+        CONTRACT_CHANGE("contract_change", List.of("abort", "apply"));
 
         private final String jsonValue;
         private final List<String> options;
@@ -111,7 +118,8 @@ public record HumanDecision(
          */
         boolean acceptsOptions(List<String> declared) {
             if (options.equals(declared)) return true;
-            return this == FAILOVER && List.of("abort", "switch").equals(declared);
+            if (this == FAILOVER && List.of("abort", "switch").equals(declared)) return true;
+            return this == FAILURE && List.of("retry", "abort").equals(declared);
         }
     }
 

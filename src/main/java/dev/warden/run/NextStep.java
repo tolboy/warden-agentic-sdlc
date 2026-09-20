@@ -255,6 +255,8 @@ public final class NextStep {
             case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
                     "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
+                commands.add("warden approve " + runId + " --decision advance --note \""
+                        + note(kind, findings) + "\"");
                 commands.add("warden approve " + runId + " --decision " + closeOption(summary)
                         + " --note \"" + note(kind, findings) + "\"");
                 if (!taskId.isBlank()) {
@@ -473,6 +475,7 @@ public final class NextStep {
         row.put("line", finding.get("line"));
         row.put("message", finding.get("message"));
         row.put("suggestion", finding.get("suggestion"));
+        row.put("proposed_acceptance", finding.get("proposed_acceptance"));
         return row;
     }
 

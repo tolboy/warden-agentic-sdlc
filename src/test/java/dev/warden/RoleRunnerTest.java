@@ -442,6 +442,12 @@ public final class RoleRunnerTest implements Suite {
         String evidence = Files.readString(project.resolve(".warden/runs/failover/evidence.jsonl"));
         check.contains("the exhaustion is its own ledger event", evidence, "role_quota_exhausted");
         check.contains("naming the vendor that ran out", evidence, "spentvendor");
+        RoleRunner pinned = new RoleRunner(new ProcessRunner()).atStage("reviewer");
+        pinned.pinForRun("reviewer", "stub-spent");
+        RoleRunner.Outcome pinnedSwap = pinned.run(new ConfigLoader().load(project, "hello"),
+                UserConfig.load(home), "reviewer", "pinned-failover", (String) null, null, false);
+        check.that("a pinned profile can fail over after quota", pinnedSwap.ok());
+        check.eq("the exhausted pin is not reselected", "stub-review", pinnedSwap.profile());
 
         // Nothing left to fall back to: the run stops, and says which of the two situations
         // it is in — "nothing is configured" needs an operator, "everything is spent" needs time.

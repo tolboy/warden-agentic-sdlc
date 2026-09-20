@@ -285,6 +285,18 @@ public final class EvidenceLedger {
     public static final String NARRATION = "narration.log";
 
     /**
+     * The per-run roster overlay, written by the outer command before the loop reserves.
+     *
+     * An instruction, not evidence — which is why the fence below lets it be there already.
+     * It exists because {@code warden do --conductor} does not run the loop: Conductor does,
+     * in a new process, from a workflow file with a fixed set of inputs. The flags the
+     * operator typed reached neither. Handing them over through the run's own directory
+     * keeps Warden the state machine, ties the overlay to exactly one run id, and leaves it
+     * on disk afterwards for whoever asks why that stage ran on Opus.
+     */
+    public static final String RUN_OVERRIDE = "run-override.json";
+
+    /**
      * The files a run may find already in its own directory, all of them belonging to `--watch`.
      *
      * The narration and the tiny script a terminal follows it with are written before the loop
@@ -299,7 +311,7 @@ public final class EvidenceLedger {
      */
     private static final java.util.Set<String> NON_EVIDENCE = java.util.Set.of(
             NARRATION, "follow.ps1", "follow.sh",
-            INSTANCE_FILE,
+            INSTANCE_FILE, RUN_OVERRIDE,
             HomeCorpus.STATUS, HomeCorpus.OUTBOX, HomeCorpus.DELIVERED, HomeCorpus.PROVENANCE,
             HomeCorpus.RUN_LOCK);
 

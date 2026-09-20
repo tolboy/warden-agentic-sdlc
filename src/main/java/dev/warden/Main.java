@@ -414,7 +414,8 @@ public final class Main {
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
-                    .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"));
+                    .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"))
+                    .withOverride(dev.warden.config.RunOverride.fromArgs(args));
             // Conductor's inner `warden run` is a new process and cannot see DoCommand's
             // in-memory Preparation. The reservation carries the mode when a planner ran
             // (or when auto skipped and still recorded it); --prepare is the same fact
@@ -456,7 +457,10 @@ public final class Main {
             if (value != null) result.put(key, value);
         }
         result.put("report_path", writeRunReport(Path.of("."), runId));
-        if (waitForGate != null) {
+        if (!dryRun && root != null && !hasFlag(args, "--no-wait-for-gate")) {
+            result.putAll(superviseGates(root, runId, outcome.summaryReport(), args,
+                    waitForGate == null ? 60 : waitForGate, ApproveEnv.realtime(), Main::startAdvance));
+        } else if (waitForGate != null) {
             // Import only. The wait never starts, retries or continues a run; a missing
             // gate is said, not treated as an answer.
             if (dryRun) {
@@ -468,6 +472,7 @@ public final class Main {
         }
         System.out.println(Json.write(result));
         int exit = outcome.ok() ? 0 : 1;
+        if (result.get("continued_ok") instanceof Boolean ok) exit = ok ? 0 : 1;
         if (result.get("gate_import") instanceof Map<?, ?> imported
                 && Boolean.FALSE.equals(imported.get("ok"))) {
             exit = 1;
@@ -505,6 +510,146 @@ public final class Main {
     }
 
     /**
+     * {@code advance}: close this run and start the next id of the same task, carrying
+     * writers. Verdicts are not reused — the point of advance is that the operator changed
+     * the contract, the scope, or the tree. {@code --no-start} records the decision and
+     * prints the command, for a script that wants to launch the run itself.
+     */
+    static Map<String, Object> startAdvance(Path root, HumanDecision resolved, String[] args,
+                                            ApproveEnv env) {
+        String nextId = nextRunId(root, resolved.runId());
+        String command = "warden run " + resolved.taskId() + " --run-id " + nextId
+                + " --continue " + resolved.runId() + " --prepare off";
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("command", command);
+        report.put("run_id", nextId);
+        report.put("continued_from", resolved.runId());
+        if (hasFlag(args, "--no-start")) {
+            report.put("started", false);
+            return report;
+        }
+        String unchanged = "advance".equals(resolved.decision()) ? advanceWouldRepeat(root, resolved) : null;
+        if (unchanged != null) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "advance_would_repeat");
+            report.put("message", unchanged);
+            return report;
+        }
+        try {
+            ConfigLoader.Loaded loaded = new ConfigLoader().load(root, resolved.taskId());
+            UserConfig user = env.user();
+            Carried carried = continuation(root, resolved.runId());
+            dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
+            java.nio.file.Path narration = narrationFile(root, nextId);
+            if (hasFlag(args, "--watch")) card.watch(narration, nextId);
+            TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
+                    .withProgress(dev.warden.run.Progress.tee(narration(args),
+                            dev.warden.run.Progress.toFile(narration)))
+                    .withWorkspace(card)
+                    .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
+                    .withOverride(dev.warden.config.RunOverride.fromArgs(args))
+                    .run(loaded, user, nextId, false, carried.failover(), carried.continuation());
+            report.put("started", true);
+            report.put("ok", outcome.ok());
+            report.put("reason", outcome.reason());
+            report.put("next_action", outcome.nextAction());
+            report.put("summary_report", outcome.summaryReport());
+            report.put("report_path", writeRunReport(root, nextId));
+        } catch (Exception failed) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "advance_start_failed");
+            report.put("message", String.valueOf(failed.getMessage()));
+        }
+        return report;
+    }
+
+    /**
+     * Why starting the next run now would stop at the same wall, or null when it might not.
+     *
+     * {@code advance} means "I dealt with the blocker, go again". The blockers it is offered
+     * for — a contract that does not permit the change, a scope that excludes the file, a
+     * baseline that was already failing — are all things outside the loop, and none of them
+     * is cleared by running the loop a second time. Measured: an advance answered on a
+     * {@code preflight_outside_scope} stop started a second run that stopped on
+     * {@code preflight_outside_scope}, with the contract byte-identical and no writer called.
+     *
+     * So the two things that would have to have changed are compared before a run id is
+     * spent: the `.warden` tree the contract is digested from, and the working tree the stop
+     * was about. If neither moved, the answer is the refusal below rather than a second run
+     * folder proving it. A tree Warden cannot fingerprint is not an accusation — the run
+     * starts, and the loop's own preflight has the last word as it always did.
+     */
+    static String advanceWouldRepeat(Path root, HumanDecision resolved) {
+        Map<String, Object> prior;
+        try {
+            Path file = root.resolve(".warden/runs").resolve(resolved.runId()).resolve("task-run.json");
+            if (!java.nio.file.Files.isRegularFile(file)) return null;
+            prior = dev.warden.json.Json.parseObject(java.nio.file.Files.readString(file));
+        } catch (Exception unreadable) {
+            return null;
+        }
+        Object reason = prior.get("reason");
+        if (!(reason instanceof String stopped) || !REPEATS_WITHOUT_AN_EDIT.contains(stopped)) {
+            return null;
+        }
+        String contractNow;
+        String treeNow;
+        try {
+            contractNow = dev.warden.config.WardenTree.digest(
+                    dev.warden.config.WardenTree.snapshot(root));
+            Object base = prior.get("diff_base_commit");
+            if (!(base instanceof String commit)) return null;
+            treeNow = new dev.warden.git.GitRepository(root, new ProcessRunner())
+                    .sourceFingerprint(commit);
+        } catch (Exception cannotTell) {
+            return null;
+        }
+        if (!contractNow.equals(prior.get("contract_sha256"))) return null;
+        if (resolved.candidateFingerprint() != null
+                && !resolved.candidateFingerprint().equals(treeNow)) {
+            return null;
+        }
+        return "advance would start a run that stops on the same thing: " + stopped
+                + ". Neither the contract under .warden nor the working tree has changed since "
+                + resolved.runId() + " stopped, and that stop is not about anything the loop can "
+                + "do differently on a second pass. Edit the contract (or the tree), then answer "
+                + "advance again — `warden report " + resolved.runId() + " --text` names what the "
+                + "preflight objected to. To start one anyway, use the printed `warden run` "
+                + "command.";
+    }
+
+    /**
+     * Stops whose cause is outside the loop, so a fresh run over an unchanged contract and
+     * an unchanged tree reaches the same line of code.
+     */
+    private static final java.util.Set<String> REPEATS_WITHOUT_AN_EDIT = java.util.Set.of(
+            "preflight_outside_scope", "preflight_dirty_tree", "contract_invalid",
+            "policy_invalid", "baseline_failed", "run_override_invalid",
+            "independent_review_unavailable", "visual_qa_unavailable", "mcp_config_missing");
+
+    /** bakery-3 → bakery-4; a name without a trailing number gets {@code -2}. */
+    static String nextRunId(Path root, String runId) {
+        String candidate = bumpRunId(runId);
+        Path runs = root.resolve(".warden/runs");
+        for (int i = 0; i < 50; i++) {
+            if (!java.nio.file.Files.isDirectory(runs.resolve(candidate))) return candidate;
+            candidate = bumpRunId(candidate);
+        }
+        return runId + "-" + Long.toHexString(System.currentTimeMillis());
+    }
+
+    static String bumpRunId(String runId) {
+        java.util.regex.Matcher trailing = java.util.regex.Pattern.compile("^(.*-)(\\d+)$")
+                .matcher(runId);
+        if (trailing.matches()) {
+            return trailing.group(1) + (Long.parseLong(trailing.group(2)) + 1);
+        }
+        return runId + "-2";
+    }
+
+    /**
      * The substitutions a human authorised on an earlier run, read back from that run's own
      * decision record.
      *
@@ -520,6 +665,13 @@ public final class Main {
     static Carried continuation(Path root, String priorRunId) throws Exception {
         if (priorRunId == null) return new Carried(Map.of(), TaskLoop.Continuation.NONE);
         HumanDecision decision = new ApprovalStore(root).read(priorRunId);
+        Map<String, String> priorSubstitutions = new LinkedHashMap<>();
+        Path priorFile = root.resolve(decision.summaryPath());
+        if (java.nio.file.Files.isRegularFile(priorFile)) {
+            Object previous = Json.parseObject(java.nio.file.Files.readString(priorFile)).get("authorized_failover");
+            if (previous instanceof Map<?, ?> map) map.forEach((key, value) ->
+                    priorSubstitutions.put(String.valueOf(key), String.valueOf(value)));
+        }
         // A rejection is feedback, not an authorisation: it grants nothing, it only tells the
         // next implementer what a person already objected to. Refusing to carry it meant the
         // one piece of human judgement in the loop was the one piece nobody downstream saw.
@@ -538,19 +690,27 @@ public final class Main {
         // the very tree that is still sitting there, and TaskLoop re-checks that before it
         // believes any of it.
         if (decision.kind() == HumanDecision.Kind.FAILURE && "retry".equals(decision.decision())) {
-            return new Carried(Map.of(),
+            return new Carried(priorSubstitutions,
                     new TaskLoop.Continuation(priorRunId, null, true));
+        }
+        // The operator (or whoever answered the gate) dealt with the blocker and wants the
+        // next run of this task now. Writers carry; verdicts do not — a contract or scope
+        // edit is why advance exists, and those change what a reading is about.
+        if ((decision.kind() == HumanDecision.Kind.FAILURE && "advance".equals(decision.decision()))
+                || (decision.kind() == HumanDecision.Kind.CONTRACT_CHANGE && "apply".equals(decision.decision()))) {
+            return new Carried(priorSubstitutions,
+                    new TaskLoop.Continuation(priorRunId, decision.note(), false));
         }
         if (decision.kind() != HumanDecision.Kind.FAILOVER) {
             throw new IllegalArgumentException("--continue " + priorRunId + " names a "
-                    + decision.kind().jsonValue() + " decision that is neither a rejection nor a "
-                    + "retry; only a failover decision authorises a vendor substitution");
+                    + decision.kind().jsonValue() + " decision that is neither a rejection, a "
+                    + "retry, nor an advance; only a failover decision authorises a vendor substitution");
         }
         // A failover answered `retry` is the person waiting out the quota window with the
         // same roster: no substitution is authorised, and the spent stop was never about the
         // work, so the verdicts already reached are kept.
         if (decision.state() == HumanDecision.State.RESOLVED && "retry".equals(decision.decision())) {
-            return new Carried(Map.of(), new TaskLoop.Continuation(priorRunId, null, true));
+            return new Carried(priorSubstitutions, new TaskLoop.Continuation(priorRunId, null, true));
         }
         if (decision.state() != HumanDecision.State.RESOLVED || !"switch".equals(decision.decision())) {
             throw new IllegalArgumentException("--continue " + priorRunId + " has not been "
@@ -559,8 +719,8 @@ public final class Main {
                     + "`warden approve " + priorRunId + " --decision switch|retry`");
         }
         Path summary = root.resolve(decision.summaryPath());
-        Object pending = Json.parseObject(java.nio.file.Files.readString(summary))
-                .get("failover_pending");
+        Map<String, Object> priorSummary = Json.parseObject(java.nio.file.Files.readString(summary));
+        Object pending = priorSummary.get("failover_pending");
         if (!(pending instanceof Map<?, ?> map)) {
             throw new IllegalArgumentException("--continue " + priorRunId + ": that run's summary "
                     + "names no pending failover, so there is nothing to authorise");
@@ -577,7 +737,13 @@ public final class Main {
         // that changed was who would read next. TaskLoop still re-checks the tree, the
         // acceptance and each stage's roster; the stage whose vendor ran out has no passing
         // row and is dispatched to the profile the person just chose.
-        return new Carried(Map.of(String.valueOf(role), String.valueOf(profile)),
+        Map<String, String> substitutions = new LinkedHashMap<>();
+        if (priorSummary.get("authorized_failover") instanceof Map<?, ?> authorized) {
+            authorized.forEach((key, value) -> substitutions.put(String.valueOf(key), String.valueOf(value)));
+        }
+        Object stage = map.get("stage");
+        substitutions.put(stage instanceof String text ? text : String.valueOf(role), String.valueOf(profile));
+        return new Carried(substitutions,
                 new TaskLoop.Continuation(priorRunId, null, true));
     }
 
@@ -670,14 +836,23 @@ public final class Main {
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
                 .withWorkspace(board(args), hasFlag(args, "--watch"))
                 .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
+                .withOverride(dev.warden.config.RunOverride.fromArgs(args))
                 .run(options, user);
         Map<String, Object> report = new LinkedHashMap<>(outcome.report());
         Object runId = report.get("run_id");
         if (runId instanceof String id && outcome.worktree() != null) {
             report.put("report_path", writeRunReport(outcome.worktree(), id));
+            Path summary = outcome.worktree().resolve(".warden/runs").resolve(id).resolve("task-run.json");
+            if (!options.dryRun() && !options.conductor() && !hasFlag(args, "--no-wait-for-gate")
+                    && java.nio.file.Files.isRegularFile(summary)) {
+                Integer minutes = optionalMinutes(args, "--wait-for-gate");
+                report.putAll(superviseGates(outcome.worktree(), id,
+                        Json.parseObject(java.nio.file.Files.readString(summary)), args,
+                        minutes == null ? 60 : minutes, ApproveEnv.realtime(), Main::startAdvance));
+            }
         }
         System.out.println(Json.write(report));
-        return outcome.ok() ? 0 : 1;
+        return Boolean.TRUE.equals(report.get("continued_ok")) || outcome.ok() ? 0 : 1;
     }
 
     /**
@@ -1034,7 +1209,14 @@ public final class Main {
                 }
             }
 
-            HumanDecision resolved = store.resolve(runId, expected, choice, actor, note);
+            if ("advance".equals(choice) && !hasFlag(args, "--no-start")) {
+                String repeat = advanceWouldRepeat(root, pending);
+                if (repeat != null) throw new ApprovalException("advance_would_repeat", repeat);
+            }
+            final boolean applyProposal = "apply".equals(choice);
+            HumanDecision resolved = store.resolve(runId, expected, choice, actor, note, current -> {
+                if (applyProposal) dev.warden.run.ContractProposal.apply(root, current);
+            });
             boolean summaryProjectionUpdated = updateDecisionProjection(root, resolved);
             long waitMillis = Math.max(0L,
                     Duration.between(resolved.createdAt(), resolved.updatedAt()).toMillis());
@@ -1069,11 +1251,17 @@ public final class Main {
             result.put("summary_projection_updated", summaryProjectionUpdated);
             result.putAll(decisionLedger.corpusVisibility());
             result.put("lands", false);
-            result.put("next", "accept".equals(choice)
-                    ? "inspect the exact diff and land it manually if desired"
-                    : "retry".equals(choice)
-                        ? "start a new run id after addressing the recorded blocker"
-                        : "no changes were landed");
+            if ("advance".equals(choice) || "apply".equals(choice)) {
+                Map<String, Object> started = startAdvance(root, resolved, args, env);
+                result.put("next_run", started);
+                result.put("next", started.get("command"));
+            } else {
+                result.put("next", "accept".equals(choice)
+                        ? "inspect the exact diff and land it manually if desired"
+                        : "retry".equals(choice)
+                            ? "start a new run id after addressing the recorded blocker"
+                            : "no changes were landed");
+            }
             return new ApproveOutcome(true, result);
         } catch (ApprovalException failure) {
             Map<String, Object> result = new LinkedHashMap<>();
@@ -1266,10 +1454,48 @@ public final class Main {
         }
         ApproveOutcome imported = approveDecision(root,
                 new String[] {"approve", runId, "--from-orca", "--wait-minutes",
-                        Integer.toString(waitMinutes)},
+                        Integer.toString(waitMinutes), "--no-start"},
                 env);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("gate_import", imported.report());
+        return result;
+    }
+
+    @FunctionalInterface
+    interface ContinuationStarter {
+        Map<String, Object> start(Path root, HumanDecision decision, String[] args, ApproveEnv env);
+    }
+
+    /** Own the operator wait outside TaskLoop's paid execution budget. Each restart is durable. */
+    static Map<String, Object> superviseGates(Path root, String runId, Map<String, Object> summary,
+                                             String[] args, int minutes, ApproveEnv env,
+                                             ContinuationStarter starter) throws Exception {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Object> chain = new java.util.ArrayList<>();
+        for (int count = 0; count < 100; count++) {
+            // Success remains a separate human acceptance; no background controller lands code.
+            String kind = String.valueOf(summary.get("decision_kind"));
+            if (!"failover".equals(kind) && !"failure".equals(kind)
+                    && !"contract_change".equals(kind)) break;
+            Object gate = summary.get("orca_gate");
+            if (!(gate instanceof Map<?, ?> map) || !Boolean.TRUE.equals(map.get("published"))) break;
+            Map<String, Object> imported = waitForPublishedGate(root, runId, summary, minutes, env);
+            chain.add(imported);
+            if (!(imported.get("gate_import") instanceof Map<?, ?> answer)
+                    || !Boolean.TRUE.equals(answer.get("ok"))) break;
+            HumanDecision resolved = new ApprovalStore(root).read(runId);
+            if (!List.of("switch", "advance", "apply").contains(resolved.decision())) break;
+            Map<String, Object> next = starter.start(root, resolved, args, env);
+            chain.add(next);
+            if (!Boolean.TRUE.equals(next.get("started"))) break;
+            result.put("continued_run_id", next.get("run_id"));
+            result.put("continued_ok", next.get("ok"));
+            if (!(next.get("summary_report") instanceof Map<?, ?> raw)) break;
+            summary = new LinkedHashMap<>();
+            for (var entry : raw.entrySet()) summary.put(String.valueOf(entry.getKey()), entry.getValue());
+            runId = String.valueOf(next.get("run_id"));
+        }
+        if (!chain.isEmpty()) result.put("gate_chain", chain);
         return result;
     }
 
@@ -1401,6 +1627,26 @@ public final class Main {
                                            has no contract yet. always --draft-only spends the
                                            planner and never the implementer
                   warden run <task>            the bounded loop; stops at the human gate
+                                               --use <stage>=<profile>  pin a profile for one
+                                               stage this run (review-second=claude-review).
+                                               Filtered by the roster's independence rule
+                                               like any other choice
+                                               --effort <stage>=<level>  effort for that
+                                               stage, refused when the runner cannot deliver
+                                               it rather than only recorded
+                                               --host <stage>=orca  run that stage on the
+                                               runner: orca profile you declared for that
+                                               role and vendor, so Agent Dashboard shows
+                                               WORKING. It never rewrites a direct profile
+                                               into an Orca one: worker-start forwards agent,
+                                               model and effort only, so grants would be lost
+                                               and the direct stamp would be carried onto a
+                                               channel it never probed
+                                               None of these touch ~/.warden. Task YAML
+                                               `use:` is the same overlay; flags win, and
+                                               every one is checked against the roster before
+                                               the first paid call. --dry-run prints the
+                                               resulting cast and spends nothing.
                                                --no-orca-gate does not mirror the pending
                                                decision into Orca as a decision gate
                                                --wait-for-gate N  after the loop, wait up to
@@ -1450,7 +1696,12 @@ public final class Main {
                                                every worktree of this repository
                   warden approve <run-id> --decision <choice>
                                                record a decision; never lands changes.
-                                               Must be run from the worktree the run lives in
+                                               Must be run from the worktree the run lives in.
+                                               Failure options: retry, abort, advance.
+                                               advance closes this run and starts the next
+                                               id of the same task (writers carry; verdicts
+                                               do not). --no-start records it and prints the
+                                               command instead.
                   warden approve <run-id> --from-orca
                                                take the decision from the Orca gate the run
                                                published, so it can be answered from another
