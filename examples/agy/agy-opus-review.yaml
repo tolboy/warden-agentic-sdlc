@@ -28,7 +28,7 @@ json_schema: schemas/reviewer.json
 artifact:
   required_fields: [role, task_id, status, verdict, summary, findings]
 quota:
-  signatures: ["no capacity available", "experiencing high traffic"]
+  signatures: ["no capacity available", "experiencing high traffic", "individual quota reached"]
 notes: "Failover from claude.exe Opus 5. Thinking is in the model id; agy rejects --effort for this model."
 verification:
   probe: 'agy -p "Use view_file to read schemas/reviewer.json. Return only its exact top-level title." --output-format json --mode accept-edits --sandbox --add-dir . --print-timeout 3m --model claude-opus-4-6-thinking --dangerously-skip-permissions'

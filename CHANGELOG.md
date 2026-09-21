@@ -11,6 +11,10 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- An Antigravity (`agy`) spent plan that exits 0 with `Individual quota reached` in the
+  JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
+  look used to stop as `role_artifact_incomplete` because the envelope was missing
+  `verdict`. Suite `quota signal`.
 - A visual task with `evidence: agent` is not a browser contract. Preflight used to ask
   `scripts/visual-qa.mjs --validate-only` about every required scenario, so a Unity look
   that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of

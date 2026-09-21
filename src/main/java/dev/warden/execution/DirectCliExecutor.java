@@ -239,6 +239,12 @@ public final class DirectCliExecutor implements RoleExecutor {
             if (!artifact.containsKey(field)) missing.add(field);
         }
         if (!missing.isEmpty()) {
+            // agy (bakery-agy-3 look) exited 0 with an error envelope: status=ERROR,
+            // error="Individual quota reached...", no verdict. That used to be
+            // role_artifact_incomplete, so failover never ran. A spent plan that did
+            // not produce the artifact is still a spent plan.
+            Result quota = quotaFailure(request, process, duration, evidence);
+            if (quota != null) return quota;
             evidence.put("failure", "role_artifact_incomplete");
             evidence.put("missing_fields", missing);
             evidence.put("received_keys", new ArrayList<>(artifact.keySet()));

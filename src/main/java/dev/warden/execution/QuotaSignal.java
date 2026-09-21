@@ -78,6 +78,7 @@ public final class QuotaSignal {
             "session limit",
             "quota exceeded",
             "quota exhausted",
+            "quota reached",
             "out of credits",
             "insufficient credits",
             "insufficient_quota",

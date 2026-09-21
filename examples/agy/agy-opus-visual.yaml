@@ -31,6 +31,8 @@ prompt_template: prompts/visual-qa.md
 json_schema: schemas/visual-qa.json
 artifact:
   required_fields: [role, task_id, status, verdict, summary, findings]
+quota:
+  signatures: ["individual quota reached", "no capacity available"]
 notes: "Looks with Orca computer-use. Thinking is in the model id; agy rejects --effort for this model."
 verification:
   probe: 'agy -p "Use view_file to read schemas/visual-qa.json. Return only its exact top-level title." --output-format json --mode accept-edits --add-dir . --print-timeout 3m --model claude-opus-4-6-thinking --dangerously-skip-permissions'
