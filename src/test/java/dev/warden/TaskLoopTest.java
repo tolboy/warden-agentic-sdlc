@@ -1,6 +1,7 @@
 package dev.warden;
 
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.RunOverride;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
 import dev.warden.gate.VisualQaRunner;
@@ -1673,6 +1674,58 @@ public final class TaskLoopTest implements Suite {
         check.eq("and the summary records the cap mode", "strict",
                 fits.summaryReport().get("cost_cap"));
 
+        // A pin outside the policy list is still a profile the cap has to reserve. Policy
+        // writer/reviewer bounds of $0.02/$0.03 fit under $0.06; an expensive implementer
+        // pinned with --use does not, and used to be dispatched because preflight only
+        // walked RoleSpec.profiles().
+        Path pinned = newProject(sandbox, "strict-pin", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-pin", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "expensive", "implementer", "expensivevendor",
+                "impl", 0.10, 0.08);
+        TaskLoop.Outcome pinSpends = new TaskLoop(new ProcessRunner())
+                .withOverride(RunOverride.fromArgs(new String[] {"--use", "implement=expensive"}))
+                .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home), "sc4", false);
+        check.eq("a dearer --use pin is refused before dispatch",
+                "budget_exhausted", pinSpends.reason());
+        check.eq("with nothing spent", 0L, pinSpends.summaryReport().get("role_runs"));
+        check.contains("naming the strict reserve",
+                String.valueOf(pinSpends.summaryReport().get("budget_stop")), "strict cap");
+
+        Path unboundedPin = newProject(sandbox, "strict-pin-unbounded", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-pin-unbounded", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "expensive-free", "implementer", "expensivevendor",
+                "impl", null, 0.08);
+        TaskLoop.Outcome pinUnenforceable = new TaskLoop(new ProcessRunner())
+                .withOverride(RunOverride.fromArgs(new String[] {"--use", "implement=expensive-free"}))
+                .run(new ConfigLoader().load(unboundedPin, "hello"), UserConfig.load(home),
+                        "sc5", false);
+        check.eq("a pinned profile with no bound makes the cap unenforceable",
+                "cost_cap_unenforceable", pinUnenforceable.reason());
+        check.eq("before anything was dispatched", 0L,
+                pinUnenforceable.summaryReport().get("role_runs"));
+        check.contains("naming the pinned profile",
+                Json.write(pinUnenforceable.summaryReport().get("cost_cap_gap")), "expensive-free");
+
+        // A rate-limit retry is another vendor call. Charging it only after RoleRunner
+        // returned let two $0.03 reviewer attempts share one outstanding bound under a
+        // $0.06 cap, and the run finished over budget.
+        Path retried = newProject(sandbox, "strict-retry", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-retry", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "loop-review", "reviewer", "reviewvendor",
+                "rate-limit-once", 0.03, 0.03);
+        String retryPolicy = Files.readString(home.resolve("policy.yaml"));
+        Files.writeString(home.resolve("policy.yaml"), retryPolicy.stripTrailing()
+                + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 1 } }\n");
+        TaskLoop.Outcome retryStopped = new TaskLoop(new ProcessRunner())
+                .withSleeper(millis -> { })
+                .run(new ConfigLoader().load(retried, "hello"), UserConfig.load(home), "sc6", false);
+        check.eq("a rate-limit retry that would overrun the cap is not admitted",
+                "rate_limited", retryStopped.reason());
+        check.that("the run stays under the ceiling",
+                ((Number) retryStopped.summaryReport().get("total_cost_usd")).doubleValue() <= 0.06);
+        check.eq("after the implementer and one reviewer attempt", 2L,
+                retryStopped.summaryReport().get("role_runs"));
+
         writeProfiles(home, sandbox, "strict-restore", 1, 1);
     }
 
@@ -1694,6 +1747,55 @@ public final class TaskLoopTest implements Suite {
                     "limits: { wall_clock_minutes: 2 }",
                     "limits: { wall_clock_minutes: 2, max_cost_usd: " + profile[1] + " }"));
         }
+    }
+
+    /**
+     * A stand-in that reports a chosen price, optionally with a declared per-call bound.
+     * {@code bound} null is the overlay that makes a strict cap unenforceable.
+     */
+    private void writeCostlyProfile(Path home, Path sandbox, String name, String role,
+                                    String vendor, String mode, Double bound, double reportedCost)
+            throws IOException {
+        Path counter = sandbox.resolve(name + ".count");
+        Files.deleteIfExists(counter);
+        boolean writer = "implementer".equals(role);
+        String prompt = writer ? "implementer" : "reviewer";
+        String fields = writer ? "role, task_id, status, summary, files_changed"
+                : "role, task_id, status, verdict, summary, findings";
+        String limits = bound == null
+                ? "limits: { wall_clock_minutes: 2 }"
+                : "limits: { wall_clock_minutes: 2, max_cost_usd: " + bound + " }";
+        int threshold = mode.endsWith("-once") ? 2 : 1;
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: %s
+                vendor: %s
+                command: %s
+                read_only: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                  - "--cost"
+                  - "%s"
+                  - "--prompt-file"
+                  - "{{prompt_file}}"
+                %s
+                prompt_template: prompts/%s.md
+                json_schema: schemas/%s.json
+                artifact:
+                  required_fields: [%s]
+                verification:
+                  verified_on: "2026-08-26"
+                """.formatted(name, role, vendor, yaml(javaExecutable()), !writer,
+                yaml(absoluteClassPath()), mode, yaml(counter.toString()), threshold,
+                reportedCost, limits, prompt, prompt, fields));
     }
 
     /**

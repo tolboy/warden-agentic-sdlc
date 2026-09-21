@@ -134,18 +134,27 @@ public final class PlannerDraft {
     /**
      * One top-level block: the line that starts with {@code key:} in the first column, plus
      * every line under it that is indented, blank or a comment. Null when the key is absent.
+     *
+     * The key index is kept separate from any comment that introduces it: walking {@code start}
+     * onto the comment and then scanning from there treated {@code budgets:} as the first line
+     * of the body, which is unindented, so a ceiling under {@code # Operator ceiling} was
+     * dropped. CRLF is split the way {@link dev.warden.yaml.Yaml} already splits it, so a
+     * Windows-saved {@code budgets:} still matches.
      */
     private static String blockOf(String yaml, String key) {
-        String[] lines = yaml.split("\n", -1);
-        int start = -1;
+        String[] lines = yaml.split("\r?\n", -1);
+        int keyIndex = -1;
         for (int index = 0; index < lines.length; index++) {
             String line = lines[index];
-            if (line.equals(key + ":") || line.startsWith(key + ": ")) { start = index; break; }
+            if (line.equals(key + ":") || line.startsWith(key + ": ")) {
+                keyIndex = index;
+                break;
+            }
         }
-        if (start < 0) return null;
-        // A comment directly above the key explains it and belongs to it.
+        if (keyIndex < 0) return null;
+        int start = keyIndex;
         while (start > 0 && lines[start - 1].startsWith("#")) start--;
-        int end = start + 1;
+        int end = keyIndex + 1;
         while (end < lines.length) {
             String line = lines[end];
             boolean belongs = line.isBlank() || line.startsWith(" ") || line.startsWith("\t")
@@ -154,7 +163,9 @@ public final class PlannerDraft {
             end++;
         }
         // A trailing comment block introduces the next key rather than closing this one.
-        while (end > start + 1 && (lines[end - 1].startsWith("#") || lines[end - 1].isBlank())) end--;
+        while (end > keyIndex + 1 && (lines[end - 1].startsWith("#") || lines[end - 1].isBlank())) {
+            end--;
+        }
         StringBuilder block = new StringBuilder();
         for (int index = start; index < end; index++) block.append(lines[index]).append('\n');
         return block.toString();

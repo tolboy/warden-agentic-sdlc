@@ -75,6 +75,7 @@ public final class PlannerTest implements Suite {
             prepareAlwaysDraftOnly(check, sandbox, home);
             prepareAlwaysGoesToLoop(check, sandbox, home);
             prepareAlwaysDoesNotTruncateExisting(check, sandbox, home);
+            operatorBlocksSurviveCrlfAndComments(check, sandbox, home);
             prepareAlwaysVisualParity(check, sandbox, home);
             stubDraftRefusals(check, sandbox, home);
             schemaIsEnforcedWhenProfileSkips(check, sandbox, home);
@@ -852,6 +853,55 @@ public final class PlannerTest implements Suite {
                 TaskSpec.parse(replannedYaml, handFile.toString()).id());
         check.eq("and the ceiling is what the loop would read", 11L,
                 TaskSpec.parse(replannedYaml, handFile.toString()).budget().maxRoleRuns());
+    }
+
+    /**
+     * Two shapes of a hand-written ceiling that {@code --prepare always} used to drop:
+     * CRLF on the key line, and a comment sitting directly above {@code budgets:}.
+     */
+    private void operatorBlocksSurviveCrlfAndComments(Check check, Path sandbox, Path home)
+            throws Exception {
+        ProjectConfig projectCfg = ProjectConfig.parse("""
+                version: 1
+                project: demo
+                checks:
+                  fast: ["echo ok"]
+                scopes:
+                  app: ["src"]
+                """, "project.yaml");
+        PlannerDraft.Access granted = PlannerDraft.Access.DO_DEFAULT;
+
+        Path crlf = sandbox.resolve("crlf-blocks");
+        scaffoldProject(crlf);
+        PlannerDraft.write(crlf, "hello", GOAL, projectCfg, granted, draft(Map.of()));
+        Path crlfFile = crlf.resolve(".warden/tasks/hello.yaml");
+        String crlfExisting = Files.readString(crlfFile, StandardCharsets.UTF_8);
+        if (!crlfExisting.endsWith("\n")) crlfExisting += "\n";
+        Files.writeString(crlfFile, crlfExisting + "budgets:\r\n  max_cost_usd: 0.05\r\n",
+                StandardCharsets.UTF_8);
+        PlannerDraft.write(crlf, "hello", GOAL, projectCfg, granted, draft(Map.of()));
+        String crlfMerged = Files.readString(crlfFile, StandardCharsets.UTF_8);
+        check.contains("a CRLF budgets block survives replan", crlfMerged, "max_cost_usd: 0.05");
+        check.eq("and the loop would still read the ceiling", 0.05,
+                TaskSpec.parse(crlfMerged, crlfFile.toString()).budget().maxCostUsd());
+
+        Path commented = sandbox.resolve("comment-blocks");
+        scaffoldProject(commented);
+        PlannerDraft.write(commented, "hello", GOAL, projectCfg, granted, draft(Map.of()));
+        Path commentedFile = commented.resolve(".warden/tasks/hello.yaml");
+        String commentedExisting = Files.readString(commentedFile, StandardCharsets.UTF_8);
+        if (!commentedExisting.endsWith("\n")) commentedExisting += "\n";
+        Files.writeString(commentedFile, commentedExisting
+                + "# Operator ceiling\nbudgets:\n  max_cost_usd: 0.05\n",
+                StandardCharsets.UTF_8);
+        PlannerDraft.write(commented, "hello", GOAL, projectCfg, granted, draft(Map.of()));
+        String commentedMerged = Files.readString(commentedFile, StandardCharsets.UTF_8);
+        check.contains("a comment above budgets is kept with the block", commentedMerged,
+                "Operator ceiling");
+        check.contains("and the ceiling under it survives replan", commentedMerged,
+                "max_cost_usd: 0.05");
+        check.eq("so the money cap is still what the person wrote", 0.05,
+                TaskSpec.parse(commentedMerged, commentedFile.toString()).budget().maxCostUsd());
     }
 
     private void prepareAlwaysVisualParity(Check check, Path sandbox, Path home) throws Exception {

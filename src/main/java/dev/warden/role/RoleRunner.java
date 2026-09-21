@@ -94,6 +94,23 @@ public final class RoleRunner {
          * cannot carry the chain an hour past the time the operator gave it.
          */
         default java.time.Duration wallClockCap() { return null; }
+
+        /**
+         * The declared per-call bound of the profile about to run. Asked immediately before
+         * {@link #requireDispatch} so a strict money cap reserves who routing actually
+         * selected — a {@code --use} pin, an Orca twin, a substitution — rather than the
+         * largest name on the policy list.
+         */
+        default void reserve(Double declaredBound) { }
+
+        /**
+         * Charge a completed vendor attempt before the next dispatch of this role is
+         * considered. A rate-limit retry and a failover are further calls; leaving their
+         * predecessors unaccounted until {@code RoleRunner.run} returns let them share one
+         * outstanding bound and overrun a strict cap. An unpriced attempt is charged at
+         * {@code declaredBound} when the cap is strict.
+         */
+        default void settleAttempt(Object costUsd, Double declaredBound) { }
     }
 
     /**
@@ -769,6 +786,7 @@ public final class RoleRunner {
             // refuses a new paid dispatch. Settlement of a worker already running is past
             // this line and is never blocked for analytics.
             if (user.home() != null) HomeCorpus.requireDispatch(user.home(), root);
+            gate.reserve(profile.maxCostUsd());
             gate.requireDispatch();
             java.time.Duration cap = gate.wallClockCap();
             if (cap != null && cap.toMinutes() < profile.wallClockMinutes()) {
@@ -832,6 +850,7 @@ public final class RoleRunner {
             attempts.add(attemptRow);
             if (report.get("cost_usd") instanceof Number number) spent += number.doubleValue();
             journalAttempt(ledger, role, roleInvocationId, report, attemptRow);
+            gate.settleAttempt(report.get("cost_usd"), profile.maxCostUsd());
 
             // A transient rate limit is the one failure worth asking the same vendor again
             // for, and only when the policy said how often. The wait honours the seconds the

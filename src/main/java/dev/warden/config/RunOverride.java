@@ -249,6 +249,11 @@ public final class RunOverride {
         return stage != null && "orca".equals(hostByStage.get(stage));
     }
 
+    /** The profile pin for {@code stage}, or null when this overlay does not name one. */
+    public String pinnedProfile(String stage) {
+        return stage == null ? null : profileByStage.get(stage);
+    }
+
     public Map<String, Object> toMap() {
         Map<String, Object> value = new LinkedHashMap<>();
         if (!profileByStage.isEmpty()) value.put("profile", new LinkedHashMap<>(profileByStage));

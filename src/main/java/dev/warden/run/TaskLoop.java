@@ -141,6 +141,8 @@ public final class TaskLoop {
     private final RunOverride override;
     /** Nanoseconds, as {@link System#nanoTime}; replaced only by the suite. */
     private java.util.function.LongSupplier clock = System::nanoTime;
+    /** How the loop waits between rate-limit retries; the suite replaces it. */
+    private java.util.function.LongConsumer sleeper;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (VisualCheck) null);
@@ -171,8 +173,20 @@ public final class TaskLoop {
         return copy;
     }
 
+    /**
+     * The same loop, pausing between rate-limit retries through {@code next} instead of the
+     * clock. The suite cannot wait out a vendor's backoff.
+     */
+    public TaskLoop withSleeper(java.util.function.LongConsumer next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.sleeper = next;
+        return copy;
+    }
+
     private TaskLoop keepClock(TaskLoop copy) {
         copy.clock = clock;
+        copy.sleeper = sleeper;
         return copy;
     }
 
@@ -507,9 +521,16 @@ public final class TaskLoop {
             // call as its outcome, so the loop still charges it; throwing from the next
             // dispatch instead lost that call's cost and its unpriced count.
             @Override public boolean hasRoom() { return budget.hasRoom(); }
+
+            @Override public void reserve(Double declaredBound) { budget.reserveSelected(declaredBound); }
+
+            @Override public void settleAttempt(Object costUsd, Double declaredBound) {
+                budget.settleAttempt(costUsd, declaredBound);
+            }
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
+        if (sleeper != null) roles.withSleeper(sleeper);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
@@ -668,7 +689,8 @@ public final class TaskLoop {
         // on the roster declares an upper bound per call, or the cap cannot be enforced and
         // the run says so instead of spending under a number that was never a cap.
         if (task.budget().strictCostCap()) {
-            Map<String, Object> unbounded = strictCapGap(workflow, user, task, reviewByRisk);
+            Map<String, Object> unbounded = strictCapGap(workflow, user, task, reviewByRisk,
+                    overlay, authorizedFailover);
             if (unbounded != null) {
                 summary.put("cost_cap", "strict");
                 summary.put("cost_cap_gap", unbounded);
@@ -677,7 +699,8 @@ public final class TaskLoop {
                 summary.putIfAbsent("would_stop", "cost_cap_unenforceable");
             } else {
                 summary.put("cost_cap", "strict");
-                budget.strictBounds(strictBounds(workflow, user, task, reviewByRisk));
+                budget.strictBounds(strictBounds(workflow, user, task, reviewByRisk,
+                        overlay, authorizedFailover));
             }
         }
         // A policy file that exists and does not parse is not the same as no policy. Treating
@@ -1138,24 +1161,30 @@ public final class TaskLoop {
     /**
      * The paying profile with no declared per-call bound, when the task asked for a strict
      * money cap, or null when every candidate declares one.
+     *
+     * Routing does not only consult {@link Policy.RoleSpec#profiles()}: a {@code --use} pin,
+     * a {@code --host} twin, an escalation rung and an authorised substitution can all select
+     * a verified profile from the operator's roster. A cap that ignored those spent under a
+     * number it had never reserved.
      */
     private static Map<String, Object> strictCapGap(Workflow workflow, UserConfig user,
-                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                                    RunOverride overlay,
+                                                    Map<String, String> substitutions) {
         if (user.policy() == null) return null;
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
-            Policy.RoleSpec spec = user.policy().roles().get(stage.role());
-            if (spec == null) continue;
-            for (String name : spec.profiles()) {
-                dev.warden.config.Profile profile = user.profiles().get(name);
-                if (profile == null || profile.maxCostUsd() != null) continue;
+            for (dev.warden.config.Profile profile : selectableProfiles(stage, user, overlay,
+                    substitutions)) {
+                if (profile.maxCostUsd() != null) continue;
                 Map<String, Object> gap = new LinkedHashMap<>();
                 gap.put("stage", stage.name());
                 gap.put("role", stage.role());
-                gap.put("profile", name);
+                gap.put("profile", profile.name());
                 gap.put("message", "budgets.cost_cap: strict needs a proven upper bound for every "
-                        + "call it may admit, and profile '" + name + "' (stage '" + stage.name()
+                        + "call it may admit, and profile '" + profile.name() + "' (stage '"
+                        + stage.name()
                         + "') declares no limits.max_cost_usd. Declare one from that vendor's "
                         + "measured worst case, or set cost_cap: threshold to keep max_cost_usd as "
                         + "a threshold on reported spend; nothing was dispatched.");
@@ -1167,26 +1196,65 @@ public final class TaskLoop {
 
     /**
      * The worst-case price of each paying stage under a strict cap: the largest declared
-     * bound among the profiles that could fill it. Preparation stages are already spent when
-     * the loop starts and do not need reserving.
+     * bound among the profiles routing can actually select. Preparation stages are already
+     * spent when the loop starts and do not need reserving. The dispatch gate then overwrites
+     * the stage with the selected profile's own bound.
      */
     private static Map<String, Double> strictBounds(Workflow workflow, UserConfig user,
-                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk) {
+                                                    TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                                    RunOverride overlay,
+                                                    Map<String, String> substitutions) {
         Map<String, Double> bounds = new LinkedHashMap<>();
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
-            Policy.RoleSpec spec = user.policy().roles().get(stage.role());
             double worst = 0;
-            for (String name : spec.profiles()) {
-                dev.warden.config.Profile profile = user.profiles().get(name);
-                if (profile != null && profile.maxCostUsd() != null) {
+            for (dev.warden.config.Profile profile : selectableProfiles(stage, user, overlay,
+                    substitutions)) {
+                if (profile.maxCostUsd() != null) {
                     worst = Math.max(worst, profile.maxCostUsd());
                 }
             }
             bounds.put(stage.name(), worst);
         }
         return bounds;
+    }
+
+    /**
+     * Every profile this stage might dispatch: the policy list, a pin, a host twin of those,
+     * an escalation rung of the same role, and a substitution a person already authorised.
+     */
+    private static List<dev.warden.config.Profile> selectableProfiles(Workflow.Stage stage,
+            UserConfig user, RunOverride overlay, Map<String, String> substitutions) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        Policy.RoleSpec spec = user.policy() == null ? null : user.policy().roles().get(stage.role());
+        if (spec != null) names.addAll(spec.profiles());
+        if (overlay != null) {
+            String pin = overlay.pinnedProfile(stage.name());
+            if (pin != null) names.add(pin);
+        }
+        if (substitutions != null) {
+            String named = substitutions.get(stage.name());
+            if (named == null) named = substitutions.get(stage.role());
+            if (named != null) names.add(named);
+        }
+        Policy.Escalation ladder = user.policy() == null ? null : user.policy().escalation();
+        if (ladder != null) {
+            for (Policy.Escalation.Rung rung : ladder.rungs()) {
+                if ("implementer".equals(stage.role())) names.add(rung.implementer());
+                else if ("reviewer".equals(stage.role())) names.add(rung.reviewer());
+            }
+        }
+        List<dev.warden.config.Profile> profiles = new ArrayList<>();
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        for (String name : names) {
+            dev.warden.config.Profile profile = user.profiles().get(name);
+            if (profile == null) continue;
+            if (overlay != null) profile = overlay.adapt(stage.name(), profile, user.profiles());
+            if (profile == null || !seen.add(profile.name())) continue;
+            profiles.add(profile);
+        }
+        return profiles;
     }
 
     /**
@@ -3532,6 +3600,8 @@ public final class TaskLoop {
         private Map<String, Double> strictBounds;
         private final java.util.Set<String> stagesPaid = new java.util.LinkedHashSet<>();
         private String dispatchingStage;
+        /** True while this role's vendor attempts have already been charged in-flight. */
+        private boolean settledInFlight;
         private final java.util.function.LongSupplier clock;
         private final long startedNanos;
 
@@ -3594,6 +3664,10 @@ public final class TaskLoop {
         boolean hasRoom() {
             if (maxRuns > 0 && chainRuns() >= maxRuns) return false;
             if (maxCost > 0 && chainSpent() >= maxCost) return false;
+            if (strictBounds != null && maxCost > 0
+                    && chainSpent() + outstandingBounds() > maxCost) {
+                return false;
+            }
             return !deadlinePassed();
         }
 
@@ -3664,6 +3738,48 @@ public final class TaskLoop {
         }
 
         int unpriced() { return unpriced; }
+
+        /**
+         * The selected profile's declared bound for the stage about to dispatch. A pin or
+         * host twin can be dearer than anyone on the policy list; reserving the list's max
+         * then spent the pin under a number that had never been checked.
+         */
+        void reserveSelected(Double bound) {
+            if (strictBounds == null || dispatchingStage == null) return;
+            if (bound == null) {
+                throw new ExceededException("max_cost_usd",
+                        "budgets.cost_cap: strict needs a proven upper bound for the profile "
+                                + "about to dispatch at stage '" + dispatchingStage
+                                + "', and it declares none");
+            }
+            strictBounds.put(dispatchingStage, bound);
+        }
+
+        /**
+         * Charge one completed vendor attempt before a retry or failover is admitted.
+         * Unpriced attempts under a strict cap are charged at the profile's declared bound
+         * so the next dispatch cannot treat them as free.
+         */
+        void settleAttempt(Object cost, Double bound) {
+            if (cost instanceof Number number) spent += number.doubleValue();
+            else if (strictBounds != null && bound != null && bound > 0) spent += bound;
+            else unpriced++;
+            settledInFlight = true;
+        }
+
+        /**
+         * The role already charged its vendor attempts through {@link #settleAttempt}.
+         * {@link #record} must not add them again; it still retires the stage bound.
+         */
+        boolean finishSettledRole() {
+            if (!settledInFlight) return false;
+            settledInFlight = false;
+            if (strictBounds != null && dispatchingStage != null) {
+                stagesPaid.add(dispatchingStage);
+                dispatchingStage = null;
+            }
+            return true;
+        }
 
         void account(Object cost) {
             if (cost instanceof Number number) spent += number.doubleValue();
@@ -4368,13 +4484,17 @@ public final class TaskLoop {
             // A role may have dispatched more than one vendor. Charging only the last one
             // would under-report a run that failed over, which is the run most worth costing.
             Object attempts = step.details().get("vendor_attempts");
-            if (attempts instanceof List<?> list && !list.isEmpty()) {
-                for (Object item : list) {
-                    if (item instanceof Map<?, ?> map) budget.account(map.get("cost_usd"));
+            if (!budget.finishSettledRole()) {
+                if (attempts instanceof List<?> list && !list.isEmpty()) {
+                    for (Object item : list) {
+                        if (item instanceof Map<?, ?> map) budget.account(map.get("cost_usd"));
+                    }
+                } else {
+                    budget.account(step.details().get("cost_usd"));
                 }
+            }
+            if (attempts instanceof List<?> list && !list.isEmpty()) {
                 entry.put("vendor_attempts", attempts);
-            } else {
-                budget.account(step.details().get("cost_usd"));
             }
             if (step.details().get("failover_pending") != null) {
                 entry.put("failover_pending", step.details().get("failover_pending"));

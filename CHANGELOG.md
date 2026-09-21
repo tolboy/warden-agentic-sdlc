@@ -27,6 +27,11 @@ that exists in code but has never been run live says so.
   that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of
   `testid=`. Dry-run stayed silent when node was not on PATH. The adapter is asked only
   when the harness will actually run. Suite `visual qa`. Live-caught on `bakery-agy-1`.
+- A strict money cap looks at the profile routing will actually dispatch: a `--use` pin,
+  a `--host` twin, an escalation rung and an authorised substitution, not only the policy
+  list. A rate-limit retry is charged before the next attempt is admitted, and an unpriced
+  attempt is charged at its declared bound. `--prepare always` keeps operator `budgets`
+  blocks that use CRLF or sit under a comment. Suites `planner` and `task loop`.
 
 ### Added
 

@@ -66,6 +66,13 @@ public final class StubVendor {
         return null;
     }
 
+    /** Optional {@code --cost <usd>} so a budget test can name what the stand-in reports. */
+    private static double costOf(String[] args, double fallback) {
+        String raw = flag(args, "--cost");
+        if (raw == null || raw.isBlank()) return fallback;
+        return Double.parseDouble(raw);
+    }
+
     private static boolean succeedsNow(String[] args) throws Exception {
         String counterPath = flag(args, "--counter");
         String threshold = flag(args, "--threshold");
@@ -160,7 +167,7 @@ public final class StubVendor {
                 System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
                         + "\"status\":\"completed\",\"summary\":\"created\","
                         + "\"files_changed\":[\"src/result.txt\"]},"
-                        + "\"total_cost_usd\":0.012,\"num_turns\":3,"
+                        + "\"total_cost_usd\":" + costOf(args, 0.012) + ",\"num_turns\":3,"
                         + "\"usage\":{\"input_tokens\":7,\"output_tokens\":5,\"total_tokens\":12},"
                         + "\"modelUsage\":{\"stub-impl-model\":{}}}");
             }
@@ -510,12 +517,16 @@ public final class StubVendor {
                     String message = mode.equals("rate-limit-once")
                             ? "Rate limit reached for requests; please retry shortly"
                             : "You've hit your usage limit. Try again at 9:21 PM.";
-                    System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\"}");
+                    String priced = flag(args, "--cost") == null ? ""
+                            : ",\"total_cost_usd\":" + costOf(args, 0.004);
+                    System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\""
+                            + priced + "}");
                     System.exit(1);
                 }
                 System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\","
                         + "\"task_id\":\"hello\",\"status\":\"completed\",\"verdict\":\"pass\","
-                        + "\"summary\":\"review\",\"findings\":[]},\"total_cost_usd\":0.004}");
+                        + "\"summary\":\"review\",\"findings\":[]},\"total_cost_usd\":"
+                        + costOf(args, 0.004) + "}");
             }
             // An implementer that writes the result on its first call and is rate limited on
             // its second — the fix round a reviewer's P1 asked for. The tree is left as the
