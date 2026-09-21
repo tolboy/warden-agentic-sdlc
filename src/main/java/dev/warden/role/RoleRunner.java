@@ -244,9 +244,8 @@ public final class RoleRunner {
         String key = stage == null ? role : stage;
         String named = usable(replacements.get(key));
         if (named != null) return named;
-        named = usable(authorizedFailover.get(key));
-        if (named == null) named = usable(authorizedFailover.get(role));
-        if (named != null) return named;
+        // authorizedFailover is not a pin. It authorises the successor after quota;
+        // rotation still names the spent profile so the switch is a role_failover event.
         if (stage != null && stageAssignments.containsKey(stage)) {
             named = usable(stageAssignments.get(stage));
             if (named != null) return named;
@@ -313,8 +312,7 @@ public final class RoleRunner {
     /** Whether the pin in force at {@code stage} was typed by a person for this run. */
     private boolean pinnedByOperator(String stage, String role) {
         String key = stage == null ? role : stage;
-        if (replacements.containsKey(key) || authorizedFailover.containsKey(key)
-                || authorizedFailover.containsKey(role)) return true;
+        if (replacements.containsKey(key)) return true;
         if (stage != null && stageAssignments.containsKey(stage)) {
             return operatorPinnedStages.contains(stage);
         }

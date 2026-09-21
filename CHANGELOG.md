@@ -15,6 +15,9 @@ that exists in code but has never been run live says so.
   JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
   look used to stop as `role_artifact_incomplete` because the envelope was missing
   `verdict`. Suite `quota signal`.
+- A confirmed vendor swap authorises the successor after quota; it is not a pin that
+  skips the spent vendor. Pinning it dropped the `role_failover` event the continued
+  run has to write. Suite `task loop`.
 - A visual task with `evidence: agent` is not a browser contract. Preflight used to ask
   `scripts/visual-qa.mjs --validate-only` about every required scenario, so a Unity look
   that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of

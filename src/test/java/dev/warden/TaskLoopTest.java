@@ -1509,7 +1509,7 @@ public final class TaskLoopTest implements Suite {
                 "operator", "");
         Main.Carried carried = Main.continuation(switched, "is1");
         check.eq("the switch authorises the named successor",
-                Map.of("reviewer", "loop-review"), carried.failover());
+                Map.of("review-second", "loop-review"), carried.failover());
         check.that("and asks the loop to keep what was already judged",
                 carried.continuation().reuseJudgements());
         TaskLoop.Outcome afterSwitch = new TaskLoop(new ProcessRunner())
