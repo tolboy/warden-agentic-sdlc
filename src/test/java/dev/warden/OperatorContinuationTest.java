@@ -13,6 +13,7 @@ public final class OperatorContinuationTest implements Suite {
     public String name() { return "operator-continuation"; }
     public void run(Check check) throws Exception {
         proposals(check);
+        aliasedProject(check);
         supervisor(check);
         Path fake = Files.createTempFile("warden-fake-image", ".png");
         Files.write(fake, new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13});
@@ -39,10 +40,39 @@ public final class OperatorContinuationTest implements Suite {
         return root;
     }
 
+    private void aliasedProject(Check check) throws Exception {
+        Path root = project();
+        Path alias = root.resolveSibling(root.getFileName() + "-alias");
+        linkDirectory(alias, root);
+        try {
+            Map<String, Object> proposal = ContractProposal.prepare(alias, summary());
+            check.that("project directory aliases allow a validated proposal", !proposal.isEmpty());
+            check.eq("proposal stays relative to the project", ".warden/tasks/task.yaml", proposal.get("path"));
+            Path outside = project();
+            Path redirected = root.resolve(".warden/tasks/redirected");
+            linkDirectory(redirected, outside.resolve(".warden/tasks"));
+            try {
+                Map<String, Object> request = summary();
+                request.put("task_id", ".warden/tasks/redirected/task.yaml");
+                check.that("a redirect inside tasks is still refused",
+                        ContractProposal.prepare(alias, request).isEmpty());
+            } finally { Files.delete(redirected); }
+        } finally { Files.delete(alias); }
+    }
+
+    private void linkDirectory(Path link, Path target) throws Exception {
+        if (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")) {
+            Process process = new ProcessBuilder("cmd", "/c", "mklink", "/J",
+                    link.toString(), target.toString()).redirectErrorStream(true).start();
+            String output = new String(process.getInputStream().readAllBytes());
+            if (process.waitFor() != 0) throw new java.io.IOException(output);
+        } else Files.createSymbolicLink(link, target);
+    }
+
     private Map<String, Object> summary() {
         return new LinkedHashMap<>(Map.of("task_id", "task", "next_step", Map.of(
                 "kind", "fix_contract", "findings", List.of(Map.of("category", "contract_gap",
-                        "proposed_acceptance", List.of("new-check --scene Bakery"))))));
+                        "proposed_acceptance", List.of("new-check --scene sample"))))));
     }
 
     private void proposals(Check check) throws Exception {
@@ -60,7 +90,7 @@ public final class OperatorContinuationTest implements Suite {
         ApprovalStore store = new ApprovalStore(root);
         HumanDecision pending = store.createPending("run-1", "task", HumanDecision.Kind.CONTRACT_CHANGE,
                 ContractProposal.question(proposal), file, null);
-        check.that("phone question names executable commands", pending.reason().contains("new-check --scene Bakery"));
+        check.that("phone question names executable commands", pending.reason().contains("new-check --scene sample"));
         Files.writeString(task, before + "# edited while waiting\n");
         try {
             store.resolve("run-1", pending.updatedAt().toString(), "apply", "tester", "",

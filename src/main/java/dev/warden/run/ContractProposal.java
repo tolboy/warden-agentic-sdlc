@@ -37,7 +37,7 @@ public final class ContractProposal {
             if (before.equals(after)) return Map.of();
             TaskSpec.parse(after, target.toString()).resolve(loaded.project(), target.toString());
             Map<String, Object> proposal = new LinkedHashMap<>();
-            proposal.put("path", root.toAbsolutePath().normalize().relativize(target).toString().replace('\\', '/'));
+            proposal.put("path", relativeTo(root, target));
             proposal.put("before_sha256", hash(before));
             proposal.put("after", after);
             proposal.put("commands", commands);
@@ -94,13 +94,27 @@ public final class ContractProposal {
         } finally { Files.deleteIfExists(temp); }
     }
 
+    /**
+     * The file must physically sit under this project's {@code .warden/tasks}.
+     * Windows may spell the same directory as an 8.3 name, a junction, or a {@code \\?\}
+     * prefix; {@code toRealPath()} of the file is compared with {@code toRealPath()} of
+     * the tasks directory, never with the unresolved {@code Path} the caller held.
+     */
     private static Path confined(Path root, Path target) throws IOException {
-        Path base = root.toAbsolutePath().normalize().resolve(".warden/tasks");
-        Path path = target.toAbsolutePath().normalize();
-        if (!path.startsWith(base) || !path.toRealPath().startsWith(base.toRealPath())
-                || !path.toRealPath().equals(path))
-            throw new ApprovalException("proposal_outside_tasks", "proposal must target a real file under .warden/tasks");
-        return path;
+        Path realTasks = root.toAbsolutePath().normalize().toRealPath()
+                .resolve(".warden").resolve("tasks").toRealPath();
+        Path realFile = target.toAbsolutePath().normalize().toRealPath();
+        if (!realFile.startsWith(realTasks) || !Files.isRegularFile(realFile)) {
+            throw new ApprovalException("proposal_outside_tasks",
+                    "proposal must target a real file under .warden/tasks");
+        }
+        return realFile;
+    }
+
+    private static String relativeTo(Path root, Path target) throws IOException {
+        return root.toAbsolutePath().normalize().toRealPath()
+                .relativize(target.toAbsolutePath().normalize().toRealPath())
+                .toString().replace('\\', '/');
     }
 
     private static String digest(Map<String, Object> proposal) {

@@ -18,6 +18,10 @@ that exists in code but has never been run live says so.
 - A confirmed vendor swap authorises the successor after quota; it is not a pin that
   skips the spent vendor. Pinning it dropped the `role_failover` event the continued
   run has to write. Suite `task loop`.
+- A contract proposal on Windows no longer requires `toRealPath()` to equal the
+  unresolved path. GitHub's runner spells temp dirs as an 8.3 name or a `\\?\`
+  prefix, `prepare` swallowed that as an empty proposal, and `operator-continuation`
+  died as `proposal_changed`. Confinement compares real paths. Suite `operator-continuation`.
 - A visual task with `evidence: agent` is not a browser contract. Preflight used to ask
   `scripts/visual-qa.mjs --validate-only` about every required scenario, so a Unity look
   that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of
