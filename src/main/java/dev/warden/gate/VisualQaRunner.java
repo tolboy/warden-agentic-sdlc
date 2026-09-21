@@ -65,11 +65,18 @@ public final class VisualQaRunner {
      * Those are the browser stage's business and it has its own codes for them; refusing a run
      * at preflight because node is slow to answer would trade one premature stop for another.
      *
+     * A task that declared {@code evidence: agent} has no browser stage. Its scenarios are
+     * instructions to the visual role (play this level, photograph that hop), not CDP
+     * locators. Asking the adapter about them is how bakery-agy-1 stopped as
+     * {@code visual_qa_contract_invalid} before any vendor ran: the adapter wanted
+     * {@code testid=} on a sentence about a Unity net.
+     *
      * @return the problem to stop on, or null when there is nothing to say
      */
     public String contractProblem(ConfigLoader.Loaded loaded) {
         TaskSpec.VisualQa visual = loaded.resolved().visualQa();
-        if (!visual.required() || script == null || !Files.isRegularFile(script)) return null;
+        if (!visual.required() || visual.agentEvidence()) return null;
+        if (script == null || !Files.isRegularFile(script)) return null;
         if (visual.scenarios().isEmpty()) {
             return "visual_qa.required is true and the task declares no scenarios";
         }

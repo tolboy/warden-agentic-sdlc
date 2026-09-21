@@ -82,6 +82,21 @@ public final class VisualQaTest implements Suite {
         // Node is not a build dependency — `./build.sh && ./test.sh` must work on a bare JDK —
         // so the half of this that needs it is skipped rather than failed when it is absent.
         Path adapter = Path.of("scripts", "visual-qa.mjs").toAbsolutePath();
+        Files.writeString(project.resolve(".warden/tasks/unity.yaml"), """
+                version: 1
+                id: unity
+                goal: Photograph the hop
+                scope: code
+                visual_qa:
+                  required: true
+                  evidence: agent
+                  scenarios:
+                    - "Play the Bakery campaign level. Photograph the hop-aside."
+                """);
+        check.eq("an agent camera is not a browser contract", null,
+                new VisualQaRunner(new ProcessRunner(), adapter)
+                        .contractProblem(new ConfigLoader().load(project, "unity")));
+
         if (!Files.isRegularFile(adapter) || !nodeAvailable()) return;
 
         check.eq("a contract that states an assertion passes preflight", null,

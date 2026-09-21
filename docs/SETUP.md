@@ -183,13 +183,18 @@ workflow:
         evidence: agent, on_fail: stop, on_findings: fix }
 ```
 
-`evidence: agent` needs no `browser` stage and cannot also `sees:` one. What Warden adds is the
-same for every target: the role is told where to save its screenshots (the run's
-`screenshots/` directory; `{{evidence_dir}}` in args if the vendor wants it as a flag) and to
-list them in `screenshots_taken`; each listed file must exist there and be non-empty, its
-digest goes onto the step row as `image_evidence`, and a verdict that lists none is refused as
-`visual_qa_no_evidence` — no fix round, because no implementer can make a model take a
-picture. The configuration file's digest is recorded on the role contract. Warden never reads
+`evidence: agent` needs no `browser` stage and cannot also `sees:` one. Its scenarios are
+instructions to the looking role — "play Bakery and photograph the hop" — not CDP locators.
+Preflight does not ask `scripts/visual-qa.mjs` about them; that grammar is for the harness
+stage, and applying it here is how a Unity look used to die as `visual_qa_contract_invalid`
+for want of `testid=`. What Warden adds is the same for every target: the role is told where
+to save its screenshots (the run's `screenshots/` directory; `{{evidence_dir}}` in args if
+the vendor wants it as a flag) and to list them in `screenshots_taken`; each listed file
+must exist there and be non-empty, its digest goes onto the step row as `image_evidence`,
+and a verdict that lists none is refused as `visual_qa_no_evidence` — no fix round, because
+no implementer can make a model take a picture. The camera itself can be an MCP server
+(Unity, a browser) or a desktop computer-use skill (`orca computer`) that can see the
+window even when no engine MCP is configured. The configuration file's digest is recorded on the role contract. Warden never reads
 the file's format and never checks what a picture shows: that is what the profile's probe is
 for, and the template's `verification.probe` asks the model to take one screenshot, open it
 with its own read tool and name two words visible in it. Run that against **your** server, look

@@ -9,6 +9,14 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Fixed
+
+- A visual task with `evidence: agent` is not a browser contract. Preflight used to ask
+  `scripts/visual-qa.mjs --validate-only` about every required scenario, so a Unity look
+  that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of
+  `testid=`. Dry-run stayed silent when node was not on PATH. The adapter is asked only
+  when the harness will actually run. Suite `visual qa`. Live-caught on `bakery-agy-1`.
+
 ### Added
 
 - Per-run roster overlays so a Unity loop does not rewrite `~/.warden`. `warden run` and
