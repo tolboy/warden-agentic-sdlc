@@ -19,6 +19,17 @@ that exists in code but has never been run live says so.
   already was. `warden profiles --verify` fills `{{model}}` and `{{effort}}` in the probe, so
   the stamp is earned by the model the profile declares. Found moving the roster from Opus 5
   to Opus 5.5 on 2026-09-22. Suites `roster`, `profile verifier`.
+- An Orca worker that never took its first turn is not a verdict on the work. On a live run
+  in a fresh worktree, Claude Code sat on its once-per-repository trust question, Warden
+  fenced the worker after 45 s as `role_orca_start_failed`, the stop was `reviewer_failed`,
+  and the `--continue` that followed paid the implementer and the first reader again for a
+  tree they had passed. `role_orca_start_failed`, `_no_coordinator`, `_unavailable`,
+  `_no_worktree` and `_worker_active` now stop as `orca_worker_not_started` (and
+  `role_orca_timeout` as `role_timed_out`), which a continuation carries verdicts past; a
+  summary written before this is re-read from its failed step's code. Before fencing,
+  Warden keeps the agent tab's last screen as `agent_screen_tail` and names a trust question
+  or a CLI update prompt as `agent_blocked_on` with the one action that clears it. Suites
+  `workflow`, `next-step`, `orca-settlement`.
 - `warden do "…" --watch --use implement=…` no longer corrupts the goal. The positional parser
   read every flag it did not list as taking a value, so `--watch` swallowed the `--use` after
   it, `implement=…` joined the goal, and a contract whose goal was on disk word for word was

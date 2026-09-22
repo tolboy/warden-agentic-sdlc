@@ -367,6 +367,9 @@ public final class OrcaExecutor implements RoleExecutor {
                 dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
             }
             if (!started.ok() || !OrcaSettlement.startReady(started.envelope())) {
+                // Read before fencing: once the worker is stopped its tab is gone, and the
+                // screen is the only place that says why the first turn never started.
+                recordAgentScreen(request.projectRoot(), dispatchId, evidence);
                 boolean fenced = dispatchId != null
                         && stopWorker(request.projectRoot(), dispatchId, evidence);
                 if (fenced) {
@@ -904,6 +907,52 @@ public final class OrcaExecutor implements RoleExecutor {
      * operator is owed more than a false: the first attempt at this recorded only the boolean,
      * and a live timeout then reported an unaccounted lifecycle with nothing to act on.
      */
+    /**
+     * The agent tab's last screen for a worker whose first turn never started, and what it was
+     * waiting on when Warden recognises it.
+     *
+     * Measured 2026-09-22 on Orca 1.4.207: a Claude reviewer in a fresh worktree sat on Claude
+     * Code's once-per-repository trust question until Warden fenced it, and the report said
+     * only `role_orca_start_failed` with Orca's receipt. The question itself was in the
+     * worker's `terminal.preview`, and it names the one click that fixes it.
+     */
+    private void recordAgentScreen(Path root, String dispatchId, Map<String, Object> evidence) {
+        if (dispatchId == null) return;
+        try {
+            OrcaClient.Rpc shown = orca.invoke(root, PROBE_TIMEOUT,
+                    List.of("orchestration", "worker-show", "--dispatch", dispatchId));
+            String screen = nestedString(shown.result(), "terminal", "preview");
+            if (screen == null || screen.isBlank()) return;
+            evidence.put("agent_screen_tail", tail(screen, 1500));
+            String blockedOn = blockedOn(screen);
+            if (blockedOn == null) return;
+            evidence.put("agent_blocked_on", blockedOn);
+            evidence.put("resolution", "folder_trust".equals(blockedOn)
+                    ? "the agent CLI stopped on its first-run question for this repository "
+                            + "(Claude Code: \"Is this a project you created or one you trust?\"). "
+                            + "Answer Yes once in an Orca tab in this worktree; Claude records it "
+                            + "for the whole repository, so later worktrees do not ask again"
+                    : "the agent CLI asked to update before it would start. Choose Skip or update "
+                            + "it once in an Orca tab, then retry");
+        } catch (Exception unreadable) {
+            // The screen is a diagnosis, not a condition of fencing; the stop goes ahead.
+        }
+    }
+
+    /** What a first-run screen is waiting on, or null when Warden does not recognise it. */
+    public static String blockedOn(String screen) {
+        if (screen == null) return null;
+        String lower = screen.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("trust this folder") || lower.contains("one you trust")
+                || lower.contains("do you trust")) {
+            return "folder_trust";
+        }
+        if (lower.contains("update available") || lower.contains("update now")) {
+            return "cli_update_prompt";
+        }
+        return null;
+    }
+
     private boolean stopWorker(Path root, String dispatchId, Map<String, Object> evidence) {
         try {
             OrcaClient.Rpc stopped = orca.invoke(root, Duration.ofSeconds(30),

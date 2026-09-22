@@ -15,6 +15,18 @@ public final class OrcaSettlementTest implements Suite {
                 {"ok":true,"result":{"ready":true,"dispatchId":"disp_1","taskId":"task_1"}}
                 """);
         check.that("worker-start ready is recognised", OrcaSettlement.startReady(ready));
+
+        // What a worker that never took its first turn was looking at. The first is the
+        // preview Orca 1.4.207 held for a Claude reviewer in a fresh worktree on 2026-09-22.
+        check.eq("Claude Code's trust question is recognised", "folder_trust",
+                dev.warden.execution.orca.OrcaExecutor.blockedOn("one you trust? (Like your own "
+                        + "code, a well-known open source\nproject, or work from your team).\n"
+                        + "Security guide\nPS C:\\w-hello-toggle>"));
+        check.eq("and Codex's update screen", "cli_update_prompt",
+                dev.warden.execution.orca.OrcaExecutor.blockedOn("Update available! 0.154.0 -> "
+                        + "0.156.0\n1. Update now (runs `npm install -g @openai/codex`)"));
+        check.eq("an ordinary screen is not guessed at", null,
+                dev.warden.execution.orca.OrcaExecutor.blockedOn("Thinking... reading index.html"));
         check.eq("dispatch id is taken from the receipt", "disp_1", OrcaSettlement.dispatchId(ready));
 
         Map<String, Object> nested = Json.parseObject("""

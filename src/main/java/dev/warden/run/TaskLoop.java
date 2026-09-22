@@ -339,7 +339,8 @@ public final class TaskLoop {
             "role_timed_out",
             "vendor_call_failed",
             "vendor_protocol_failed",
-            "prompt_undeliverable");
+            "prompt_undeliverable",
+            "orca_worker_not_started");
 
     /**
      * Role outcome codes that describe the call rather than the candidate, and the stop reason
@@ -368,19 +369,31 @@ public final class TaskLoop {
      * {@link #reusableJudgements} still applies, and the stage that failed has no passing row
      * to reuse, so it is always dispatched again.
      */
-    private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.of(
-            "role_timeout", "role_timed_out",
-            "role_command_failed", "vendor_call_failed",
-            "role_artifact_unparseable", "vendor_protocol_failed",
-            "role_artifact_incomplete", "vendor_protocol_failed",
-            "role_artifact_schema_violation", "vendor_protocol_failed",
-            "role_prompt_undeliverable", "prompt_undeliverable",
-            "role_rate_limited", "rate_limited",
-            "role_quota_exhausted", "quota_exhausted",
+    private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
+            Map.entry("role_timeout", "role_timed_out"),
+            Map.entry("role_command_failed", "vendor_call_failed"),
+            Map.entry("role_artifact_unparseable", "vendor_protocol_failed"),
+            Map.entry("role_artifact_incomplete", "vendor_protocol_failed"),
+            Map.entry("role_artifact_schema_violation", "vendor_protocol_failed"),
+            Map.entry("role_prompt_undeliverable", "prompt_undeliverable"),
+            Map.entry("role_rate_limited", "rate_limited"),
+            Map.entry("role_quota_exhausted", "quota_exhausted"),
             // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
             // opposite of that, and the difference decides both what an operator goes and
             // reads and whether the stages that already passed survive the retry.
-            "role_turns_exhausted", "turn_ceiling_reached");
+            Map.entry("role_turns_exhausted", "turn_ceiling_reached"),
+            // An Orca worker that never took its first turn read nothing. Measured 2026-09-22:
+            // Claude Code stopped on its once-per-repository trust question in a fresh
+            // worktree, Warden fenced the worker after 45 s, the stop was `reviewer_failed`,
+            // and the `--continue` that followed paid the implementer and the first reader
+            // again for a tree they had already passed. `role_orca_reported_failure` is not
+            // here on purpose: that worker ran and said the work failed.
+            Map.entry("role_orca_start_failed", "orca_worker_not_started"),
+            Map.entry("role_orca_no_coordinator", "orca_worker_not_started"),
+            Map.entry("role_orca_unavailable", "orca_worker_not_started"),
+            Map.entry("role_orca_no_worktree", "orca_worker_not_started"),
+            Map.entry("role_orca_worker_active", "orca_worker_not_started"),
+            Map.entry("role_orca_timeout", "role_timed_out"));
 
     /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
     private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
@@ -390,7 +403,8 @@ public final class TaskLoop {
             "prompt_undeliverable", "prompt_delivery",
             "rate_limited", "rate_limit",
             "quota_exhausted", "quota",
-            "turn_ceiling_reached", "turn_ceiling");
+            "turn_ceiling_reached", "turn_ceiling",
+            "orca_worker_not_started", "orca_start");
 
     /**
      * Whether a call timed out on a wall clock the chain deadline had lowered.
@@ -447,6 +461,29 @@ public final class TaskLoop {
      */
     public static boolean isAboutTheWork(String reason) {
         return !NOT_ABOUT_THE_WORK.contains(reason);
+    }
+
+    /**
+     * The stop reason a continuation judges an earlier run by.
+     *
+     * Usually the recorded one. A summary written before a role code was classified still says
+     * the generic `<role>_failed`, and its failed step still carries the code that says what
+     * happened; reading that code lets a run stopped by, say, an Orca worker that never started
+     * keep the verdicts it had already paid for. Only the generic reason is re-read, and only
+     * when the failed step's code is one {@link #isInfrastructureFailure} names.
+     */
+    public static String reasonForContinuation(Map<String, Object> prior) {
+        String recorded = String.valueOf(prior.get("reason"));
+        if (!recorded.endsWith("_failed") || !(prior.get("steps") instanceof List<?> steps)) {
+            return recorded;
+        }
+        for (int index = steps.size() - 1; index >= 0; index--) {
+            if (!(steps.get(index) instanceof Map<?, ?> row)) continue;
+            if (!Boolean.FALSE.equals(row.get("ok"))) continue;
+            String mapped = INFRASTRUCTURE_REASONS.get(String.valueOf(row.get("code")));
+            return mapped != null ? mapped : recorded;
+        }
+        return recorded;
     }
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun)
@@ -4048,7 +4085,11 @@ public final class TaskLoop {
         Path priorSummary = root.resolve(".warden/runs").resolve(priorRunId).resolve("task-run.json");
         if (!Files.isRegularFile(priorSummary)) return declineReuse(summary, "no summary for " + priorRunId);
         Map<String, Object> prior = Json.parseObject(Files.readString(priorSummary));
-        String priorReason = String.valueOf(prior.get("reason"));
+        String priorReason = reasonForContinuation(prior);
+        if (!priorReason.equals(String.valueOf(prior.get("reason")))) {
+            summary.put("prior_reason_reclassified", Map.of(
+                    "recorded", String.valueOf(prior.get("reason")), "read_as", priorReason));
+        }
         if (isAboutTheWork(priorReason)) {
             return declineReuse(summary, priorRunId + " stopped with `" + priorReason
                     + "`, which is a verdict on the work; only a failure that was never about "
@@ -5018,6 +5059,12 @@ public final class TaskLoop {
             case "role_timed_out" -> "the " + failedProfile(summary) + " call ran out of wall "
                     + "clock. Raise limits.wall_clock_minutes on that profile if the task "
                     + "needs longer, or narrow the task, then: " + carryOn + kept(summary);
+            case "orca_worker_not_started" -> "the " + failedProfile(summary) + " Orca worker "
+                    + "never took its first turn, so it read nothing. The usual cause is the agent "
+                    + "CLI waiting on a first-run screen in that tab: Claude Code asks once per "
+                    + "repository whether to trust it, and Codex asks to update. The role report's "
+                    + "agent_screen_tail and agent_blocked_on say which. Answer it once in an Orca "
+                    + "tab in this worktree, then: " + carryOn + kept(summary);
             case "vendor_call_failed" -> "the " + failedProfile(summary) + " process failed "
                     + "without a recognised cause (a login, the network, the CLI itself). Read "
                     + "stderr_tail and stdout_tail in its role report, fix what they name, "
