@@ -33,6 +33,7 @@ public final class RosterTest implements Suite {
             blockListIsReplacedWithFlowForm(check, home(sandbox, "block-list"));
             missingRoleIsAppendedAtEndOfRoles(check, home(sandbox, "append"));
             modelRemovesVerifiedOnUnlessKept(check, sandbox);
+            modelReachesTheVendorOrIsRefused(check, sandbox);
             effortWithoutPlaceholderIsRefused(check, home(sandbox, "effort"));
             failedReparseRestoresOriginalBytes(check, home(sandbox, "reparse"));
             allowMissingAndMismatch(check, home(sandbox, "allow"));
@@ -196,9 +197,17 @@ public final class RosterTest implements Suite {
         check.that("visual_qa independence", parsed.roles().get("visual_qa").requireIndependentVendor());
     }
 
+    /** The shipped grok-review keeps its model as a label; give it the vendor's flag. */
+    private static void forwardsModel(Path profile) throws Exception {
+        String text = Files.readString(profile, StandardCharsets.UTF_8);
+        Files.writeString(profile, text.replace("args:\n", "args:\n  - \"--model\"\n  - \"{{model}}\"\n"),
+                StandardCharsets.UTF_8);
+    }
+
     private void modelRemovesVerifiedOnUnlessKept(Check check, Path sandbox) throws Exception {
         Path drop = home(sandbox, "model-drop");
         Path grok = drop.resolve("profiles").resolve("grok-review.yaml");
+        forwardsModel(grok);
         String original = Files.readString(grok, StandardCharsets.UTF_8);
         check.that("shipped grok profile is stamped", original.contains("verified_on"));
 
@@ -220,6 +229,7 @@ public final class RosterTest implements Suite {
 
         Path keep = home(sandbox, "model-keep");
         Path keptFile = keep.resolve("profiles").resolve("grok-review.yaml");
+        forwardsModel(keptFile);
         RosterCommand.Outcome kept = roster(keep, "roster", "model", "grok-review",
                 "--model", "grok-4.20", "--keep-verified");
         check.that("keep-verified succeeds", kept.ok());
@@ -249,6 +259,86 @@ public final class RosterTest implements Suite {
         check.contains("effort inserted after model", effortText, "model: new-model\neffort: high\n");
         check.that("adding a model still drops the old stamp", !effortText.contains("verified_on"));
         Profile.parse(effortText, extra.toString());
+    }
+
+    /**
+     * `roster model` used to rewrite the `model:` line and nothing else. Every hand-written
+     * profile on the maintainer's machine passed `--model opus` literally in args and in its
+     * probe, so a switch to a newer Opus renamed the profile, the vendor kept the old model,
+     * and `profiles --verify` stamped the new name on a call to the old one.
+     */
+    private void modelReachesTheVendorOrIsRefused(Check check, Path sandbox) throws Exception {
+        Path labelled = home(sandbox, "model-label");
+        Path grok = labelled.resolve("profiles").resolve("grok-review.yaml");
+        String untouched = Files.readString(grok, StandardCharsets.UTF_8);
+        RosterCommand.Outcome refused = roster(labelled, "roster", "model", "grok-review",
+                "--model", "grok-4.20");
+        check.eq("a profile that passes no model is refused", "model_not_forwarded",
+                refused.report().get("code"));
+        check.contains("and told which line to add",
+                String.valueOf(refused.report().get("message")), "\"{{model}}\"");
+        check.eq("the file is untouched", untouched, Files.readString(grok, StandardCharsets.UTF_8));
+        check.eq("and nothing was backed up", null, refused.report().get("backup"));
+
+        Path literal = home(sandbox, "model-literal");
+        Path opus = literal.resolve("profiles").resolve("literal-review.yaml");
+        Files.writeString(opus, """
+                version: 1
+                profile: literal-review
+                role: reviewer
+                vendor: claude
+                model: opus
+                effort: xhigh
+                command: claude
+                runner: direct
+                args:
+                  - "-p"
+                  # the model flag, pinned by hand
+                  - "--model"
+                  - "opus"
+                  - "--effort"
+                  - "{{effort}}"
+                verification:
+                  probe: 'claude -p "say ok" --model opus --output-format json'
+                  verified_on: "2026-08-27"
+                """, StandardCharsets.UTF_8);
+        RosterCommand.Outcome switched = roster(literal, "roster", "model", "literal-review",
+                "--model", "claude-opus-5-5");
+        check.that("a literal model is switched", switched.ok());
+        String text = Files.readString(opus, StandardCharsets.UTF_8);
+        Profile parsed = Profile.parse(text, opus.toString());
+        check.eq("the model line names the new model", "claude-opus-5-5", parsed.model());
+        check.that("the args pass the placeholder the executor fills",
+                parsed.args().contains("{{model}}"));
+        check.that("and no longer ask for the old model", !parsed.args().contains("opus"));
+        check.contains("the probe asks for the declared model too",
+                parsed.verificationProbe(), "--model {{model}} --output-format");
+        check.contains("the comment above the flag survived", text, "# the model flag, pinned by hand");
+        check.that("the old stamp is dropped", !parsed.verified());
+        check.eq("a probe that names the model draws no warning", null,
+                switched.report().get("probe_warning"));
+
+        Path flow = home(sandbox, "model-flow");
+        Path flowFile = flow.resolve("profiles").resolve("flow-review.yaml");
+        Files.writeString(flowFile, """
+                version: 1
+                profile: flow-review
+                role: reviewer
+                vendor: codex
+                model: gpt-6-astra
+                command: codex
+                runner: direct
+                args: ["exec", "-m", "gpt-6-astra", "--json"]
+                """, StandardCharsets.UTF_8);
+        RosterCommand.Outcome flowed = roster(flow, "roster", "model", "flow-review",
+                "--model", "gpt-6-luna");
+        check.that("a flow-style args list is switched too", flowed.ok());
+        Profile flowParsed = Profile.parse(Files.readString(flowFile, StandardCharsets.UTF_8),
+                flowFile.toString());
+        check.eq("with the placeholder in place of the old model",
+                List.of("exec", "-m", "{{model}}", "--json"), flowParsed.args());
+        check.contains("a profile with no probe is told it has nothing to verify with",
+                String.valueOf(flowed.report().get("probe_warning")), "no verification.probe");
     }
 
     private void effortWithoutPlaceholderIsRefused(Check check, Path home) throws Exception {

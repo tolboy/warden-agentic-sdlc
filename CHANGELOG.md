@@ -11,6 +11,14 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `warden roster model` switches the model the vendor is asked for, not only the label.
+  A direct profile that spells the old model in `args` (every hand-written profile on the
+  maintainer's machine passed `--model opus` literally) now has that item rewritten to
+  `{{model}}`, and so does the model after a model flag in its `verification.probe`. A
+  profile whose args pass no model at all is refused as `model_not_forwarded`, as effort
+  already was. `warden profiles --verify` fills `{{model}}` and `{{effort}}` in the probe, so
+  the stamp is earned by the model the profile declares. Found moving the roster from Opus 5
+  to Opus 5.5 on 2026-09-22. Suites `roster`, `profile verifier`.
 - An Antigravity (`agy`) spent plan that exits 0 with `Individual quota reached` in the
   JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
   look used to stop as `role_artifact_incomplete` because the envelope was missing

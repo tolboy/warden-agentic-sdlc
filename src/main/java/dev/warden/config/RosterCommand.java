@@ -480,6 +480,8 @@ public final class RosterCommand {
             Outcome refused = refuseEffort(effort, model, profile, file);
             if (refused != null) return refused;
         }
+        Outcome unforwarded = refuseUnforwardedModel(profile, file);
+        if (unforwarded != null) return unforwarded;
 
         Document document = Document.read(file);
         List<String> before = new ArrayList<>();
@@ -488,11 +490,110 @@ public final class RosterCommand {
         if (editError != null) {
             return fail("policy_line_not_found", editError, file, null, null);
         }
+        // A model the args spell out literally is the same label with extra steps: the line
+        // above changes and the vendor is still asked for the old one. Every hand-written
+        // profile on the maintainer's machine was like that, so `roster model` was a rename.
+        if ("direct".equals(profile.runner()) && profile.model() != null) {
+            forwardModel(document.lines, profile.model(), before, after);
+        }
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("verify_with", "warden profiles --verify " + name);
         extra.put("profile", name);
+        String probeWarning = probeWarning(document.lines, profile.verificationProbe() != null);
+        if (probeWarning != null) extra.put("probe_warning", probeWarning);
         return rewriteAndReparse(file, document.render(), "profile", "roster_model",
                 before, after, extra);
+    }
+
+    /**
+     * A direct profile whose args pass no model at all keeps the vendor's default whatever
+     * `model:` says, so rewriting that line would report a switch that never happens. Same
+     * rule as effort: the file is left alone and the operator is told which line to add.
+     */
+    private static Outcome refuseUnforwardedModel(Profile profile, Path file) {
+        if (!"direct".equals(profile.runner())) return null;
+        boolean placeholder = profile.args().stream().anyMatch(a -> a.contains("{{model}}"));
+        boolean literal = profile.model() != null && profile.args().contains(profile.model());
+        if (placeholder || literal) return null;
+        return fail("model_not_forwarded", "profile '" + profile.name() + "' passes no model to "
+                + "the vendor: its args carry neither {{model}} nor the current model"
+                + (profile.model() == null ? "" : " '" + profile.model() + "'")
+                + ", so a new name would only be a label and the vendor would keep its default. "
+                + "Add the vendor's model flag followed by \"{{model}}\" to args, then run this again",
+                file, null, null);
+    }
+
+    /**
+     * Replace the old model where the profile spells it literally — an args item, and the
+     * value after a model flag in the probe — with {@code {{model}}}, so the name on the
+     * {@code model:} line is the one the vendor and the probe are given.
+     */
+    private static void forwardModel(List<String> lines, String oldModel, List<String> before,
+                                     List<String> after) {
+        int argsLine = findKey(lines, 0, lines.size(), "args", 0, 0);
+        if (argsLine >= 0) {
+            String header = lines.get(argsLine);
+            String flow = stripComment(header);
+            if (flow.contains("[")) {
+                String rewritten = header.replaceAll("(?<=[\\[,]\\s{0,8})([\"']?)"
+                        + java.util.regex.Pattern.quote(oldModel) + "\\1(?=\\s*[,\\]])",
+                        java.util.regex.Matcher.quoteReplacement("\"{{model}}\""));
+                if (!rewritten.equals(header)) {
+                    before.add(header);
+                    lines.set(argsLine, rewritten);
+                    after.add(rewritten);
+                }
+            } else {
+                int end = blockEnd(lines, argsLine, indent(header));
+                for (int i = argsLine + 1; i < end; i++) {
+                    String line = lines.get(i);
+                    String content = stripComment(line).strip();
+                    if (!content.startsWith("-")) continue;
+                    String item = content.substring(1).strip();
+                    if (item.length() >= 2 && (item.startsWith("\"") && item.endsWith("\"")
+                            || item.startsWith("'") && item.endsWith("'"))) {
+                        item = item.substring(1, item.length() - 1);
+                    }
+                    if (!item.equals(oldModel)) continue;
+                    String rewritten = line.substring(0, line.indexOf('-')) + "- \"{{model}}\"";
+                    before.add(line);
+                    lines.set(i, rewritten);
+                    after.add(rewritten);
+                }
+            }
+        }
+        int verification = findKey(lines, 0, lines.size(), "verification", 0, 0);
+        if (verification < 0) return;
+        int end = blockEnd(lines, verification, 0);
+        int probe = findKey(lines, verification + 1, end, "probe", 1, Integer.MAX_VALUE);
+        if (probe < 0) return;
+        String line = lines.get(probe);
+        String rewritten = line.replaceAll("(--model[ =]|-m )"
+                + java.util.regex.Pattern.quote(oldModel) + "(?=[\\s'\"]|$)", "$1{{model}}");
+        if (!rewritten.equals(line)) {
+            before.add(line);
+            lines.set(probe, rewritten);
+            after.add(rewritten);
+        }
+    }
+
+    /**
+     * Said, not refused: a probe is free text, and one that asks the vendor for its default
+     * may be deliberate. But `profiles --verify` would then stamp the new model on the
+     * strength of a call to another one.
+     */
+    private static String probeWarning(List<String> lines, boolean hasProbe) {
+        if (!hasProbe) {
+            return "the profile has no verification.probe, so `warden profiles --verify` has "
+                    + "nothing to run; write one that passes \"{{model}}\" before relying on it";
+        }
+        int verification = findKey(lines, 0, lines.size(), "verification", 0, 0);
+        int end = verification < 0 ? lines.size() : blockEnd(lines, verification, 0);
+        int probe = verification < 0 ? -1
+                : findKey(lines, verification + 1, end, "probe", 1, Integer.MAX_VALUE);
+        if (probe >= 0 && lines.get(probe).contains("{{model}}")) return null;
+        return "verification.probe does not pass {{model}}, so `warden profiles --verify` would "
+                + "call the vendor's default model and stamp this one";
     }
 
     /**
