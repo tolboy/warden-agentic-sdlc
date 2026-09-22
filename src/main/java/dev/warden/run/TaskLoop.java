@@ -928,6 +928,9 @@ public final class TaskLoop {
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
+        if (budget.unpricedCharge() > 0) {
+            summary.put("cost_cap_unpriced_charge_usd", budget.unpricedCharge());
+        }
         summary.put("cost_ceiling_binding", budget.chainUnpriced() == 0);
         describeChain(summary, budget, runId, task, attempt);
         // Which judging stages did not see the tree as it finally stands. A workflow may
@@ -1076,6 +1079,9 @@ public final class TaskLoop {
         chain.put("role_runs", budget.chainRuns());
         chain.put("cost_usd", budget.chainSpent());
         chain.put("unpriced_calls", budget.chainUnpriced());
+        if (budget.chainUnpricedCharge() > 0) {
+            chain.put("cost_cap_unpriced_charge_usd", budget.chainUnpricedCharge());
+        }
         chain.put("fix_attempts", earlier.fixAttempts() + attempt);
         chain.put("elapsed_seconds", budget.elapsedSeconds());
         chain.put("elapsed_known", earlier.elapsedKnown());
@@ -3602,6 +3608,12 @@ public final class TaskLoop {
         private String dispatchingStage;
         /** True while this role's vendor attempts have already been charged in-flight. */
         private boolean settledInFlight;
+        /**
+         * Declared bounds a strict cap charged for attempts that reported no price. They count
+         * against the cap and are never reported as spend: `total_cost_usd` is what vendors
+         * printed, and a call that printed nothing stays in `unpriced`.
+         */
+        private double unpricedCharge;
         private final java.util.function.LongSupplier clock;
         private final long startedNanos;
 
@@ -3647,6 +3659,10 @@ public final class TaskLoop {
 
         long chainUnpriced() { return inherited.unpricedCalls() + unpriced; }
 
+        double unpricedCharge() { return unpricedCharge; }
+
+        double chainUnpricedCharge() { return inherited.unpricedChargeUsd() + unpricedCharge; }
+
         /** Execution seconds the chain has used, this run's so far included. */
         long elapsedSeconds() {
             return inherited.elapsedSeconds() + (clock.getAsLong() - startedNanos) / 1_000_000_000L;
@@ -3665,7 +3681,7 @@ public final class TaskLoop {
             if (maxRuns > 0 && chainRuns() >= maxRuns) return false;
             if (maxCost > 0 && chainSpent() >= maxCost) return false;
             if (strictBounds != null && maxCost > 0
-                    && chainSpent() + outstandingBounds() > maxCost) {
+                    && chainSpent() + chainUnpricedCharge() + outstandingBounds() > maxCost) {
                 return false;
             }
             return !deadlinePassed();
@@ -3719,9 +3735,12 @@ public final class TaskLoop {
             if (strictBounds != null && maxCost > 0) {
                 if (dispatchingStage != null) stagesPaid.remove(dispatchingStage);
                 double owed = outstandingBounds();
-                if (chainSpent() + owed > maxCost) {
+                double charged = chainUnpricedCharge();
+                if (chainSpent() + charged + owed > maxCost) {
                     throw new ExceededException("max_cost_usd", "max_cost_usd of " + maxCost
                             + " is a strict cap: reported spend " + chainSpent()
+                            + (charged > 0 ? ", " + charged + " charged at declared bounds for "
+                                    + "calls that reported no price," : "")
                             + " plus the declared worst case of the calls still owed (" + owed
                             + ") would exceed it" + earlier);
                 }
@@ -3758,12 +3777,17 @@ public final class TaskLoop {
         /**
          * Charge one completed vendor attempt before a retry or failover is admitted.
          * Unpriced attempts under a strict cap are charged at the profile's declared bound
-         * so the next dispatch cannot treat them as free.
+         * so the next dispatch cannot treat them as free. That charge is the cap's, not the
+         * vendor's: folding it into {@code spent} reported a Codex call or a spent quota as
+         * dollars nobody printed, and hid it from {@code unpriced_calls}.
          */
         void settleAttempt(Object cost, Double bound) {
-            if (cost instanceof Number number) spent += number.doubleValue();
-            else if (strictBounds != null && bound != null && bound > 0) spent += bound;
-            else unpriced++;
+            if (cost instanceof Number number) {
+                spent += number.doubleValue();
+            } else {
+                unpriced++;
+                if (strictBounds != null && bound != null && bound > 0) unpricedCharge += bound;
+            }
             settledInFlight = true;
         }
 
@@ -3813,12 +3837,13 @@ public final class TaskLoop {
      */
     record Chain(List<String> runs, long roleRuns, double costUsd, long unpricedCalls,
                  long fixAttempts, long elapsedSeconds, boolean elapsedKnown,
-                 long blockingReviewsSeen, long escalationRung) {
-        static final Chain NONE = new Chain(List.of(), 0, 0, 0, 0, 0, true, 0, 0);
+                 long blockingReviewsSeen, long escalationRung, double unpricedChargeUsd) {
+        static final Chain NONE = new Chain(List.of(), 0, 0, 0, 0, 0, true, 0, 0, 0);
 
         Chain(List<String> runs, long roleRuns, double costUsd, long unpricedCalls,
               long fixAttempts, long elapsedSeconds, boolean elapsedKnown) {
-            this(runs, roleRuns, costUsd, unpricedCalls, fixAttempts, elapsedSeconds, elapsedKnown, 0, 0);
+            this(runs, roleRuns, costUsd, unpricedCalls, fixAttempts, elapsedSeconds, elapsedKnown,
+                    0, 0, 0);
         }
 
         /** The chain as the named run left it, or {@link #NONE} when it cannot be read. */
@@ -3837,7 +3862,8 @@ public final class TaskLoop {
                             number(chain.get("fix_attempts")), number(chain.get("elapsed_seconds")),
                             !Boolean.FALSE.equals(chain.get("elapsed_known")),
                             number(chain.get("blocking_reviews_seen")),
-                            number(chain.get("escalation_rung")));
+                            number(chain.get("escalation_rung")),
+                            decimal(chain.get("cost_cap_unpriced_charge_usd")));
                 }
                 // Written before chains were recorded: the run's own totals are the chain.
                 return new Chain(List.of(runId), number(prior.get("role_runs")),
@@ -4337,7 +4363,9 @@ public final class TaskLoop {
         Object unpriced = summary.get("unpriced_calls");
         if (unpriced instanceof Number number && number.longValue() > 0) {
             progress.line("      " + number + " of those reported no price at all, so the "
-                    + "$ ceiling did not measure them");
+                    + "$ ceiling did not measure them"
+                    + (budget.unpricedCharge() > 0 ? "; the strict cap counted them at their "
+                            + "declared bounds (" + Progress.money(budget.unpricedCharge()) + ")" : ""));
         }
         if ("human_gate".equals(nextAction)) {
             progress.line("      the candidate is ready and nothing has been landed");
@@ -4768,6 +4796,9 @@ public final class TaskLoop {
         summary.put("total_cost_usd", budget.spent());
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
+        if (budget.unpricedCharge() > 0) {
+            summary.put("cost_cap_unpriced_charge_usd", budget.unpricedCharge());
+        }
         summary.put("cost_ceiling_binding", budget.chainUnpriced() == 0);
         describeChain(summary, budget, String.valueOf(summary.get("run_id")),
                 null, attempt);

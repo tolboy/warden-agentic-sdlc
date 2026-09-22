@@ -1726,6 +1726,37 @@ public final class TaskLoopTest implements Suite {
         check.eq("after the implementer and one reviewer attempt", 2L,
                 retryStopped.summaryReport().get("role_runs"));
 
+        // The same retry against a reviewer that prints no price when it is rate limited, as
+        // Codex prints none at all. The cap charges the attempt at its declared $0.03, so the
+        // retry is refused; the report still says what vendors printed. Folding the charge
+        // into total_cost_usd reported $0.03 nobody billed and hid the call from
+        // unpriced_calls, and ledger --compare read both.
+        Path unpricedRetry = newProject(sandbox, "strict-retry-unpriced", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-retry-unpriced", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "loop-review", "reviewer", "reviewvendor",
+                "rate-limit-once", 0.03, null);
+        String unpricedPolicy = Files.readString(home.resolve("policy.yaml"));
+        Files.writeString(home.resolve("policy.yaml"), unpricedPolicy.stripTrailing()
+                + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 1 } }\n");
+        TaskLoop.Outcome unpricedStopped = new TaskLoop(new ProcessRunner())
+                .withSleeper(millis -> { })
+                .run(new ConfigLoader().load(unpricedRetry, "hello"), UserConfig.load(home),
+                        "sc7", false);
+        check.eq("an unpriced attempt still counts against the strict cap",
+                "rate_limited", unpricedStopped.reason());
+        check.eq("so the retry was not dispatched", 2L,
+                unpricedStopped.summaryReport().get("role_runs"));
+        check.that("total_cost_usd is only what the vendors printed",
+                Math.abs(((Number) unpricedStopped.summaryReport().get("total_cost_usd"))
+                        .doubleValue() - 0.012) < 1e-9);
+        check.eq("the silent attempt is still an unpriced call", 1L,
+                unpricedStopped.summaryReport().get("unpriced_calls"));
+        check.eq("and the cap's own charge is reported beside it", 0.03,
+                unpricedStopped.summaryReport().get("cost_cap_unpriced_charge_usd"));
+        check.eq("the chain carries the charge to a continuation", 0.03,
+                ((Map<?, ?>) unpricedStopped.summaryReport().get("chain"))
+                        .get("cost_cap_unpriced_charge_usd"));
+
         writeProfiles(home, sandbox, "strict-restore", 1, 1);
     }
 
@@ -1751,10 +1782,11 @@ public final class TaskLoopTest implements Suite {
 
     /**
      * A stand-in that reports a chosen price, optionally with a declared per-call bound.
-     * {@code bound} null is the overlay that makes a strict cap unenforceable.
+     * {@code bound} null is the overlay that makes a strict cap unenforceable;
+     * {@code reportedCost} null is a vendor that prints no price on a failed call.
      */
     private void writeCostlyProfile(Path home, Path sandbox, String name, String role,
-                                    String vendor, String mode, Double bound, double reportedCost)
+                                    String vendor, String mode, Double bound, Double reportedCost)
             throws IOException {
         Path counter = sandbox.resolve(name + ".count");
         Files.deleteIfExists(counter);
@@ -1766,6 +1798,8 @@ public final class TaskLoopTest implements Suite {
                 ? "limits: { wall_clock_minutes: 2 }"
                 : "limits: { wall_clock_minutes: 2, max_cost_usd: " + bound + " }";
         int threshold = mode.endsWith("-once") ? 2 : 1;
+        String costArgs = reportedCost == null ? ""
+                : "  - \"--cost\"\n  - \"" + reportedCost + "\"\n";
         Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
                 version: 1
                 profile: %s
@@ -1782,9 +1816,7 @@ public final class TaskLoopTest implements Suite {
                   - %s
                   - "--threshold"
                   - "%d"
-                  - "--cost"
-                  - "%s"
-                  - "--prompt-file"
+                %s  - "--prompt-file"
                   - "{{prompt_file}}"
                 %s
                 prompt_template: prompts/%s.md
@@ -1795,7 +1827,7 @@ public final class TaskLoopTest implements Suite {
                   verified_on: "2026-08-26"
                 """.formatted(name, role, vendor, yaml(javaExecutable()), !writer,
                 yaml(absoluteClassPath()), mode, yaml(counter.toString()), threshold,
-                reportedCost, limits, prompt, prompt, fields));
+                costArgs, limits, prompt, prompt, fields));
     }
 
     /**

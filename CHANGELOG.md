@@ -30,8 +30,11 @@ that exists in code but has never been run live says so.
 - A strict money cap looks at the profile routing will actually dispatch: a `--use` pin,
   a `--host` twin, an escalation rung and an authorised substitution, not only the policy
   list. A rate-limit retry is charged before the next attempt is admitted, and an unpriced
-  attempt is charged at its declared bound. `--prepare always` keeps operator `budgets`
-  blocks that use CRLF or sit under a comment. Suites `planner` and `task loop`.
+  attempt is charged at its declared bound against the cap only: it stays in
+  `unpriced_calls`, stays out of `total_cost_usd`, and the charge is reported as
+  `cost_cap_unpriced_charge_usd` (also on the chain, so a continuation keeps it).
+  `--prepare always` keeps operator `budgets` blocks that use CRLF or sit under a comment.
+  Suites `planner` and `task loop`.
 
 ### Added
 
