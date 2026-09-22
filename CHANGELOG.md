@@ -19,6 +19,12 @@ that exists in code but has never been run live says so.
   already was. `warden profiles --verify` fills `{{model}}` and `{{effort}}` in the probe, so
   the stamp is earned by the model the profile declares. Found moving the roster from Opus 5
   to Opus 5.5 on 2026-09-22. Suites `roster`, `profile verifier`.
+- `warden do "…" --watch --use implement=…` no longer corrupts the goal. The positional parser
+  read every flag it did not list as taking a value, so `--watch` swallowed the `--use` after
+  it, `implement=…` joined the goal, and a contract whose goal was on disk word for word was
+  refused as `task_conflict`. `do` now knows which of its flags take a value and refuses an
+  unknown one by name; a `task_conflict` names the fields that differ and prints both sides.
+  Suite `do-command`.
 - An Antigravity (`agy`) spent plan that exits 0 with `Individual quota reached` in the
   JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
   look used to stop as `role_artifact_incomplete` because the envelope was missing

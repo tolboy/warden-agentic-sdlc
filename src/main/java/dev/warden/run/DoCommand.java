@@ -152,6 +152,21 @@ public final class DoCommand {
         return !argumentsCanCarryNonAscii() && goal.contains("??");
     }
 
+    /**
+     * Every flag `warden do` reads, split by whether it takes a value. The goal is whatever is
+     * left, so a flag missing from both lists used to be read as taking a value: `--watch` then
+     * swallowed the `--use` after it, `implement=…` joined the goal, and a contract with the
+     * right goal on disk was refused as task_conflict. An unknown flag is now refused by name.
+     */
+    static final java.util.Set<String> VALUE_FLAGS = java.util.Set.of(
+            "--goal", "--goal-file", "--project", "--scope", "--risk", "--task-id", "--run-id",
+            "--base-ref", "--isolation", "--prepare", "--wait-for-gate", "--use", "--effort",
+            "--host");
+    static final java.util.Set<String> SWITCH_FLAGS = java.util.Set.of(
+            "--in-place", "--no-worktree", "--dry-run", "--conductor", "--auto-reject-gates",
+            "--init-repo", "--draft-only", "--quiet", "--watch", "--no-orca-gate",
+            "--no-wait-for-gate", "--no-workspace-status");
+
     public static Options parse(String[] args) {
         String goalFile = option(args, "--goal-file", null);
         if (goalFile != null) {
@@ -171,11 +186,11 @@ public final class DoCommand {
         for (int index = 1; index < args.length; index++) {
             String arg = args[index];
             if (arg.startsWith("--")) {
-                if (!arg.equals("--in-place") && !arg.equals("--no-worktree")
-                        && !arg.equals("--dry-run") && !arg.equals("--conductor")
-                        && !arg.equals("--auto-reject-gates") && !arg.equals("--init-repo")
-                        && !arg.equals("--draft-only") && !arg.equals("--quiet")) {
-                    index++;
+                if (VALUE_FLAGS.contains(arg)) index++;
+                else if (!SWITCH_FLAGS.contains(arg)) {
+                    throw new IllegalArgumentException("do does not know " + arg + ". Flags that take "
+                            + "a value: " + new java.util.TreeSet<>(VALUE_FLAGS) + "; switches: "
+                            + new java.util.TreeSet<>(SWITCH_FLAGS));
                 }
                 continue;
             }
