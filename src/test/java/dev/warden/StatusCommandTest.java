@@ -165,11 +165,12 @@ public final class StatusCommandTest implements Suite {
         check.eq("run id", "torch-2", pending.get("run_id"));
         check.eq("task id", "status-tells-the-truth", pending.get("task_id"));
         check.eq("kind", "failure", pending.get("kind"));
-        check.eq("options", List.of("retry", "abort"), pending.get("options"));
+        check.eq("options", List.of("retry", "abort", "advance"), pending.get("options"));
         List<Map<String, Object>> approve = maps(pending.get("approve"));
-        check.eq("one approve command per listed option", 2, approve.size());
-        check.eq("and the operator is offered both rather than handed one",
-                List.of("retry", "abort"), approve.stream().map(row -> row.get("decision")).toList());
+        check.eq("one approve command per listed option", 3, approve.size());
+        check.eq("and the operator is offered every listed choice rather than handed one",
+                List.of("retry", "abort", "advance"),
+                approve.stream().map(row -> row.get("decision")).toList());
         String first = String.valueOf(approve.get(0).get("command"));
         check.contains("approve command names the run", first, "warden approve torch-2 --decision");
         check.contains("approve command includes the sibling directory",

@@ -90,7 +90,7 @@ public final class GitRepository {
         // edits to already-dirty and binary files without decoding a binary patch as text.
         digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout(), sourceOnly)
                 .getBytes(StandardCharsets.UTF_8));
-        Set<String> paths = changedPaths(mergeBase);
+        Set<String> paths = evidenceRemoved(changedPaths(mergeBase));
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
         List<String> changed = paths.stream().sorted().toList();
         for (String relative : changed) {
@@ -167,10 +167,47 @@ public final class GitRepository {
                 index += paths.size();
                 continue;
             }
+            // Warden's own evidence is dropped from BOTH fingerprints. See evidenceRemoved.
+            if (!paths.isEmpty() && paths.stream().allMatch(GitRepository::isEvidencePath)) {
+                index += paths.size();
+                continue;
+            }
             shape.append(':').append(fields[0]).append(' ').append(fields[1]).append(' ')
                     .append(status).append('\0');
         }
         return shape.toString();
+    }
+
+    /**
+     * The same set of changed paths with Warden's own run evidence taken out.
+     *
+     * The read-only fingerprint includes `.warden` on purpose: a reviewer that writes a task
+     * file is a violation, and that is the guard's whole point. `.warden/runs` is not
+     * configuration — it is what Warden itself writes while the call it is guarding is in
+     * flight: `rotation.json` when the profile was resolved, `corpus_status.json` when the
+     * ledger was delivered, the run directory itself. `WardenTree` already excludes it from
+     * the contract snapshot, for exactly this reason and in those words.
+     *
+     * Until this was here, a project that tracked its run evidence in git convicted every
+     * read-only role of mutating the worktree. Measured on run `bakery-2` of the Crumb
+     * Raiders trial, 2026-09-19: `planner_protocol_violation`, "refusing to retry on a tree
+     * the writer mutated", over three files the planner never touched and Warden wrote. The
+     * `.gitignore` `warden init` ships un-ignores `*.json` under `runs/`, so tracking them is
+     * the documented default rather than an unusual thing to do.
+     */
+    private static Set<String> evidenceRemoved(Set<String> paths) {
+        Set<String> kept = new java.util.LinkedHashSet<>();
+        for (String path : paths) {
+            if (isEvidencePath(path)) continue;
+            kept.add(path);
+        }
+        return kept;
+    }
+
+    private static boolean isEvidencePath(String path) {
+        String normalized = normalize(path);
+        return normalized.equals(dev.warden.config.WardenTree.EVIDENCE)
+                || normalized.startsWith(dev.warden.config.WardenTree.EVIDENCE + "/");
     }
 
     private static boolean isWardenPath(String path) {

@@ -38,9 +38,9 @@ public final class RoleContract {
 
     /** The keys compared on resume, in the order a person would want to hear about them. */
     private static final List<String> COMPARED = List.of(
-            "role", "roster", "strategy", "require_independent_vendor",
-            "profile", "vendor", "model", "effort", "read_only",
-            "prompt_template_sha256", "json_schema_sha256",
+            "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "profile", "vendor", "model", "effort", "runner", "read_only",
+            "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             // The stage's own routing. A stage name is stable across a workflow edit, so
             // `review` can keep its identity while changing what a finding from it does —
             // and a verdict reached under `on_findings: fix` is not evidence for a stage that
@@ -54,6 +54,8 @@ public final class RoleContract {
         routing.put("on_findings", stage.onFindings());
         routing.put("recheck_after_fix", stage.recheckAfterFix());
         routing.put("fix_with", stage.fixWith());
+        // Who took the pictures is part of what a visual verdict is about.
+        if (stage.acquiresEvidence() || stage.sees() != null) routing.put("evidence", stage.evidence());
         return routing;
     }
 
@@ -72,13 +74,20 @@ public final class RoleContract {
         contract.put("strategy", spec == null ? null : spec.strategy());
         contract.put("require_independent_vendor",
                 spec != null && spec.requireIndependentVendor());
+        // A declared pair is a term of the reading: a verdict admitted under one pair is not
+        // evidence for a stage whose pair has since been changed or removed.
+        contract.put("same_vendor_peer", spec == null || spec.peer() == null ? null : spec.peer().label());
         contract.put("profile", profile.name());
         contract.put("vendor", profile.vendor());
         contract.put("model", profile.model());
         contract.put("effort", profile.effort());
+        contract.put("runner", profile.runner());
         contract.put("read_only", profile.readOnly());
         contract.put("prompt_template_sha256", digestOf(user, profile.promptTemplate()));
         contract.put("json_schema_sha256", digestOf(user, profile.jsonSchema()));
+        // The tools a reader may reach are a term of its reading: a reviewer that could drive
+        // a browser yesterday and cannot today is a different reviewer.
+        contract.put("mcp_config_sha256", digestOf(user, profile.mcpConfig()));
         return contract;
     }
 
@@ -104,6 +113,12 @@ public final class RoleContract {
      */
     public static String differenceFrom(Object recorded, dev.warden.config.Workflow.Stage current,
                                         UserConfig user) {
+        return differenceFrom(recorded, current, user, dev.warden.config.RunOverride.NONE, Map.of());
+    }
+
+    public static String differenceFrom(Object recorded, dev.warden.config.Workflow.Stage current,
+                                        UserConfig user, dev.warden.config.RunOverride overlay,
+                                        Map<String, String> substitutions) {
         if (!(recorded instanceof Map<?, ?> was)) {
             // Every stage, not only the judging ones. Which model wrote the code under which
             // authority is as much a term of "this stage is done" as who read it, and a
@@ -116,10 +131,17 @@ public final class RoleContract {
         Policy.RoleSpec spec = user.policy() == null ? null : user.policy().roles().get(role);
         if (spec == null) return "role '" + role + "' is no longer configured";
         Object name = was.get("profile");
+        if (overlay.toMap().get("profile") instanceof Map<?, ?> pins
+                && pins.get(current.name()) != null) name = pins.get(current.name());
+        if (substitutions.containsKey(role)) name = substitutions.get(role);
+        if (substitutions.containsKey(current.name())) name = substitutions.get(current.name());
         Profile profile = user.profiles().get(String.valueOf(name));
         if (profile == null) {
             return "profile '" + name + "', which filled it, no longer exists";
         }
+        if (overlay.problem(current.name(), profile, user.profiles()) != null)
+            return "the run overlay can no longer be delivered";
+        profile = overlay.adapt(current.name(), profile, user.profiles());
         // The stage's role may have changed under a stable name. The recorded profile fills
         // exactly one role, so a profile that cannot fill the current role is proof on its own
         // that the earlier verdict is a verdict about a different job.

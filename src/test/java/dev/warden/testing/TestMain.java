@@ -28,6 +28,7 @@ public final class TestMain {
                 new dev.warden.PlannerTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),
+                new dev.warden.OrcaIsolationTest(),
                 new dev.warden.LaunchSettingsTest(),
                 new dev.warden.DashboardTest(),
                 new dev.warden.OrcaSettlementTest(),
@@ -38,13 +39,17 @@ public final class TestMain {
                 new dev.warden.NextStepTest(),
                 new dev.warden.LocalHttpExecutorTest(),
                 new dev.warden.LedgerTest(),
+                new dev.warden.LedgerCompareTest(),
                 new dev.warden.HomeCorpusTest(),
                 new dev.warden.CorpusReaderTest(),
                 new dev.warden.PilotConfigTest(),
                 new dev.warden.PilotPrepareTest(),
                 new dev.warden.ApprovalStoreTest(),
                 new dev.warden.StatusCommandTest(),
-                new dev.warden.InitializerTest()
+                new dev.warden.InitializerTest(),
+                new dev.warden.RosterTest(),
+                new dev.warden.RunOverrideTest(),
+                new dev.warden.OperatorContinuationTest()
         );
 
         Check check = new Check();

@@ -118,6 +118,20 @@ JSON object.
 
 Visual checking is two layers, and they answer different questions.
 
+For a Unity scene, a Tauri window, or a canvas the harness cannot drive, the visual role
+brings its own camera: `visual_qa.evidence: agent` on the task skips the browser stage for
+that run, and the images it took are opened on the Orca card when the run stops, so the
+person answering the gate from a phone is looking at the screen the verdict is about.
+
+Who runs a stage, at what effort, on which runner is a per-run overlay rather than an edit
+to `~/.warden`: `--use <stage>=<profile>`, `--effort <stage>=<level>`, `--host <stage>=orca`
+on the command line, or the same map as `use:` on the task. Every one of them is checked
+against the roster before the first paid call, and the run header prints the resulting
+`cast` — which profile fills which stage — so a roster change can be checked with
+`--dry-run` instead of with money. A failure gate also offers `advance`, which starts the
+next run of the task once you have dealt with the blocker, and refuses when nothing has
+changed since the stop.
+
 **The harness** is a real headless browser over CDP, with zero npm dependencies. Scenarios
 live in the task contract and are checked mechanically:
 
@@ -147,6 +161,16 @@ the one that was named, and refuses to run if a stranger is already answering on
 never as bare filenames passed off as pictures. It answers only what a machine cannot measure:
 clipped text, overlap, a collapsed layout. It is off by default in the policy: the harness is
 free, a model's look costs a vendor call.
+
+Where no browser harness can drive the application — a Unity scene, a Tauri window, a
+canvas-heavy page — the role can bring its own camera. A stage declared `evidence: agent`
+dispatches a profile that names its MCP servers (`mcp.config`) and declares
+`capabilities.vision.acquires: true`; the model drives the application with those tools, saves
+what it judged into the run's `screenshots/` directory and lists the files in
+`screenshots_taken`. Warden checks that each listed file exists there and is not empty, hashes
+it onto the step row, and refuses a verdict that lists none as `visual_qa_no_evidence`. It does
+not check what the picture shows; that is what the profile's probe is for. See
+[`docs/SETUP.md`](docs/SETUP.md#visual-qa-through-the-vendors-own-tools-mcp).
 
 A failure in either layer comes back to the implementer as an ordinary failed check.
 
@@ -238,7 +262,9 @@ commands. Do not copy Warden's own `.warden/`: that is Warden's contract, not a 
 
 The loop runs for tens of minutes. It used to print nothing for all of it and then emit one
 JSON object at the end, so "where are we now" had to be worked out from file timestamps in
-four run directories. Now `do` and `run` narrate themselves **on stderr**:
+four run directories. Now `do` and `run` narrate themselves **on stderr**. The same picture is
+on the local page `warden dashboard` serves (and `--open-orca` opens in an Orca tab): every
+run with its stage timeline, verdicts, cost and decision.
 
 ```text
 run   chapter-hearth-4
@@ -358,7 +384,10 @@ condition is a configuration error rather than a silent "false", because false h
 permissive answer. `on_fail: fix` returns the exact failure text to the implementer, no more
 than `max_fix_attempts` times, and re-runs every earlier stage marked `recheck_after_fix` —
 otherwise fixing one check can break one already passed. `sees:` binds the role with eyes to a
-specific browser stage: you cannot look at pixels nobody photographed.
+specific browser stage: you cannot look at pixels nobody photographed. `evidence: agent`
+instead lets that role take its own pictures through the MCP servers its profile names —
+a game engine, a desktop window, a page the harness cannot drive — and Warden verifies the
+files it lists exist inside the run's evidence before believing the verdict.
 
 What is **not** configurable: what a failure is called (`gates_not_satisfied` is not renamed
 along with your stage), the budget boundary, and the fact that the last word is a human's. The
@@ -461,6 +490,11 @@ resolver refuses these rather than pretending.
 | Bounded loop: implement → gates → review → browser → look, fix ≤ N | ✅ | ✅ | Run `chapter-hearth-3`: six vendor calls, $3.91, one fix round |
 | Browser harness (CDP, project-neutral) | ✅ | ✅ | Six scenarios across three viewports |
 | `visual_qa` role on real screenshots | ✅ | ✅ | Filed a P1 the harness could not see; routed back as a fix round |
+| `visual_qa` role taking its own screenshots through MCP (`evidence: agent`) | ✅ | ❌ | Suite-covered with a stand-in vendor; the shipped `claude-visual-qa-mcp` template is unverified until its probe is run against a server of yours |
+| Writer provenance, assurance labels, `same_vendor_peer`, escalation ladder | ✅ | ❌ | Suite-covered; the reader preflight stops before the writer is paid |
+| Second planner (`plan_reviewer`), reservation re-measured against the contract | ✅ | ❌ | The shipped `agy-plan-review` profile's probe has not been run |
+| Gate TTL, strict money cap, bounded rate-limit retry, failover `retry` | ✅ | ❌ | Suite-covered with test clocks and sleepers |
+| `warden ledger --compare`, `warden roster`, dashboard run timeline | ✅ | ❌ | Offline against the corpus and the configuration files |
 | Human gate: durable, cross-process-locked decisions | ✅ | ✅ | `accept` / `reject` / `switch` / `retry` |
 | Carrying a rejection or a verdict into the next run | ✅ | ✅ | `--continue` |
 | `warden do`: Orca worktree isolation, task draft | ✅ | ✅ | Cut from the branch the operator is actually on |
@@ -471,7 +505,7 @@ resolver refuses these rather than pretending.
 | Per-vendor tool allowlists | ❌ | ❌ | A profile's args are whatever you wrote — see [`SECURITY.md`](SECURITY.md) |
 | Visual QA pixel-diff and baselines | ❌ | ❌ | The harness asserts; it does not compare images |
 
-Commands: `do`, `setup`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
+Commands: `do`, `setup`, `dashboard`, `profiles`, `init`, `validate`, `gates`, `visual-qa`, `role`, `run`,
 `doctor`, `ledger`, `report`, `status`, `approve`, `land`.
 
 The live runs were made on Windows against a SvelteKit project, with Orca 1.4.190 and Codex,
@@ -483,6 +517,7 @@ Grok and Claude on the operator's own subscriptions.
 |---|---|
 | [`spec/SPEC.md`](spec/SPEC.md) | The full specification: every file, every command, every invariant |
 | [`docs/adr/0001-layer-split.md`](docs/adr/0001-layer-split.md) | Why Warden is a policy/evidence engine, Orca is the cockpit, and Conductor stays optional |
+| [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md) | The deterministic-workflow hypothesis: what counts as evidence, the A/B protocol, the decision rule, Conductor evaluated, and the plugin exit if it fails |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Per-block status, and what each failure is allowed to do |
 | [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) | A guided tour on stub vendors — nothing spent |
 | [`docs/LIVE-CYCLE.md`](docs/LIVE-CYCLE.md) | Transcripts of real runs, including what they broke |

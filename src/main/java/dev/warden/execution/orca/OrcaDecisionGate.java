@@ -1,6 +1,7 @@
 package dev.warden.execution.orca;
 
 import dev.warden.approval.HumanDecision;
+import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
 
 import java.nio.file.Path;
@@ -154,7 +155,7 @@ public final class OrcaDecisionGate {
                 OrcaClient.Rpc created = orca.invoke(root, Duration.ofSeconds(20),
                         List.of("orchestration", "gate-create",
                                 "--task", taskId,
-                                "--question", oneLine(question(decision)),
+                                "--question", oneLine(question(decision, root)),
                                 "--options", OrcaClient.jsonArgument(decision.options()),
                                 "--from", handle));
                 String gateId = nested(created.result(), "gate", "id");
@@ -248,10 +249,40 @@ public final class OrcaDecisionGate {
 
     /** What the person is being asked, with the options spelled out in the question itself. */
     public static String question(HumanDecision decision) {
-        return "Warden run " + decision.runId() + " (" + decision.taskId() + "): "
-                + decision.reason() + " Reply with exactly one of "
-                + String.join(" or ", decision.options())
-                + ". Nothing is landed either way.";
+        return question(decision, null);
+    }
+
+    public static String question(HumanDecision decision, Path root) {
+        StringBuilder text = new StringBuilder();
+        text.append("Warden run ").append(decision.runId())
+                .append(" (").append(decision.taskId()).append("): ")
+                .append(decision.reason());
+        String next = nextStepSentence(decision, root);
+        if (!next.isBlank()) text.append(" Next: ").append(next);
+        text.append(" Reply with exactly one of ")
+                .append(String.join(" or ", decision.options()));
+        if (decision.options().contains("advance")) {
+            text.append(". advance starts the next run of this task after you dealt with the blocker");
+        }
+        text.append(". Nothing is landed either way.");
+        return text.toString();
+    }
+
+    private static String nextStepSentence(HumanDecision decision, Path root) {
+        if (decision.summaryPath() == null) return "";
+        try {
+            Path file = Path.of(decision.summaryPath());
+            if (!file.isAbsolute() && root != null) file = root.resolve(file);
+            if (!java.nio.file.Files.isRegularFile(file)) return "";
+            Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(file));
+            Object step = summary.get("next_step");
+            if (step instanceof Map<?, ?> map && map.get("summary") != null) {
+                return String.valueOf(map.get("summary"));
+            }
+        } catch (Exception ignored) {
+            // The question still names the reason and the options.
+        }
+        return "";
     }
 
     private void closeQuietly(Path root, String handle) {

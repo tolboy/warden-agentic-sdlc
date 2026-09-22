@@ -1,6 +1,7 @@
 package dev.warden;
 
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.RunOverride;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
 import dev.warden.gate.VisualQaRunner;
@@ -260,6 +261,8 @@ public final class TaskLoopTest implements Suite {
             reusedJudgementChecks(check, sandbox, home);
             infrastructureResumeChecks(check, sandbox, home);
             chainBudgetChecks(check, sandbox, home);
+            provenanceChecks(check, sandbox, home);
+            gateTtlAndStrictCapChecks(check, sandbox, home);
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
@@ -403,9 +406,13 @@ public final class TaskLoopTest implements Suite {
     private void landMessageTellsTheTruth(Check check, Map<String, Object> report, String message,
                                           Map<String, Object> landReport) {
         String goal = String.valueOf(report.get("goal"));
-        int newline = goal.indexOf('\n');
-        String subject = (newline < 0 ? goal : goal.substring(0, newline)).strip();
+        // The subject is the conventional `type(task): claim` form, cut to 72 characters; the
+        // goal itself follows in the body, once, however long it is.
+        String subject = dev.warden.run.LandCommand.subjectFor("feat",
+                String.valueOf(report.get("task_id")), goal);
         check.eq("the subject appears once and not twice", 1, countExactLines(message, subject));
+        check.that("and is the conventional form, not the goal verbatim",
+                subject.startsWith("feat(") && subject.length() <= 72);
         check.eq("the pull request title is that subject",
                 subject, landReport.get("pull_request_title"));
         check.contains("the evidence directory is pointed at", message,
@@ -538,7 +545,7 @@ public final class TaskLoopTest implements Suite {
         check.eq("the human is asked a different question from retry-or-give-up",
                 "failover", decision.kind().jsonValue());
         check.eq("and abort is offered first, so automation declines rather than grants",
-                List.of("abort", "switch"), decision.options());
+                List.of("abort", "switch", "retry"), decision.options());
         check.contains("the question names both vendors", decision.reason(), "spentvendor");
         check.contains("and says what the switch costs in independence",
                 decision.reason(), "independence");
@@ -797,6 +804,8 @@ public final class TaskLoopTest implements Suite {
                 !Files.exists(noBrowser.resolve(".warden/runs/v3/context/fix-1-visual.md")));
 
         visualRoleChecks(check, sandbox, home);
+        acquiredEvidenceChecks(check, sandbox, home);
+        policyInvalidChecks(check, sandbox, home);
     }
 
     /**
@@ -979,6 +988,251 @@ public final class TaskLoopTest implements Suite {
         check.eq("and is named as such", "repair_made_no_progress", unresolved.reason());
         check.that("the cost of finding that out is in the summary",
                 ((Number) unresolved.summaryReport().get("total_cost_usd")).doubleValue() > 0);
+    }
+
+    /**
+     * The role with its own camera. A browser harness cannot drive a game engine or a desktop
+     * window, so a visual role may take its own screenshots through the tools its profile
+     * declares — and Warden believes exactly the files it can find inside the run's evidence
+     * afterwards, hashed, and nothing the vendor merely says it looked at.
+     */
+    @SuppressWarnings("unchecked")
+    private void acquiredEvidenceChecks(Check check, Path sandbox, Path home) throws Exception {
+        Files.createDirectories(home.resolve("mcp"));
+        Files.writeString(home.resolve("mcp/visual.json"),
+                "{\"mcpServers\":{\"browser\":{\"command\":\"stand-in\"}}}\n");
+
+        // Takes one screenshot into the run's evidence and lists it: the reading stands, and
+        // the picture is on the step row as a digest, the same shape the harness records.
+        Path taking = newProject(sandbox, "eyes-acquire", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire", "eyes-acquire", 1, "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        int[] harnessCalls = {0};
+        TaskLoop.Outcome took = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> { harnessCalls[0]++; return stubVisual(true); }).run(
+                        new ConfigLoader().load(taking, "hello"), UserConfig.load(home), "va1", false);
+        check.that("a visual role that took its own picture finishes green", took.ok());
+        check.eq("and no harness ran, because the stage said the agent takes the pictures",
+                0, harnessCalls[0]);
+        Map<String, Object> eyes = visualStep(took);
+        check.eq("the step row says where the pictures came from", "agent", eyes.get("evidence"));
+        List<Object> images = listOf(eyes.get("image_evidence"));
+        check.eq("one screenshot was verified", 1, images.size());
+        Map<String, Object> image = (Map<String, Object>) images.get(0);
+        Path shot = Path.of(String.valueOf(image.get("path")));
+        Path runs = taking.resolve(".warden/runs").toAbsolutePath().normalize();
+        check.that("it lives inside the run's evidence directory", shot.startsWith(runs));
+        check.eq("and its digest is the file's own",
+                dev.warden.git.GitRepository.contentSha256(shot), image.get("sha256"));
+        Map<String, Object> report = readJson(
+                taking.resolve(".warden/runs/va1--visual-role-0/role-visual_qa.json"));
+        check.eq("nothing was attached to it", 0L, report.get("attachment_count"));
+        String command = Json.write(report.get("command")).replace("\\\\", "/");
+        check.contains("the vendor was handed its MCP configuration", command, "--mcp-config");
+        check.contains("resolved against the config home", command, "/mcp/visual.json");
+        Map<String, Object> contract = (Map<String, Object>) eyes.get("role_contract");
+        check.eq("and the configuration's digest is a term of the reading",
+                dev.warden.git.GitRepository.sha256(home.resolve("mcp/visual.json")),
+                contract.get("mcp_config_sha256"));
+        check.eq("as is who took the pictures", "agent", contract.get("evidence"));
+        String prompt = Files.readString(
+                taking.resolve(".warden/runs/va1--visual-role-0/prompts/visual_qa.md"));
+        check.contains("the prompt told it to take its own pictures", prompt, "this role takes its own");
+        check.contains("and where to put them", prompt, "screenshots_taken");
+
+        // Answers without taking any: not a verdict. The tooling failed, not the code, so
+        // nobody is paid to fix anything and the readings before it stand.
+        Path empty = newProject(sandbox, "eyes-acquire-empty", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-empty", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-empty", "eyes-acquire-empty", 1,
+                "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome bare = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(empty, "hello"), UserConfig.load(home), "va2", false);
+        check.that("a verdict that took no picture is refused", !bare.ok());
+        check.eq("and the run says why", "visual_qa_no_evidence", bare.reason());
+        check.eq("the step row carries the refusal", "role_visual_no_evidence", visualStep(bare).get("code"));
+        check.eq("and no implementer was paid to fix a picture nobody took", 1L,
+                steps(bare).stream().filter(row -> "implementer".equals(row.get("step"))).count());
+
+        // Lists a file it wrote somewhere other than the run's evidence: refused by name.
+        Path strayed = newProject(sandbox, "eyes-acquire-outside", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-outside", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-outside", "eyes-acquire-outside", 1,
+                "mcp/visual.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome stray = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(strayed, "hello"), UserConfig.load(home), "va3", false);
+        check.eq("a picture outside the run's evidence is no evidence", "visual_qa_no_evidence",
+                stray.reason());
+        check.eq("and the row names what was refused", 1,
+                listOf(visualStep(stray).get("screenshots_refused")).size());
+        check.that("the file itself was really written elsewhere",
+                Files.isRegularFile(sandbox.resolve("eyes-acquire-outside-elsewhere/elsewhere-1280x720.png")));
+
+        // A stage that expects the role to bring its own pictures, filled by a profile that
+        // never said it could: found before anyone is paid, not after the implementer and the
+        // reviewer have both run.
+        Path blind = newProject(sandbox, "eyes-acquire-blind", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-blind", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-blind", "eyes-acquire", 1, "mcp/visual.json", false);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome unfit = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(blind, "hello"), UserConfig.load(home), "va4", false);
+        check.eq("a profile that cannot take pictures stops the run before it starts",
+                "visual_qa_unavailable", unfit.reason());
+        check.that("and the implementer never ran",
+                !Files.exists(sandbox.resolve("eyes-acquire-blind-impl.count")));
+        Map<String, Object> gap = (Map<String, Object>) unfit.summaryReport().get("unavailable_role");
+        check.eq("naming the profile", "loop-eyes-mcp", gap.get("profile"));
+        check.contains("and what it lacks", String.valueOf(gap.get("message")), "acquires: true");
+
+        // A profile whose MCP configuration file is missing: the same preflight, the same
+        // zero calls, and a reason that says which file.
+        Path unplugged = newProject(sandbox, "eyes-acquire-unplugged", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-unplugged", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-unplugged", "eyes-acquire", 1, "mcp/missing.json", true);
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome missing = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unplugged, "hello"), UserConfig.load(home), "va5", false);
+        check.eq("a missing MCP configuration stops the run before it starts", "mcp_config_missing",
+                missing.reason());
+        check.that("with nobody paid",
+                !Files.exists(sandbox.resolve("eyes-acquire-unplugged-impl.count")));
+        check.contains("and the file is named", String.valueOf(missing.summaryReport().get("resolution")),
+                "mcp/missing.json");
+        // The dry run says the same, so an operator sees it before spending anything.
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unplugged, "hello"), UserConfig.load(home), "va5-dry", true);
+        check.eq("and the preview names the stop it would make", "mcp_config_missing",
+                preview.summaryReport().get("would_stop"));
+
+        // Same preflight when the camera profile exists but has never been probed: the
+        // resolver refuses it, and that used to look like "nobody to fill the stage" and
+        // fall through until after the writer had been paid.
+        Path unstamped = newProject(sandbox, "eyes-acquire-unstamped", "medium", 20, true);
+        writeProfiles(home, sandbox, "eyes-acquire-unstamped", 1, 1);
+        writeAcquiringEyes(home, sandbox, "eyes-acquire-unstamped", "eyes-acquire", 1,
+                "mcp/visual.json", true);
+        Files.writeString(home.resolve("profiles/loop-eyes-mcp.yaml"),
+                Files.readString(home.resolve("profiles/loop-eyes-mcp.yaml"))
+                        .replace("verified_on: \"2026-09-18\"\n", ""));
+        policyWithAcquiringEyes(home);
+        TaskLoop.Outcome unproven = new TaskLoop(new ProcessRunner(), (loaded, runId) -> stubVisual(true)).run(
+                new ConfigLoader().load(unstamped, "hello"), UserConfig.load(home), "va6", false);
+        check.eq("an unverified MCP camera stops the run before it starts",
+                "visual_qa_unavailable", unproven.reason());
+        check.that("and the implementer never ran",
+                !Files.exists(sandbox.resolve("eyes-acquire-unstamped-impl.count")));
+        Map<String, Object> unprovenGap = (Map<String, Object>) unproven.summaryReport().get("unavailable_role");
+        check.contains("naming the refusal", String.valueOf(unprovenGap.get("rejected_profiles")),
+                "vision_capability_unverified");
+    }
+
+    /**
+     * A policy file that does not parse used to be treated as no policy: the built-in chain
+     * ran, every role stage was skipped as not configured, and a dry run previewed `ok` over
+     * a candidate nobody would write. Measured on a multi-line flow mapping.
+     */
+    private void policyInvalidChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "policy-invalid", "medium", 20, false);
+        writeProfiles(home, sandbox, "policy-invalid", 1, 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl],
+                                 strategy: first }
+                """);
+        UserConfig broken = UserConfig.load(home);
+        check.that("the policy is present", broken.policyPresent());
+        check.that("and did not load", broken.policy() == null);
+        TaskLoop.Outcome refused = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), broken, "pi1", false);
+        check.eq("a run under a policy that does not parse stops before dispatching",
+                "policy_invalid", refused.reason());
+        check.that("with nobody paid", !Files.exists(sandbox.resolve("policy-invalid-impl.count")));
+        check.contains("and the summary carries the parser's own complaint",
+                String.valueOf(refused.summaryReport().get("policy_problem")), "flow mapping");
+        TaskLoop.Outcome preview = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), broken, "pi1-dry", true);
+        check.eq("and so does the dry run, rather than previewing the built-in chain",
+                "policy_invalid", preview.reason());
+        // Restore a parseable policy for whatever runs next.
+        writeProfiles(home, sandbox, "policy-invalid", 1, 1);
+    }
+
+    private Map<String, Object> visualStep(TaskLoop.Outcome outcome) {
+        return steps(outcome).stream()
+                .filter(step -> "visual_qa".equals(step.get("step")) && step.get("profile") != null)
+                .findFirst().orElseThrow();
+    }
+
+    /**
+     * @param mode     the stand-in's behaviour: takes a picture, takes none, or takes one
+     *                 outside the evidence directory
+     * @param acquires whether the profile declares that it takes its own screenshots
+     */
+    private void writeAcquiringEyes(Path home, Path sandbox, String scenario, String mode, int passesOn,
+                                    String mcpConfig, boolean acquires) throws IOException {
+        Path counter = sandbox.resolve(scenario + "-eyes.count");
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/loop-eyes-mcp.yaml"), """
+                version: 1
+                profile: loop-eyes-mcp
+                role: visual_qa
+                vendor: eyesvendor
+                command: %s
+                read_only: true
+                mcp:
+                  config: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--evidence-dir"
+                  - "{{evidence_dir}}"
+                  - "--outside"
+                  - %s
+                  - "--mcp-config"
+                  - "{{mcp_config}}"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                    acquires: %s
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/visual-qa.md
+                json_schema: schemas/visual-qa.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  verified_on: "2026-09-18"
+                """.formatted(yaml(javaExecutable()), yaml(mcpConfig), yaml(absoluteClassPath()), mode,
+                yaml(sandbox.resolve(scenario + "-elsewhere").toString()), yaml(counter.toString()),
+                passesOn, acquires));
+    }
+
+    private void policyWithAcquiringEyes(Path home) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                  visual_qa: { profiles: [loop-eyes-mcp], strategy: first, require_independent_vendor: false }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: look, run: role, role: visual_qa, when: [visual_qa_required], evidence: agent, on_fail: stop, on_findings: fix }
+                """);
     }
 
     private void writeEyesProfile(Path home, Path sandbox, String scenario, int passesOn)
@@ -1219,8 +1473,8 @@ public final class TaskLoopTest implements Suite {
                     String.valueOf(stopped.summaryReport().get("safe_next_step")), "review is reused");
 
             dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
-            check.eq(mode + ": the person is asked retry or abort",
-                    List.of("retry", "abort"), store.read(first).options());
+            check.eq(mode + ": the person is asked retry, abort or advance",
+                    List.of("retry", "abort", "advance"), store.read(first).options());
             store.resolve(first, store.read(first).updatedAt().toString(), "retry", "operator",
                     "waited for the window");
 
@@ -1256,7 +1510,7 @@ public final class TaskLoopTest implements Suite {
                 "operator", "");
         Main.Carried carried = Main.continuation(switched, "is1");
         check.eq("the switch authorises the named successor",
-                Map.of("reviewer", "loop-review"), carried.failover());
+                Map.of("review-second", "loop-review"), carried.failover());
         check.that("and asks the loop to keep what was already judged",
                 carried.continuation().reuseJudgements());
         TaskLoop.Outcome afterSwitch = new TaskLoop(new ProcessRunner())
@@ -1305,8 +1559,275 @@ public final class TaskLoopTest implements Suite {
         check.eq("two calls: the reading and the repair", 2L,
                 answered.summaryReport().get("role_runs"));
 
+        // A failover answered `retry` is the person waiting out the window with the same
+        // roster. It used to be impossible: the only answers were abort and switch, so a
+        // person who wanted the same vendor tomorrow had to abort and pay the writer again.
+        Path waited = newProject(sandbox, "infra-failover-retry");
+        writeProfiles(home, sandbox, "infra-failover-retry", 1, 1);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota-once", sandbox.resolve("infra-failover-retry-review2.count"), 2);
+        pairedReviewPolicy(home, "confirm");
+        TaskLoop.Outcome askedAgain = loop(waited, home, "fr1");
+        check.eq("a spent second reader with a successor asks who should read",
+                "failover_requires_confirmation", askedAgain.reason());
+        dev.warden.approval.ApprovalStore waitStore = new dev.warden.approval.ApprovalStore(waited);
+        check.eq("and the question now offers retry beside abort and switch",
+                List.of("abort", "switch", "retry"), waitStore.read("fr1").options());
+        waitStore.resolve("fr1", waitStore.read("fr1").updatedAt().toString(), "retry", "operator",
+                "the window rolled over");
+        Main.Carried carriedRetry = Main.continuation(waited, "fr1");
+        check.that("retry authorises no substitution", carriedRetry.failover().isEmpty());
+        check.that("and keeps the verdicts", carriedRetry.continuation().reuseJudgements());
+        TaskLoop.Outcome afterWait = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(waited, "hello"), UserConfig.load(home), "fr2",
+                        false, carriedRetry.failover(), carriedRetry.continuation());
+        check.that("the same roster finishes once the window rolled over", afterWait.ok());
+        check.eq("without paying the writer or the first reader again",
+                Map.of("from", "fr1", "stages", List.of("implement", "review")),
+                afterWait.summaryReport().get("reused_judgements"));
+        check.eq("and the second reading is the vendor that had run out", List.of("loop-review-2"),
+                steps(afterWait).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .map(step -> step.get("profile")).toList());
+
         // Restore the ordinary roster for the checks that follow.
         writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /**
+     * The two P4 bounds a run can declare beyond calls and time: a gate that expires, and a
+     * money cap that is a cap. Neither changes a task that does not declare it.
+     */
+    @SuppressWarnings("unchecked")
+    private void gateTtlAndStrictCapChecks(Check check, Path sandbox, Path home) throws Exception {
+        // A gate with a life. Accept refuses past it unless the person says they re-checked;
+        // reject, retry and abort stay open, because they grant nothing.
+        Path timed = newProject(sandbox, "gate-ttl");
+        writeProfiles(home, sandbox, "gate-ttl", 1, 1);
+        editTask(timed, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  gate_ttl_hours: 1");
+        TaskLoop.Outcome ttl = loop(timed, home, "gt1");
+        check.that("a task with a gate TTL still reaches the gate", ttl.ok());
+        dev.warden.approval.HumanDecision pending =
+                new dev.warden.approval.ApprovalStore(timed).read("gt1");
+        check.that("the decision carries an expiry", pending.expiresAt() != null);
+        check.that("one hour after it was asked", pending.expiresAt()
+                .equals(pending.createdAt().plus(java.time.Duration.ofHours(1))));
+        check.that("and the summary says when", ttl.summaryReport().get("gate_expires_at") != null);
+        long later = pending.expiresAt().toEpochMilli() + 60_000L;
+        Main.ApproveEnv expired = new Main.ApproveEnv(() -> later, millis -> { },
+                (root, gate) -> null, home);
+        Main.ApproveOutcome refused = Main.approveDecision(timed,
+                new String[] {"approve", "gt1", "--decision", "accept"}, expired);
+        check.that("an acceptance after the gate expired is refused", !refused.ok());
+        check.eq("under its own code", "gate_expired", refused.report().get("code"));
+        check.eq("and the decision is still pending", "pending",
+                new dev.warden.approval.ApprovalStore(timed).read("gt1").state().jsonValue());
+        Main.ApproveOutcome acknowledged = Main.approveDecision(timed,
+                new String[] {"approve", "gt1", "--decision", "accept", "--acknowledge-expired"},
+                expired);
+        check.that("an acknowledged acceptance after expiry is recorded", acknowledged.ok());
+
+        Path timedReject = newProject(sandbox, "gate-ttl-reject");
+        writeProfiles(home, sandbox, "gate-ttl-reject", 1, 1);
+        editTask(timedReject, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  gate_ttl_hours: 1");
+        loop(timedReject, home, "gt2");
+        long past = new dev.warden.approval.ApprovalStore(timedReject).read("gt2").expiresAt()
+                .toEpochMilli() + 60_000L;
+        Main.ApproveOutcome rejected = Main.approveDecision(timedReject,
+                new String[] {"approve", "gt2", "--decision", "reject", "--note", "stale"},
+                new Main.ApproveEnv(() -> past, millis -> { }, (root, gate) -> null, home));
+        check.that("a rejection after expiry needs no acknowledgement", rejected.ok());
+
+        Path untimed = newProject(sandbox, "gate-no-ttl");
+        writeProfiles(home, sandbox, "gate-no-ttl", 1, 1);
+        loop(untimed, home, "gt3");
+        check.that("a task without a TTL writes no expiry",
+                new dev.warden.approval.ApprovalStore(untimed).read("gt3").expiresAt() == null);
+
+        // A strict money cap. Without a bound on every paying profile it cannot be enforced,
+        // and the run says so before spending under a number that was never a cap.
+        Path unbounded = newProject(sandbox, "strict-unbounded");
+        writeProfiles(home, sandbox, "strict-unbounded", 1, 1);
+        editTask(unbounded, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  cost_cap: strict");
+        TaskLoop.Outcome unenforceable = loop(unbounded, home, "sc1");
+        check.eq("a strict cap over an unbounded roster stops before the first call",
+                "cost_cap_unenforceable", unenforceable.reason());
+        check.eq("with nothing spent", 0L, unenforceable.summaryReport().get("role_runs"));
+        check.contains("naming the profile without a bound",
+                Json.write(unenforceable.summaryReport().get("cost_cap_gap")), "loop-impl");
+
+        Path bounded = newProject(sandbox, "strict-bounded", "medium", 20, "0.03");
+        writeBoundedProfiles(home, sandbox, "strict-bounded", 0.02, 0.02);
+        TaskLoop.Outcome tooTight = loop(bounded, home, "sc2");
+        check.eq("a strict cap that the worst case of the owed calls exceeds refuses the first call",
+                "budget_exhausted", tooTight.reason());
+        check.eq("on the money ceiling", "max_cost_usd", tooTight.summaryReport().get("budget_limit_hit"));
+        check.eq("before anything was dispatched", 0L, tooTight.summaryReport().get("role_runs"));
+        check.contains("and says it was the strict reserve, not the reported spend",
+                String.valueOf(tooTight.summaryReport().get("budget_stop")), "strict cap");
+
+        Path roomy = newProject(sandbox, "strict-roomy", "medium", 20, "0.10");
+        writeBoundedProfiles(home, sandbox, "strict-roomy", 0.02, 0.02);
+        TaskLoop.Outcome fits = loop(roomy, home, "sc3");
+        check.that("a strict cap the worst case fits under runs to the gate", fits.ok());
+        check.eq("and the summary records the cap mode", "strict",
+                fits.summaryReport().get("cost_cap"));
+
+        // A pin outside the policy list is still a profile the cap has to reserve. Policy
+        // writer/reviewer bounds of $0.02/$0.03 fit under $0.06; an expensive implementer
+        // pinned with --use does not, and used to be dispatched because preflight only
+        // walked RoleSpec.profiles().
+        Path pinned = newProject(sandbox, "strict-pin", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-pin", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "expensive", "implementer", "expensivevendor",
+                "impl", 0.10, 0.08);
+        TaskLoop.Outcome pinSpends = new TaskLoop(new ProcessRunner())
+                .withOverride(RunOverride.fromArgs(new String[] {"--use", "implement=expensive"}))
+                .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home), "sc4", false);
+        check.eq("a dearer --use pin is refused before dispatch",
+                "budget_exhausted", pinSpends.reason());
+        check.eq("with nothing spent", 0L, pinSpends.summaryReport().get("role_runs"));
+        check.contains("naming the strict reserve",
+                String.valueOf(pinSpends.summaryReport().get("budget_stop")), "strict cap");
+
+        Path unboundedPin = newProject(sandbox, "strict-pin-unbounded", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-pin-unbounded", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "expensive-free", "implementer", "expensivevendor",
+                "impl", null, 0.08);
+        TaskLoop.Outcome pinUnenforceable = new TaskLoop(new ProcessRunner())
+                .withOverride(RunOverride.fromArgs(new String[] {"--use", "implement=expensive-free"}))
+                .run(new ConfigLoader().load(unboundedPin, "hello"), UserConfig.load(home),
+                        "sc5", false);
+        check.eq("a pinned profile with no bound makes the cap unenforceable",
+                "cost_cap_unenforceable", pinUnenforceable.reason());
+        check.eq("before anything was dispatched", 0L,
+                pinUnenforceable.summaryReport().get("role_runs"));
+        check.contains("naming the pinned profile",
+                Json.write(pinUnenforceable.summaryReport().get("cost_cap_gap")), "expensive-free");
+
+        // A rate-limit retry is another vendor call. Charging it only after RoleRunner
+        // returned let two $0.03 reviewer attempts share one outstanding bound under a
+        // $0.06 cap, and the run finished over budget.
+        Path retried = newProject(sandbox, "strict-retry", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-retry", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "loop-review", "reviewer", "reviewvendor",
+                "rate-limit-once", 0.03, 0.03);
+        String retryPolicy = Files.readString(home.resolve("policy.yaml"));
+        Files.writeString(home.resolve("policy.yaml"), retryPolicy.stripTrailing()
+                + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 1 } }\n");
+        TaskLoop.Outcome retryStopped = new TaskLoop(new ProcessRunner())
+                .withSleeper(millis -> { })
+                .run(new ConfigLoader().load(retried, "hello"), UserConfig.load(home), "sc6", false);
+        check.eq("a rate-limit retry that would overrun the cap is not admitted",
+                "rate_limited", retryStopped.reason());
+        check.that("the run stays under the ceiling",
+                ((Number) retryStopped.summaryReport().get("total_cost_usd")).doubleValue() <= 0.06);
+        check.eq("after the implementer and one reviewer attempt", 2L,
+                retryStopped.summaryReport().get("role_runs"));
+
+        // The same retry against a reviewer that prints no price when it is rate limited, as
+        // Codex prints none at all. The cap charges the attempt at its declared $0.03, so the
+        // retry is refused; the report still says what vendors printed. Folding the charge
+        // into total_cost_usd reported $0.03 nobody billed and hid the call from
+        // unpriced_calls, and ledger --compare read both.
+        Path unpricedRetry = newProject(sandbox, "strict-retry-unpriced", "medium", 20, "0.06");
+        writeBoundedProfiles(home, sandbox, "strict-retry-unpriced", 0.02, 0.03);
+        writeCostlyProfile(home, sandbox, "loop-review", "reviewer", "reviewvendor",
+                "rate-limit-once", 0.03, null);
+        String unpricedPolicy = Files.readString(home.resolve("policy.yaml"));
+        Files.writeString(home.resolve("policy.yaml"), unpricedPolicy.stripTrailing()
+                + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 1 } }\n");
+        TaskLoop.Outcome unpricedStopped = new TaskLoop(new ProcessRunner())
+                .withSleeper(millis -> { })
+                .run(new ConfigLoader().load(unpricedRetry, "hello"), UserConfig.load(home),
+                        "sc7", false);
+        check.eq("an unpriced attempt still counts against the strict cap",
+                "rate_limited", unpricedStopped.reason());
+        check.eq("so the retry was not dispatched", 2L,
+                unpricedStopped.summaryReport().get("role_runs"));
+        check.that("total_cost_usd is only what the vendors printed",
+                Math.abs(((Number) unpricedStopped.summaryReport().get("total_cost_usd"))
+                        .doubleValue() - 0.012) < 1e-9);
+        check.eq("the silent attempt is still an unpriced call", 1L,
+                unpricedStopped.summaryReport().get("unpriced_calls"));
+        check.eq("and the cap's own charge is reported beside it", 0.03,
+                unpricedStopped.summaryReport().get("cost_cap_unpriced_charge_usd"));
+        check.eq("the chain carries the charge to a continuation", 0.03,
+                ((Map<?, ?>) unpricedStopped.summaryReport().get("chain"))
+                        .get("cost_cap_unpriced_charge_usd"));
+
+        writeProfiles(home, sandbox, "strict-restore", 1, 1);
+    }
+
+    /** The ordinary stand-ins, each declaring a per-call worst case, under a strict-cap task. */
+    private void writeBoundedProfiles(Path home, Path sandbox, String scenario, double implBound,
+                                      double reviewBound) throws IOException {
+        writeProfiles(home, sandbox, scenario, 1, 1);
+        editTask(sandbox.resolve(scenario), "max_fix_attempts: 2", "max_fix_attempts: 2\n"
+                + "budgets_marker: []");
+        // `budgets` already carries max_cost_usd; the cap mode is added beside it.
+        Path task = sandbox.resolve(scenario).resolve(".warden/tasks/hello.yaml");
+        String text = Files.readString(task).replace("budgets_marker: []\n", "");
+        text = text.replace("max_role_runs:", "cost_cap: strict\n  max_role_runs:");
+        Files.writeString(task, text);
+        for (String[] profile : List.of(new String[] {"loop-impl", String.valueOf(implBound)},
+                new String[] {"loop-review", String.valueOf(reviewBound)})) {
+            Path file = home.resolve("profiles/" + profile[0] + ".yaml");
+            Files.writeString(file, Files.readString(file).replace(
+                    "limits: { wall_clock_minutes: 2 }",
+                    "limits: { wall_clock_minutes: 2, max_cost_usd: " + profile[1] + " }"));
+        }
+    }
+
+    /**
+     * A stand-in that reports a chosen price, optionally with a declared per-call bound.
+     * {@code bound} null is the overlay that makes a strict cap unenforceable;
+     * {@code reportedCost} null is a vendor that prints no price on a failed call.
+     */
+    private void writeCostlyProfile(Path home, Path sandbox, String name, String role,
+                                    String vendor, String mode, Double bound, Double reportedCost)
+            throws IOException {
+        Path counter = sandbox.resolve(name + ".count");
+        Files.deleteIfExists(counter);
+        boolean writer = "implementer".equals(role);
+        String prompt = writer ? "implementer" : "reviewer";
+        String fields = writer ? "role, task_id, status, summary, files_changed"
+                : "role, task_id, status, verdict, summary, findings";
+        String limits = bound == null
+                ? "limits: { wall_clock_minutes: 2 }"
+                : "limits: { wall_clock_minutes: 2, max_cost_usd: " + bound + " }";
+        int threshold = mode.endsWith("-once") ? 2 : 1;
+        String costArgs = reportedCost == null ? ""
+                : "  - \"--cost\"\n  - \"" + reportedCost + "\"\n";
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: %s
+                vendor: %s
+                command: %s
+                read_only: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                %s  - "--prompt-file"
+                  - "{{prompt_file}}"
+                %s
+                prompt_template: prompts/%s.md
+                json_schema: schemas/%s.json
+                artifact:
+                  required_fields: [%s]
+                verification:
+                  verified_on: "2026-08-26"
+                """.formatted(name, role, vendor, yaml(javaExecutable()), !writer,
+                yaml(absoluteClassPath()), mode, yaml(counter.toString()), threshold,
+                costArgs, limits, prompt, prompt, fields));
     }
 
     /**
@@ -1806,10 +2327,12 @@ public final class TaskLoopTest implements Suite {
                 .withProgress(printed::add)
                 .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu1", false);
 
-        check.that("a repair no later stage could judge is refused", !refused.ok());
+        check.that("a chain no reader could ever judge is refused", !refused.ok());
         check.eq("and the stop is about the roster, not about the reviewer",
                 "independent_review_unavailable", refused.reason());
-        check.eq("nothing was spent on the repair", 1L, refused.summaryReport().get("role_runs"));
+        // Before this preflight the writer was paid first and the gap found at the review
+        // stage; the roster was the same fact before the first call as after it.
+        check.eq("nothing at all was spent", 0L, refused.summaryReport().get("role_runs"));
         check.eq("and no fix round was counted", 0L, refused.summaryReport().get("attempts_used"));
         Map<String, Object> gap =
                 (Map<String, Object>) refused.summaryReport().get("unavailable_role");
@@ -1820,8 +2343,277 @@ public final class TaskLoopTest implements Suite {
         check.contains("the operator is told to widen the roster, not to read a transcript",
                 String.valueOf(refused.summaryReport().get("resolution")),
                 "Add a profile from another vendor");
-        check.contains("and the terminal says it stopped before the repair",
-                String.join("\n", printed), "stopping before the repair rather than after it");
+        check.contains("and the terminal says it stopped before the first dispatch",
+                String.join("\n", printed), "stopping before the first dispatch");
+        TaskLoop.Outcome previewed = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu2", true);
+        check.eq("a dry run names the same stop", "independent_review_unavailable",
+                previewed.summaryReport().get("would_stop"));
+    }
+
+    /**
+     * Who wrote the candidate decides who may read it, and the label the reading gets.
+     *
+     * Four legs. The writer set is recorded on an ordinary run and every reading is
+     * independent. A same-vendor reader is refused before the writer is paid unless the
+     * policy declares the pair and the task admits it, and then it is labelled a peer, never
+     * independent. The escalation ladder climbs after the declared number of objecting
+     * readings, pins the next rung's pair, and its reader is labelled a co-author. And a
+     * writer's last fix round is its product: a continuation reuses it rather than paying
+     * the writer to reproduce a tree it already left.
+     */
+    @SuppressWarnings("unchecked")
+    private void provenanceChecks(Check check, Path sandbox, Path home) throws Exception {
+        String implFields = "role, task_id, status, summary, files_changed";
+        String reviewFields = "role, task_id, status, verdict, summary, findings";
+
+        // Leg 1: recorded, independent.
+        Path plain = newProject(sandbox, "prov-plain");
+        writeProfiles(home, sandbox, "prov-plain", 1, 1);
+        TaskLoop.Outcome ok = loop(plain, home, "pv1");
+        check.that("an ordinary run reaches the gate", ok.ok());
+        check.eq("the writer set names the implementer's vendor", List.of("implvendor"),
+                ok.summaryReport().get("writer_vendors"));
+        check.eq("and its profile", List.of("loop-impl"), ok.summaryReport().get("writer_profiles"));
+        check.eq("provenance is recorded, because the tree was clean at the start", "recorded",
+                ok.summaryReport().get("writer_provenance"));
+        check.eq("the reading is independent", "independent",
+                ok.summaryReport().get("review_assurance"));
+        List<Map<String, Object>> coverage =
+                (List<Map<String, Object>>) ok.summaryReport().get("review_coverage");
+        check.eq("and the coverage row says so", "independent", coverage.get(0).get("assurance"));
+
+        // Leg 2: one vendor, two hats, a declared pair.
+        Path peer = newProject(sandbox, "prov-peer");
+        writeModelledProfile(home, "peer-impl", "implementer", "onevendor", "model-a", false,
+                "implementer", implFields, "impl", sandbox.resolve("prov-peer-impl.count"), 1);
+        writeModelledProfile(home, "peer-review", "reviewer", "onevendor", "model-b", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-peer-review.count"), 1);
+        peerPolicy(home, "peer-review", "peer-impl");
+        TaskLoop.Outcome refused = loop(peer, home, "pv2");
+        check.eq("a task that did not admit the pair is refused before anyone is paid",
+                "independent_review_unavailable", refused.reason());
+        check.eq("with nothing spent", 0L, refused.summaryReport().get("role_runs"));
+        editTask(peer, "max_fix_attempts: 2", "max_fix_attempts: 2\nreview_assurance: same_vendor_peer");
+        TaskLoop.Outcome peered = loop(peer, home, "pv3");
+        check.that("a task that admits the pair runs", peered.ok());
+        check.eq("and the reading is labelled a same-vendor peer", "same_vendor_peer",
+                peered.summaryReport().get("review_assurance"));
+        check.contains("which the human gate says out loud",
+                new dev.warden.approval.ApprovalStore(peer).read("pv3").reason(),
+                "not an independent review");
+        writeModelledProfile(home, "peer-review", "reviewer", "onevendor", "model-a", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-peer-review.count"), 1);
+        TaskLoop.Outcome sameModel = loop(peer, home, "pv4");
+        check.eq("the same model at another name is not a peer", "independent_review_unavailable",
+                sameModel.reason());
+        check.contains("and the refusal says why", Json.write(sameModel.summaryReport().get("unavailable_role")),
+                "peer_pair_invalid");
+
+        // Leg 3: the ladder.
+        Path ladder = newProject(sandbox, "prov-ladder");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-ladder-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-ladder-review.count"), 3);
+        writeProfile(home, "rung-impl", "implementer", "rungvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-ladder-rung-impl.count"), 1);
+        writeProfile(home, "rung-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-ladder-rung-review.count"), 1);
+        ladderPolicy(home, 2);
+        List<String> printed = new java.util.ArrayList<>();
+        TaskLoop.Outcome climbed = new TaskLoop(new ProcessRunner()).withProgress(printed::add)
+                .run(new ConfigLoader().load(ladder, "hello"), UserConfig.load(home), "pv5", false);
+        check.that("the ladder ends green", climbed.ok());
+        Map<String, Object> state = (Map<String, Object>) climbed.summaryReport().get("escalation");
+        check.eq("one rung was climbed", 1L, state.get("rung"));
+        check.eq("after two objecting readings", 2L, state.get("blocking_reviews_seen"));
+        check.eq("the rung's writer took the repair", "rung-impl", state.get("implementer"));
+        check.eq("and its reader re-read the objecting stage", "review", state.get("at_stage"));
+        List<Map<String, Object>> rows = steps(climbed);
+        Map<String, Object> lastFix = rows.stream()
+                .filter(row -> "implementer".equals(row.get("step")) && row.get("fix_for") != null)
+                .reduce((a, b) -> b).orElseThrow();
+        check.eq("the second repair was written by the rung", "rung-impl", lastFix.get("profile"));
+        Map<String, Object> lastRead = rows.stream()
+                .filter(row -> "review".equals(row.get("stage"))).reduce((a, b) -> b).orElseThrow();
+        check.eq("and read by the rung's reader", "rung-review", lastRead.get("profile"));
+        check.eq("both writers are in the writer set", List.of("implvendor", "rungvendor"),
+                climbed.summaryReport().get("writer_vendors"));
+        check.eq("a reader that wrote earlier is a co-author, not independent", "peer_review",
+                climbed.summaryReport().get("review_assurance"));
+        check.eq("the chain carries the rung", 1L,
+                ((Map<String, Object>) climbed.summaryReport().get("chain")).get("escalation_rung"));
+        check.contains("and the terminal said who climbed", String.join("\n", printed),
+                "escalation rung 1 of 1");
+
+        Path exhausted = newProject(sandbox, "prov-exhausted");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-exhausted-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-exhausted-review.count"), 3);
+        writeProfile(home, "rung-impl", "implementer", "rungvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-exhausted-rung-impl.count"), 1);
+        writeProfile(home, "rung-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-exhausted-rung-review.count"), 99);
+        ladderPolicy(home, 2);
+        TaskLoop.Outcome spent = loop(exhausted, home, "pv6");
+        check.eq("a last rung that still objects exhausts the ladder", "quality_exhausted",
+                spent.reason());
+        check.eq("with the rung recorded", 1L,
+                ((Map<String, Object>) spent.summaryReport().get("escalation")).get("rung"));
+
+        // Leg 4: a fix round is the writer's product, and a continuation reuses it.
+        Path reuse = newProject(sandbox, "prov-reuse");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", implFields, "impl-grows", sandbox.resolve("prov-reuse-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", reviewFields, "sequence:p1,rate,pass",
+                sandbox.resolve("prov-reuse-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome limited = loop(reuse, home, "pv7");
+        check.eq("the reader objects, the writer repairs, the re-read is rate limited",
+                "rate_limited", limited.reason());
+        check.eq("after one fix round", 1L, limited.summaryReport().get("attempts_used"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(reuse);
+        store.resolve("pv7", store.read("pv7").updatedAt().toString(), "retry", "operator", "waited");
+        TaskLoop.Outcome resumed = continued(reuse, home, "pv8", "pv7");
+        check.that("the retry reaches the gate", resumed.ok());
+        check.eq("reusing the writer's fix round as the implement stage",
+                Map.of("from", "pv7", "stages", List.of("implement")),
+                resumed.summaryReport().get("reused_judgements"));
+        check.eq("and paying only for the reading", 1L, resumed.summaryReport().get("role_runs"));
+        Map<String, Object> reusedRow = steps(resumed).stream()
+                .filter(row -> "implementer".equals(row.get("step"))).findFirst().orElseThrow();
+        check.eq("the reused row is the fix round, not the first attempt", "review",
+                reusedRow.get("fix_for"));
+        check.eq("and the writer set survived the continuation", List.of("implvendor"),
+                resumed.summaryReport().get("writer_vendors"));
+
+        // Leg 5: what Warden may and may not say about a tree it did not start clean.
+        Path stranger = newProject(sandbox, "prov-stranger");
+        writeProfiles(home, sandbox, "prov-stranger", 1, 1);
+        // A file no recorded run wrote. The implementer this run dispatches accounts for
+        // what IT writes and for nothing that was already here.
+        Files.writeString(stranger.resolve("src/stranger.txt"), "written by nobody" + System.lineSeparator());
+        TaskLoop.Outcome unexplained = loop(stranger, home, "pv9");
+        check.that("the run still reaches the gate", unexplained.ok());
+        check.eq("a known new author does not explain the bytes that were already there",
+                "unknown_preexisting_candidate", unexplained.summaryReport().get("writer_provenance"));
+        check.eq("so nothing read over that tree is called independent", "unproven",
+                unexplained.summaryReport().get("review_assurance"));
+
+        // The same tree, a new run id and no --continue: the run that left this tree is
+        // found by its recorded closing fingerprint, not by being the newest folder.
+        Path inherit = newProject(sandbox, "prov-inherit");
+        writeProfiles(home, sandbox, "prov-inherit", 1, 1);
+        TaskLoop.Outcome first = loop(inherit, home, "pv10");
+        check.that("the first run reaches the gate", first.ok());
+        check.eq("and knows who wrote", "recorded", first.summaryReport().get("writer_provenance"));
+        TaskLoop.Outcome next = loop(inherit, home, "pv11");
+        check.eq("a new run id over that tree inherits its writers", List.of("implvendor"),
+                next.summaryReport().get("writer_vendors"));
+        check.eq("naming the run it took them from", "pv10",
+                next.summaryReport().get("writers_inherited_from"));
+        check.eq("so the reading is independent again, and says so", "independent",
+                next.summaryReport().get("review_assurance"));
+
+        // Now move the tree behind the recorded fingerprint. The same run folders are on
+        // disk and the newest of them still names a writer; none of them accounts for this.
+        Files.writeString(inherit.resolve("src/after-the-fact.txt"), "edited outside Warden" + System.lineSeparator());
+        TaskLoop.Outcome moved = loop(inherit, home, "pv12");
+        check.eq("a tree no recorded run left is not inherited from the newest one",
+                "unknown_preexisting_candidate", moved.summaryReport().get("writer_provenance"));
+        check.eq("and the label goes with it", "unproven",
+                moved.summaryReport().get("review_assurance"));
+
+        // Leg 6: choosing a reader is not waiving the contract.
+        Path pinned = newProject(sandbox, "prov-pinned");
+        writeProfiles(home, sandbox, "prov-pinned", 1, 1);
+        writeProfile(home, "same-vendor-review", "reviewer", "implvendor", true,
+                "reviewer", reviewFields, "review", sandbox.resolve("prov-pinned-review.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, same-vendor-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                """);
+        TaskLoop.Outcome waived = new TaskLoop(new ProcessRunner())
+                .withOverride(dev.warden.config.RunOverride.fromArgs(
+                        new String[] {"--use", "review=same-vendor-review"}))
+                .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home), "pv13", false);
+        check.eq("an operator's pin is filtered like any other choice",
+                "independent_review_unavailable", waived.reason());
+        check.eq("and nothing was spent finding out", 0L, waived.summaryReport().get("role_runs"));
+        check.contains("with the resolver's own reason, not a pin error",
+                Json.write(waived.summaryReport().get("unavailable_role")), "same_vendor_as_writer");
+
+        writeProfiles(home, sandbox, "prov-restore", 1, 1);
+    }
+
+    private void peerPolicy(Path home, String reviewer, String implementer) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [%s], strategy: first, require_independent_vendor: false }
+                  reviewer:
+                    profiles: [%s]
+                    strategy: first
+                    require_independent_vendor: false
+                    same_vendor_peer: { implementer: %s, reviewer: %s }
+                review: { required_for_risk: [medium, high] }
+                """.formatted(implementer, reviewer, implementer, reviewer));
+    }
+
+    private void ladderPolicy(Path home, int after) throws IOException {
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                escalation:
+                  after_blocking_reviews: %d
+                  rungs:
+                    - { implementer: rung-impl, reviewer: rung-review }
+                """.formatted(after));
+    }
+
+    private void writeModelledProfile(Path home, String name, String role, String vendor,
+                                      String model, boolean readOnly, String promptAndSchema,
+                                      String requiredFields, String mode, Path counter,
+                                      int threshold) throws IOException {
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: %s
+                vendor: %s
+                model: %s
+                command: %s
+                read_only: %s
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "%d"
+                  - "--prompt-file"
+                  - "{{prompt_file}}"
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/%s.md
+                json_schema: schemas/%s.json
+                artifact:
+                  required_fields: [%s]
+                verification:
+                  verified_on: "2026-08-26"
+                """.formatted(name, role, vendor, model, yaml(javaExecutable()), readOnly,
+                yaml(absoluteClassPath()), mode, yaml(counter.toString()), threshold,
+                promptAndSchema, promptAndSchema, requiredFields));
     }
 
     /**
@@ -2216,11 +3008,17 @@ public final class TaskLoopTest implements Suite {
         TaskLoop.Outcome a2resumed = continueFrom(a2, home, "sr-first", "sr-second");
         check.that("the resume does not resurrect the retired review",
                 !reusedStages(a2resumed).contains("review"));
-        // The repair superseded the implement stage's own tree, so that stage verdict is stale
-        // too: the tree it produced was replaced before the run ended. Nothing is carried, and
-        // the resume rebuilds honestly rather than reusing a verdict about a vanished revision.
-        check.that("nothing stale is carried across the repair",
-                reusedStages(a2resumed).isEmpty());
+        // The repair superseded the implement stage's own tree, so that stage row is stale.
+        // The repair's own row is not: the tree the fix round left is the tree being resumed,
+        // and it is the writer's last product. It is reused under the implement stage rather
+        // than paying the writer to reproduce a candidate it already wrote; the retired review
+        // is still not carried.
+        check.eq("only the writer's fix round is carried across the repair",
+                List.of("implement"), reusedStages(a2resumed));
+        Map<String, Object> carriedWriter = steps(a2resumed).stream()
+                .filter(row -> "implementer".equals(row.get("step"))).findFirst().orElseThrow();
+        check.eq("and it is the fix round, not the superseded first attempt", "browser",
+                carriedWriter.get("fix_for"));
         check.contains("and the decline says the prior run had already retired the review",
                 declinedReason(a2resumed, "review"), "retired");
         check.that("the resume reaches the human gate", a2resumed.ok());

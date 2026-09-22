@@ -49,6 +49,18 @@ public final class ApprovalStore {
                 summaryPath, candidateFingerprint);
     }
 
+    /** @param ttl how long the question stays answerable, or null for a gate that never expires */
+    public HumanDecision createSuccess(
+            String runId,
+            String taskId,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint,
+            java.time.Duration ttl) throws IOException {
+        return createPending(runId, taskId, HumanDecision.Kind.SUCCESS, reason,
+                summaryPath, candidateFingerprint, ttl);
+    }
+
     public HumanDecision createFailure(
             String runId,
             String taskId,
@@ -80,6 +92,17 @@ public final class ApprovalStore {
             String reason,
             Path summaryPath,
             String candidateFingerprint) throws IOException {
+        return createPending(runId, taskId, kind, reason, summaryPath, candidateFingerprint, null);
+    }
+
+    public synchronized HumanDecision createPending(
+            String runId,
+            String taskId,
+            HumanDecision.Kind kind,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint,
+            java.time.Duration ttl) throws IOException {
         validateRunId(runId);
         requireNonBlank("task_id", taskId);
         requireNonBlank("reason", reason);
@@ -114,7 +137,8 @@ public final class ApprovalStore {
                     candidateFingerprint,
                     null,
                     null,
-                    null);
+                    null,
+                    ttl == null ? null : now.plus(ttl));
             writeAtomically(target, pending.toMap());
             return pending;
         });
@@ -129,6 +153,15 @@ public final class ApprovalStore {
             String decision,
             String actor,
             String note) throws IOException {
+        return resolve(runId, expectedUpdatedAt, decision, actor, note, current -> {});
+    }
+
+    @FunctionalInterface
+    public interface BeforeResolve { void run(HumanDecision current) throws IOException; }
+
+    /** Validate and apply a digest-bound contract proposal under the decision lock. */
+    public synchronized HumanDecision resolve(String runId, String expectedUpdatedAt, String decision,
+                                               String actor, String note, BeforeResolve action) throws IOException {
         validateRunId(runId);
         Path target = decisionPath(runId);
         return underExclusiveLock(target, () -> {
@@ -145,6 +178,7 @@ public final class ApprovalStore {
                         "decision must be one of " + current.options() + " for run " + runId);
             }
             requireNonBlank("actor", actor);
+            action.run(current);
 
             HumanDecision resolved = new HumanDecision(
                     current.schemaVersion(),
@@ -160,7 +194,8 @@ public final class ApprovalStore {
                     current.candidateFingerprint(),
                     decision,
                     actor,
-                    note == null ? "" : note);
+                    note == null ? "" : note,
+                    current.expiresAt());
             writeAtomically(target, resolved.toMap());
             return resolved;
         });

@@ -83,6 +83,31 @@ public interface Workspace {
     default void show(java.nio.file.Path file, String runId, String title) { }
 
     /**
+     * Put a file the run produced in front of the operator, in whatever the board views it
+     * with.
+     *
+     * {@link #show} prints a text file into a terminal, which is the right window for a
+     * compiled contract and the wrong one for a PNG. Visual QA is the case that asked for
+     * this: the whole point of the stage is that somebody looked at the screen, and until
+     * this existed the only trace of those pixels on the board was a sha256 in the ledger.
+     * A person deciding `accept` or `reject` from a phone should be deciding it while
+     * looking at the picture the verdict is about.
+     *
+     * Best-effort like the rest of this interface, and deliberately unbounded in what a board
+     * may do with it: opening an editor, a preview pane or nothing at all are all correct.
+     */
+    default void reveal(java.nio.file.Path file) { }
+
+    /**
+     * Name the stage that is about to spend time, on the board's own task list.
+     *
+     * Direct runners never become Agent Dashboard rows — that needs {@code runner: orca}.
+     * The card and the tab still have to say which Warden stage is working, or a phone
+     * sees only "in progress". Best-effort, like the rest of this interface.
+     */
+    default void stage(String label) { }
+
+    /**
      * The three states a Warden run can put a workspace in.
      *
      * Deliberately not one per stage. The board answers one question — is this waiting for me
@@ -137,6 +162,14 @@ public interface Workspace {
 
             @Override public void show(java.nio.file.Path file, String runId, String title) {
                 try { board.show(file, runId, title); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void reveal(java.nio.file.Path file) {
+                try { board.reveal(file); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void stage(String label) {
+                try { board.stage(label); } catch (RuntimeException | Error notOurProblem) { }
             }
         };
     }

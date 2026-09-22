@@ -1,0 +1,41 @@
+version: 1
+profile: agy-gpt-oss-review
+role: reviewer
+# Same independence family as codex profiles: GPT-OSS weights are OpenAI's,
+# even though the subscription/transport is Antigravity.
+vendor: codex
+model: gpt-oss-120b-medium
+command: agy
+runner: direct
+read_only: true
+prompt_delivery: argv
+args:
+  - "-p=Read the whole file {{prompt_file}} with view_file and follow its review instructions. Read files only. Do not run shell commands or create or edit files. Return exactly the requested JSON object, without Markdown."
+  - "--output-format"
+  - "json"
+  - "--model"
+  - "{{model}}"
+  - "--mode"
+  - "accept-edits"
+  - "--sandbox"
+  - "--add-dir"
+  - "{{repo_root}}"
+  - "--print-timeout"
+  - "5m"
+  - "--dangerously-skip-permissions"
+limits:
+  wall_clock_minutes: 6
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+quota:
+  signatures: ["no capacity available", "experiencing high traffic"]
+notes: "Effort is encoded in the model id. agy sandbox with skip-permissions does not enforce read-only; Warden detects content changes and rejects the verdict. Plan mode asks for an additional plan approval, so this headless profile uses accept-edits with a read-only prompt and Warden enforcement. No vision capability claimed. Usage may be unpriced."
+verification:
+  probe: 'agy -p "Use view_file to read schemas/reviewer.json in the current working directory. Return only its exact top-level title. Do not edit files or run commands. This is a single read, do it immediately without creating a plan." --output-format json --mode accept-edits --sandbox --add-dir . --print-timeout 3m --model gpt-oss-120b-medium --dangerously-skip-permissions'
+  expect: "Reviewer artifact"
+  what_to_check:
+    - "File reading works; response contains the schema title."
+    - "A separate Warden role smoke accepts typed JSON and leaves the project unchanged."
+    - "No provider model identity or visual-QA capability is inferred from this probe."

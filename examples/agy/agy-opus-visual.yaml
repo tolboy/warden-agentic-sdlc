@@ -1,0 +1,39 @@
+version: 1
+profile: agy-opus-visual
+role: visual_qa
+vendor: google
+model: claude-opus-4-6-thinking
+command: agy
+runner: direct
+read_only: true
+prompt_delivery: argv
+args:
+  - "-p=Read the whole file {{prompt_file}} and follow it. You may run orca computer to look at the running application and copy PNGs into {{evidence_dir}}. Do not edit source files. Return exactly the JSON object the prompt asks for."
+  - "--output-format"
+  - "json"
+  - "--model"
+  - "{{model}}"
+  - "--mode"
+  - "accept-edits"
+  - "--add-dir"
+  - "{{repo_root}}"
+  - "--print-timeout"
+  - "15m"
+  - "--dangerously-skip-permissions"
+capabilities:
+  vision:
+    delivery: workspace_file
+    verification: required
+    acquires: true
+limits:
+  wall_clock_minutes: 20
+prompt_template: prompts/visual-qa.md
+json_schema: schemas/visual-qa.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+quota:
+  signatures: ["individual quota reached", "no capacity available"]
+notes: "Looks with Orca computer-use. Thinking is in the model id; agy rejects --effort for this model."
+verification:
+  probe: 'agy -p "Use view_file to read schemas/visual-qa.json. Return only its exact top-level title." --output-format json --mode accept-edits --add-dir . --print-timeout 3m --model claude-opus-4-6-thinking --dangerously-skip-permissions'
+  expect: "Visual QA artifact"

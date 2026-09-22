@@ -1,0 +1,35 @@
+version: 1
+profile: agy-opus-review
+role: reviewer
+vendor: google
+model: claude-opus-4-6-thinking
+command: agy
+runner: direct
+read_only: true
+prompt_delivery: argv
+args:
+  - "-p=Read the whole file {{prompt_file}} with view_file and follow its review instructions. Read files only. Do not run shell commands or create or edit files. Return exactly the requested JSON object, without Markdown."
+  - "--output-format"
+  - "json"
+  - "--model"
+  - "{{model}}"
+  - "--mode"
+  - "accept-edits"
+  - "--sandbox"
+  - "--add-dir"
+  - "{{repo_root}}"
+  - "--print-timeout"
+  - "15m"
+  - "--dangerously-skip-permissions"
+limits:
+  wall_clock_minutes: 20
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+quota:
+  signatures: ["no capacity available", "experiencing high traffic", "individual quota reached"]
+notes: "Failover from claude.exe Opus 5. Thinking is in the model id; agy rejects --effort for this model."
+verification:
+  probe: 'agy -p "Use view_file to read schemas/reviewer.json. Return only its exact top-level title." --output-format json --mode accept-edits --sandbox --add-dir . --print-timeout 3m --model claude-opus-4-6-thinking --dangerously-skip-permissions'
+  expect: "Reviewer artifact"

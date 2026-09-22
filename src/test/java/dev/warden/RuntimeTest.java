@@ -198,6 +198,34 @@ public final class RuntimeTest implements Suite {
                     !beforeTrackedAll.equals(git.fingerprint(base)));
             Files.writeString(repository.resolve(".warden/land-note.txt"), "committed config\n");
 
+            // `.warden/runs` is the exception inside that exception: it is not configuration,
+            // it is what Warden writes while the call it is guarding is still running - the
+            // rotation counter when the profile was resolved, the corpus delivery status, the
+            // run directory itself. Tracking it is the documented default (the .gitignore
+            // `warden init` writes un-ignores *.json under runs/), and until this held, every
+            // read-only role in such a project was convicted of mutating the worktree.
+            // Measured on run bakery-2 of the Crumb Raiders trial, 2026-09-19.
+            Files.createDirectories(repository.resolve(".warden/runs/some-run"));
+            Files.writeString(repository.resolve(".warden/runs/rotation.json"), "{}\n");
+            command(repository, "git", "add", "--", ".warden/runs/rotation.json");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid",
+                    "commit", "-m", "tracked run evidence");
+            String beforeEvidence = git.fingerprint(base);
+            String beforeEvidenceSource = git.sourceFingerprint(base);
+            Files.writeString(repository.resolve(".warden/runs/rotation.json"), "{\"reviewer\": 2}\n");
+            Files.writeString(repository.resolve(".warden/runs/some-run/role-planner.json"), "{}\n");
+            check.eq("Warden's own evidence does not move the read-only fingerprint",
+                    beforeEvidence, git.fingerprint(base));
+            check.eq("nor the candidate fingerprint",
+                    beforeEvidenceSource, git.sourceFingerprint(base));
+            Files.writeString(repository.resolve(".warden/config-note.txt"), "a real config edit\n");
+            check.that("while a change to configuration under .warden still moves it",
+                    !beforeEvidence.equals(git.fingerprint(base)));
+            Files.delete(repository.resolve(".warden/config-note.txt"));
+            Files.writeString(repository.resolve(".warden/runs/rotation.json"), "{}\n");
+            Files.delete(repository.resolve(".warden/runs/some-run/role-planner.json"));
+
             // Committing the accepted change must not invalidate the acceptance. The candidate
             // is the content, not where it is sitting: measured on run torch-2, where
             // `warden land --commit` made the commit and `warden land --push` then refused it

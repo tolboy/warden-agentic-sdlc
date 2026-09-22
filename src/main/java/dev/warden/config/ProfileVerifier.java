@@ -32,9 +32,21 @@ import java.util.Map;
  */
 public final class ProfileVerifier {
 
+    /**
+     * @param expected    the substring `verification.expect` said the probe's stdout would
+     *                    carry, or null when the profile declared none
+     * @param answerFound whether it did; always true when nothing was expected
+     */
     public record Probe(boolean ok, String command, int exitCode, boolean timedOut,
                         String stdoutTail, String stderrTail, Path transcript,
-                        List<String> whatToCheck) {}
+                        List<String> whatToCheck, String expected, boolean answerFound) {
+
+        public Probe(boolean ok, String command, int exitCode, boolean timedOut,
+                     String stdoutTail, String stderrTail, Path transcript, List<String> whatToCheck) {
+            this(ok, command, exitCode, timedOut, stdoutTail, stderrTail, transcript, whatToCheck,
+                    null, true);
+        }
+    }
 
     /** Why a stamp was refused, or the file it was written to. */
     public record Stamp(boolean written, String code, String message, Path profileFile, String date) {}
@@ -68,8 +80,15 @@ public final class ProfileVerifier {
                 """.formatted(command, java.time.Instant.now(), result.exitCode(), result.timedOut(),
                 result.stdout(), result.stderr()), StandardCharsets.UTF_8);
 
-        return new Probe(result.ok(), command, result.exitCode(), result.timedOut(),
-                tail(result.stdout()), tail(result.stderr()), transcript, profile.verificationChecks());
+        // Exit code alone is not a pass when the profile said what the answer has to contain:
+        // a headless CLI whose tool call was auto-denied exited 0 with an empty response, and
+        // a stamp on that would release a reader that cannot read.
+        String expected = profile.verificationExpect();
+        boolean answered = expected == null
+                || (result.stdout() != null && result.stdout().contains(expected));
+        return new Probe(result.ok() && answered, command, result.exitCode(), result.timedOut(),
+                tail(result.stdout()), tail(result.stderr()), transcript, profile.verificationChecks(),
+                expected, answered);
     }
 
     /**
@@ -137,6 +156,12 @@ public final class ProfileVerifier {
             return "the probe hit its wall clock. Raise limits.wall_clock_minutes, or ask the "
                     + "probe for less; nothing was stamped";
         }
+        if (!probe.answerFound()) {
+            return "the probe exited " + probe.exitCode() + " but its output does not contain "
+                    + "the expected answer '" + probe.expected() + "': a tool call was refused, or "
+                    + "the model answered from something other than the file. Read the transcript; "
+                    + "nothing was stamped";
+        }
         if (said.contains("requires a newer version") || said.contains("upgrade to the latest")
                 || said.contains("update your cli") || said.contains("unsupported model")) {
             return "the vendor refused the request itself, not the profile: it says the CLI is "
@@ -165,6 +190,10 @@ public final class ProfileVerifier {
         result.put("stdout_tail", probe.stdoutTail());
         result.put("stderr_tail", probe.stderrTail());
         result.put("what_to_check", probe.whatToCheck());
+        if (probe.expected() != null) {
+            result.put("expected", probe.expected());
+            result.put("answer_found", probe.answerFound());
+        }
         return result;
     }
 

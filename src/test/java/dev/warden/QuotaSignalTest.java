@@ -93,6 +93,20 @@ public final class QuotaSignalTest implements Suite {
                         .matched());
         check.that("a bare mention of the word quota decides nothing, even on stderr",
                 !QuotaSignal.detect(List.of(), "", "recomputing the disk quota table").matched());
+
+        // bakery-agy-3 look: agy exited 0, stderr and the JSON `error` field both named
+        // a spent Antigravity plan. Without this phrase the envelope was read as an
+        // incomplete artifact and failover never ran.
+        String agyStderr = "error: Individual quota reached. Please upgrade your subscription "
+                + "to increase your limits. Resets in 132h44m53s. (response may be truncated)";
+        String agyStdout = "{\"conversation_id\":\"795bb5c3-a940-4e13-8e55-bb65bdf18d44\","
+                + "\"status\":\"ERROR\",\"response\":\"Unity isn't running.\","
+                + "\"error\":\"Individual quota reached. Please upgrade your subscription "
+                + "to increase your limits. Resets in 132h44m53s.\"}";
+        QuotaSignal.Detection agy = QuotaSignal.detect(List.of(), agyStdout, agyStderr);
+        check.that("an Antigravity individual quota is recognised", agy.matched());
+        check.eq("as a spent plan, not a rate limit", "quota_exhausted", agy.kind());
+        check.eq("and the phrase that decided it is named", "quota reached", agy.signature());
         claudeEnvelopeChecks(check);
         turnCeilingChecks(check);
         rateLimitChecks(check, stderrOnly, codex);

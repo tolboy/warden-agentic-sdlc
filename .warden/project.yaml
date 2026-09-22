@@ -54,9 +54,8 @@ defaults:
 # deleted afterwards; the title defaults to the first line of the commit message, which
 # is the second reason that line has to be a real subject.
 #
-# `note:` is deliberately absent. ProjectConfig accepts it under LAND_KEYS but the Land
-# record carries only remote, base and pullRequest, so a note here would validate and be
-# silently dropped. Reported rather than used.
+# `note:` is refused. It is not a LAND_KEYS entry, so a `land.note` key is the same
+# unknown-key error every other undeclared field gets.
 land:
   remote: origin
   base: main

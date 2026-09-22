@@ -63,18 +63,28 @@ public final class PlannerDraft {
                 throw new TaskDraft.TaskConflict("task '" + taskId
                         + "' already exists but cannot be validated: " + invalid.getMessage());
             }
-            boolean sameScope = existing.scope().entries().size() == 1
-                    && compiled.scope().equals(existing.scope().entries().get(0));
-            boolean sameRisk = compiled.risk().equals(existing.risk());
-            boolean sameGoal = proposed.goal().equals(existing.goal());
-            boolean sameId = taskId.equals(existing.id());
-            if (!sameId || !sameGoal || !sameScope || !sameRisk) {
-                throw new TaskDraft.TaskConflict("task '" + taskId
-                        + "' already exists with different intent; choose a different --task-id "
-                        + "or explicitly edit/review " + file
-                        + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
-                        + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk());
-            }
+            String conflict = intentConflict(taskId, operatorGoal, compiled.scope(),
+                    compiled.risk(), existing, file);
+            if (conflict != null) throw new TaskDraft.TaskConflict(conflict);
+            // Same intent: the new plan is applied, and the blocks that are the operator's
+            // own are carried across it.
+            //
+            // Both halves of that were broken. The comparison above used to be the COMPILED
+            // goal - the operator's, plus whatever the planner appended to it - against the
+            // operator's goal alone, so "same intent" was unreachable for any contract a
+            // person had written, and `--prepare always` ended as task_conflict with the
+            // planner already paid for (Crumb Raiders, 2026-09-19: four minutes and $0.27 of
+            // Grok, discarded). And when it was reachable, the file was kept whole, so a
+            // second plan changed nothing at all.
+            //
+            // `render` writes goal, non_goals, risk, scope, checks, authority and visual_qa
+            // and stops there, so applying a plan silently reset `budgets` and
+            // `max_fix_attempts` to TaskSpec's defaults - six calls, where this workflow
+            // needs five before a single repair. Those are ceilings a person chose, not
+            // something a planner may lower by drafting.
+            String merged = carryOperatorBlocks(compiled.yaml(),
+                    Files.readString(file, StandardCharsets.UTF_8));
+            Files.writeString(file, merged, StandardCharsets.UTF_8);
             return new TaskDraft.Written(file, taskId, true);
         }
         Files.createDirectories(file.getParent());
@@ -85,6 +95,106 @@ public final class PlannerDraft {
             throw new TaskDraft.TaskConflict("task '" + taskId + "' already exists at " + file);
         }
         return new TaskDraft.Written(file, taskId, false);
+    }
+
+    /**
+     * The keys a person owns in a contract, in the order they are written.
+     *
+     * A planner drafts what the work is; these say what it may spend, who does it, and what
+     * a person must be shown. `visual_qa` is here because a hand-written browser contract is
+     * a promise about the product, and a planner that has never seen the screen must not
+     * quietly withdraw it. `use` is here for the same reason one rung down: it names the
+     * profile, the effort and the Orca host a person chose for a stage, and a replan that
+     * dropped it would send the next run back to the default roster without saying so —
+     * losing precisely the settings the overlay exists to keep out of `~/.warden`.
+     */
+    private static final List<String> OPERATOR_BLOCKS =
+            List.of("visual_qa", "use", "budgets", "max_fix_attempts", "timeout_minutes");
+
+    /**
+     * The compiled contract with the operator's own blocks taken from the file it replaces.
+     *
+     * Line-based on purpose: Warden reads a strict YAML subset and does not write it, and
+     * re-emitting a hand-written file would drop the comments explaining why a ceiling is
+     * what it is - which in these files is the most valuable part.
+     */
+    static String carryOperatorBlocks(String compiledYaml, String existingYaml) {
+        String result = compiledYaml;
+        for (String key : OPERATOR_BLOCKS) {
+            String existingBlock = blockOf(existingYaml, key);
+            if (existingBlock == null) continue;
+            String compiledBlock = blockOf(result, key);
+            result = compiledBlock == null
+                    ? (result.endsWith("\n") ? result : result + "\n") + existingBlock
+                    : result.replace(compiledBlock, existingBlock);
+        }
+        return result;
+    }
+
+    /**
+     * One top-level block: the line that starts with {@code key:} in the first column, plus
+     * every line under it that is indented, blank or a comment. Null when the key is absent.
+     *
+     * The key index is kept separate from any comment that introduces it: walking {@code start}
+     * onto the comment and then scanning from there treated {@code budgets:} as the first line
+     * of the body, which is unindented, so a ceiling under {@code # Operator ceiling} was
+     * dropped. CRLF is split the way {@link dev.warden.yaml.Yaml} already splits it, so a
+     * Windows-saved {@code budgets:} still matches.
+     */
+    private static String blockOf(String yaml, String key) {
+        String[] lines = yaml.split("\r?\n", -1);
+        int keyIndex = -1;
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index];
+            if (line.equals(key + ":") || line.startsWith(key + ": ")) {
+                keyIndex = index;
+                break;
+            }
+        }
+        if (keyIndex < 0) return null;
+        int start = keyIndex;
+        while (start > 0 && lines[start - 1].startsWith("#")) start--;
+        int end = keyIndex + 1;
+        while (end < lines.length) {
+            String line = lines[end];
+            boolean belongs = line.isBlank() || line.startsWith(" ") || line.startsWith("\t")
+                    || line.startsWith("#");
+            if (!belongs) break;
+            end++;
+        }
+        // A trailing comment block introduces the next key rather than closing this one.
+        while (end > keyIndex + 1 && (lines[end - 1].startsWith("#") || lines[end - 1].isBlank())) {
+            end--;
+        }
+        StringBuilder block = new StringBuilder();
+        for (int index = start; index < end; index++) block.append(lines[index]).append('\n');
+        return block.toString();
+    }
+
+    /**
+     * Why an existing contract is not this invocation's, or null when it is.
+     *
+     * The operator's goal is compared as a prefix, not for equality: a planner may append to
+     * it and may not replace or drop it, which is the same rule {@link TaskDraft#requireSameIntent}
+     * applies. Id, scope and risk are compared exactly - those are the operator's decisions,
+     * and a contract that changes one of them is a different piece of work under a reused name.
+     *
+     * Public so the caller can ask before it pays a planner. A conflict is knowable from the
+     * file alone; discovering it after the call is how a plan gets bought and thrown away.
+     */
+    public static String intentConflict(String taskId, String operatorGoal, String scope,
+                                        String risk, TaskSpec existing, Path file) {
+        boolean sameScope = existing.scope().entries().size() == 1
+                && scope.equals(existing.scope().entries().get(0));
+        boolean sameRisk = risk.equals(existing.risk());
+        boolean sameGoal = existing.goal() != null
+                && existing.goal().startsWith(operatorGoal.strip());
+        boolean sameId = taskId.equals(existing.id());
+        if (sameId && sameGoal && sameScope && sameRisk) return null;
+        return "task '" + taskId + "' already exists with different intent; choose a different "
+                + "--task-id or explicitly edit/review " + file
+                + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
+                + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk();
     }
 
     public static Compiled compile(String taskId, String operatorGoal, ProjectConfig project,

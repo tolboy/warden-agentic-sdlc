@@ -11,6 +11,100 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- An Antigravity (`agy`) spent plan that exits 0 with `Individual quota reached` in the
+  JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
+  look used to stop as `role_artifact_incomplete` because the envelope was missing
+  `verdict`. Suite `quota signal`.
+- A confirmed vendor swap authorises the successor after quota; it is not a pin that
+  skips the spent vendor. Pinning it dropped the `role_failover` event the continued
+  run has to write. Suite `task loop`.
+- A contract proposal on Windows no longer requires `toRealPath()` to equal the
+  unresolved path. GitHub's runner spells temp dirs as an 8.3 name or a `\\?\`
+  prefix, `prepare` swallowed that as an empty proposal, and `operator-continuation`
+  died as `proposal_changed`. Confinement compares real paths. Suite `operator-continuation`.
+- A visual task with `evidence: agent` is not a browser contract. Preflight used to ask
+  `scripts/visual-qa.mjs --validate-only` about every required scenario, so a Unity look
+  that said "photograph the hop-aside" died as `visual_qa_contract_invalid` for want of
+  `testid=`. Dry-run stayed silent when node was not on PATH. The adapter is asked only
+  when the harness will actually run. Suite `visual qa`. Live-caught on `bakery-agy-1`.
+- A strict money cap looks at the profile routing will actually dispatch: a `--use` pin,
+  a `--host` twin, an escalation rung and an authorised substitution, not only the policy
+  list. A rate-limit retry is charged before the next attempt is admitted, and an unpriced
+  attempt is charged at its declared bound against the cap only: it stays in
+  `unpriced_calls`, stays out of `total_cost_usd`, and the charge is reported as
+  `cost_cap_unpriced_charge_usd` (also on the chain, so a continuation keeps it).
+  `--prepare always` keeps operator `budgets` blocks that use CRLF or sit under a comment.
+  Suites `planner` and `task loop`.
+
+### Added
+
+- Per-run roster overlays so a Unity loop does not rewrite `~/.warden`. `warden run` and
+  `warden do` take `--use <stage>=<profile>`, `--effort <stage>=<level>` and
+  `--host <stage>=orca`; a task may declare the same under `use:`, and flags win. Overlays
+  carry into `warden do --conductor` through the run's own `run-override.json`, and survive
+  a replan: `use:` is an operator block like `visual_qa`. `verified_on` is never touched.
+  Every overlay is checked against the roster before the first paid stage, and refused there
+  rather than honoured in name: a stage nobody in the workflow answers to, an effort the
+  runner cannot deliver, a host the profile cannot travel to. Suite `run-override`.
+- `--host <stage>=orca` moves a stage to the `runner: orca` profile the operator declared
+  for that role and vendor, so the Agent Dashboard shows a WORKING row. It does **not**
+  rewrite a direct profile into an Orca one: `worker-start` forwards agent, model and effort
+  and nothing else, so tool grants, sandbox, turn ceiling and MCP configuration would be
+  dropped and the direct profile's stamp would be carried onto a channel it never probed.
+  A profile with none of those is hosted in place; anything else is refused before a vendor
+  is paid, with the twin to declare named in the message. Not live-proven against
+  `worker-start` on this change.
+- `cast` on the run header and in `task-run.json`: which profile fills each stage, at what
+  model, effort and runner, with a per-run overlay marked. Printed before the first dispatch
+  and in `--dry-run`, so a roster change can be checked without paying for one. The Orca
+  card carries the short form (`implement(grok) -> review(openai) -> look(claude)`).
+- Screenshots reach the board. When a run stops for a person, up to four of the images the
+  visual stage was judged on are opened in Orca through `file open`, so an `accept` answered
+  from a phone is answered while looking at the pixels rather than at a digest.
+- `advance` on a failure gate. It closes the run and starts the next id of the same task
+  (`--continue`, writers carry, verdicts do not). `--no-start` records the decision and
+  prints the command. The Orca gate question names the next step and that advance starts
+  the following run. Older `retry`/`abort` files still parse. Conductor's own human gate
+  still offers only abort and retry: a decision node that started a nested run would put a
+  second retry controller inside the one Warden already is.
+- A task may require visual QA with `evidence: agent` and no browser viewport grammar. The
+  loop then drops the CDP harness for that run and the visual role takes its own pictures.
+  Copy `examples/mcp/unity.json` to `~/.warden/mcp/visual.json` (default
+  `http://127.0.0.1:8081/mcp`), and `warden profiles --verify claude-visual-qa-mcp --confirm`
+  before a paid look. An unverified camera now stops the run *before* the writer is paid.
+  The Bakery task opts in.
+
+### Fixed
+
+- A new run id on a tree an earlier run of this task left no longer marks every reader
+  `unproven`. Bakery-7 paid two independent vendors and was then told nobody could be called
+  independent, because the run folder had a different name. The writer set is inherited from
+  the run whose recorded closing tree **is** this tree — same immutable diff base, same
+  candidate fingerprint as the human decision recorded — and from no other. A prior run that
+  did not know its own writers is not a source, and a writer dispatched by *this* run proves
+  nothing about bytes that were in the tree before it: an unexplained candidate stays
+  `unknown_preexisting_candidate`, and every reading over it stays `unproven`.
+- A confirmed vendor substitution survives `advance` and `apply`. Those decisions used to
+  start the next run with an empty failover map, so a second reader switched after a quota
+  stop was silently put back on the spent profile. The substitutions recorded on the prior
+  summary travel with the continuation; verdicts still do not, because the contract moved.
+- An operator pin that has already reported a spent subscription this run is dropped rather
+  than re-dispatched. Rotation and failover can then pick the backup the roster still has.
+- Direct stages are named as Orca orchestration tasks on the run the card belongs to, so a
+  phone can see `review-second · claude-review` without rewriting the roster onto
+  `runner: orca`. Agent Dashboard WORKING rows still need a verified Orca profile. Not
+  live-proven against `task-create` on this change.
+- `--use <stage>=<profile>` no longer waives the task's `require_independent_vendor`. The pin
+  reached the roster through the escalation ladder's path, which skips the independence
+  filter by design, so choosing a reader quietly bought a `peer_review` the contract had not
+  agreed to. An operator's pin is now filtered like any other choice and refused with the
+  resolver's own reason; the ladder keeps its exception, because a rung is a pair the policy
+  declared.
+- `advance` no longer spends a run id proving nothing changed. The stops it is offered for
+  are caused outside the loop — a scope that excludes the file, a contract that forbids the
+  change, a failing baseline — and a second pass over an unchanged contract and an unchanged
+  tree reaches the same line. When neither has moved, `advance` says so and prints the
+  `warden run` command for starting one anyway.
 - A task's limits bound the chain of runs `--continue` links, not each run. A `retry` or
   `switch` continuation inherits the calls, reported cost, unpriced calls and fix rounds the
   earlier runs spent, read from the new `chain` block of their summary; before, every
@@ -85,6 +179,95 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- **Who wrote the code is measured, and every reading says how far it is from them.** The
+  summary carries `writer_vendors`, `writer_profiles` and `writer_provenance`: the set grows
+  with every writer call, including a failed one and a continuation, and is restored from the
+  `chain` block. A reader is independent of the whole set, not only of the last implementer,
+  and each reading carries an assurance label: `independent`, `same_vendor_peer`, `peer_review`
+  (a pinned assignment), `coauthor`, or `unproven` when the provenance is not known — which is
+  never read as independent. `same_vendor_peer` is opt-in twice: a named implementer/reviewer
+  pair with different models under `roles.reviewer.same_vendor_peer` in policy, and
+  `review_assurance: same_vendor_peer` on the task. `require_independent_vendor: true` stays
+  strict; a contradictory configuration is refused; the human gate shows the label. The reader
+  preflight asks every reader against the writer's vendor before the writer is paid:
+  `independent_review_unavailable` with zero calls and `rejected_profiles` naming the resolver's
+  reason per profile. Suite-covered; not run live.
+- **An escalation ladder by explicit policy.** `escalation.after_blocking_reviews: N` and
+  `rungs: [{implementer, reviewer}, …]` pin a different pair to the stages after N blocking
+  reviews of the same candidate; assignments are pinned per stage and restored on a
+  continuation, never chosen by rotation over a changed roster. Running out is
+  `quality_exhausted`; a rung nobody can fill is `escalation_unavailable`. Suite-covered.
+- **A continuation reuses the writer's last fix round.** When a fix round moved the tree, the
+  writer's own row for that tree is reused under the implement stage instead of paying the
+  writer to reproduce a candidate it already wrote; a retired review is still not carried.
+- **A second planner.** The `plan_reviewer` role (read-only) reads the compiled contract, not
+  the draft. Blocking findings send the first planner back once with a `prepare-redraft.md`
+  context; a second refusal stops as `plan_review_findings_remain`; a reviewer that moved the
+  tree is `plan_reviewer_protocol_violation`. The summary carries `plan_review`, both calls
+  count in the preparation budget, and `warden setup` ships `prompts/plan-reviewer.md`,
+  `schemas/plan-reviewer.json` and an unverified `agy-plan-review` profile (Gemini 3.8 Flash
+  through the `agy` CLI, whose calls report no price). Suite-covered; the profile's probe has
+  not been run.
+- **The reservation is re-measured against the compiled contract** (`P2PLAN-17`). The
+  estimate made before a contract exists is kept as `budget_plan_at_reservation` (phase
+  `reserve`); once the planner has compiled the contract the plan is measured again against
+  it (`budget_plan.measured_against: compiled_contract`, phase `prepared`), and
+  `reservation_matched_contract` says whether the two named the same paying stages. The
+  historical estimate is never rewritten.
+- **`retry` on a failover decision.** After the cause is removed, the same profile runs again
+  and earlier verdicts are carried, alongside `abort` and `switch`.
+- **A human gate that expires.** `budgets.gate_ttl_hours` writes `expires_at` on the decision;
+  `warden status` shows `expired`; accepting after expiry is refused as `gate_expired` unless
+  `--acknowledge-expired` is passed; waiting on a gate ends at its expiry.
+- **A money cap that is a cap.** `budgets.cost_cap: strict` reserves a proven upper bound per
+  call from each profile's `limits.max_cost_usd`; a roster without one stops as
+  `cost_cap_unenforceable` before the first call. Without it, `max_cost_usd` stays what it
+  was: a threshold on reported spend, and the preview still says so.
+- **A bounded retry on a transient rate limit**, opt-in: `retry.rate_limited: { max_attempts,
+  backoff_seconds }` in policy (default `max_attempts: 0`). The pause is the vendor's reported
+  retry-after when the evidence carries one, otherwise exponential backoff; every pause is on
+  the role report as `rate_limit_retry`. No failover, no dropped profile. Suite-covered with a
+  test sleeper; no live rate limit was retried.
+- **`warden ledger --compare [--baseline-file PATH] [--text]`** (P6b, the small form): two
+  slices of the corpus side by side — calls, reported cost and unpriced calls, duration, fix
+  rounds, stops by class, roster — with no new dashboard. The protocol for using it is in
+  [`docs/HYPOTHESIS.md`](docs/HYPOTHESIS.md).
+- **`warden roster`**: which profile fills which role and in which workflow, `roster set` to
+  change a role's profiles and strategy, `roster model` to change a profile's model and effort,
+  each with a timestamped backup of the file it rewrote; changing a model drops
+  `verification.verified_on` unless `--keep-verified`.
+- **A run timeline on the dashboard**: stages, calls, fix rounds and stops of a run, read from
+  the ledger.
+- **A visual role that takes its own screenshots.** A workflow stage may declare
+  `evidence: agent` instead of `sees:`; it needs no browser harness. The profile names the
+  MCP servers the vendor may reach (`mcp.config`, in the vendor's own format, handed to the
+  vendor's own flag through `{{mcp_config}}`) and declares `capabilities.vision.acquires:
+  true`. The role saves what it judged under the run's `screenshots/` directory (the prompt
+  is told where, and `{{evidence_dir}}` is available in args) and lists the files in
+  `screenshots_taken`; Warden verifies each one exists inside the run's evidence and is not
+  empty, hashes it onto the step row as `image_evidence`, and refuses a verdict that lists
+  none as `visual_qa_no_evidence` — a stop that is not about the work, with no fix round.
+  The configuration file's digest is a term of the role contract (`mcp_config_sha256`).
+  Before the first call, a stage with `evidence: agent` filled by a profile that does not
+  acquire stops as `visual_qa_unavailable`, and a profile whose `mcp.config` file is missing
+  stops as `mcp_config_missing`; the dry run names both. `warden setup` ships an unverified
+  `claude-visual-qa-mcp` template whose probe must be run against a server of yours. Suite-
+  covered with a stand-in vendor; no real MCP server has been tried, and what a screenshot is
+  a picture of is not verified by Warden.
+- **`verification.expect`**: a substring the probe's stdout has to contain before
+  `warden profiles --verify` stamps `verified_on`. Without it the stamp was exit code alone,
+  and a headless CLI whose tool call was auto-denied exited 0 with an empty response and was
+  stamped verified (measured with `agy` on 2026-09-18). The report carries `expected` and
+  `answer_found`; the next step names the refusal. The shipped `agy-plan-review` profile now
+  expects the schema title it is asked to read, adds `--add-dir .` to its probe and
+  `--dangerously-skip-permissions` to its args, with the measured consequence spelled out in
+  the file: `--mode plan --sandbox` do not stop that CLI from writing inside `--add-dir`, so
+  the read-only guarantee for the role is Warden's fingerprint check, not the CLI.
+- **A policy file that does not parse stops the run** as `policy_invalid`, with the parser's
+  complaint in `policy_problem`, before anything is dispatched — dry run included. It used to
+  be treated as no policy: the built-in chain ran, every role stage was skipped as
+  `role_not_configured`, and a dry run previewed `ok` over a candidate nobody would write.
+  Measured on a multi-line flow mapping in `roles:`.
 - `budgets.max_elapsed_minutes`: an execution deadline for a task, summed across the runs a
   `--continue` links and not counting time spent waiting for a person. No vendor call starts
   with less than a minute left, each call's wall clock is lowered to what is left, and a
@@ -177,6 +360,9 @@ that exists in code but has never been run live says so.
 
 ### Changed
 
+- `land.note` in `.warden/project.yaml` is refused as an unknown key. It used to
+  validate and be dropped: `ProjectConfig.LAND_KEYS` listed `note`, but the `Land`
+  record never carried it.
 - The hygiene job now reads every commit a push or a pull request introduces, not only the
   resulting tree. A tip-only gate was green while a commit added three absolute paths to a
   document and the next commit reworded them away, and the paths were still in the history the

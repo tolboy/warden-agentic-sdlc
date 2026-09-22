@@ -87,6 +87,9 @@ public final class Findings {
             // derivation, registry comparisons or any hash: it is what the operator is
             // being asked to do, not what the defect is.
             Object suggestion = raw.get("suggestion");
+            if (raw.get("proposed_acceptance") instanceof List<?> commands) {
+                value.put("proposed_acceptance", commands);
+            }
             if (suggestion instanceof String proposed && !proposed.isBlank()) {
                 value.put("suggestion", proposed);
             }

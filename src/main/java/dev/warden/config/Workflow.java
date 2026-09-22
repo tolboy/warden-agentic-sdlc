@@ -76,7 +76,16 @@ public record Workflow(List<Stage> stages) {
 
     private static final Set<String> STAGE_KEYS = Set.of(
             "stage", "run", "role", "when", "on_fail", "on_findings",
-            "recheck_after_fix", "fix_with", "sees");
+            "recheck_after_fix", "fix_with", "sees", "evidence");
+
+    /**
+     * Where a visual role's pixels come from. `harness`: the browser harness stage named by
+     * `sees` took them. `agent`: the role takes them itself through its own tools — an MCP
+     * server for a browser, a game engine or a desktop window — writes them into the run's
+     * evidence directory and lists them in `screenshots_taken`; Warden verifies that the files
+     * exist there and hashes them, and a verdict that lists none is `visual_qa_no_evidence`.
+     */
+    public static final Set<String> EVIDENCE = Set.of("harness", "agent");
     private static final Set<String> TOP_LEVEL = Set.of("stages");
 
     /**
@@ -89,13 +98,25 @@ public record Workflow(List<Stage> stages) {
      * @param recheckAfterFix  re-run this stage after any later stage's fix round
      * @param fixWith          the role handed the failure; `implementer` unless stated
      * @param sees             the visual-harness stage whose screenshots this role receives
+     * @param evidence         `harness` or `agent`: who takes a visual role's screenshots
      */
     public record Stage(String name, Kind kind, String role, List<String> when,
                         String onFail, String onFindings, boolean recheckAfterFix,
-                        String fixWith, String sees) {
+                        String fixWith, String sees, String evidence) {
 
         public Stage {
             when = List.copyOf(when);
+            if (evidence == null) evidence = "harness";
+        }
+
+        public Stage(String name, Kind kind, String role, List<String> when, String onFail,
+                     String onFindings, boolean recheckAfterFix, String fixWith, String sees) {
+            this(name, kind, role, when, onFail, onFindings, recheckAfterFix, fixWith, sees, "harness");
+        }
+
+        /** Whether this visual role takes its own pixels rather than reading a harness's. */
+        public boolean acquiresEvidence() {
+            return kind == Kind.ROLE && "visual_qa".equals(role) && "agent".equals(evidence);
         }
 
         /** The label under which this stage appears in the run summary and the ledger. */
@@ -153,6 +174,7 @@ public record Workflow(List<Stage> stages) {
             value.put("recheck_after_fix", recheckAfterFix);
             value.put("fix_with", fixWith);
             if (sees != null) value.put("sees", sees);
+            if (kind == Kind.ROLE && "visual_qa".equals(role)) value.put("evidence", evidence);
             return value;
         }
     }
@@ -161,6 +183,26 @@ public record Workflow(List<Stage> stages) {
      * The chain Warden ran before it could be declared, kept as the default so an operator
      * who never writes a `workflow:` block gets exactly the documented loop.
      */
+    /**
+     * A Unity scene, a Tauri window, a canvas — anything the CDP harness cannot drive.
+     * Drop the browser stages and tell the visual role to take its own pictures, without
+     * editing the operator's policy.yaml.
+     */
+    public Workflow forAgentEvidence() {
+        List<Stage> next = new ArrayList<>();
+        for (Stage stage : stages) {
+            if (stage.kind() == Kind.VISUAL_HARNESS) continue;
+            if (stage.kind() == Kind.ROLE && "visual_qa".equals(stage.role())) {
+                next.add(new Stage(stage.name(), stage.kind(), stage.role(), stage.when(),
+                        stage.onFail(), stage.onFindings(), stage.recheckAfterFix(),
+                        stage.fixWith(), null, "agent"));
+            } else {
+                next.add(stage);
+            }
+        }
+        return new Workflow(next);
+    }
+
     public static Workflow builtIn() {
         return new Workflow(List.of(
                 new Stage("implement", Kind.ROLE, "implementer", List.of(),
@@ -260,7 +302,23 @@ public record Workflow(List<Stage> stages) {
                 root.collector().add("workflow stage '" + name + "' is not a role stage; remove sees");
                 sees = null;
             }
-            if (sees == null && kind == Kind.ROLE && "visual_qa".equals(role)) {
+            String evidence = entry.optString("evidence", null);
+            if (evidence != null && !(kind == Kind.ROLE && "visual_qa".equals(role))) {
+                root.collector().add("workflow stage '" + name + "' does not run the visual_qa role; "
+                        + "remove evidence");
+                evidence = null;
+            } else if (evidence != null && !EVIDENCE.contains(evidence)) {
+                root.collector().add("workflow stage '" + name + "'.evidence must be one of "
+                        + EVIDENCE + ", got '" + evidence + "'");
+                evidence = null;
+            }
+            boolean acquires = "agent".equals(evidence);
+            if (acquires && sees != null) {
+                root.collector().add("workflow stage '" + name + "' takes its own screenshots "
+                        + "(evidence: agent) and cannot also see a harness stage; remove sees");
+                continue;
+            }
+            if (sees == null && kind == Kind.ROLE && "visual_qa".equals(role) && !acquires) {
                 sees = lastVisualHarness(stages);
                 if (sees == null) {
                     root.collector().add("workflow stage '" + name + "' runs the visual_qa role but no "
@@ -274,7 +332,8 @@ public record Workflow(List<Stage> stages) {
                 continue;
             }
 
-            stages.add(new Stage(name, kind, role, conditions, onFail, onFindings, recheck, fixWith, sees));
+            stages.add(new Stage(name, kind, role, conditions, onFail, onFindings, recheck, fixWith, sees,
+                    evidence));
         }
         return stages.isEmpty() ? builtIn() : new Workflow(stages);
     }

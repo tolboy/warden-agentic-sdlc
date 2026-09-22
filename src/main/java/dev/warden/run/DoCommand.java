@@ -87,6 +87,7 @@ public final class DoCommand {
     private final Workspace.Source board;
     private final boolean watch;
     private final boolean orcaGate;
+    private final dev.warden.config.RunOverride override;
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
@@ -101,16 +102,26 @@ public final class DoCommand {
 
     public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
                      boolean watch, boolean orcaGate) {
+        this(processes, progress, board, watch, orcaGate, dev.warden.config.RunOverride.NONE);
+    }
+
+    public DoCommand(ProcessRunner processes, Progress progress, Workspace.Source board,
+                     boolean watch, boolean orcaGate, dev.warden.config.RunOverride override) {
         this.processes = processes;
         this.progress = progress;
         this.board = board;
         this.watch = watch;
         this.orcaGate = orcaGate;
+        this.override = override == null ? dev.warden.config.RunOverride.NONE : override;
     }
 
     /** Publish the run's pending decision to Orca as a gate, so it can be answered elsewhere. */
     public DoCommand withOrcaGate(boolean publish) {
-        return new DoCommand(processes, progress, board, watch, publish);
+        return new DoCommand(processes, progress, board, watch, publish, override);
+    }
+
+    public DoCommand withOverride(dev.warden.config.RunOverride next) {
+        return new DoCommand(processes, progress, board, watch, orcaGate, next);
     }
 
     /**
@@ -119,7 +130,7 @@ public final class DoCommand {
      * worktree partway through and the operator's own checkout is the wrong one to write on.
      */
     public DoCommand withWorkspace(Workspace.Source source, boolean watch) {
-        return new DoCommand(processes, progress, source, watch, orcaGate);
+        return new DoCommand(processes, progress, source, watch, orcaGate, override);
     }
 
     /**
@@ -284,8 +295,26 @@ public final class DoCommand {
         Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
         boolean contractExists = Files.isRegularFile(taskFile);
         boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists);
+        // Asked before a planner is dispatched, not after it has answered. The conflict is
+        // knowable from the file on disk: same id, same scope, same risk, and an existing
+        // goal that still carries the operator's. Discovering it afterwards is how a plan
+        // gets bought and discarded, which is what run bakery-1 of the Crumb Raiders trial
+        // did on 2026-09-19 - four minutes and $0.27, for an answer the file already held.
+        if (dispatchPlanner && contractExists) {
+            try {
+                TaskSpec existing = TaskSpec.parse(
+                        Files.readString(taskFile, StandardCharsets.UTF_8), taskFile.toString());
+                String conflict = PlannerDraft.intentConflict(taskId, options.goal(), scope, risk,
+                        existing, taskFile);
+                if (conflict != null) return fail("task_conflict", requested, root, taskId, conflict);
+            } catch (RuntimeException unreadable) {
+                return fail("task_conflict", requested, root, taskId, "task '" + taskId
+                        + "' already exists but cannot be validated: " + unreadable.getMessage());
+            }
+        }
 
         TaskDraft.Written drafted;
+        Map<String, Object> planReview = null;
         // The mode that was in force, even when auto skipped the planner. TaskLoop writes
         // this into the run summary; defaulting to NONE (off) made --prepare auto look like
         // off after the fact.
@@ -313,13 +342,13 @@ public final class DoCommand {
                 // sufficient_for_success: false on a run that then finished.
                 if (options.draftOnly()) {
                     preparationPlan = new CallPlan(user.policy().workflow(),
-                            stage -> true, List.of("planner"));
-                    preparationCap = 1;
+                            stage -> true, Preparation.payingStages(user));
+                    preparationCap = Preparation.payingStages(user).size();
                 } else {
                     TaskSpec.ResolvedTask measured = measureForReservation(root, project,
                             taskId, options.goal(), scope, risk, contractExists);
                     preparationPlan = TaskLoop.planFor(user.policy().workflow(), user,
-                            measured, List.of("planner"));
+                            measured, Preparation.payingStages(user));
                     preparationCap = measured.budget().maxRoleRuns();
                 }
             }
@@ -344,9 +373,15 @@ public final class DoCommand {
                         prepared.message() == null ? prepared.code() : prepared.message()).report();
                 report.put("prepare", options.prepare());
                 report.put("run_id", runId);
+                report.put("preparation_role_runs", (long) prepared.roleRuns());
+                report.put("preparation_cost_usd", prepared.costUsd());
+                report.put("preparation_unpriced", (long) prepared.unpriced());
+                if (prepared.planReview() != null) report.put("plan_review", prepared.planReview());
+                if (prepared.written() != null) report.put("task_file", prepared.written().file().toString());
                 attachCorpusVisibility(report, root, runId, user.home());
                 return new Outcome(false, prepared.code(), requested, root, taskId, report);
             }
+            if (prepared.planReview() != null) planReview = prepared.planReview();
             if (options.dryRun() && prepared.written() == null && !contractExists) {
                 Map<String, Object> report = new LinkedHashMap<>();
                 report.put("ok", true);
@@ -380,8 +415,29 @@ public final class DoCommand {
             // So a later `warden run` or the Conductor inner process can join this reservation
             // instead of refusing it as a duplicate. The planner wrote evidence here; the loop
             // has not started yet.
+            //
+            // The plan is measured again, now against the contract the planner compiled. The
+            // reservation was measured before any contract existed — against the invocation's
+            // risk and no visual contract — and a planner is allowed to change both, so the
+            // two can name different paying stages (P2PLAN-17). The loop measures the compiled
+            // contract; so must the record a person reads before the loop starts. The earlier
+            // estimate is kept under its own phase rather than rewritten as if the final facts
+            // had been known in advance.
+            Map<String, Object> compiledPlan = null;
+            if (user.policy() != null && !options.draftOnly()) {
+                try {
+                    TaskSpec.ResolvedTask compiled = loader.load(root, taskId).resolved();
+                    compiledPlan = TaskLoop.planFor(user.policy().workflow(), user, compiled,
+                            Preparation.payingStages(user))
+                            .toMap(compiled.budget().maxRoleRuns(), user.policy().repairReserve());
+                } catch (Exception unreadable) {
+                    // The loop refuses an unreadable contract on its own; the estimate stands.
+                    compiledPlan = null;
+                }
+            }
             new EvidenceLedger(root, runId, user.home())
-                    .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced());
+                    .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced(),
+                            compiledPlan);
         } else if ("auto".equals(options.prepare()) && contractExists) {
             // A ready contract is not rewritten, but it is still this invocation's contract.
             // TaskDraft.write compares the operator's goal for equality, which would refuse
@@ -460,6 +516,7 @@ public final class DoCommand {
                 report.put("budget_plan", preparationPlan.toMap(
                         preparationCap, user.policy().repairReserve()));
             }
+            if (planReview != null) report.put("plan_review", planReview);
             if (dispatchPlanner) {
                 attachCorpusVisibility(report, root, runId, user.home());
             }
@@ -502,6 +559,7 @@ public final class DoCommand {
                     .withWorkspace(card)
                     .withOrcaGate(orcaGate && !options.dryRun())
                     .withPreparation(preparation)
+                    .withOverride(override)
                     .run(loaded, user, runId, options.dryRun());
         } catch (EvidenceLedger.RunExistsException duplicate) {
             return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
@@ -527,6 +585,7 @@ public final class DoCommand {
         report.put("scope", scope);
         report.put("risk", risk);
         report.put("dry_run", options.dryRun());
+        if (planReview != null) report.put("plan_review", planReview);
         report.put("summary", String.valueOf(loop.summary()));
         report.put("steps", loop.summaryReport().get("steps"));
         // Only when there is something to say. A dry run does not stop for these, so if the
@@ -559,6 +618,12 @@ public final class DoCommand {
             return fail("conductor_dry_run_unsupported", requested, root, taskId,
                     "use ordinary `warden do --dry-run`; Conductor exists to present a real human gate");
         }
+        // Conductor's workflow file declares five inputs and Warden does not rewrite it, so
+        // the flags an operator typed here cannot ride along as arguments. They are left in
+        // the run's own directory instead, which the inner `warden run` reads before it
+        // resolves anyone. Without this, `--conductor --use ... --effort ...` started the
+        // loop on the default roster and said nothing about it.
+        TaskLoop.handOver(root, runId, override);
         // Agent execution has its own task budget. This outer bound is the separate human-gate
         // TTL; Conductor checkpoints the workflow if the operator does not answer within a day.
         ConductorBridge.Outcome conductor = new ConductorBridge().run(root, taskId, runId,
