@@ -352,6 +352,22 @@ public final class RuntimeTest implements Suite {
         check.contains("and it reads the whole prompt", printed == null ? "" : printed.stderr(),
                 "read " + prompt.length());
         check.that("while its output is still capped", printed != null && printed.stdoutTruncated());
+
+        // Unix only: there Process.destroy closes stdin after the signal, and that close waits
+        // for the lock the blocked prompt write holds. A child that ignores SIGTERM and never
+        // reads kept the stop inside destroy until it exited by itself, here after 60 s.
+        // Windows terminates without touching the streams, so it has nothing to show.
+        if (!System.getProperty("os.name").toLowerCase().contains("win")) {
+            started = System.nanoTime();
+            ProcessRunner.Result stubborn = bounded(() -> runner.run(
+                    List.of("sh", "-c", "trap '' TERM; exec sleep 60"), Path.of("."),
+                    Duration.ofSeconds(1), 1024, prompt), Duration.ofSeconds(45));
+            seconds = Duration.ofNanos(System.nanoTime() - started).toSeconds();
+            check.that("a child that ignores SIGTERM and never reads its prompt is killed after "
+                    + "the grace period", stubborn != null && stubborn.timedOut());
+            check.that("and the stop does not wait for it to exit by itself (" + seconds + " s)",
+                    seconds < 20);
+        }
     }
 
     /** The call's result, or null when it had not returned within {@code limit}. */

@@ -21,7 +21,11 @@ that exists in code but has never been run live says so.
   60 s bound expired (timeout 2 s), and a child that prints 4 MB first never returned. The
   output readers now start first, and the prompt is written on its own thread under the
   timeout. On a stop, the process tree is killed, which breaks the pipe and ends the write.
-  Suite `runtime`.
+  The stop signals through `ProcessHandle`, not `Process.destroy`: on Unix the latter closes
+  stdin after the signal, and that close waits for the lock the blocked write holds, so a child
+  that ignored SIGTERM kept the stop inside `destroy` until it exited by itself. Measured in a
+  Linux container with a child that ignores SIGTERM and sleeps 40 s: 40.1 s before, 3.1 s
+  after (killed after the 2 s grace). Suite `runtime`.
 - `warden roster model` switches the model the vendor is asked for, not only the label.
   A direct profile that spells the old model in `args` (every hand-written profile on the
   maintainer's machine passed `--model opus` literally) now has that item rewritten to

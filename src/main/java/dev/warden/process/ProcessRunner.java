@@ -89,12 +89,21 @@ public final class ProcessRunner {
                 stdout.text(), stderr.text(), stdout.truncated(), stderr.truncated());
     }
 
+    /**
+     * Signals through {@link ProcessHandle}, never {@link Process#destroy}. On Unix,
+     * {@code Process.destroy} closes the child's stdin right after the signal, and that close
+     * flushes under the lock a prompt write still blocked on a full pipe holds. A child that
+     * ignores SIGTERM and never reads its prompt would hold this call inside {@code destroy},
+     * before the grace wait and the forced kill below could run. The handle only signals; the
+     * stdin stream stays with its writer, which closes it once the pipe breaks.
+     */
     private static void terminateTree(Process process, Duration grace) throws InterruptedException {
+        ProcessHandle child = process.toHandle();
         process.descendants().forEach(ProcessHandle::destroy);
-        process.destroy();
+        child.destroy();
         if (process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS)) return;
         process.descendants().forEach(ProcessHandle::destroyForcibly);
-        process.destroyForcibly();
+        child.destroyForcibly();
         process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS);
     }
 
