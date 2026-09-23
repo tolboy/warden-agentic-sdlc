@@ -16,6 +16,11 @@ artifact:
   required_fields: [role, task_id, status, verdict, summary, findings]
 notes: "Opt-in Orca profile, not equivalent to a direct --allowedTools profile. Read-only uses Warden's content check, not a provider sandbox. Keep restricted direct profiles in policy until launch/tool parity is proven."
 verification:
+  # Through the Orca channel itself: one worker reads a word Warden has just written into
+  # this worktree and says it back. Run `warden profiles --verify <name>` from an Orca
+  # worktree; {{worktree}} is the directory it was run in.
+  probe: "warden probe orca --agent claude --model {{model}} --effort {{effort}} --worktree {{worktree}}"
+  expect: "probe-answer: matched"
   what_to_check:
     - "launch.requested and launch.effective both contain model opus and effort max"
     - "worker_done contains the typed reviewer artifact; delivery is acknowledged and worker released"

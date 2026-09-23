@@ -216,6 +216,18 @@ public final class RunOverride {
 
     private String hostRefusal(String stage, Profile chosen, Map<String, Profile> roster) {
         Profile unstamped = twinOf(chosen, roster, false);
+        if (unstamped != null && unstamped.verificationProbe() == null) {
+            // `profiles --verify` refuses a profile with nothing to run, so advising it here
+            // sent the operator into a refusal. The Orca examples carry the probe to copy.
+            return "--host " + stage + "=orca found the Orca twin '" + unstamped.name()
+                    + "', but it carries no verified_on and no verification.probe, so there is "
+                    + "nothing `warden profiles --verify` could run to stamp it. Add the Orca "
+                    + "channel probe the shipped examples/orca profiles carry — probe: \"warden "
+                    + "probe orca --agent " + unstamped.command() + " --model {{model}} --effort "
+                    + "{{effort}} --worktree {{worktree}}\" with expect: \"probe-answer: matched\" — "
+                    + "then run `warden profiles --verify " + unstamped.name() + " --confirm` from "
+                    + "an Orca worktree, and this flag will use it.";
+        }
         if (unstamped != null) {
             return "--host " + stage + "=orca found the Orca twin '" + unstamped.name()
                     + "', but it carries no verified_on, and the resolver does not dispatch an "

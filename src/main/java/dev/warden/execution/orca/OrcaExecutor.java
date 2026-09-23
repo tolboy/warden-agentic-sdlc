@@ -256,34 +256,50 @@ public final class OrcaExecutor implements RoleExecutor {
 
         boolean retainCoordinator = false;
         try {
-        String runId = recorded.orcaRunId();
-        OrcaClient.Rpc run;
-        if (runId == null) {
-            run = orca.invoke(request.projectRoot(), Duration.ofSeconds(20),
-                    List.of("orchestration", "run-create",
-                            "--objective", "warden " + request.workflowRunId() + ": "
-                                    + request.task().goal(),
-                            "--from", coordinatorHandle));
-            evidence.put("run_create_ok", run.ok());
-            runId = nestedString(run.result(), "run", "id");
-            if (runId == null) runId = string(OrcaSettlement.first(run.result(), "runId", "id", "run_id"));
-            evidence.put("orca_run_reused", false);
-        } else {
+        // The Run is the one this Warden run already owns, whoever made it — the narration
+        // board, an earlier role, the run this one continues — and is made here only when
+        // nobody has. Deciding that from the snapshot read at the top raced the board, which
+        // made a Run of its own, so the stages and the workers sat in two.
+        String coordinator = coordinatorHandle;
+        OrcaClient.Rpc[] made = {null};
+        OrcaLifecycle.OwnedRun owned;
+        try {
+            owned = lifecycle.orcaRun(() -> {
+                made[0] = orca.invoke(request.projectRoot(), Duration.ofSeconds(20),
+                        List.of("orchestration", "run-create",
+                                "--objective", "warden " + request.workflowRunId() + ": "
+                                        + request.task().goal(),
+                                "--from", coordinator));
+                if (!made[0].ok()) return null;
+                String created = nestedString(made[0].result(), "run", "id");
+                return created != null ? created
+                        : string(OrcaSettlement.first(made[0].result(), "runId", "id", "run_id"));
+            });
+        } catch (java.io.IOException unreadable) {
+            evidence.put("failure", "role_orca_no_coordinator");
+            evidence.put("lifecycle_error", String.valueOf(unreadable.getMessage()));
+            evidence.put("resolution", "Warden could not read or record which Orca Run this run owns");
+            return fail("role_orca_no_coordinator", evidence, elapsed(deadline, profile), "");
+        }
+        String runId = owned.id();
+        OrcaClient.Rpc run = made[0];
+        if (made[0] != null) evidence.put("run_create_ok", made[0].ok());
+        if (runId != null && !owned.created()) {
             run = orca.invoke(request.projectRoot(), Duration.ofSeconds(20),
                     List.of("orchestration", "run-use", "--id", runId,
                             "--from", coordinatorHandle));
             evidence.put("run_use_ok", run.ok());
-            evidence.put("orca_run_reused", true);
         }
-        if (!run.ok() || runId == null) {
+        evidence.put("orca_run_reused", runId != null && !owned.created());
+        if (run == null || !run.ok() || runId == null) {
             evidence.put("failure", "role_orca_no_coordinator");
             evidence.put("stderr_tail", tail(run.stderr(), 2000));
             evidence.put("stdout_tail", tail(run.stdout(), 2000));
             evidence.put("resolution", "Orca could not bind a Run to Warden's coordinator terminal");
-            return fail("role_orca_no_coordinator", evidence, elapsed(deadline, profile), run.stdout());
+            return fail("role_orca_no_coordinator", evidence, elapsed(deadline, profile),
+                    run == null ? "" : run.stdout());
         }
         evidence.put("orca_run_id", runId);
-        bindRun(lifecycle, runId, evidence);
 
         String taskId;
         String dispatchId;
@@ -715,14 +731,6 @@ public final class OrcaExecutor implements RoleExecutor {
         }
     }
 
-    private void bindRun(OrcaLifecycle lifecycle, String runId, Map<String, Object> evidence) {
-        try {
-            lifecycle.mutate(OrcaLifecycle.of(snapshot -> snapshot.withOrcaRunId(runId)));
-        } catch (Exception failure) {
-            evidence.put("lifecycle_write_error", String.valueOf(failure.getMessage()));
-        }
-    }
-
     private OrcaSettlement.Outcome waitForSettlement(Path root, String taskId, String dispatchId,
                                                      String runId, String coordinatorHandle,
                                                      long deadline, Map<String, Object> evidence)
@@ -1027,7 +1035,7 @@ public final class OrcaExecutor implements RoleExecutor {
         return direct == null ? null : String.valueOf(direct);
     }
 
-    private static String selectorArgument(String selector) {
+    static String selectorArgument(String selector) {
         if (selector == null) return "current";
         if (selector.startsWith("id:") || selector.startsWith("path:")
                 || selector.startsWith("name:") || selector.startsWith("branch:")

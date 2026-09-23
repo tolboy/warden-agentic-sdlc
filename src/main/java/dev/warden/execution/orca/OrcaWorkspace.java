@@ -38,11 +38,16 @@ public final class OrcaWorkspace implements Workspace {
     private final Path worktree;
     private final String selector;
 
-    /** The live view this run opened, if it opened one. Null until {@link #watch} succeeds. */
+    /**
+     * The live view this run opened, if it opened one: by {@link #watch} in this process, or
+     * found on disk by {@link #adopt} in a later one. Null otherwise.
+     */
     private String terminal;
     private String runId;
-    /** Orca orchestration run that owns the stage tasks on this board. */
+    /** The Orca Run this Warden run owns, shared with the executor and the gate. */
     private String orcaRunId;
+    /** The stage row created by {@link #stage} and not yet settled by {@link #stageEnded}. */
+    private String openTask;
 
     /**
      * The last line written to the card, so a beat can re-say it with the clock attached.
@@ -79,7 +84,11 @@ public final class OrcaWorkspace implements Workspace {
      * error state.
      */
     public static Workspace attach(ProcessRunner processes, Path worktree) {
-        OrcaClient orca = new OrcaClient(processes);
+        return attach(new OrcaClient(processes), worktree);
+    }
+
+    /** The same probe over a given client; tests pass one that answers for Orca. */
+    public static Workspace attach(OrcaClient orca, Path worktree) {
         try {
             if (!Boolean.TRUE.equals(orca.status(worktree).get("available"))) return Workspace.NONE;
             OrcaClient.Rpc current = orca.invoke(worktree, Duration.ofSeconds(15),
@@ -102,9 +111,46 @@ public final class OrcaWorkspace implements Workspace {
 
     @Override
     public void state(State state) {
-        if (state != State.RUNNING) stopped = true;
+        if (state != State.RUNNING) {
+            stopped = true;
+            // A stage that never reported was stopped by the run, not finished by it.
+            settle(false, "the run stopped before this stage reported an outcome");
+        }
         set(List.of("--workspace-status", column(state)));
         retitle(state);
+    }
+
+    /**
+     * The tab this run opened, found from the lifecycle file.
+     *
+     * The process that records an answer is rarely the one that opened the tab: `warden
+     * approve`, the decision page and the supervisor each build their own board. Without the
+     * handle on disk the tab went on saying NEEDS YOU after the question was answered.
+     */
+    @Override
+    public void adopt(String runId) {
+        if (terminal != null || runId == null) return;
+        try {
+            OrcaLifecycle.Snapshot recorded = new OrcaLifecycle(worktree, runId).read();
+            if (recorded.watchTerminal() == null) return;
+            this.runId = runId;
+            this.terminal = recorded.watchTerminal();
+            this.orcaRunId = recorded.orcaRunId();
+        } catch (Exception notOurProblem) {
+            // No tab to rename is not a decision that failed.
+        }
+    }
+
+    /**
+     * The tab stops asking, without claiming the next run has started. The column is left
+     * where it is: a continuation moves it to running when it actually starts, and one that
+     * never starts leaves the card where a person will look.
+     */
+    @Override
+    public void answered(String decision) {
+        if (terminal == null || runId == null || decision == null) return;
+        stopped = true;
+        rename("warden " + runId + " - " + decision);
     }
 
     /**
@@ -202,7 +248,11 @@ public final class OrcaWorkspace implements Workspace {
             if (opened.ok()) {
                 this.runId = runId;
                 this.terminal = handleOf(opened.result());
-                ensureRun();
+                String handle = terminal;
+                if (handle != null) {
+                    new OrcaLifecycle(worktree, runId).mutate(OrcaLifecycle.of(
+                            snapshot -> snapshot.withWatchTerminal(handle)));
+                }
             }
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
@@ -257,29 +307,78 @@ public final class OrcaWorkspace implements Workspace {
         try {
             ensureRun();
             if (orcaRunId == null || terminal == null) return;
+            settle(false, "no outcome was reported before the next stage began");
             String title = clip(label);
-            orca.invoke(worktree, TIMEOUT, List.of(
+            OrcaClient.Rpc created = orca.invoke(worktree, TIMEOUT, List.of(
                     "orchestration", "task-create",
                     "--spec", "Warden stage: " + title,
                     "--task-title", title,
                     "--display-name", title,
                     "--run", orcaRunId,
                     "--from", terminal));
+            if (!created.ok()) return;
+            String id = OrcaSettlement.taskId(created.envelope());
+            if (id == null) {
+                Object first = OrcaSettlement.first(created.result(), "id", "taskId");
+                id = first == null ? null : String.valueOf(first);
+            }
+            openTask = id;
         } catch (Exception notOurProblem) {
             // A missing task row is not a missing stage.
         }
     }
 
+    /**
+     * The stage row is closed with the stage's own outcome. It used to be created and never
+     * touched again, so every stage of every run sat open on the Run for good, and a passed
+     * review looked exactly like one still in progress.
+     */
+    @Override
+    public void stageEnded(boolean ok, String summary) {
+        settle(ok, summary);
+    }
+
+    private void settle(boolean ok, String summary) {
+        String task = openTask;
+        if (task == null || orcaRunId == null || terminal == null) return;
+        openTask = null;
+        try {
+            orca.invoke(worktree, TIMEOUT, List.of(
+                    "orchestration", "task-update",
+                    "--id", task,
+                    "--status", ok ? "completed" : "failed",
+                    "--result", OrcaClient.jsonArgument(Map.of("summary", clip(summary))),
+                    "--run", orcaRunId,
+                    "--from", terminal));
+        } catch (Exception notOurProblem) {
+            // An unsettled row is a stale row, not a stale run.
+        }
+    }
+
+    /**
+     * The Run the executor and the gate use too, found or made through the lifecycle file,
+     * with this tab bound to it. Made lazily, at the first stage, so a continuation that
+     * inherits its predecessor's Run has done so before anything here asks.
+     */
     private void ensureRun() {
         if (orcaRunId != null || terminal == null || runId == null) return;
         try {
-            OrcaClient.Rpc created = orca.invoke(worktree, TIMEOUT, List.of(
-                    "orchestration", "run-create",
-                    "--objective", "warden " + runId,
-                    "--from", terminal));
-            if (!created.ok()) return;
-            String id = nestedRunId(created.result());
-            if (id != null) orcaRunId = id;
+            String from = terminal;
+            String warden = runId;
+            OrcaLifecycle.OwnedRun owned = new OrcaLifecycle(worktree, warden).orcaRun(() -> {
+                OrcaClient.Rpc created = orca.invoke(worktree, TIMEOUT, List.of(
+                        "orchestration", "run-create",
+                        "--objective", "warden " + warden,
+                        "--from", from));
+                return created.ok() ? nestedRunId(created.result()) : null;
+            });
+            if (owned.id() == null) return;
+            if (!owned.created()) {
+                OrcaClient.Rpc bound = orca.invoke(worktree, TIMEOUT, List.of(
+                        "orchestration", "run-use", "--id", owned.id(), "--from", from));
+                if (!bound.ok()) return;
+            }
+            orcaRunId = owned.id();
         } catch (Exception notOurProblem) {
             // The card and the tab still name the stage.
         }

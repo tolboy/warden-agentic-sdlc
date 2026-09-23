@@ -98,7 +98,85 @@ public final class DecisionPage implements AutoCloseable {
         return "http://127.0.0.1:" + server.getAddress().getPort() + "/" + token + "/";
     }
 
-    @Override public void close() { server.stop(0); }
+    /**
+     * Waits for an answer still being written before the server goes. The button's own POST
+     * records the decision, and the supervisor that sees it closes the page; closing with no
+     * grace dropped that POST's response, and the tab showed a broken connection instead of
+     * "recorded".
+     */
+    @Override public void close() { server.stop(2); }
+
+    // ------------------------------------------------------------------ lease
+
+    /** Beside the run's evidence: which process serves the page for this run, and where. */
+    public static final String LEASE_FILE = "decision-page.json";
+
+    /**
+     * A page some process is keeping up for one run.
+     *
+     * The page lives as long as the process that serves it, and that process used to be the
+     * only one that knew its address. Once it stopped waiting, the decision stayed pending on
+     * disk with no way back to it but `warden decide`; while it waited, a second `decide`
+     * would have put up a second page and a second supervisor, and each would have started
+     * the continuation. The lease is how the Dashboard and `decide` find the page that is
+     * already up, and tell a live one from one whose process is gone.
+     */
+    public record Lease(String url, long pid, String processStartedAt) {}
+
+    /** Record that this process serves {@code url} for {@code runId}. */
+    public static void lease(Path root, String runId, String url) throws IOException {
+        Path file = leaseFile(root, runId);
+        Map<String, Object> lease = new LinkedHashMap<>();
+        lease.put("run_id", runId);
+        lease.put("url", url);
+        lease.put("pid", ProcessHandle.current().pid());
+        lease.put("process_started_at", startOf(ProcessHandle.current()));
+        dev.warden.json.JsonFile.writeAtomically(file, lease);
+    }
+
+    /** The lease for {@code runId} when its process is still the one that wrote it, else null. */
+    public static Lease liveLease(Path root, String runId) {
+        try {
+            Path file = leaseFile(root, runId);
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return null;
+            Map<String, Object> lease = Json.parseObject(Files.readString(file, StandardCharsets.UTF_8));
+            if (!(lease.get("url") instanceof String url) || !(lease.get("pid") instanceof Number pid)) {
+                return null;
+            }
+            Object started = lease.get("process_started_at");
+            boolean alive = ProcessHandle.of(pid.longValue())
+                    .filter(ProcessHandle::isAlive)
+                    .filter(process -> started == null || String.valueOf(started).equals(startOf(process)))
+                    .isPresent();
+            return alive ? new Lease(url, pid.longValue(), started == null ? null : String.valueOf(started))
+                    : null;
+        } catch (Exception unreadable) {
+            return null;
+        }
+    }
+
+    /** Drop the lease, if it is still the one for {@code url}. */
+    public static void release(Path root, String runId, String url) {
+        try {
+            Path file = leaseFile(root, runId);
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return;
+            Map<String, Object> lease = Json.parseObject(Files.readString(file, StandardCharsets.UTF_8));
+            if (url.equals(lease.get("url"))) Files.deleteIfExists(file);
+        } catch (Exception notOurs) {
+            // A lease left behind names a process that is gone, and liveLease says so.
+        }
+    }
+
+    private static Path leaseFile(Path root, String runId) {
+        if (runId == null || !runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) {
+            throw new IllegalArgumentException("unsafe run id: " + runId);
+        }
+        return root.toAbsolutePath().normalize().resolve(".warden/runs").resolve(runId).resolve(LEASE_FILE);
+    }
+
+    private static String startOf(ProcessHandle process) {
+        return process.info().startInstant().map(Object::toString).orElse(null);
+    }
 
     private void handle(HttpExchange exchange) throws Exception {
         String authority = "127.0.0.1:" + server.getAddress().getPort();

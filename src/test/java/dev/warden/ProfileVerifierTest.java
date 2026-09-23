@@ -3,8 +3,10 @@ package dev.warden;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
 import dev.warden.config.UserConfig;
+import dev.warden.execution.orca.OrcaProbe;
 import dev.warden.process.ProcessRunner;
 import dev.warden.testing.Check;
+import dev.warden.testing.FakeOrca;
 import dev.warden.testing.Suite;
 
 import java.io.IOException;
@@ -13,6 +15,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Verifying a vendor profile.
@@ -163,8 +166,113 @@ public final class ProfileVerifierTest implements Suite {
             check.eq("and the refusal is named", "no_verification_block", missing.code());
             check.contains("the operator is told to write the probe first",
                     missing.message(), "add one with a probe");
+
+            orcaChannelProbe(check, home);
         } finally {
             deleteTree(home);
+        }
+    }
+
+    /**
+     * The shipped Orca examples carried `what_to_check` and no probe, and Warden advised
+     * `warden profiles --verify <twin> --confirm` for them, which refuses a profile with nothing
+     * to run. They now name `warden probe orca`, which goes through worker-start and asks the
+     * worker for a word Warden has just written into the worktree.
+     */
+    private void orcaChannelProbe(Check check, Path home) throws Exception {
+        Path worktree = Files.createDirectories(home.resolve("orca worktree"));
+        for (String example : List.of("claude-review.yaml", "codex-review-astra.yaml")) {
+            Path shipped = Path.of("examples/orca").resolve(example);
+            Profile profile = Profile.parse(Files.readString(shipped), shipped.toString());
+            check.contains("the Orca example names the Orca channel probe: " + example,
+                    String.valueOf(profile.verificationProbe()), "warden probe orca --agent " + profile.command());
+            check.eq("and the answer it has to print: " + example, "probe-answer: matched",
+                    profile.verificationExpect());
+
+            FakeOrca orca = new FakeOrca(worktree);
+            String[] asked = {null};
+            orca.answering(args -> {
+                String word = readProbeWord(worktree, orca);
+                asked[0] = word;
+                return FakeOrca.workerDone(orca.lastTask(), orca.lastDispatch(), Map.of("answer", word));
+            });
+            List<List<String>> ran = new java.util.ArrayList<>();
+            ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner(), (argv, timeout) -> {
+                ran.add(argv);
+                var outcome = new OrcaProbe(orca.client()).run(OrcaProbe.parse(argv.toArray(String[]::new)));
+                return new ProcessRunner.Result(argv, outcome.exitCode(), false, 0L,
+                        String.join("\n", outcome.lines()), "", false, false);
+            });
+            ProfileVerifier.Probe probe = verifier.run(profile, home, Duration.ofSeconds(60), worktree);
+            check.that("the example passes --verify through the Orca channel: " + example, probe.ok());
+            check.that("and was run by Warden itself, not a shell looking for `warden` on PATH",
+                    ran.size() == 1 && ran.get(0).get(0).equals("probe"));
+            check.eq("with the directory --verify was asked from, spaces and all", worktree.toString(),
+                    FakeOrca.option(ran.get(0), "--worktree"));
+            List<String> start = orca.calls("orchestration worker-start").getFirst();
+            check.eq("the worker gets the profile's agent", profile.command(), FakeOrca.option(start, "--agent"));
+            check.eq("model", profile.model(), FakeOrca.option(start, "--model"));
+            check.eq("and effort", profile.effort(), FakeOrca.option(start, "--effort"));
+            check.that("the worker was asked a word, not told one",
+                    !FakeOrca.option(orca.calls("orchestration task-create").getFirst(), "--spec")
+                            .contains(String.valueOf(asked[0])));
+            check.eq("it is released afterwards", 1, orca.calls("orchestration worker-release").size());
+            check.eq("and its coordinator closed", 1, orca.calls("terminal close").size());
+            try (var left = Files.list(worktree)) {
+                check.eq("the word file is gone", 0L, left.count());
+            }
+        }
+
+        FakeOrca guessing = new FakeOrca(worktree);
+        guessing.answering(args -> FakeOrca.workerDone(guessing.lastTask(), guessing.lastDispatch(),
+                Map.of("answer", "WARDEN-DEMO")));
+        OrcaProbe.Outcome wrong = new OrcaProbe(guessing.client())
+                .run(OrcaProbe.parse(new String[] {"probe", "orca", "--agent", "claude", "--worktree",
+                        worktree.toString()}));
+        check.eq("an answer that is not the word fails", 1, wrong.exitCode());
+        check.that("and says so rather than matched",
+                wrong.lines().stream().anyMatch(line -> line.startsWith("probe-answer: mismatched")));
+        check.eq("the worker that guessed is stopped", 1, guessing.calls("orchestration worker-stop").size());
+
+        FakeOrca elsewhere = new FakeOrca(worktree).notAWorktree();
+        OrcaProbe.Outcome outside = new OrcaProbe(elsewhere.client())
+                .run(OrcaProbe.parse(new String[] {"probe", "orca", "--agent", "codex", "--worktree",
+                        worktree.toString()}));
+        check.eq("outside an Orca worktree nothing starts", 0, elsewhere.calls("orchestration worker-start").size());
+        check.that("and the reason is printed",
+                outside.lines().stream().anyMatch(line -> line.contains("not a worktree Orca manages")));
+
+        check.eq("an empty model stays an empty argument, not the next flag's name",
+                List.of("probe", "orca", "--agent", "grok", "--model", "", "--effort", "", "--worktree", "w"),
+                ProfileVerifier.ownProbe("warden probe orca --agent grok --model {{model}} --effort {{effort}}"
+                        + " --worktree {{worktree}}", Profile.parse("""
+                                version: 1
+                                profile: g
+                                role: implementer
+                                vendor: grok
+                                command: grok
+                                runner: orca
+                                read_only: false
+                                """, "g.yaml"), "w"));
+        check.eq("any other probe still goes to the shell", null,
+                ProfileVerifier.ownProbe("claude -p ok", Profile.parse("""
+                        version: 1
+                        profile: c
+                        role: reviewer
+                        vendor: claude
+                        command: claude
+                        """, "c.yaml"), "w"));
+    }
+
+    /** What the probe wrote for the worker: the one word in its answer file. */
+    private static String readProbeWord(Path worktree, FakeOrca orca) {
+        try (var entries = Files.list(worktree)) {
+            Path fixture = entries.filter(path -> path.getFileName().toString().startsWith(".warden-probe-"))
+                    .findFirst().orElseThrow();
+            String text = Files.readString(fixture.resolve("answer.txt"));
+            return text.replace("The probe word is ", "").replace(".", "").strip();
+        } catch (IOException unreadable) {
+            throw new IllegalStateException(unreadable);
         }
     }
 

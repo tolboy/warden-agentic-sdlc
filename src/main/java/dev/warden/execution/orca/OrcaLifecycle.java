@@ -208,30 +208,46 @@ public final class OrcaLifecycle {
         }
     }
 
-    /** The whole file, read or written in one step. */
+    /**
+     * The whole file, read or written in one step.
+     *
+     * {@code watchTerminal} is the tab {@code --watch} opened on the narration. It is kept here
+     * rather than in the object that opened it because the process that answers the decision is
+     * rarely that one: {@code warden approve}, the decision page and the supervisor each build a
+     * board of their own, found no tab to rename, and left it saying NEEDS YOU after the answer.
+     */
     public record Snapshot(long schemaVersion, String runId, String orcaRunId,
-                           Map<String, Worker> workers, Gate gate) {
+                           Map<String, Worker> workers, Gate gate, String watchTerminal) {
 
         public Snapshot {
             workers = Map.copyOf(workers);
         }
 
+        public Snapshot(long schemaVersion, String runId, String orcaRunId,
+                        Map<String, Worker> workers, Gate gate) {
+            this(schemaVersion, runId, orcaRunId, workers, gate, null);
+        }
+
         public static Snapshot empty(String runId) {
-            return new Snapshot(SCHEMA_VERSION, runId, null, Map.of(), null);
+            return new Snapshot(SCHEMA_VERSION, runId, null, Map.of(), null, null);
         }
 
         public Snapshot withOrcaRunId(String id) {
-            return new Snapshot(schemaVersion, runId, id, workers, gate);
+            return new Snapshot(schemaVersion, runId, id, workers, gate, watchTerminal);
         }
 
         public Snapshot withWorker(Worker worker) {
             Map<String, Worker> next = new LinkedHashMap<>(workers);
             next.put(worker.key(), worker);
-            return new Snapshot(schemaVersion, runId, orcaRunId, next, gate);
+            return new Snapshot(schemaVersion, runId, orcaRunId, next, gate, watchTerminal);
         }
 
         public Snapshot withGate(Gate published) {
-            return new Snapshot(schemaVersion, runId, orcaRunId, workers, published);
+            return new Snapshot(schemaVersion, runId, orcaRunId, workers, published, watchTerminal);
+        }
+
+        public Snapshot withWatchTerminal(String handle) {
+            return new Snapshot(schemaVersion, runId, orcaRunId, workers, gate, handle);
         }
 
         public Optional<Worker> worker(String key) {
@@ -252,6 +268,7 @@ public final class OrcaLifecycle {
             for (Worker worker : workers.values()) encoded.add(worker.toMap());
             value.put("workers", encoded);
             value.put("gate", gate == null ? null : gate.toMap());
+            value.put("watch_terminal", watchTerminal);
             return value;
         }
 
@@ -277,7 +294,7 @@ public final class OrcaLifecycle {
             }
             Gate gate = rawGate == null ? null : Gate.fromMap(cast((Map<?, ?>) rawGate));
             return new Snapshot(schemaVersion, required(value, "run_id"),
-                    optional(value, "orca_run_id"), workers, gate);
+                    optional(value, "orca_run_id"), workers, gate, optional(value, "watch_terminal"));
         }
     }
 
@@ -313,6 +330,62 @@ public final class OrcaLifecycle {
             JsonFile.writeAtomically(file, next.toMap());
             return next;
         });
+    }
+
+    /** Creates an Orca Run and returns its id, or null when Orca would not make one. */
+    @FunctionalInterface
+    public interface RunCreator {
+        String create() throws Exception;
+    }
+
+    /** The Run a caller is to use, and whether it was created by this call. */
+    public record OwnedRun(String id, boolean created) {}
+
+    /**
+     * The one Orca Run this Warden run owns: the one on record, or the one {@code create}
+     * makes, written down before the lock is released.
+     *
+     * Three parts of Warden talk to Orca about a run — the narration board, the executor
+     * that starts workers, and the decision gate — and each used to find or make a Run on its
+     * own. The board kept its id in a field, so the stage rows it wrote and the workers and
+     * gate the other two created sat in different Runs, and a person looking at one Run saw
+     * part of the history. Creating under the lock is what makes it one: a second caller
+     * waits and then finds the first one's Run. A caller that did not create it must still
+     * bind its own terminal to it ({@code run-use}); {@code created} says which case this is.
+     */
+    public OwnedRun orcaRun(RunCreator create) throws IOException {
+        return JsonFile.underExclusiveLock(file, FILE_NAME + ".lock", () -> {
+            Snapshot current = read();
+            if (current.orcaRunId() != null) return new OwnedRun(current.orcaRunId(), false);
+            String id;
+            try {
+                id = create.create();
+            } catch (IOException failed) {
+                throw failed;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted while creating an Orca Run", interrupted);
+            } catch (Exception failed) {
+                throw new IOException(failed.getMessage(), failed);
+            }
+            if (id == null || id.isBlank()) return new OwnedRun(null, false);
+            JsonFile.writeAtomically(file, current.withOrcaRunId(id).toMap());
+            return new OwnedRun(id, true);
+        });
+    }
+
+    /**
+     * Carry the Orca Run of {@code fromRunId} to its continuation {@code runId}, so a chain
+     * of Warden runs — a retry, an advance, a switch — is one history in Orca rather than one
+     * Run per attempt. Does nothing when the continuation already has a Run or the run it
+     * continues never had one.
+     */
+    public static void inheritRun(Path projectRoot, String fromRunId, String runId) throws IOException {
+        if (fromRunId == null || fromRunId.equals(runId)) return;
+        String inherited = new OrcaLifecycle(projectRoot, fromRunId).read().orcaRunId();
+        if (inherited == null) return;
+        new OrcaLifecycle(projectRoot, runId).mutate(snapshot ->
+                snapshot.orcaRunId() != null ? snapshot : snapshot.withOrcaRunId(inherited));
     }
 
     /** A transformation that may itself refuse, so a caller can compare-and-swap. */

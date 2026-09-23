@@ -36,6 +36,155 @@ public final class DecisionPageTest implements Suite {
         retryOnThePageContinuesTheLoop(check);
         rejectWithANoteGoesBackToTheWriter(check);
         onlyTheLastAttemptIsShown(check);
+        aDecisionOutlivesItsPage(check);
+        anAnswerDoesNotClaimTheNextRunStarted(check);
+    }
+
+    /**
+     * The page lived exactly as long as the `warden do` that asked. When that stopped waiting,
+     * the page went with it and the decision stayed pending, reachable only by `warden
+     * decide` typed in the worktree. The Dashboard now lists it and puts the page back up —
+     * or goes to the one already up, rather than starting a second supervisor.
+     */
+    private void aDecisionOutlivesItsPage(Check check) throws Exception {
+        Path root = project("Toggle the greeting");
+        Path home = Files.createDirectories(root.resolve("home"));
+        Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+        summary.put("decision_kind", "success");
+        Files.writeString(summaryFile, Json.write(summary));
+        new ApprovalStore(root).createSuccess("run-1", "hello", "every stage that ran passed",
+                summaryFile, "fingerprint-shown");
+        long[] now = {1_800_000_000_000L};
+        Main.ApproveEnv hurried = new Main.ApproveEnv(() -> now[0], millis -> now[0] += millis,
+                (path, gate) -> { throw new IllegalStateException("no gate"); }, home);
+        String[] args = {"--no-workspace-status", "--quiet"};
+
+        // The wait that asked the question ends unanswered, as it does after --wait-minutes.
+        String[] leased = {null};
+        Map<String, Object> waited = Main.awaitDecision(root, "run-1", args, 1, hurried, url -> {
+            var lease = DecisionPage.liveLease(root, "run-1");
+            leased[0] = lease == null ? null : lease.url();
+            check.eq("while the page is up its lease names it", url, leased[0]);
+            return true;
+        });
+        check.eq("the first wait ended without an answer", Boolean.TRUE,
+                ((Map<?, ?>) waited.get("decision_page")).get("timed_out"));
+        check.that("and took its page and its lease with it", DecisionPage.liveLease(root, "run-1") == null);
+
+        Main.ApproveEnv patient = new Main.ApproveEnv(System::currentTimeMillis,
+                millis -> Thread.sleep(Math.min(millis, 20)),
+                (path, gate) -> { throw new IllegalStateException("no gate"); }, home);
+        List<String> previews = new java.util.ArrayList<>();
+        try (var dashboard = new dev.warden.dashboard.Dashboard(root, 0,
+                runId -> Main.openDecision(root, runId, args, patient, url -> previews.add(url)))) {
+            dashboard.start();
+            Map<String, Object> state = Json.parseObject(get(dashboard.url() + "api/state").body());
+            List<?> pending = (List<?>) state.get("pending_decisions");
+            check.eq("the Dashboard lists the open question", 1, pending.size());
+            check.eq("naming its run", "run-1", ((Map<?, ?>) pending.get(0)).get("run_id"));
+            check.eq("and says nobody is serving its page now", false, ((Map<?, ?>) pending.get(0)).get("page_open"));
+
+            String html = get(dashboard.url()).body();
+            java.util.regex.Matcher meta = java.util.regex.Pattern
+                    .compile("name=\"warden-token\" content=\"([^\"]+)\"").matcher(html);
+            check.that("the page it serves carries the action token", meta.find());
+            String token = meta.group(1);
+
+            check.eq("a request without the token is refused", 403,
+                    postForm(dashboard.url() + "decide/run-1", "token=wrong", null).statusCode());
+            check.eq("and so is one from another origin", 403,
+                    postForm(dashboard.url() + "decide/run-1", "token=" + token, "http://evil.example").statusCode());
+            check.that("neither started a page", DecisionPage.liveLease(root, "run-1") == null);
+
+            HttpResponse<String> opened = postForm(dashboard.url() + "decide/run-1", "token=" + token, null);
+            check.eq("the button puts the page back up and goes to it", 303, opened.statusCode());
+            String page = opened.headers().firstValue("Location").orElse("");
+            check.contains("a decision page on this machine", page, "http://127.0.0.1:");
+            check.contains("that asks the question again", get(page).body(), "Нужно ваше решение");
+            var lease = DecisionPage.liveLease(root, "run-1");
+            check.eq("and is leased, so the next click finds it", page, lease == null ? null : lease.url());
+            check.eq("a second click goes to the same page", page,
+                    postForm(dashboard.url() + "decide/run-1", "token=" + token, null)
+                            .headers().firstValue("Location").orElse(""));
+            check.eq("and the list says it is open", true, ((Map<?, ?>) ((List<?>) Json.parseObject(
+                    get(dashboard.url() + "api/state").body()).get("pending_decisions")).get(0)).get("page_open"));
+
+            HumanDecision current = new ApprovalStore(root).read("run-1");
+            HttpResponse<String> answered = post(page, "reject", "", current.updatedAt().toString());
+            check.contains("the answer goes through approve", answered.body(), "Записано");
+            long until = System.currentTimeMillis() + 10_000L;
+            while (DecisionPage.liveLease(root, "run-1") != null && System.currentTimeMillis() < until) {
+                Thread.sleep(20);
+            }
+            check.that("the page's supervisor ends with the answer", DecisionPage.liveLease(root, "run-1") == null);
+            check.eq("a decided run is not reopened", 409,
+                    postForm(dashboard.url() + "decide/run-1", "token=" + token, null).statusCode());
+            check.eq("and leaves the list", 0, ((List<?>) Json.parseObject(
+                    get(dashboard.url() + "api/state").body()).get("pending_decisions")).size());
+        }
+        check.eq("nothing was opened besides the page", List.of(), previews);
+    }
+
+    /**
+     * `warden approve` moved the card to "running" for every answer that expects another run,
+     * before any run had started, and a continuation that was then refused left it there. The
+     * tab it could not find went on saying NEEDS YOU. The card now moves when the next run
+     * starts; the answer renames the tab and leaves the column alone.
+     */
+    private void anAnswerDoesNotClaimTheNextRunStarted(Check check) throws Exception {
+        List<String> told = new java.util.concurrent.CopyOnWriteArrayList<>();
+        dev.warden.run.Workspace recording = new dev.warden.run.Workspace() {
+            @Override public void note(String text) { told.add("note"); }
+            @Override public void state(State state) { told.add("state " + state); }
+            @Override public void adopt(String runId) { told.add("adopt " + runId); }
+            @Override public void answered(String decision) { told.add("answered " + decision); }
+        };
+        var before = Main.boards;
+        Main.boards = worktree -> recording;
+        try {
+            for (String[] answer : List.of(new String[] {"reject", "the second press misses"},
+                    new String[] {"reject", ""})) {
+                told.clear();
+                Path root = project("Toggle the greeting");
+                Path home = Files.createDirectories(root.resolve("home"));
+                HumanDecision pending = new ApprovalStore(root).createSuccess("run-1", "hello",
+                        "every stage that ran passed", root.resolve(".warden/runs/run-1/task-run.json"),
+                        "fingerprint-shown");
+                Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis, millis -> { },
+                        (path, gate) -> { throw new IllegalStateException("no gate"); }, home);
+                var recorded = Main.approveDecision(root, new String[] {"approve", "run-1",
+                        "--decision", answer[0], "--note", answer[1], "--expected-updated-at",
+                        pending.updatedAt().toString(), "--no-start", "--quiet"}, env);
+                String which = answer[0] + (answer[1].isEmpty() ? " without a note" : " with a note");
+                check.that("the answer is recorded: " + which, recorded.ok());
+                check.that("the board takes over the run's tab first: " + which,
+                        !told.isEmpty() && told.get(0).equals("adopt run-1"));
+                if (answer[1].isEmpty()) {
+                    check.that("an answer that closes the run settles the card",
+                            told.contains("state " + dev.warden.run.Workspace.State.SETTLED));
+                } else {
+                    check.that("an answer that expects another run renames the tab",
+                            told.contains("answered reject"));
+                    check.that("and does not say running before that run starts",
+                            told.stream().noneMatch(line -> line.startsWith("state ")));
+                }
+                String narration = Files.exists(root.resolve(".warden/runs/run-1/narration.log"))
+                        ? Files.readString(root.resolve(".warden/runs/run-1/narration.log")) : "";
+                check.that("no narration is invented for a run that never had one: " + which,
+                        narration.isEmpty());
+            }
+        } finally {
+            Main.boards = before;
+        }
+    }
+
+    private HttpResponse<String> postForm(String url, String body, String origin) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (origin != null) request.header("Origin", origin);
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     /**

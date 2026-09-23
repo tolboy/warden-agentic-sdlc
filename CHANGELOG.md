@@ -11,6 +11,59 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- One Warden run is one Orca Run. The `--watch` board made a Run of its own and kept its id
+  in a field, while the executor and the decision gate found or made one through
+  `orca.json`, so a watched run put its stage rows in one Run and its workers and gate in
+  another. All three now get or create the Run through `OrcaLifecycle.orcaRun`, under the
+  lifecycle lock. A continuation (retry, advance, switch) inherits its predecessor's Run,
+  so a chain is one history. Stage rows are created once per stage (the resolved profile
+  used to open a second one) and closed with the stage's outcome: `completed`, or `failed`
+  when the stage failed or the run stopped mid-stage. They used to stay open forever. Found
+  by the 2026-09-22 review (UI-06). Suite `orca-run-identity`, new.
+- The watch tab stops saying NEEDS YOU once the question is answered. Its handle lived only
+  in the object that opened it, and `warden approve`, the decision page and the supervisor
+  each build their own board, so the answer never reached the tab. The handle is now kept
+  in `orca.json`; the answering process adopts it, renames the tab to the decision, and
+  appends the decision to the run's narration. An answer that expects another run no longer
+  moves the card to running: the continuation does that when it actually starts, and a
+  continuation that is refused leaves the card where a person will look. Found by the
+  review (UI-05). Suites `orca-run-identity`, `decision-page`, `heartbeat`.
+- A decision outlives its page. The page lived exactly as long as the `warden do` that asked
+  the question, and once that stopped waiting the only way back was `warden decide` typed in
+  the worktree. `warden dashboard` now lists pending decisions, and its button opens the
+  page for one: the page some process already serves (each page is leased in
+  `decision-page.json` with its pid), or a new one that this Dashboard keeps up until the
+  question is answered, independent of the gate TTL. The page is the same supervisor
+  `decide` runs, and answers still go only through `approveDecision`; retry, advance,
+  switch and apply continue the loop from the Dashboard's process. The action is a POST
+  carrying a token that exists only in the page the Dashboard served, on loopback, with
+  the Host and Origin checks unchanged. `warden decide` shows a page that is already up
+  instead of starting a second supervisor, and a second supervisor does not pay for a
+  contract amendment its run has already had. The decision page now waits for an answer's
+  response before it closes; with no grace, the tab showed a broken connection instead of
+  "recorded". Found by the review (UI-08). Suites `decision-page`, `dashboard`.
+- The shipped Orca profiles can be verified with the command Warden advises for them.
+  `examples/orca/*.yaml` had `what_to_check` and no `verification.probe`, and `--host
+  <stage>=orca` told the operator to run `warden profiles --verify <twin> --confirm`,
+  which refuses a profile with nothing to run. New `warden probe orca --agent A [--model M]
+  [--effort E] [--image] [--worktree DIR]` goes through the Orca channel itself: a
+  coordinator terminal, a Run and a Task, `worker-start` with the profile's agent, model and
+  effort, and a typed `worker_done` whose answer must be a word Warden has just written into
+  the worktree (as text, or drawn in a picture with `--image`). It prints
+  `probe-answer: matched` only for that word, then releases the worker, closes the
+  coordinator and removes the file. The examples now name it, with `expect: "probe-answer:
+  matched"`. `profiles --verify` runs a `warden probe` itself rather than through a shell,
+  so it needs no `warden` on PATH, and fills `{{worktree}}` with the directory it was asked
+  from. An Orca twin with no probe is told which probe line to add before it is told to
+  verify. The Orca calls are exercised against a fake Orca in the tests; no vendor was paid
+  for a live probe in this change. Found by the review (CFG-02). Suites `profile verifier`,
+  `run-override`.
+- `--use`, `--effort` and `--host` on a stage that no profile fills (the machine gates, the
+  browser harness) are refused before anything is dispatched, as `run_override_invalid`
+  naming the stage. Every preflight loop skipped non-role stages, so `--host browser=orca`
+  was accepted and ignored and the run went ahead as if it had not been typed. Found by the
+  review (CFG-03). Suite `task loop`.
+
 - `warden roster model` switches the model the vendor is asked for, not only the label.
   A direct profile that spells the old model in `args` (every hand-written profile on the
   maintainer's machine passed `--model opus` literally) now has that item rewritten to

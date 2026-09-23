@@ -175,6 +175,22 @@ public final class HeartbeatTest implements Suite {
             }
         }).show(java.nio.file.Path.of("hello.yaml"), "r1", "warden r1 contract");
         check.that("and a show that throws does not reach the run", true);
+
+        // The three the decision surfaces added are forwarded too: a board that never heard
+        // about a stage's end or an answer is a tab that says NEEDS YOU forever.
+        List<String> forwarded = new CopyOnWriteArrayList<>();
+        Workspace told = Workspace.guarded(new Workspace() {
+            @Override public void note(String text) { }
+            @Override public void state(State state) { }
+            @Override public void stageEnded(boolean ok, String summary) { forwarded.add("ended " + ok); }
+            @Override public void adopt(String runId) { forwarded.add("adopt " + runId); }
+            @Override public void answered(String decision) { throw new IllegalStateException("orca died"); }
+        });
+        told.stageEnded(true, "review ok");
+        told.adopt("r1");
+        told.answered("retry");
+        check.eq("the guard forwards stageEnded and adopt, and swallows a failing answered",
+                List.of("ended true", "adopt r1"), forwarded);
     }
 
     private record Beat(String who, long millis) {}

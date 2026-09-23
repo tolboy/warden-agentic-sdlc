@@ -2551,6 +2551,24 @@ public final class TaskLoopTest implements Suite {
         check.contains("with the resolver's own reason, not a pin error",
                 Json.write(waived.summaryReport().get("unavailable_role")), "same_vendor_as_writer");
 
+        // Leg 7: gates and the browser harness have no profile to change. `--host browser=orca`
+        // used to be accepted and skipped, and the run went ahead as if it had not been typed.
+        for (String[] typed : List.of(new String[] {"--host", "browser=orca"},
+                new String[] {"--use", "gates=loop-review"},
+                new String[] {"--effort", "gates=xhigh"})) {
+            TaskLoop.Outcome ignored = new TaskLoop(new ProcessRunner())
+                    .withOverride(dev.warden.config.RunOverride.fromArgs(typed))
+                    .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home),
+                            "pv14-" + typed[1].substring(0, typed[1].indexOf('=')) + typed[0].length(), false);
+            check.eq("an overlay on a stage no profile fills is refused: " + String.join(" ", typed),
+                    "run_override_invalid", ignored.reason());
+            check.eq("before anything is spent: " + String.join(" ", typed), 0L,
+                    ignored.summaryReport().get("role_runs"));
+            check.contains("naming the stage and the ones it could have meant",
+                    String.valueOf(ignored.summaryReport().get("resolution")),
+                    "stage '" + typed[1].substring(0, typed[1].indexOf('=')) + "' is the");
+        }
+
         writeProfiles(home, sandbox, "prov-restore", 1, 1);
     }
 

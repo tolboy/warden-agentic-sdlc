@@ -77,7 +77,12 @@ public final class OrcaDecisionGate {
     private final Reader reader;
 
     public OrcaDecisionGate(ProcessRunner processes) {
-        this.orca = new OrcaClient(processes);
+        this(new OrcaClient(processes));
+    }
+
+    /** Over a given client; tests pass one that answers for Orca. */
+    public OrcaDecisionGate(OrcaClient orca) {
+        this.orca = orca;
         this.reader = (root, gate) -> readFrom(orca, root, gate);
     }
 
@@ -118,22 +123,27 @@ public final class OrcaDecisionGate {
                 return new Publication(false, "no_coordinator", null);
             }
             try {
-                String orcaRunId = lifecycle.read().orcaRunId();
-                OrcaClient.Rpc run = orcaRunId == null
-                        ? orca.invoke(root, Duration.ofSeconds(20),
-                                List.of("orchestration", "run-create",
-                                        "--objective", oneLine("warden " + decision.runId() + ": " + objective),
-                                        "--from", handle))
-                        : orca.invoke(root, Duration.ofSeconds(20),
-                                List.of("orchestration", "run-use", "--id", orcaRunId, "--from", handle));
-                if (orcaRunId == null) {
-                    orcaRunId = nested(run.result(), "run", "id");
-                    if (orcaRunId == null) {
-                        orcaRunId = string(OrcaSettlement.first(run.result(), "runId", "id", "run_id"));
-                    }
+                // The Run the stages and the workers of this run are on, made here only when
+                // nobody has made one yet. See OrcaLifecycle#orcaRun.
+                OrcaClient.Rpc[] made = {null};
+                OrcaLifecycle.OwnedRun owned = lifecycle.orcaRun(() -> {
+                    made[0] = orca.invoke(root, Duration.ofSeconds(20),
+                            List.of("orchestration", "run-create",
+                                    "--objective", oneLine("warden " + decision.runId() + ": " + objective),
+                                    "--from", handle));
+                    if (!made[0].ok()) return null;
+                    String created = nested(made[0].result(), "run", "id");
+                    return created != null ? created
+                            : string(OrcaSettlement.first(made[0].result(), "runId", "id", "run_id"));
+                });
+                String orcaRunId = owned.id();
+                OrcaClient.Rpc run = made[0];
+                if (orcaRunId != null && !owned.created()) {
+                    run = orca.invoke(root, Duration.ofSeconds(20),
+                            List.of("orchestration", "run-use", "--id", orcaRunId, "--from", handle));
                 }
-                if (!run.ok() || orcaRunId == null) {
-                    return new Publication(false, "no_run", null, detailOf(run));
+                if (run == null || !run.ok() || orcaRunId == null) {
+                    return new Publication(false, "no_run", null, run == null ? "no_run" : detailOf(run));
                 }
 
                 // The gate hangs on a task of its own rather than on whichever task a vendor

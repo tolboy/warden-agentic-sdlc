@@ -7,7 +7,11 @@ import dev.warden.json.Json;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -18,11 +22,36 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Local read-only projection for Orca's browser. No dispatch, approval, or terminal input. */
+/**
+ * Local projection for Orca's browser. No dispatch, no approval and no terminal input.
+ *
+ * One action: for a pending decision, put up its decision page, or go to the one already up.
+ * A decision used to outlive the only process that knew its page, and the way back was
+ * `warden decide` typed in the worktree. The answer itself is still given on the decision
+ * page, through the same path as `warden approve`; this only finds or starts that page.
+ * The action is a POST carrying a token that exists only in the page this server rendered,
+ * so another page in the same browser can neither see it nor make the request.
+ */
 public final class Dashboard implements AutoCloseable {
+
+    /** Finds or starts the decision page for one pending run, and returns its URL. */
+    @FunctionalInterface
+    public interface DecisionOpener {
+        String open(String runId) throws Exception;
+    }
+
     private final HttpServer server;
+    private final String token;
 
     public Dashboard(Path project, int port) throws IOException {
+        this(project, port, null);
+    }
+
+    /** @param decisions null for a dashboard that offers no action at all */
+    public Dashboard(Path project, int port, DecisionOpener decisions) throws IOException {
+        byte[] secret = new byte[24];
+        new SecureRandom().nextBytes(secret);
+        token = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.createContext("/", exchange -> {
             String host = exchange.getRequestHeaders().getFirst("Host");
@@ -32,25 +61,67 @@ public final class Dashboard implements AutoCloseable {
             int status = 200;
             String contentType = "application/json; charset=utf-8";
             String body;
+            String location = null;
             if (!authority.equals(host) || (origin != null && !origin.equals("http://" + authority))) {
                 status = 403; body = "{}";
+            } else if ("POST".equals(exchange.getRequestMethod()) && path.startsWith("/decide/")) {
+                contentType = "text/html; charset=utf-8";
+                String runId = path.substring("/decide/".length());
+                Map<String, String> form = form(new String(
+                        exchange.getRequestBody().readNBytes(4096), StandardCharsets.UTF_8));
+                if (decisions == null) {
+                    status = 404; body = notice("Действие не подключено к этой панели.");
+                } else if (!MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+                        form.getOrDefault("token", "").getBytes(StandardCharsets.UTF_8))) {
+                    status = 403; body = notice("Запрос не с этой панели.");
+                } else if (!runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) {
+                    status = 404; body = notice("Нет такого запуска.");
+                } else {
+                    try {
+                        location = decisions.open(runId);
+                        status = 303; body = "";
+                    } catch (Exception refused) {
+                        status = 409;
+                        body = notice("Страница решения для " + runId + " не открыта: " + refused.getMessage());
+                    }
+                }
             } else if (!"GET".equals(exchange.getRequestMethod())) {
                 status = 405; body = "{}";
             } else if ("/".equals(path)) {
-                contentType = "text/html; charset=utf-8"; body = HTML;
+                contentType = "text/html; charset=utf-8";
+                body = HTML.replace("{{TOKEN}}", decisions == null ? "" : token)
+                        .replace("{{ACTIONS}}", decisions == null ? "false" : "true");
             } else if ("/api/state".equals(path)) {
                 try { body = Json.write(snapshot(project, UserConfig.load())); }
                 catch (Exception failed) { status = 503; body = Json.write(Map.of("error", "State unavailable; inspect Warden configuration")); }
             } else { status = 404; body = "{}"; }
             exchange.getResponseHeaders().set("Content-Type", contentType);
+            if (location != null) exchange.getResponseHeaders().set("Location", location);
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
             exchange.getResponseHeaders().set("Content-Security-Policy",
                     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'");
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
             try (var output = exchange.getResponseBody()) { output.write(bytes); }
         });
+    }
+
+    private static String notice(String text) {
+        return "<!doctype html><meta charset=utf-8><title>Warden</title><p>" + text
+                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                + "</p><p><a href=\"/\">Назад к панели</a></p>";
+    }
+
+    private static Map<String, String> form(String body) {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (String pair : body.split("&")) {
+            int equals = pair.indexOf('=');
+            if (equals <= 0) continue;
+            values.put(URLDecoder.decode(pair.substring(0, equals), StandardCharsets.UTF_8),
+                    URLDecoder.decode(pair.substring(equals + 1), StandardCharsets.UTF_8));
+        }
+        return values;
     }
 
     public void start() { server.start(); }
@@ -120,6 +191,26 @@ public final class Dashboard implements AutoCloseable {
         runRows.sort(Comparator.comparing(row -> String.valueOf(row.get("updated_at")), Comparator.reverseOrder()));
         attempts.sort(Comparator.comparing(row -> String.valueOf(row.get("updated_at")), Comparator.reverseOrder()));
         state.put("runs", runRows.stream().limit(100).toList());
+        // Every question still open, oldest first, with whether a page is up for it now. The
+        // list is the way back to a decision whose page went away with the process that asked.
+        List<Map<String, Object>> pendingDecisions = new ArrayList<>();
+        for (Map<String, Object> run : runRows) {
+            if (!(run.get("decision") instanceof Map<?, ?> decision)
+                    || !"pending".equals(decision.get("state"))) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("run_id", run.get("run_id"));
+            row.put("task_id", run.get("task_id"));
+            row.put("kind", decision.get("kind"));
+            row.put("reason", run.get("reason"));
+            row.put("options", decision.get("options"));
+            row.put("created_at", decision.get("created_at"));
+            row.put("expires_at", decision.get("expires_at"));
+            row.put("page_open", run.get("run_id") instanceof String id
+                    && DecisionPage.liveLease(project, id) != null);
+            pendingDecisions.add(row);
+        }
+        pendingDecisions.sort(Comparator.comparing(row -> String.valueOf(row.get("created_at"))));
+        state.put("pending_decisions", pendingDecisions);
         state.put("dry_runs_hidden", dryRunsHidden);
         state.put("attempts", attempts.stream().limit(200).toList());
         return state;
@@ -188,7 +279,8 @@ public final class Dashboard implements AutoCloseable {
                     || !file.toRealPath().startsWith(runsRoot)) return null;
             Map<String, Object> source = Json.parseObject(Files.readString(file));
             Map<String, Object> visible = new LinkedHashMap<>();
-            for (String key : List.of("state", "kind", "decision", "actor", "updated_at")) {
+            for (String key : List.of("state", "kind", "decision", "actor", "updated_at",
+                    "created_at", "expires_at")) {
                 copyScalar(visible, source, key);
             }
             List<String> options = stringList(source.get("options"));
@@ -268,7 +360,10 @@ public final class Dashboard implements AutoCloseable {
             .badge{background:#233a35;color:#9ee9c6;border-radius:5px;padding:3px 7px}.bad{color:#ffae94}#path{overflow-wrap:anywhere}.empty{padding:28px;color:#9caebd}
             details.timeline{white-space:normal;font-weight:400;max-width:480px}details.timeline summary{cursor:pointer;color:#9fb4c6}details.timeline div{padding:2px 0}
             </style><h1>Warden <span class="muted">/ Agents</span></h1>
+            <meta name="warden-token" content="{{TOKEN}}"><meta name="warden-actions" content="{{ACTIONS}}">
             <div id="connection" role="status">Подключение…</div><p id="path" class="muted"></p>
+            <h2>Ждут вашего решения</h2><p class="muted">Кнопка открывает страницу решения или возвращает к уже открытой. Если процесс, задавший вопрос, перестал ждать, панель поднимает страницу заново и продолжает работу после ответа.</p>
+            <div class="scroll"><table><thead><tr><th>Run / задача</th><th>Вопрос</th><th>Варианты</th><th>Задан</th><th>Страница</th><th></th></tr></thead><tbody id="pending"></tbody></table><div id="pending-empty" class="empty" hidden>Открытых решений нет.</div></div>
             <p class="muted">Workflow и роли задаёт Warden. Orca подтверждает параметры запуска. Эти данные не подтверждают фактическую модель inference и не заменяют результат проверок.</p>
             <h2>Запуски</h2><p class="muted">Каждый запуск со своей хронологией этапов, вердиктами, стоимостью и решением. Dry-run в этот список не входят.</p>
             <p id="dry-hidden" class="muted"></p>
@@ -290,6 +385,12 @@ public final class Dashboard implements AutoCloseable {
             if(run.next_step?.summary)line(details,run.next_step.summary);
             const options=run.decision?.options;if(options&&options.length)line(details,'warden approve '+(run.run_id??'')+' --decision '+options.join('|'));
             return details}
+            const token=document.querySelector('meta[name=warden-token]').content,actions=document.querySelector('meta[name=warden-actions]').content==='true';
+            function drawPending(){const body=$('pending');body.replaceChildren();const rows=data.pending_decisions||[];
+            for(const d of rows){const tr=document.createElement('tr');[d.run_id+' / '+(d.task_id??'—'),(d.kind??'—')+(d.reason?' · '+d.reason:''),(d.options||[]).join(' | '),d.created_at?new Date(d.created_at).toLocaleString():'—',d.page_open?'открыта':'закрыта: процесс, задавший вопрос, больше не ждёт'].forEach(v=>cell(tr,v));
+            const td=document.createElement('td');if(actions){const form=document.createElement('form');form.method='post';form.action='/decide/'+encodeURIComponent(d.run_id);
+            const hidden=document.createElement('input');hidden.type='hidden';hidden.name='token';hidden.value=token;const button=document.createElement('button');button.textContent=d.page_open?'Открыть решение':'Продолжить ожидание и открыть';form.append(hidden,button);td.append(form)}else td.textContent='warden decide '+d.run_id;
+            tr.append(td);body.append(tr)}$('pending-empty').hidden=rows.length>0}
             function drawRuns(){const body=$('runs');body.replaceChildren();const runs=data.runs||[];
             for(const r of runs){const tr=document.createElement('tr');const chain=r.chain||{},decision=r.decision||{},gate=r.orca_gate||{};
             const cost=chain.cost_usd??r.total_cost_usd,unpriced=chain.unpriced_calls??r.unpriced_calls;
@@ -299,7 +400,7 @@ public final class Dashboard implements AutoCloseable {
             const td=document.createElement('td');td.append(timeline(r));tr.append(td);body.append(tr)}
             $('runs-empty').hidden=runs.length>0;$('dry-hidden').textContent=data.dry_runs_hidden?('Скрыто dry-run: '+data.dry_runs_hidden):''}
             const states={running:'В работе',completed:'Завершено',failed:'Ошибка',needs_you:'Нужен ответ',dry_run:'Dry run',unknown_controller_stopped:'Контроллер остановлен · агент не проверен'};
-            function draw(){if(!data)return;drawRuns();const q=$('filter').value.toLowerCase();const rows=data.attempts.filter(r=>JSON.stringify(r).toLowerCase().includes(q));
+            function draw(){if(!data)return;drawPending();drawRuns();const q=$('filter').value.toLowerCase();const rows=data.attempts.filter(r=>JSON.stringify(r).toLowerCase().includes(q));
             table('attempts',rows.map(r=>{const l=r.launch,e=l?.effective;return [r.workflow_run_id+' / '+r.stage,r.role+' / '+r.profile,r.runner,(r.model??'по умолчанию')+' · '+(r.effort_requested??'effort не задан'),l?.status==='matched'?(e?.model??'не задана')+' · '+(e?.effort??'effort неизвестен'):(l?.status??'не подтверждено'),(states[r.view_state]??r.view_state)+' / '+(r.orca_dispatch_id??'—')]}));$('empty').hidden=rows.length>0;
             table('plan',data.plan.map(r=>[r.stage,r.role,r.profile,r.model,r.effort??'не задан',r.runner,(r.read_only?'read-only':'запись')+' / '+(r.verified?'профиль проверен':'требуется проверка')]));
             $('path').textContent=data.project+' · '+data.config_home;$('problems').textContent=Object.entries(data.problems).map(([k,v])=>k+': '+v).join('; ')}

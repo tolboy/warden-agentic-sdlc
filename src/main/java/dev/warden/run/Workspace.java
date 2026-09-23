@@ -108,6 +108,28 @@ public interface Workspace {
     default void stage(String label) { }
 
     /**
+     * The stage named by the last {@link #stage} call has finished, with this outcome.
+     *
+     * A row that is opened and never closed says "in progress" for as long as anybody looks,
+     * which on a board that outlives the run is forever.
+     */
+    default void stageEnded(boolean ok, String summary) { }
+
+    /**
+     * Take over the surfaces an earlier process opened for {@code runId} — its tab, its Run —
+     * so this board can change what they say. The decision is usually recorded by a process
+     * other than the one that asked it.
+     */
+    default void adopt(String runId) { }
+
+    /**
+     * The run's question has an answer. The surfaces that asked stop asking, and nothing
+     * here claims the run that answer leads to has started: that run says so itself when it
+     * does.
+     */
+    default void answered(String decision) { }
+
+    /**
      * The three states a Warden run can put a workspace in.
      *
      * Deliberately not one per stage. The board answers one question — is this waiting for me
@@ -170,6 +192,18 @@ public interface Workspace {
 
             @Override public void stage(String label) {
                 try { board.stage(label); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void stageEnded(boolean ok, String summary) {
+                try { board.stageEnded(ok, summary); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void adopt(String runId) {
+                try { board.adopt(runId); } catch (RuntimeException | Error notOurProblem) { }
+            }
+
+            @Override public void answered(String decision) {
+                try { board.answered(decision); } catch (RuntimeException | Error notOurProblem) { }
             }
         };
     }
