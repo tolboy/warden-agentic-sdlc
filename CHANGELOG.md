@@ -21,8 +21,18 @@ that exists in code but has never been run live says so.
   anything is written; an accepted path already at HEAD is `already_committed` rather than
   committed again, so `land --commit` followed by `land --push` pushes instead of failing
   with "nothing to commit". A commit that still differs from the plan (a pre-commit hook
-  that stages more) stops as `commit_differs_from_plan` before the push. Found by the
-  2026-09-22 review (CORE-04). Suite `land`, new.
+  that stages more) stops as `commit_differs_from_plan` before the push, and one with the
+  planned paths but other content — a formatter hook that rewrites an accepted file and
+  stages it again, even in the index alone — stops as `commit_differs_from_accepted`: land
+  compares the blob and mode of every path in its commit (`ls-tree`) with what it staged
+  from the accepted working tree before the hook ran (`ls-files -s`). A commit refused
+  either way is recorded beside the run's decision (`land-refused.json`), and every later
+  `land --commit` or `--push` refuses as `refused_commit_in_history` while that commit is
+  reachable from HEAD: with the source already at HEAD, a second `--push` used to have
+  nothing to commit, nothing to check, and published the commit the first had refused. A
+  deletion already staged, as after the `git reset --soft HEAD~1` the refusal recommends,
+  is no longer handed to `git add`, which rejected it. Found by the 2026-09-22 review
+  (CORE-04) and the review of this change. Suite `land`, new.
 - A judging role cannot be given a profile that may write. A reviewer copied from an
   implementer with `read_only: false` and the writer's vendor was labelled `none` by the
   resolver, which asked the independence question only of read-only profiles, so it passed
