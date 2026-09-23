@@ -263,6 +263,7 @@ public final class RuntimeTest implements Suite {
             deleteTree(repository);
         }
         committedCandidateChecks(check, runner);
+        untrackedExecutableChecks(check, runner);
     }
 
     /**
@@ -333,6 +334,73 @@ public final class RuntimeTest implements Suite {
                     !accepted.equals(git.sourceFingerprint(base)));
             command(repository, "git", "update-index", "--chmod=-x", "--", "src/edited.txt");
             check.eq("and the same tree brings it back", accepted, git.sourceFingerprint(base));
+
+            // The mode an added file lands with. Its raw record is left out of the shape, and
+            // with it went the one thing that record held beyond the file itself: an added
+            // script committed as 100755 and then as 100644, the same bytes, kept its
+            // fingerprint, so land and acceptance could not tell the two apart.
+            command(repository, "git", "update-index", "--chmod=+x", "--", "src/added.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "executable");
+            String executable = git.sourceFingerprint(base);
+            check.that("an added file committed executable is a different candidate",
+                    !accepted.equals(executable));
+            command(repository, "git", "update-index", "--chmod=-x", "--", "src/added.txt");
+            check.that("and staging it back as a plain file with the same bytes moves it",
+                    !executable.equals(git.sourceFingerprint(base)));
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "plain again");
+            check.that("as does committing that", !executable.equals(git.sourceFingerprint(base)));
+            check.eq("which is the plain candidate that was accepted", accepted, git.sourceFingerprint(base));
+        } finally {
+            deleteTree(repository);
+        }
+    }
+
+    /**
+     * An added executable before and after it is tracked, where the file system has the bit.
+     *
+     * With {@code core.fileMode} on, git takes an added file's mode from its executable bit,
+     * so an untracked script already has the mode it will land with; the fingerprint has to
+     * read it from the file then and from the raw record after, and get the same answer.
+     * With the setting off, git ignores the bit and adds the file as a plain one, and so must
+     * the fingerprint. Windows has no such bit to set, so there is nothing to show there.
+     */
+    private static void untrackedExecutableChecks(Check check, ProcessRunner runner) throws Exception {
+        if (System.getProperty("os.name").toLowerCase().contains("win")) return;
+        Path repository = Files.createTempDirectory("warden-fingerprint-mode-");
+        try {
+            Files.writeString(repository.resolve("base.txt"), "base\n");
+            command(repository, "git", "init", "-b", "main");
+            command(repository, "git", "config", "core.fileMode", "true");
+            command(repository, "git", "add", ".");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "base");
+            GitRepository git = new GitRepository(repository, runner);
+            String base = git.mergeBase("HEAD");
+
+            Path script = repository.resolve("run.sh");
+            Files.writeString(script, "#!/bin/sh\necho ran\n");
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+            String plain = git.sourceFingerprint(base);
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+            String untracked = git.sourceFingerprint(base);
+            check.that("an untracked script's executable bit is part of the candidate", !plain.equals(untracked));
+            command(repository, "git", "add", "--", "run.sh");
+            check.eq("and staging it does not move the fingerprint", untracked, git.sourceFingerprint(base));
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "script");
+            check.eq("nor does committing it", untracked, git.sourceFingerprint(base));
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+            check.eq("dropping the bit on the committed script is the plain candidate",
+                    plain, git.sourceFingerprint(base));
+
+            command(repository, "git", "reset", "-q", "--hard", base);
+            Files.writeString(script, "#!/bin/sh\necho ran\n");
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+            command(repository, "git", "config", "core.fileMode", "false");
+            check.eq("with core.fileMode off an untracked executable is added, and fingerprinted, "
+                    + "as a plain file", plain, git.sourceFingerprint(base));
         } finally {
             deleteTree(repository);
         }

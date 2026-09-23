@@ -20,20 +20,24 @@ that exists in code but has never been run live says so.
   The candidate fingerprint now leaves additions out of the raw shape — the path, its
   presence and its bytes are hashed from the file either way — and takes the diff with
   `--no-renames`, so a rename is the deletion of the old path plus the new file, tracked or
-  not. Deletions, renames and mode changes of files the base already had still move it; the
-  mode an added file is committed with does not, as it never did while the file was
-  untracked. The read-only fingerprint keeps the `A` record: a reader that stages a file is
-  still a mutation. Past the fingerprint, `--push` then failed on the commit it did not
+  not. Deletions, renames and mode changes of files the base already had still move it, and
+  so does the mode an added file lands with: it is hashed in one form wherever the file
+  sits — from the `A` record once tracked, from the file's executable bit and
+  `core.fileMode` while untracked — and only when it is not a plain file's `100644`. An
+  added script accepted as `100755` and committed as `100644` with the same bytes is a
+  different candidate. The read-only fingerprint keeps the `A` record: a reader that stages
+  a file is still a mutation. Past the fingerprint, `--push` then failed on the commit it did not
   need: `git commit` had nothing to commit, and a deleted path, in neither the index nor the
   tree any more, made `git add` fail before it. When HEAD already holds the accepted paths
   as they stand, `land` now skips both, reports `already_committed` and goes on to push. The
   changed-path set (blast radius, `changed_files`, the working-tree snapshot) is also taken
   unpaired, so a staged `git mv` no longer hides the path it emptied from the scope check.
-  **Decisions recorded before this:** a candidate whose added files were untracked and
-  that renamed nothing through the index — the usual run — has the fingerprint it had, and
-  a test pins it against the old definition. That includes a run accepted before this and
+  **Decisions recorded before this:** a candidate whose added files were untracked plain
+  files and that renamed nothing through the index — the usual run — has the fingerprint it
+  had, and a test pins it against the old definition. That includes a run accepted before this and
   already committed by `land --commit`: `land --push` now takes it. A candidate that had an
-  addition staged or committed, or a rename git had paired, reads `candidate_changed` once —
+  addition staged or committed, a rename git had paired, or an untracked executable addition
+  on a file system with the bit, reads `candidate_changed` once —
   at `warden approve --decision accept` (run the gates again) and at `warden land` (run the
   task again and accept the result) — and a carried judgement for it is re-judged rather
   than reused. Suites `runtime`, `task loop`.
