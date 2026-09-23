@@ -166,9 +166,18 @@ that exists in code but has never been run live says so.
   reading again under the amended terms. The amendment is paid by the chain: the loop routes
   there only when the budget covers the most calls an amendment can make plus the readings
   taken again (`contract_amendment_calls`; otherwise `contract_amendment_skipped` and the gaps
-  go to the gate), never under a strict cost cap, and the supervisor writes
+  go to the gate), never under a strict cost cap. Each of its calls then passes the chain's
+  own ceilings as the loop's calls do (`TaskLoop.amendmentGate`): none starts once the chain's
+  calls or money are spent or less than a minute of its deadline is left, and each call's
+  wall clock is lowered to what the deadline leaves, so a plan reviewer cannot start after
+  the planner spent the last of the money (`budget_exhausted`, and the amendment is
+  withdrawn). The supervisor writes
   `contract-amendment.json` beside the stopped run — the reservation before the first call,
-  the actual spend after — which the next run inherits into `chain`. Any outcome short of a
+  the actual spend after — which the next run inherits into `chain`. A named check is added
+  beside the checks the contract already ran: one with no `checks:` of its own keeps the
+  project's `defaults.checks` in the `names:` list, which would otherwise replace it. A
+  scenario list written in flow form is rewritten from the parsed scenarios, so a comma
+  inside a quoted scenario no longer splits it in two. Any outcome short of a
   passed plan review (an unavailable or timed-out reviewer, an unreadable verdict, an
   exception) puts the contract back as it was, unless someone else edited it meanwhile. It is
   offered once per chain, and a retry of the amended run after, say, a quota stop keeps

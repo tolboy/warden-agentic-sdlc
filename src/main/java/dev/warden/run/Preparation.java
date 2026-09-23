@@ -85,6 +85,8 @@ public final class Preparation {
     private Amendment amendment;
     /** The amended contract this preparation wrote and has not yet seen through review. */
     private String amendedText;
+    /** The ceilings of a chain this preparation spends for; none for a first plan. */
+    private RoleRunner.DispatchGate chain = () -> { };
 
     /**
      * The same preparation, amending the contract on disk instead of drafting one: the
@@ -95,6 +97,16 @@ public final class Preparation {
      */
     public Preparation amending(Amendment amendment) {
         this.amendment = amendment;
+        return this;
+    }
+
+    /**
+     * The same preparation, with every call also admitted by {@code chain} and its wall clock
+     * lowered to what {@code chain} has left. An amendment is paid by a chain that already
+     * spent; see {@link TaskLoop#amendmentGate}.
+     */
+    public Preparation within(RoleRunner.DispatchGate chain) {
+        this.chain = chain;
         return this;
     }
 
@@ -223,7 +235,7 @@ public final class Preparation {
         } catch (Exception cannotSnapshot) {
             baseline = null;
         }
-        Bootstrap gate = new Bootstrap();
+        Bootstrap gate = new Bootstrap(chain);
         RoleRunner roles = new RoleRunner(processes, gate).atStage("prepare");
 
         Spend spent = new Spend(0, 0, 0);
@@ -585,22 +597,42 @@ public final class Preparation {
      * RoleRunner returns the spent-subscription outcome instead of paying a successor.
      * The plan review and the one redraft it may cause are granted one call at a time by
      * the preparation that decides to make them; nothing here assumes them.
+     *
+     * Every call granted here must also be admitted by {@code chain}, which answers for the
+     * money, the calls and the time of a chain the preparation spends for.
      */
     static final class Bootstrap implements RoleRunner.DispatchGate {
+        private final RoleRunner.DispatchGate chain;
         private int remaining = 1;
         private int protocolRetries = PROTOCOL_RETRIES;
+
+        Bootstrap() { this(() -> { }); }
+
+        Bootstrap(RoleRunner.DispatchGate chain) { this.chain = chain; }
 
         @Override
         public void requireDispatch() {
             if (remaining <= 0) {
                 throw new Exhausted("planner bootstrap allows one call with no repair");
             }
+            chain.requireDispatch();
             remaining--;
         }
 
         @Override
         public boolean hasRoom() {
-            return remaining > 0;
+            return remaining > 0 && chain.hasRoom();
+        }
+
+        @Override
+        public java.time.Duration wallClockCap() { return chain.wallClockCap(); }
+
+        @Override
+        public void reserve(Double declaredBound) { chain.reserve(declaredBound); }
+
+        @Override
+        public void settleAttempt(Object costUsd, Double declaredBound) {
+            chain.settleAttempt(costUsd, declaredBound);
         }
 
         void grantProtocolRetry() {

@@ -4077,6 +4077,45 @@ public final class TaskLoop {
         }
     }
 
+    /**
+     * The gate a contract amendment's planner and plan reviewer dispatch through: the ceilings
+     * in {@code ceilings}, spent as far as the chain {@code runId} belongs to has spent them.
+     *
+     * The loop routes contract gaps to the planner only when the chain can pay for every call
+     * an amendment may make. Those calls run afterwards, in the supervisor, and preparation's
+     * own gate counts calls and nothing else: a planner dispatched with two minutes of the
+     * chain's deadline left was given its profile's whole wall clock, and a plan reviewer or
+     * a redraft could start after the money ceiling had been reached. This gate asks the
+     * chain's budget before every call, as the loop does, and lowers each call's wall clock
+     * to what is left.
+     *
+     * Build it before the amendment's reservation receipt is written: the chain read here
+     * counts a receipt it finds, so a fresh reservation would be counted as already spent.
+     */
+    public static RoleRunner.DispatchGate amendmentGate(Path root, String runId, TaskSpec.Budget ceilings,
+                                                        java.util.function.LongSupplier nanos) {
+        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.maxCostUsd(),
+                ceilings.maxElapsedMinutes(), nanos);
+        budget.inherit(Chain.after(root, runId));
+        return new RoleRunner.DispatchGate() {
+            @Override public void requireDispatch() {
+                try {
+                    budget.requireRoleRun();
+                } catch (Budget.ExceededException exceeded) {
+                    throw new dev.warden.run.Preparation.Exhausted(exceeded.getMessage());
+                }
+            }
+
+            @Override public boolean hasRoom() { return budget.hasRoom(); }
+
+            @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            @Override public void settleAttempt(Object costUsd, Double declaredBound) {
+                budget.settleAttempt(costUsd, declaredBound);
+            }
+        };
+    }
+
     /** The shortest time a vendor call is started with. See {@link Budget#requireRoleRun}. */
     private static final long MINIMUM_CALL_SECONDS = 60;
 
