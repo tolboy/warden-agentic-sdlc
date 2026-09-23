@@ -49,7 +49,8 @@ public final class TestMain {
                 new dev.warden.InitializerTest(),
                 new dev.warden.RosterTest(),
                 new dev.warden.RunOverrideTest(),
-                new dev.warden.OperatorContinuationTest()
+                new dev.warden.OperatorContinuationTest(),
+                new dev.warden.DecisionPageTest()
         );
 
         Check check = new Check();

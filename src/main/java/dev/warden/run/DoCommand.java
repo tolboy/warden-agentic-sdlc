@@ -165,7 +165,7 @@ public final class DoCommand {
     static final java.util.Set<String> SWITCH_FLAGS = java.util.Set.of(
             "--in-place", "--no-worktree", "--dry-run", "--conductor", "--auto-reject-gates",
             "--init-repo", "--draft-only", "--quiet", "--watch", "--no-orca-gate",
-            "--no-wait-for-gate", "--no-workspace-status");
+            "--no-wait-for-gate", "--no-workspace-status", "--no-decision-page");
 
     public static Options parse(String[] args) {
         // Before any early return: `--goal-file` used to skip the check, so a mistyped

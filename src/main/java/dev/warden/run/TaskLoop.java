@@ -4419,6 +4419,20 @@ public final class TaskLoop {
         if (Boolean.TRUE.equals(summary.get("candidate_review_passed"))) {
             progress.line("      the candidate passed every review that ran");
         }
+        // Only P1 stops the loop, so a reader's P2 or P3 used to end here as a clean pass. The
+        // first all-Orca run hid two: the toggle button moves 30 px when the text hides, and the
+        // acceptance never checks the text. The person deciding is owed what the readers said.
+        List<Map<String, Object>> openFindings = dev.warden.dashboard.DecisionPage.openFindings(summary);
+        if (!openFindings.isEmpty()) {
+            progress.line("      " + openFindings.size() + " finding(s) the readers left open "
+                    + "(they did not stop the loop; read them before deciding):");
+            for (Map<String, Object> finding : openFindings.subList(0, Math.min(5, openFindings.size()))) {
+                String message = String.valueOf(finding.get("message"));
+                progress.line("        " + finding.get("severity") + " " + finding.get("category") + " · "
+                        + finding.get("_stage") + ": "
+                        + (message.length() > 160 ? message.substring(0, 157) + "..." : message));
+            }
+        }
         if (summary.get("pending_stages") instanceof List<?> pending && !pending.isEmpty()) {
             List<String> names = new ArrayList<>();
             for (Object row : pending) {

@@ -76,6 +76,7 @@ public final class Main {
                 case "report" -> report(args);
                 case "status" -> status(args);
                 case "approve" -> approve(args);
+                case "decide" -> decide(args);
                 case "land" -> land(args);
                 case "pilot" -> pilot(args);
                 default -> {
@@ -458,8 +459,10 @@ public final class Main {
         }
         result.put("report_path", writeRunReport(Path.of("."), runId));
         if (!dryRun && root != null && !hasFlag(args, "--no-wait-for-gate")) {
-            result.putAll(superviseGates(root, runId, outcome.summaryReport(), args,
-                    waitForGate == null ? 60 : waitForGate, ApproveEnv.realtime(), Main::startAdvance));
+            int minutes = waitForGate == null ? 60 : waitForGate;
+            ApproveEnv env = ApproveEnv.realtime();
+            result.putAll(superviseGates(root, runId, outcome.summaryReport(), args, env,
+                    Main::startAdvance, decisionPage(args, minutes, env)));
         } else if (waitForGate != null) {
             // Import only. The wait never starts, retries or continues a run; a missing
             // gate is said, not treated as an answer.
@@ -846,9 +849,10 @@ public final class Main {
             if (!options.dryRun() && !options.conductor() && !hasFlag(args, "--no-wait-for-gate")
                     && java.nio.file.Files.isRegularFile(summary)) {
                 Integer minutes = optionalMinutes(args, "--wait-for-gate");
+                ApproveEnv env = ApproveEnv.realtime();
                 report.putAll(superviseGates(outcome.worktree(), id,
-                        Json.parseObject(java.nio.file.Files.readString(summary)), args,
-                        minutes == null ? 60 : minutes, ApproveEnv.realtime(), Main::startAdvance));
+                        Json.parseObject(java.nio.file.Files.readString(summary)), args, env,
+                        Main::startAdvance, decisionPage(args, minutes == null ? 60 : minutes, env)));
             }
         }
         System.out.println(Json.write(report));
@@ -1075,6 +1079,47 @@ public final class Main {
      * Record a human decision. Even an accepted decision never commits, merges, pushes or
      * deploys; it only closes the durable gate for a separate operator-owned landing step.
      */
+    /**
+     * The decision page for a run that is already waiting: the `do` that stopped at it has
+     * exited, timed out, or ran outside the supervisor. Opens "Warden · решение" in this
+     * worktree's Orca browser and waits for the answer exactly as `do` does, continuing the
+     * loop on retry, advance, switch or apply.
+     */
+    private static int decide(String[] args) throws Exception {
+        if (args.length < 2 || args[1].startsWith("--")) {
+            throw new IllegalArgumentException("decide requires a run id: warden decide <run-id>");
+        }
+        String runId = args[1];
+        Optional<Path> found = new ConfigLoader().locateProjectRoot(Path.of("."));
+        if (found.isEmpty()) {
+            System.out.println(Json.write(StatusCommand.notAWardenProject(Path.of("."))));
+            return 1;
+        }
+        Path root = found.get();
+        Path summaryFile = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+        if (!java.nio.file.Files.isRegularFile(summaryFile)) {
+            System.out.println(Json.write(Map.of("ok", false, "code", "run_not_found",
+                    "message", "no summary for " + runId + " under " + root.resolve(".warden/runs"))));
+            return 1;
+        }
+        Integer minutes = optionalMinutes(args, "--wait-minutes");
+        ApproveEnv env = ApproveEnv.realtime();
+        Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(summaryFile));
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("run_id", runId);
+        report.putAll(superviseGates(root, runId, summary, args, env, Main::startAdvance,
+                (path, id, shown) -> awaitDecision(path, id, args, minutes == null ? 60 : minutes, env,
+                        url -> !hasFlag(args, "--no-open") && new OrcaClient(new ProcessRunner())
+                                .invoke(path, Duration.ofSeconds(20),
+                                        List.of("tab", "create", "--worktree", "path:" + path, "--url", url))
+                                .ok())));
+        HumanDecision after = new ApprovalStore(root).read(runId);
+        report.put("ok", after.state() == HumanDecision.State.RESOLVED);
+        report.put("decision", after.toMap());
+        System.out.println(Json.write(report));
+        return after.state() == HumanDecision.State.RESOLVED ? 0 : 1;
+    }
+
     private static int approve(String[] args) throws Exception {
         ApproveOutcome outcome = approveDecision(Path.of("."), args, ApproveEnv.realtime());
         System.out.println(Json.write(outcome.report()));
@@ -1466,25 +1511,168 @@ public final class Main {
         Map<String, Object> start(Path root, HumanDecision decision, String[] args, ApproveEnv env);
     }
 
+    /** How the supervisor waits for one pending decision to be answered. */
+    @FunctionalInterface
+    interface DecisionWaiter {
+        Map<String, Object> await(Path root, String runId, Map<String, Object> summary) throws Exception;
+    }
+
+    /** Decisions whose answer is "go on": the supervisor starts the continuation itself. */
+    static final List<String> CONTINUING_DECISIONS = List.of("switch", "advance", "apply", "retry");
+
     /** Own the operator wait outside TaskLoop's paid execution budget. Each restart is durable. */
     static Map<String, Object> superviseGates(Path root, String runId, Map<String, Object> summary,
                                              String[] args, int minutes, ApproveEnv env,
                                              ContinuationStarter starter) throws Exception {
+        return superviseGates(root, runId, summary, args, env, starter, gateOnly(minutes, env));
+    }
+
+    /**
+     * The wait this supervisor had before the decision page: an Orca gate answer for a stop
+     * that is not an acceptance. Kept for callers outside an Orca worktree, where there is no
+     * gate and no page to open.
+     */
+    static DecisionWaiter gateOnly(int minutes, ApproveEnv env) {
+        return (root, runId, summary) -> {
+            String kind = String.valueOf(summary.get("decision_kind"));
+            if (!"failover".equals(kind) && !"failure".equals(kind) && !"contract_change".equals(kind)) {
+                return Map.of("gate_wait", skippedGateWait("success_is_a_separate_acceptance"));
+            }
+            return waitForPublishedGate(root, runId, summary, minutes, env);
+        };
+    }
+
+    /**
+     * The decision as a page in Orca's browser, with a button per option.
+     *
+     * Only where Warden already published an Orca gate — inside an Orca worktree with Orca
+     * running — so a `warden run` in a plain checkout keeps its old behaviour and never blocks
+     * on a page nobody can see. Everywhere else, and with `--no-decision-page`, the wait is
+     * {@link #gateOnly}. The answer is taken from whichever comes first: the page, `warden
+     * approve` typed anywhere, or the Orca gate; each one goes through {@link #approveDecision}.
+     */
+    static DecisionWaiter decisionPage(String[] args, int minutes, ApproveEnv env) {
+        DecisionWaiter fallback = gateOnly(minutes, env);
+        return (root, runId, summary) -> {
+            boolean gatePublished = summary.get("orca_gate") instanceof Map<?, ?> gate
+                    && Boolean.TRUE.equals(gate.get("published"));
+            if (hasFlag(args, "--no-decision-page") || !gatePublished) {
+                return fallback.await(root, runId, summary);
+            }
+            return awaitDecision(root, runId, args, minutes, env,
+                    url -> new OrcaClient(new ProcessRunner()).invoke(root, Duration.ofSeconds(20),
+                            List.of("tab", "create", "--worktree", "path:" + root, "--url", url)).ok());
+        };
+    }
+
+    /** Opens a URL where the operator is; true when it was shown. */
+    @FunctionalInterface
+    interface PageOpener {
+        boolean open(String url) throws Exception;
+    }
+
+    static Map<String, Object> awaitDecision(Path root, String runId, String[] args, int minutes,
+                                             ApproveEnv env, PageOpener opener) throws Exception {
+        Map<String, Object> result = new LinkedHashMap<>();
+        ApprovalStore store = new ApprovalStore(root);
+        HumanDecision pending;
+        try {
+            pending = store.read(runId);
+        } catch (Exception none) {
+            result.put("decision_page", skippedGateWait("no_pending_decision"));
+            return result;
+        }
+        if (pending.state() != HumanDecision.State.PENDING) {
+            result.put("decision_page", skippedGateWait("already_decided"));
+            return result;
+        }
+        List<String> passThrough = new java.util.ArrayList<>();
+        if (hasFlag(args, "--no-workspace-status")) passThrough.add("--no-workspace-status");
+        dev.warden.run.Progress narration = dev.warden.run.Progress.tee(narration(args),
+                dev.warden.run.Progress.toFile(narrationFile(root, runId)));
+        try (var preview = new dev.warden.gate.CandidatePreview(root, pending.taskId(),
+                narrationFile(root, runId).resolveSibling("decision-preview.log"), opener::open);
+             var page = new dev.warden.dashboard.DecisionPage(root, runId, (choice, note, expected) -> {
+            List<String> approve = new java.util.ArrayList<>(List.of("approve", runId,
+                    "--decision", choice, "--note", note, "--expected-updated-at", expected,
+                    "--actor", "orca-decision-page", "--no-start"));
+            approve.addAll(passThrough);
+            return approveDecision(root, approve.toArray(String[]::new), env).report();
+        }, preview::open)) {
+            page.start();
+            boolean shown;
+            try {
+                shown = opener.open(page.url());
+            } catch (Exception failed) {
+                shown = false;
+            }
+            Map<String, Object> described = new LinkedHashMap<>();
+            described.put("url", page.url());
+            described.put("orca_tab_opened", shown);
+            result.put("decision_page", described);
+            narration.line(shown
+                    ? "      decide in Orca: the \"Warden · решение\" tab in this worktree has a button "
+                            + "for each option (or open " + page.url() + ")"
+                    : "      decide here: " + page.url());
+
+            long deadline = env.clock.nowMillis() + Math.max(1, minutes) * 60_000L;
+            long lastGateRead = Long.MIN_VALUE;
+            while (true) {
+                HumanDecision now = store.read(runId);
+                if (now.state() != HumanDecision.State.PENDING) {
+                    described.put("decided", now.decision());
+                    described.put("actor", now.actor());
+                    break;
+                }
+                long clock = env.clock.nowMillis();
+                // The Orca gate is still an answer, from a phone for instance. Read once per
+                // ten seconds; a pending or unreadable gate is simply not an answer yet.
+                if (clock - lastGateRead >= 10_000L) {
+                    lastGateRead = clock;
+                    List<String> fromOrca = new java.util.ArrayList<>(
+                            List.of("approve", runId, "--from-orca", "--no-start"));
+                    fromOrca.addAll(passThrough);
+                    ApproveOutcome imported = approveDecision(root, fromOrca.toArray(String[]::new), env);
+                    if (imported.ok()) {
+                        result.put("gate_import", imported.report());
+                        continue;
+                    }
+                }
+                if (clock >= deadline) {
+                    described.put("timed_out", true);
+                    narration.line("      the decision page closed after " + minutes + " min without an "
+                            + "answer; answer with warden approve " + runId + " --decision <option>");
+                    break;
+                }
+                env.sleeper.sleep(2_000L);
+            }
+            // The page's own POST is answered after the store records it; give that response a
+            // moment to reach the tab before the server goes away.
+            env.sleeper.sleep(1_500L);
+        }
+        return result;
+    }
+
+    static Map<String, Object> superviseGates(Path root, String runId, Map<String, Object> summary,
+                                             String[] args, ApproveEnv env,
+                                             ContinuationStarter starter, DecisionWaiter waiter)
+            throws Exception {
         Map<String, Object> result = new LinkedHashMap<>();
         List<Object> chain = new java.util.ArrayList<>();
         for (int count = 0; count < 100; count++) {
-            // Success remains a separate human acceptance; no background controller lands code.
-            String kind = String.valueOf(summary.get("decision_kind"));
-            if (!"failover".equals(kind) && !"failure".equals(kind)
-                    && !"contract_change".equals(kind)) break;
-            Object gate = summary.get("orca_gate");
-            if (!(gate instanceof Map<?, ?> map) || !Boolean.TRUE.equals(map.get("published"))) break;
-            Map<String, Object> imported = waitForPublishedGate(root, runId, summary, minutes, env);
-            chain.add(imported);
-            if (!(imported.get("gate_import") instanceof Map<?, ?> answer)
-                    || !Boolean.TRUE.equals(answer.get("ok"))) break;
-            HumanDecision resolved = new ApprovalStore(root).read(runId);
-            if (!List.of("switch", "advance", "apply").contains(resolved.decision())) break;
+            if (summary.get("decision_kind") == null) break;
+            Map<String, Object> waited = waiter.await(root, runId, summary);
+            chain.add(waited);
+            HumanDecision resolved;
+            try {
+                resolved = new ApprovalStore(root).read(runId);
+            } catch (Exception unreadable) {
+                break;
+            }
+            if (resolved.state() != HumanDecision.State.RESOLVED) break;
+            // A retry answered on the page is the operator saying "go again": leaving it to a
+            // command typed at the machine made the answer from Orca half an answer.
+            if (!CONTINUING_DECISIONS.contains(resolved.decision())) break;
             Map<String, Object> next = starter.start(root, resolved, args, env);
             chain.add(next);
             if (!Boolean.TRUE.equals(next.get("started"))) break;
@@ -1650,10 +1838,15 @@ public final class Main {
                                                --no-orca-gate does not mirror the pending
                                                decision into Orca as a decision gate
                                                --wait-for-gate N  after the loop, wait up to
-                                               N minutes (1..1440) for the published Orca
-                                               gate and import the answer; never starts,
-                                               retries or continues a run. Skipped when no
-                                               gate was published
+                                               N minutes (1..1440, default 60) for the
+                                               answer. Inside an Orca worktree the decision
+                                               opens as a "Warden · решение" browser tab
+                                               with a button per option; the page, warden
+                                               approve and the Orca gate all count, and a
+                                               retry, advance, switch or apply answered
+                                               there continues the loop. Outside Orca it
+                                               only imports a published gate
+                                               --no-decision-page waits on the Orca gate only
                                                --prepare off|auto|always records the mode
                                                `warden do` had in force, so a skipped auto
                                                is not written as off. Does not dispatch a
@@ -1702,7 +1895,12 @@ public final class Main {
                                                id of the same task (writers carry; verdicts
                                                do not). --no-start records it and prints the
                                                command instead.
-                  warden approve <run-id> --from-orca
+                  warden decide <run-id>       open the decision as a "Warden · решение" tab in this
+                               worktree's Orca browser, with a button per option, and
+                               wait for the answer (--wait-minutes N, default 60;
+                               --no-open prints the URL instead). The same checks as
+                               approve; retry/advance/switch/apply continue the loop
+  warden approve <run-id> --from-orca
                                                take the decision from the Orca gate the run
                                                published, so it can be answered from another
                                                machine or a phone. The gate is a doorbell:

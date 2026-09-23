@@ -63,6 +63,30 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- The human decision is answered with a button in Orca. When a run stops for a person inside
+  an Orca worktree, `warden do` (and `warden run`, which already waited on failure gates)
+  opens a "Warden · решение" tab in that worktree's Orca browser: the goal, what each stage
+  concluded and who read it, the changed files, the screenshots, and a button per option
+  with a note field. A button goes through the same path as `warden approve` (version token,
+  candidate fingerprint for an acceptance, gate expiry, duplicate refusal), and a refusal is
+  shown on the page. `warden approve` and the Orca gate still count; whichever answers first
+  wins. `retry`, like `advance`, `switch` and `apply`, now continues the loop instead of
+  printing a command. `warden decide <run-id>` opens the same page for a run already
+  waiting. The page listens on 127.0.0.1 under a random path token and serves only this
+  run's screenshots. `--no-decision-page` keeps the old wait. Measured need: on 2026-09-22
+  the only ways to answer were `warden approve` or `run-use` then `gate-resolve --from` in an
+  Orca terminal. Suite `decision-page`.
+- The gate says what the readers said. Only P1 stops the loop, so a P2 or P3 used to reach
+  the person as a clean pass: on the first all-Orca run the visual reader filed that hiding
+  the greeting moves the button 30 px, so a second press in the same place misses, and the
+  second reader filed that the acceptance never checks the text; the gate said "every stage
+  passed" and the operator asked exactly the question the first finding answers. Every open
+  finding is now on the decision page (severity, category, who, expected, actual, suggestion)
+  and listed in the run's closing narration. Screenshots are captioned from the harness's
+  own report, in the order they were taken ("клик №2 по toggle → greeting виден ✓"), not by
+  file name, and the scenarios it checked are listed. "Открыть кандидата в браузере Orca"
+  starts the candidate with the task's own `visual_qa.start` and opens it as a tab, so the
+  person deciding can press the button themselves; the server stops with the page.
 - Per-run roster overlays so a Unity loop does not rewrite `~/.warden`. `warden run` and
   `warden do` take `--use <stage>=<profile>`, `--effort <stage>=<level>` and
   `--host <stage>=orca`; a task may declare the same under `use:`, and flags win. Overlays
