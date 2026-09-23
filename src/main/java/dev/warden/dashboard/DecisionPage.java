@@ -173,9 +173,11 @@ public final class DecisionPage implements AutoCloseable {
         if (result != null) {
             if (Boolean.TRUE.equals(result.get("ok"))) {
                 Object recorded = result.get("decision") instanceof Map<?, ?> map ? map.get("decision") : null;
+                Object note = result.get("decision") instanceof Map<?, ?> map ? map.get("note") : null;
                 html.append("<div class=ok>Записано: <b>").append(escape(String.valueOf(recorded)))
                         .append("</b>. Ничего не слито").append(". ")
-                        .append(escape(afterDecision(String.valueOf(recorded)))).append("</div>");
+                        .append(escape(afterDecision(String.valueOf(recorded),
+                                note != null && !String.valueOf(note).isBlank()))).append("</div>");
             } else {
                 html.append("<div class=bad>Не записано: <b>").append(escape(String.valueOf(result.get("code"))))
                         .append("</b> — ").append(escape(String.valueOf(result.get("message")))).append("</div>");
@@ -226,7 +228,8 @@ public final class DecisionPage implements AutoCloseable {
             html.append("<h2>Ваше решение</h2><form method=post action=decide>")
                     .append("<input type=hidden name=expected value='")
                     .append(escape(decision.updatedAt().toString())).append("'>")
-                    .append("<label>Заметка (для «Отклонить» — почему)<textarea name=note rows=3></textarea></label>")
+                    .append("<label>Заметка (для «Отклонить» — что исправить; она уйдёт исполнителю)"
+                        + "<textarea name=note rows=3></textarea></label>")
                     .append("<div class=buttons>");
             for (String option : decision.options()) {
                 html.append("<button name=choice value='").append(escape(option)).append("' class='")
@@ -526,11 +529,20 @@ public final class DecisionPage implements AutoCloseable {
         return null;
     }
 
+    /**
+     * This run's evidence directories, keeping only the newest attempt of each stage.
+     *
+     * A stage writes `<run>--<stage>-<attempt>` once per fix round. Every attempt but the last
+     * judged a candidate a repair has since replaced, and listing them all put the failed
+     * frames of the first browser pass beside the passing verdict of the last one — or, with
+     * eight frames from the first, left the final ones off the page altogether.
+     */
     private List<Path> runDirectories() {
         Path runs = root.resolve(".warden/runs");
         if (!Files.isDirectory(runs, LinkOption.NOFOLLOW_LINKS)) return List.of();
+        List<Path> all;
         try (var listing = Files.list(runs)) {
-            return listing.filter(dir -> {
+            all = listing.filter(dir -> {
                 String name = dir.getFileName().toString();
                 return (name.equals(runId) || name.startsWith(runId + "--"))
                         && Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS);
@@ -538,6 +550,27 @@ public final class DecisionPage implements AutoCloseable {
         } catch (IOException unreadable) {
             return List.of();
         }
+        Map<String, Path> newest = new LinkedHashMap<>();
+        Map<String, Long> newestAttempt = new LinkedHashMap<>();
+        for (Path dir : all) {
+            String name = dir.getFileName().toString();
+            String stage = name;
+            long attempt = 0;
+            if (name.startsWith(runId + "--")) {
+                String tail = name.substring(runId.length() + 2);
+                int dash = tail.lastIndexOf('-');
+                if (dash > 0 && tail.substring(dash + 1).matches("\\d{1,9}")) {
+                    stage = tail.substring(0, dash);
+                    attempt = Long.parseLong(tail.substring(dash + 1));
+                }
+            }
+            Long seen = newestAttempt.get(stage);
+            if (seen == null || attempt > seen) {
+                newestAttempt.put(stage, attempt);
+                newest.put(stage, dir);
+            }
+        }
+        return newest.values().stream().sorted().toList();
     }
 
     /** Every PNG in this run's evidence, in a stable order. */
@@ -587,7 +620,7 @@ public final class DecisionPage implements AutoCloseable {
     static String hint(String option) {
         return switch (option) {
             case "accept" -> "кандидат принят; ничего не сливается, слияние — отдельный шаг";
-            case "reject" -> "работа не принята; следующий запуск начнёт заново";
+            case "reject" -> "с заметкой — вернуть исполнителю на доработку; без заметки — закрыть без продолжения";
             case "retry" -> "запустить снова; вердикты по неизменному дереву сохранятся";
             case "abort" -> "закрыть задачу без продолжения";
             case "advance" -> "причина устранена, начать следующий прогон";
@@ -597,7 +630,10 @@ public final class DecisionPage implements AutoCloseable {
         };
     }
 
-    private static String afterDecision(String choice) {
+    private static String afterDecision(String choice, boolean withNote) {
+        if ("reject".equals(choice) && withNote) {
+            return "Warden возвращает работу исполнителю с вашей заметкой; ход виден во вкладке нарратива.";
+        }
         return switch (choice) {
             case "retry", "advance", "switch", "apply" -> "Warden продолжает петлю; ход виден во вкладке нарратива.";
             case "accept" -> "Дальше — проверить diff и при желании `warden land`.";

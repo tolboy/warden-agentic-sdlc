@@ -1254,7 +1254,10 @@ public final class Main {
                 }
             }
 
-            if ("advance".equals(choice) && !hasFlag(args, "--no-start")) {
+            // Checked before the decision is recorded, whoever starts the next run. With
+            // `--no-start` the caller starts it — the decision page's supervisor does — and a
+            // refusal found after the gate was closed left nothing to answer and no run.
+            if ("advance".equals(choice)) {
                 String repeat = advanceWouldRepeat(root, pending);
                 if (repeat != null) throw new ApprovalException("advance_would_repeat", repeat);
             }
@@ -1278,12 +1281,14 @@ public final class Main {
             UserConfig user = env.user();
             EvidenceLedger decisionLedger = new EvidenceLedger(root, runId, user.home());
             decisionLedger.append("human_decision", recorded);
-            // The card stops asking. `accept` and `abort` close the run; every other decision
-            // expects another one, so it goes back to the running column rather than to a
-            // column that reads as done to whoever glances at the board next.
+            // The card stops asking. `accept`, `abort` and a rejection with nothing to carry
+            // close the run; every other decision expects another one, so it goes back to the
+            // running column rather than to a column that reads as done to whoever glances at
+            // the board next.
+            boolean closes = "accept".equals(choice) || "abort".equals(choice)
+                    || ("reject".equals(choice) && !rejectedWithNote(resolved.kind(), choice, note));
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
-            card.state("accept".equals(choice) || "abort".equals(choice)
-                    ? dev.warden.run.Workspace.State.SETTLED
+            card.state(closes ? dev.warden.run.Workspace.State.SETTLED
                     : dev.warden.run.Workspace.State.RUNNING);
             card.note(runId + " · " + choice + " by " + actor
                     + (note.isBlank() ? "" : " · " + note) + " · nothing was landed");
@@ -1520,6 +1525,21 @@ public final class Main {
     /** Decisions whose answer is "go on": the supervisor starts the continuation itself. */
     static final List<String> CONTINUING_DECISIONS = List.of("switch", "advance", "apply", "retry");
 
+    /**
+     * Whether an answer asks the supervisor to start the next run: a continuing decision, or
+     * a rejection that says why. The note is what the next implementer is handed; a rejection
+     * without one has nothing to carry and closes the work, as `--continue` always required.
+     */
+    static boolean continues(HumanDecision resolved) {
+        if (CONTINUING_DECISIONS.contains(resolved.decision())) return true;
+        return rejectedWithNote(resolved.kind(), resolved.decision(), resolved.note());
+    }
+
+    static boolean rejectedWithNote(HumanDecision.Kind kind, String decision, String note) {
+        return kind == HumanDecision.Kind.SUCCESS && "reject".equals(decision)
+                && note != null && !note.isBlank();
+    }
+
     /** Own the operator wait outside TaskLoop's paid execution budget. Each restart is durable. */
     static Map<String, Object> superviseGates(Path root, String runId, Map<String, Object> summary,
                                              String[] args, int minutes, ApproveEnv env,
@@ -1563,6 +1583,106 @@ public final class Main {
                     url -> new OrcaClient(new ProcessRunner()).invoke(root, Duration.ofSeconds(20),
                             List.of("tab", "create", "--worktree", "path:" + root, "--url", url)).ok());
         };
+    }
+
+    /**
+     * Hand a passing run's contract gaps to the planner, and continue on the amended terms.
+     *
+     * The planner is given the contract and the readers' `contract_gap` findings and may only
+     * add acceptance; the plan reviewer reads the amendment and may send it back once. When it
+     * is written, the pending decision is answered `retry` by Warden itself, naming the gaps,
+     * and the supervisor starts the continuation: the writer's product is kept and every
+     * reading is taken again under the amended contract. When it is not, the decision stays
+     * pending and the page shows the gaps to a person.
+     */
+    static Map<String, Object> amendContract(Path root, String runId, Map<String, Object> summary,
+                                             String[] args, ApproveEnv env) {
+        Map<String, Object> report = new LinkedHashMap<>();
+        dev.warden.run.Progress narration = dev.warden.run.Progress.tee(narration(args),
+                dev.warden.run.Progress.toFile(narrationFile(root, runId)));
+        try {
+            HumanDecision pending = new ApprovalStore(root).read(runId);
+            if (pending.state() != HumanDecision.State.PENDING) {
+                report.put("contract_amendment", skippedGateWait("already_decided"));
+                return report;
+            }
+            String taskId = String.valueOf(summary.get("task_id"));
+            Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+            String before = java.nio.file.Files.readString(taskFile);
+            Path projectFile = root.resolve(".warden/project.yaml");
+            var project = dev.warden.config.ProjectConfig.parse(
+                    java.nio.file.Files.readString(projectFile), projectFile.toString());
+            var spec = dev.warden.config.TaskSpec.parse(before, taskFile.toString());
+            List<String> scopes = spec.scope().entries();
+            List<Map<String, Object>> gaps = new java.util.ArrayList<>();
+            List<Object> ids = new java.util.ArrayList<>();
+            for (Map<String, Object> finding : dev.warden.dashboard.DecisionPage.openFindings(summary)) {
+                if (!"contract_gap".equals(finding.get("category"))) continue;
+                gaps.add(finding);
+                ids.add(finding.get("id"));
+            }
+            narration.blank();
+            narration.line("prep  the readers found the acceptance too weak (" + ids
+                    + "); the planner amends it, the plan reviewer reads the amendment");
+            // The chain pays for this, so the chain is told before the first call: the receipt
+            // reserves the most an amendment can spend, and a crash leaves that reservation
+            // standing rather than an amendment nobody counted.
+            String amendRunId = runId + "-amend";
+            Path receipt = root.resolve(".warden/runs").resolve(runId).resolve(TaskLoop.AMENDMENT_RECEIPT);
+            long started = env.clock.nowMillis();
+            Map<String, Object> reserved = new LinkedHashMap<>();
+            reserved.put("run_id", amendRunId);
+            reserved.put("state", "reserved");
+            reserved.put("role_runs", (long) Preparation.mostAmendmentCalls(env.user()));
+            reserved.put("cost_usd", 0.0);
+            reserved.put("unpriced_calls", (long) Preparation.mostAmendmentCalls(env.user()));
+            reserved.put("gaps", ids);
+            java.nio.file.Files.writeString(receipt, Json.write(reserved));
+            Preparation.Outcome amended = new Preparation(new ProcessRunner(), narration)
+                    .amending(new Preparation.Amendment(before, gaps))
+                    .run(root, project, env.user(), taskId, amendRunId, spec.goal(),
+                            scopes.size() == 1 ? scopes.get(0) : String.valueOf(scopes),
+                            spec.risk(), dev.warden.config.PlannerDraft.Access.DO_DEFAULT, false);
+            Map<String, Object> settled = new LinkedHashMap<>();
+            settled.put("run_id", amendRunId);
+            settled.put("state", "settled");
+            settled.put("ok", amended.ok());
+            settled.put("code", amended.code());
+            settled.put("role_runs", (long) amended.roleRuns());
+            settled.put("cost_usd", amended.costUsd());
+            settled.put("unpriced_calls", (long) amended.unpriced());
+            settled.put("elapsed_seconds", Math.max(0L, (env.clock.nowMillis() - started) / 1000L));
+            settled.put("gaps", ids);
+            java.nio.file.Files.writeString(receipt, Json.write(settled));
+            Map<String, Object> outcome = new LinkedHashMap<>();
+            outcome.put("ok", amended.ok());
+            outcome.put("code", amended.code());
+            if (amended.message() != null) outcome.put("message", amended.message());
+            outcome.put("gaps", ids);
+            outcome.put("role_runs", (long) amended.roleRuns());
+            outcome.put("cost_usd", amended.costUsd());
+            report.put("contract_amendment", outcome);
+            if (!amended.ok()) {
+                narration.line("      the amendment did not go through (" + amended.code()
+                        + "); the gaps go to a person with the contract as it was");
+                return report;
+            }
+            List<String> approve = new java.util.ArrayList<>(List.of("approve", runId,
+                    "--decision", "retry", "--note", "acceptance amended by the planner for " + ids,
+                    "--actor", "warden:contract-amendment", "--no-start"));
+            if (hasFlag(args, "--no-workspace-status")) approve.add("--no-workspace-status");
+            ApproveOutcome retried = approveDecision(root, approve.toArray(String[]::new), env);
+            outcome.put("decision", retried.report());
+            narration.line(retried.ok()
+                    ? "      contract amended; continuing with the writer's product and every reading taken again"
+                    : "      contract amended, but the continuation could not be recorded: "
+                            + retried.report().get("message"));
+        } catch (Exception failed) {
+            report.put("contract_amendment", Map.of("ok", false, "code", "amendment_failed",
+                    "message", String.valueOf(failed.getMessage())));
+            narration.line("      the amendment failed (" + failed.getMessage() + "); the gaps go to a person");
+        }
+        return report;
     }
 
     /** Opens a URL where the operator is; true when it was shown. */
@@ -1616,7 +1736,9 @@ public final class Main {
                     : "      decide here: " + page.url());
 
             long deadline = env.clock.nowMillis() + Math.max(1, minutes) * 60_000L;
-            long lastGateRead = Long.MIN_VALUE;
+            // The first read is at once. A "last read" sentinel of Long.MIN_VALUE overflowed
+            // `clock - last` to a negative number, so the gate was never read at all.
+            long nextGateRead = env.clock.nowMillis();
             while (true) {
                 HumanDecision now = store.read(runId);
                 if (now.state() != HumanDecision.State.PENDING) {
@@ -1627,8 +1749,8 @@ public final class Main {
                 long clock = env.clock.nowMillis();
                 // The Orca gate is still an answer, from a phone for instance. Read once per
                 // ten seconds; a pending or unreadable gate is simply not an answer yet.
-                if (clock - lastGateRead >= 10_000L) {
-                    lastGateRead = clock;
+                if (clock >= nextGateRead) {
+                    nextGateRead = clock + 10_000L;
                     List<String> fromOrca = new java.util.ArrayList<>(
                             List.of("approve", runId, "--from-orca", "--no-start"));
                     fromOrca.addAll(passThrough);
@@ -1661,6 +1783,12 @@ public final class Main {
         List<Object> chain = new java.util.ArrayList<>();
         for (int count = 0; count < 100; count++) {
             if (summary.get("decision_kind") == null) break;
+            // A passing run whose readers found the acceptance too weak is the planner's to
+            // answer first. When the amendment goes through it records a retry, and the wait
+            // below finds the decision already made; when it does not, a person decides.
+            if (TaskLoop.CONTRACT_AMENDMENT.equals(summary.get("reason"))) {
+                chain.add(amendContract(root, runId, summary, args, env));
+            }
             Map<String, Object> waited = waiter.await(root, runId, summary);
             chain.add(waited);
             HumanDecision resolved;
@@ -1672,7 +1800,7 @@ public final class Main {
             if (resolved.state() != HumanDecision.State.RESOLVED) break;
             // A retry answered on the page is the operator saying "go again": leaving it to a
             // command typed at the machine made the answer from Orca half an answer.
-            if (!CONTINUING_DECISIONS.contains(resolved.decision())) break;
+            if (!continues(resolved)) break;
             Map<String, Object> next = starter.start(root, resolved, args, env);
             chain.add(next);
             if (!Boolean.TRUE.equals(next.get("started"))) break;
@@ -1809,11 +1937,13 @@ public final class Main {
                                            --draft-only stops after writing the contract, so
                                            its browser scenarios can be written before any
                                            vendor is paid to satisfy them
-                                           --prepare off|auto|always (default off) dispatches
+                                           --prepare off|auto|always (default auto) dispatches
                                            a read-only planner to draft the contract; Warden
                                            validates what it returns. auto only when the task
-                                           has no contract yet. always --draft-only spends the
-                                           planner and never the implementer
+                                           has no contract yet and the policy names a planner
+                                           (a plan_reviewer then argues it once). always
+                                           --draft-only spends the planner and never the
+                                           implementer
                   warden run <task>            the bounded loop; stops at the human gate
                                                --use <stage>=<profile>  pin a profile for one
                                                stage this run (review-second=claude-review).

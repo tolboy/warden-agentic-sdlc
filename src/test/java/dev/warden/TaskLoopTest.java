@@ -274,6 +274,8 @@ public final class TaskLoopTest implements Suite {
             handoverPackageChecks(check, sandbox, home);
             cumulativeClosureChecks(check, sandbox, home);
             crossStageRegistryChecks(check, sandbox, home);
+            nonBlockingRepairChecks(check, sandbox, home);
+            contractGapAmendmentChecks(check, sandbox, home);
             crossStageRecheckChecks(check, sandbox, home);
             historicalEvidenceReuseChecks(check, sandbox, home);
             severityLaunderingChecks(check, sandbox, home);
@@ -3352,6 +3354,167 @@ public final class TaskLoopTest implements Suite {
      * closure. The registry is the run's lifecycle: review-second's first dispatch used to
      * get no package and treat A as an initial finding.
      */
+    /**
+     * `review.repair_severities`: which non-blocking product defects go back to the writer
+     * before the human gate. Measured need, 2026-09-22: a P3 that meant the toggle button
+     * moves when the text hides reached the operator as a clean pass.
+     */
+    private void nonBlockingRepairChecks(Check check, Path sandbox, Path home) throws Exception {
+        // Default policy: P1 only. A P3 is recorded, not repaired, and the run reaches the gate.
+        Path plain = newProject(sandbox, "p3-default", "medium", 20);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("p3-default-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-p3-once", sandbox.resolve("p3-default-review.count"), 2);
+        policy(home, "loop-review", "loop-impl", "confirm");
+        TaskLoop.Outcome untouched = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(plain, "hello"), UserConfig.load(home), "p3-default", false);
+        check.eq("by default a P3 still reaches the gate", "ready_for_human", untouched.reason());
+        check.that("without a repair round", steps(untouched).stream().noneMatch(s -> s.get("fix_for") != null));
+
+        // Declared: P2 and P3 product defects are repaired before the gate.
+        Path repaired = newProject(sandbox, "p3-repaired", "medium", 20);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("p3-repaired-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-p3-once", sandbox.resolve("p3-repaired-review.count"), 2);
+        repairingPolicy(home);
+        TaskLoop.Outcome fixed = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(repaired, "hello"), UserConfig.load(home), "p3-repaired", false);
+        check.eq("a declared P3 is repaired and the run still reaches the gate",
+                "ready_for_human", fixed.reason());
+        check.eq("through exactly one repair round", 1L,
+                steps(fixed).stream().filter(s -> "review".equals(s.get("fix_for"))).count());
+        StringBuilder contexts = new StringBuilder();
+        try (var files = Files.list(repaired.resolve(".warden/runs/p3-repaired/context"))) {
+            for (Path file : files.filter(f -> f.getFileName().toString().startsWith("fix-1")).toList()) {
+                contexts.append(Files.readString(file));
+            }
+        }
+        String context = contexts.toString();
+        check.contains("the writer is handed the P3", context, "the button moves when the text hides");
+        check.contains("with its severity", context, "- severity: P3");
+        check.eq("and the gate sees nothing left open", List.of(),
+                dev.warden.dashboard.DecisionPage.openFindings(fixed.summaryReport()));
+
+        // A P3 the repair does not close is not a stop: the allowance runs out and the
+        // candidate goes to the person with the finding listed.
+        Path stubborn = newProject(sandbox, "p3-stubborn", "medium", 20);
+        Path stubbornTask = stubborn.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(stubbornTask, Files.readString(stubbornTask)
+                .replace("max_fix_attempts: 2", "max_fix_attempts: 1"));
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("p3-stubborn-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-p3-always", sandbox.resolve("p3-stubborn-review.count"), 1);
+        repairingPolicy(home);
+        TaskLoop.Outcome remaining = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(stubborn, "hello"), UserConfig.load(home), "p3-stubborn", false);
+        check.eq("an unrepaired P3 still goes to the gate", "ready_for_human", remaining.reason());
+        check.eq("after the one round the allowance paid for", 1L,
+                steps(remaining).stream().filter(s -> "review".equals(s.get("fix_for"))).count());
+        check.eq("and the person sees it", 1,
+                dev.warden.dashboard.DecisionPage.openFindings(remaining.summaryReport()).size());
+        policy(home, "loop-review", "loop-impl", "confirm");
+    }
+
+    /**
+     * `review.contract_gaps: plan`: a passing run whose readers found the acceptance too weak
+     * stops for the planner instead of reaching the gate, once per chain, and the amended run
+     * keeps the writer's product while taking every reading again.
+     */
+    private void contractGapAmendmentChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "gap-plan", "medium", 20);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("gap-plan-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-gap-p3", sandbox.resolve("gap-plan-review.count"), 1);
+        writeProfile(home, "loop-planner", "planner", "planvendor", true,
+                "planner", "role, task_id, status", "impl", sandbox.resolve("gap-plan-planner.count"), 1);
+        policy(home, "loop-review", "loop-impl", "confirm");
+        Path policy = home.resolve("policy.yaml");
+        Files.writeString(policy, Files.readString(policy)
+                .replace("review: { required_for_risk: [medium, high] }",
+                        "review: { required_for_risk: [medium, high], contract_gaps: plan }")
+                .replace("roles:\n", "roles:\n  planner: { profiles: [loop-planner], strategy: first, "
+                        + "require_independent_vendor: false }\n"));
+
+        TaskLoop.Outcome first = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home), "gp1", false);
+        check.eq("a passing run with a contract gap stops for the planner",
+                TaskLoop.CONTRACT_AMENDMENT, first.reason());
+        check.eq("naming the gap", List.of("GAP-1"), first.summaryReport().get("contract_gaps_to_plan"));
+        check.eq("and it is not a verdict on the work", false, TaskLoop.isAboutTheWork(first.reason()));
+
+        // What the supervisor does once the planner's amendment is written: the contract moves
+        // and Warden answers the pending decision with retry.
+        Path task = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "# amended: the text is checked\n");
+        var pending = new dev.warden.approval.ApprovalStore(project).read("gp1");
+        new dev.warden.approval.ApprovalStore(project).resolve("gp1", pending.updatedAt().toString(),
+                "retry", "warden:contract-amendment", "acceptance amended by the planner for [GAP-1]");
+        // And what it spent, which no run's own totals hold.
+        Files.writeString(project.resolve(".warden/runs/gp1").resolve(TaskLoop.AMENDMENT_RECEIPT),
+                dev.warden.json.Json.write(Map.of("run_id", "gp1-amend", "state", "settled",
+                        "role_runs", 2, "cost_usd", 0.25, "unpriced_calls", 0)));
+
+        TaskLoop.Outcome amended = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(project, "hello"), UserConfig.load(home), "gp2",
+                false, Map.of(), new TaskLoop.Continuation("gp1", null, true));
+        check.eq("the amended run goes to the gate: the amendment is offered once per chain",
+                "ready_for_human", amended.reason());
+        check.eq("it knows it is the amended run", "gp1", amended.summaryReport().get("contract_amended_from"));
+        check.eq("the writer's product is kept", Map.of("from", "gp1", "stages", List.of("implement")),
+                amended.summaryReport().get("reused_judgements"));
+        check.that("and the reader read again under the amended contract", steps(amended).stream()
+                .anyMatch(s -> "review".equals(s.get("stage")) && s.get("reused_from") == null));
+        Map<?, ?> before = (Map<?, ?>) first.summaryReport().get("chain");
+        Map<?, ?> after = (Map<?, ?>) amended.summaryReport().get("chain");
+        check.that("the amendment is a link in the chain", ((List<?>) after.get("runs")).contains("gp1-amend"));
+        check.eq("and its calls count against the chain's ceiling",
+                ((Number) before.get("role_runs")).longValue() + 2
+                        + ((Number) amended.summaryReport().get("role_runs")).longValue(),
+                ((Number) after.get("role_runs")).longValue());
+        check.eq("a retry after the amended run is still the amended chain", "gp1",
+                TaskLoop.amendmentOffered(project, "gp2"));
+
+        // A chain that cannot pay for the planner, at most three calls here, and for the
+        // reading taken again keeps its gaps listed at the gate instead of stopping for them.
+        Path poor = newProject(sandbox, "gap-poor", "medium", 5);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("gap-poor-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-gap-p3", sandbox.resolve("gap-poor-review.count"), 1);
+        TaskLoop.Outcome unpaid = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(poor, "hello"), UserConfig.load(home), "gpp1", false);
+        check.eq("a chain that cannot pay for the amendment goes to the gate", "ready_for_human",
+                unpaid.reason());
+        Map<?, ?> skipped = (Map<?, ?>) unpaid.summaryReport().get("contract_amendment_skipped");
+        check.eq("saying why", "max_role_runs", skipped == null ? null : skipped.get("reason"));
+        check.eq("with the calls it would have needed", 4L,
+                skipped == null ? null : ((Number) skipped.get("calls_needed")).longValue());
+        check.eq("and nothing is routed to the planner", null, unpaid.summaryReport().get("contract_gaps_to_plan"));
+        policy(home, "loop-review", "loop-impl", "confirm");
+    }
+
+    private void repairingPolicy(Path home) throws IOException {
+        policy(home, "loop-review", "loop-impl", "confirm");
+        Path policy = home.resolve("policy.yaml");
+        Files.writeString(policy, Files.readString(policy).replace(
+                "review: { required_for_risk: [medium, high] }",
+                "review: { required_for_risk: [medium, high], repair_severities: [P1, P2, P3] }"));
+    }
+
     @SuppressWarnings("unchecked")
     private void crossStageRegistryChecks(Check check, Path sandbox, Path home) throws Exception {
         Path handoff = newProject(sandbox, "registry-handoff", "medium", 20);
@@ -3903,6 +4066,15 @@ public final class TaskLoopTest implements Suite {
         dev.warden.approval.ApprovalStore decisions = new dev.warden.approval.ApprovalStore(project);
         decisions.resolve("rj1", decisions.read("rj1").updatedAt().toString(), "reject", "operator",
                 "the fire is drawn twice the height of the person standing next to it");
+        // A reader's P3 the person saw on the page when they rejected.
+        Path firstSummary = project.resolve(".warden/runs/rj1/task-run.json");
+        Map<String, Object> firstReport = new java.util.LinkedHashMap<>(
+                dev.warden.json.Json.parseObject(Files.readString(firstSummary)));
+        firstReport.put("finding_history", List.of(Map.of("stage", "review", "attempt", 0,
+                "findings", List.of(Map.of("id", "F-9", "severity", "P3", "category", "product_defect",
+                        "status", "open", "message", "the smoke drifts against the wind",
+                        "suggestion", "flip the smoke sprite")))));
+        Files.writeString(firstSummary, dev.warden.json.Json.write(firstReport));
 
         ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
         TaskLoop.Outcome second = new TaskLoop(new ProcessRunner())
@@ -3919,6 +4091,9 @@ public final class TaskLoopTest implements Suite {
         check.contains("with the person's own words", carried, "twice the height");
         check.contains("and says plainly that a person, not a check, objected",
                 carried, "A person rejected the previous candidate");
+        check.contains("with the readers' open findings the person saw", carried,
+                "P3 [product_defect] the smoke drifts against the wind");
+        check.contains("and what the reader suggested", carried, "flip the smoke sprite");
     }
 
     private TaskLoop.Outcome loop(Path project, Path home, String runId) throws Exception {

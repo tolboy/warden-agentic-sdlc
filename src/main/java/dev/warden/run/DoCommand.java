@@ -222,7 +222,11 @@ public final class DoCommand {
                 hasFlag(args, "--dry-run"), hasFlag(args, "--conductor"),
                 hasFlag(args, "--auto-reject-gates"), hasFlag(args, "--init-repo"),
                 hasFlag(args, "--draft-only"), option(args, "--isolation", null),
-                option(args, "--prepare", "off"));
+                // auto by default since 2026-09-22: a greenfield goal drafted without a planner
+                // got two generic scenarios and no acceptance for the behaviour it asked for,
+                // and the operator had to write the contract by hand. A task that already has
+                // a contract is not replanned, and a policy with no planner role drafts as before.
+                option(args, "--prepare", "auto"));
     }
 
     public Outcome run(Options options, UserConfig user) throws Exception {
@@ -317,7 +321,12 @@ public final class DoCommand {
                 : project.checks().getOrDefault(project.defaultChecks(), List.of());
         Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
         boolean contractExists = Files.isRegularFile(taskFile);
-        boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists);
+        // `auto` means "plan when there is nothing to run yet and someone to plan it"; a roster
+        // without a planner drafts the contract the old way rather than refusing the goal.
+        boolean plannerConfigured = user != null && user.policy() != null
+                && user.policy().roles().containsKey("planner");
+        boolean dispatchPlanner = Preparation.shouldDispatch(options.prepare(), contractExists)
+                && ("always".equals(options.prepare()) || plannerConfigured);
         // Asked before a planner is dispatched, not after it has answered. The conflict is
         // knowable from the file on disk: same id, same scope, same risk, and an existing
         // goal that still carries the operator's. Discovering it afterwards is how a plan

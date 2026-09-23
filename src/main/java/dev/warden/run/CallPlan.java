@@ -76,6 +76,20 @@ public final class CallPlan {
         return callsFrom(0);
     }
 
+    /**
+     * Vendor calls one more pass costs when the writer's product is carried into it: every
+     * paying stage whose role is not {@code writer}. What a continuation after a contract
+     * amendment needs, since it keeps the candidate and takes every reading again.
+     */
+    public int readingsWithout(String writer) {
+        int calls = 0;
+        for (Workflow.Stage stage : stages) {
+            if (stage.kind() == Workflow.Kind.ROLE && !skipped.test(stage)
+                    && !writer.equals(stage.role())) calls++;
+        }
+        return calls;
+    }
+
     /** Vendor calls still owed by the stages strictly after {@code index}. */
     public int callsAfter(int index) {
         return callsFrom(index + 1);

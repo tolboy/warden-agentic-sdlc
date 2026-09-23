@@ -93,6 +93,35 @@ public final class OrcaDecisionGateTest implements Suite {
         waiterStaleFailsWithoutWaiting(check);
         waiterBackoffSequence(check);
         waitForGateSkipsWhenNoneWasPublished(check);
+        theDecisionPageStillHearsTheGate(check);
+    }
+
+    /**
+     * An answer given in Orca while the decision page is open is still an answer. The page's
+     * loop kept its last gate read as {@code Long.MIN_VALUE}, and {@code clock - MIN_VALUE}
+     * overflows for any clock, so the gate was never read: a phone answer waited out the page.
+     */
+    private void theDecisionPageStillHearsTheGate(Check check) throws Exception {
+        Path root = Files.createTempDirectory("warden-page-gate-");
+        Path home = Files.createDirectories(root.resolve("config-home"));
+        try {
+            Fixture pending = fixture(root, "page-gate");
+            ScriptedGate script = new ScriptedGate(pendingAnswer(pending.gateId),
+                    pendingAnswer(pending.gateId), resolvedAnswer(pending.gateId, "abort"));
+            FakeTime time = new FakeTime();
+            time.now = 1_758_000_000_000L;
+            Main.ApproveEnv env = new Main.ApproveEnv(time, time, script, home);
+            List<String> shown = new ArrayList<>();
+            Map<String, Object> result = Main.awaitDecision(root, "page-gate",
+                    new String[] {"--no-workspace-status", "--quiet"}, 1, env, url -> shown.add(url));
+            check.eq("the page was shown", 1, shown.size());
+            check.eq("the answer given in Orca is recorded", "abort",
+                    new ApprovalStore(root).read("page-gate").decision());
+            check.eq("the gate is read at once and then every ten seconds", 3, script.reads);
+            check.that("and the import is reported", result.get("gate_import") != null);
+        } finally {
+            deleteTree(root);
+        }
     }
 
     /**

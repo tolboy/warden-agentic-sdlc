@@ -34,6 +34,92 @@ public final class DecisionPageTest implements Suite {
         page(check);
         evidenceAPersonCanRead(check);
         retryOnThePageContinuesTheLoop(check);
+        rejectWithANoteGoesBackToTheWriter(check);
+        onlyTheLastAttemptIsShown(check);
+    }
+
+    /**
+     * The page says "Отклонить" with a note returns the work to the writer. The supervisor
+     * treated reject as an ending and stopped, so the note — the one thing the operator wrote
+     * — went nowhere until someone typed `warden run --continue`. Without a note there is
+     * nothing to hand over, and the decision closes the work.
+     */
+    private void rejectWithANoteGoesBackToTheWriter(Check check) throws Exception {
+        for (String note : List.of("the second press misses the button", "")) {
+            Path root = project("Toggle the greeting");
+            Path home = Files.createDirectories(root.resolve("home"));
+            Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
+            Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+            summary.put("decision_kind", "success");
+            summary.put("orca_gate", Map.of("published", true));
+            Files.writeString(summaryFile, Json.write(summary));
+            HumanDecision pending = new ApprovalStore(root).createSuccess("run-1", "hello",
+                    "every stage that ran passed", summaryFile, "fingerprint-shown");
+            Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis,
+                    millis -> Thread.sleep(Math.min(millis, 20)),
+                    (path, gate) -> { throw new IllegalStateException("the page answered first"); }, home);
+            String[] args = {"--no-workspace-status", "--quiet"};
+            List<String> carried = new java.util.ArrayList<>();
+            Main.superviseGates(root, "run-1", summary, args, env,
+                    (path, decision, passed, environment) -> {
+                        carried.add(decision.decision() + ": " + decision.note());
+                        return Map.of("started", true, "run_id", "run-2", "ok", true,
+                                "summary_report", Map.of("run_id", "run-2"));
+                    },
+                    (path, runId, shown) -> Main.awaitDecision(path, runId, args, 1, env, url -> {
+                        HttpResponse<String> pressed = post(url, "reject", note, pending.updatedAt().toString());
+                        check.contains("the page records the rejection", pressed.body(), "Записано");
+                        if (!note.isEmpty()) {
+                            check.contains("and says the work goes back with the note", pressed.body(),
+                                    "возвращает работу исполнителю");
+                        }
+                        return true;
+                    }));
+            if (note.isEmpty()) {
+                check.eq("a rejection without a note starts nothing", List.of(), carried);
+            } else {
+                check.eq("a rejection with a note starts the writer's next run, carrying it",
+                        List.of("reject: " + note), carried);
+            }
+        }
+    }
+
+    /**
+     * A browser pass that failed and was repaired leaves two attempt directories. The page
+     * listed both, so the failed frames sat under a passing verdict, and eight frames from the
+     * first attempt could push the final ones off the page.
+     */
+    private void onlyTheLastAttemptIsShown(Check check) throws Exception {
+        Path root = project("Toggle the greeting");
+        new ApprovalStore(root).createSuccess("run-1", "hello", "every stage that ran passed",
+                root.resolve(".warden/runs/run-1/task-run.json"), "fingerprint-shown");
+        for (int attempt : List.of(0, 1)) {
+            Path shots = root.resolve(".warden/runs/run-1--visual-qa-" + attempt + "/screenshots");
+            Files.createDirectories(shots);
+            String picture = attempt == 0 ? "1280x720-failed.png" : "1280x720.png";
+            javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(4, 4,
+                    java.awt.image.BufferedImage.TYPE_INT_RGB), "png", shots.resolve(picture).toFile());
+            Map<String, Object> scenario = new LinkedHashMap<>();
+            scenario.put("raw", "1280x720: testid=toggle click -> testid=greeting hidden");
+            scenario.put("ok", attempt == 1);
+            scenario.put("viewport", Map.of("width", 1280, "height", 720, "mobile", false));
+            scenario.put("screenshot", shots.resolve(picture).toString());
+            if (attempt == 0) scenario.put("why", "the greeting stayed on the page");
+            scenario.put("steps", List.of(
+                    Map.of("matcher", "testid=toggle", "assertion", "click", "ok", true),
+                    Map.of("matcher", "testid=greeting", "assertion", "hidden", "ok", attempt == 1)));
+            Files.writeString(shots.resolve("visual-qa.json"),
+                    Json.write(Map.of("ok", attempt == 1, "scenarios", List.of(scenario))));
+        }
+        try (DecisionPage page = new DecisionPage(root, "run-1", (choice, note, expected) -> Map.of("ok", false))) {
+            page.start();
+            String body = get(page.url()).body();
+            check.contains("the repaired pass is shown", body, "✓ 1280×720");
+            check.that("the failed attempt it replaced is not", !body.contains("the greeting stayed on the page"));
+            check.that("nor its verdict", !body.contains("✗ 1280×720"));
+            check.eq("and only the final attempt's frame is on the page", 1,
+                    body.split("src='shot/", -1).length - 1);
+        }
     }
 
     /**
