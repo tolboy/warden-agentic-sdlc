@@ -339,6 +339,76 @@ public final class RosterTest implements Suite {
                 List.of("exec", "-m", "{{model}}", "--json"), flowParsed.args());
         check.contains("a profile with no probe is told it has nothing to verify with",
                 String.valueOf(flowed.report().get("probe_warning")), "no verification.probe");
+
+        // Review of PR #12: the edit followed a narrower layout than the reader accepts. Nine
+        // spaces before a flow item, or a document indented as a whole, left args on the old
+        // model while `model:` and the probe moved, and the command still answered ok.
+        Path wide = home(sandbox, "model-wide-flow");
+        Path wideFile = wide.resolve("profiles").resolve("wide-review.yaml");
+        Files.writeString(wideFile, """
+                version: 1
+                profile: wide-review
+                role: reviewer
+                vendor: claude
+                model: opus
+                command: claude
+                runner: direct
+                args: ["-p", "--model",         "opus"]
+                """, StandardCharsets.UTF_8);
+        check.that("any run of spaces before a flow item is followed",
+                roster(wide, "roster", "model", "wide-review", "--model", "claude-opus-5-5").ok());
+        check.eq("and the item is the placeholder", List.of("-p", "--model", "{{model}}"),
+                Profile.parse(Files.readString(wideFile, StandardCharsets.UTF_8),
+                        wideFile.toString()).args());
+
+        Path indented = home(sandbox, "model-indented");
+        Path indentedFile = indented.resolve("profiles").resolve("indented-review.yaml");
+        Files.writeString(indentedFile, """
+                  version: 1
+                  profile: indented-review
+                  role: reviewer
+                  vendor: claude
+                  model: opus
+                  command: claude
+                  runner: direct
+                  args:
+                    - "-p"
+                    - "--model"
+                    - "opus"   # pinned by hand
+                  verification:
+                    probe: 'claude -p "say ok" --model opus'
+                """, StandardCharsets.UTF_8);
+        check.that("a document indented as a whole is followed",
+                roster(indented, "roster", "model", "indented-review", "--model", "claude-opus-5-5").ok());
+        String indentedText = Files.readString(indentedFile, StandardCharsets.UTF_8);
+        Profile indentedParsed = Profile.parse(indentedText, indentedFile.toString());
+        check.that("its args carry the placeholder", indentedParsed.args().contains("{{model}}")
+                && !indentedParsed.args().contains("opus"));
+        check.contains("the comment after the item stayed", indentedText, "\"{{model}}\"   # pinned by hand");
+        check.contains("and its probe was rewritten too", indentedParsed.verificationProbe(),
+                "--model {{model}}");
+
+        // The reader decodes an escape the text edit cannot see. It has the last word: nothing
+        // is written rather than a switch reported that the vendor would never get.
+        Path escaped = home(sandbox, "model-escaped");
+        Path escapedFile = escaped.resolve("profiles").resolve("escaped-review.yaml");
+        String escapedText = """
+                version: 1
+                profile: escaped-review
+                role: reviewer
+                vendor: claude
+                model: "vendor\\\\opus"
+                command: claude
+                runner: direct
+                args: ["-p", "--model", "vendor\\\\opus"]
+                """;
+        Files.writeString(escapedFile, escapedText, StandardCharsets.UTF_8);
+        RosterCommand.Outcome unreached = roster(escaped, "roster", "model", "escaped-review",
+                "--model", "claude-opus-5-5");
+        check.eq("a literal the edit could not rewrite is refused", "model_not_forwarded",
+                unreached.report().get("code"));
+        check.eq("and the file is untouched", escapedText,
+                Files.readString(escapedFile, StandardCharsets.UTF_8));
     }
 
     private void effortWithoutPlaceholderIsRefused(Check check, Path home) throws Exception {

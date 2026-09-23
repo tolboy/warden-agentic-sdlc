@@ -495,6 +495,8 @@ public final class RosterCommand {
         // profile on the maintainer's machine was like that, so `roster model` was a rename.
         if ("direct".equals(profile.runner()) && profile.model() != null) {
             forwardModel(document.lines, profile.model(), before, after);
+            String unreached = unreachedModel(document.render(), file, profile.model());
+            if (unreached != null) return fail("model_not_forwarded", unreached, file, null, null);
         }
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("verify_with", "warden profiles --verify " + name);
@@ -530,51 +532,76 @@ public final class RosterCommand {
      */
     private static void forwardModel(List<String> lines, String oldModel, List<String> before,
                                      List<String> after) {
-        int argsLine = findKey(lines, 0, lines.size(), "args", 0, 0);
+        // Top-level keys sit at the document's own indent, which the reader accepts at any
+        // width; assuming column 0 skipped a profile indented as a whole.
+        int base = documentIndent(lines);
+        String old = java.util.regex.Pattern.quote(oldModel);
+        int argsLine = findKey(lines, 0, lines.size(), "args", base, base);
         if (argsLine >= 0) {
             String header = lines.get(argsLine);
-            String flow = stripComment(header);
-            if (flow.contains("[")) {
-                String rewritten = header.replaceAll("(?<=[\\[,]\\s{0,8})([\"']?)"
-                        + java.util.regex.Pattern.quote(oldModel) + "\\1(?=\\s*[,\\]])",
-                        java.util.regex.Matcher.quoteReplacement("\"{{model}}\""));
-                if (!rewritten.equals(header)) {
-                    before.add(header);
-                    lines.set(argsLine, rewritten);
-                    after.add(rewritten);
-                }
+            if (stripComment(header).contains("[")) {
+                // Any run of spaces between items; a fixed-width lookbehind missed nine.
+                replaceLine(lines, argsLine, header.replaceAll("(?<=[\\[,])(\\s*)([\"']?)" + old
+                        + "\\2(\\s*)(?=[,\\]])", "$1\"{{model}}\"$3"), before, after);
             } else {
                 int end = blockEnd(lines, argsLine, indent(header));
                 for (int i = argsLine + 1; i < end; i++) {
                     String line = lines.get(i);
-                    String content = stripComment(line).strip();
-                    if (!content.startsWith("-")) continue;
-                    String item = content.substring(1).strip();
-                    if (item.length() >= 2 && (item.startsWith("\"") && item.endsWith("\"")
-                            || item.startsWith("'") && item.endsWith("'"))) {
-                        item = item.substring(1, item.length() - 1);
-                    }
-                    if (!item.equals(oldModel)) continue;
-                    String rewritten = line.substring(0, line.indexOf('-')) + "- \"{{model}}\"";
-                    before.add(line);
-                    lines.set(i, rewritten);
-                    after.add(rewritten);
+                    // The scalar alone is replaced, so a comment after it stays where it was.
+                    replaceLine(lines, i, line.replaceFirst("^(\\s*-\\s*)([\"']?)" + old
+                            + "\\2(?=\\s*(#.*)?$)", "$1\"{{model}}\""), before, after);
                 }
             }
         }
-        int verification = findKey(lines, 0, lines.size(), "verification", 0, 0);
+        int verification = findKey(lines, 0, lines.size(), "verification", base, base);
         if (verification < 0) return;
-        int end = blockEnd(lines, verification, 0);
-        int probe = findKey(lines, verification + 1, end, "probe", 1, Integer.MAX_VALUE);
+        int end = blockEnd(lines, verification, base);
+        int probe = findKey(lines, verification + 1, end, "probe", base + 1, Integer.MAX_VALUE);
         if (probe < 0) return;
         String line = lines.get(probe);
-        String rewritten = line.replaceAll("(--model[ =]|-m )"
-                + java.util.regex.Pattern.quote(oldModel) + "(?=[\\s'\"]|$)", "$1{{model}}");
-        if (!rewritten.equals(line)) {
-            before.add(line);
-            lines.set(probe, rewritten);
-            after.add(rewritten);
+        replaceLine(lines, probe, line.replaceAll("(--model[ =]|-m )" + old + "(?=[\\s'\"]|$)",
+                "$1{{model}}"), before, after);
+    }
+
+    private static void replaceLine(List<String> lines, int index, String rewritten,
+                                    List<String> before, List<String> after) {
+        String line = lines.get(index);
+        if (rewritten.equals(line)) return;
+        before.add(line);
+        lines.set(index, rewritten);
+        after.add(rewritten);
+    }
+
+    /** The indent of the first key line, which is where the reader puts the document's root. */
+    private static int documentIndent(List<String> lines) {
+        for (String line : lines) {
+            if (isBlankOrComment(line) || line.strip().equals("---")) continue;
+            return indent(line);
         }
+        return 0;
+    }
+
+    /**
+     * Why the rewritten profile would still ask the vendor for the old model, or null when it
+     * would not. The text edit follows the file's spelling and the reader follows YAML, and the
+     * two can disagree (an escaped character, a layout the edit does not recognise). The
+     * reader has the last word: a profile whose parsed args still name the old model, or carry
+     * no {{model}}, is not written, because reporting a switch the vendor never sees is the
+     * defect this command exists to prevent.
+     */
+    private static String unreachedModel(String rewritten, Path file, String oldModel) {
+        Profile parsed;
+        try {
+            parsed = Profile.parse(rewritten, file.toString());
+        } catch (RuntimeException unreadable) {
+            return null; // rewriteAndReparse reports it and restores the original bytes
+        }
+        boolean placeholder = parsed.args().stream().anyMatch(a -> a.contains("{{model}}"));
+        if (placeholder && !parsed.args().contains(oldModel)) return null;
+        return "profile '" + parsed.name() + "' spells the model '" + oldModel + "' in args in "
+                + "a way roster could not rewrite, so the vendor would still be asked for it; "
+                + "nothing was written. Replace that args item with \"{{model}}\" by hand, then run "
+                + "this again";
     }
 
     /**
@@ -587,10 +614,11 @@ public final class RosterCommand {
             return "the profile has no verification.probe, so `warden profiles --verify` has "
                     + "nothing to run; write one that passes \"{{model}}\" before relying on it";
         }
-        int verification = findKey(lines, 0, lines.size(), "verification", 0, 0);
-        int end = verification < 0 ? lines.size() : blockEnd(lines, verification, 0);
+        int base = documentIndent(lines);
+        int verification = findKey(lines, 0, lines.size(), "verification", base, base);
+        int end = verification < 0 ? lines.size() : blockEnd(lines, verification, base);
         int probe = verification < 0 ? -1
-                : findKey(lines, verification + 1, end, "probe", 1, Integer.MAX_VALUE);
+                : findKey(lines, verification + 1, end, "probe", base + 1, Integer.MAX_VALUE);
         if (probe >= 0 && lines.get(probe).contains("{{model}}")) return null;
         return "verification.probe does not pass {{model}}, so `warden profiles --verify` would "
                 + "call the vendor's default model and stamp this one";

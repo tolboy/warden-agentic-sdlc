@@ -108,6 +108,12 @@ public final class DoCommandTest implements Suite {
         });
         check.eq("a goal read from a UTF-8 file arrives intact", goal, fromFile.goal());
         check.that("and the other flags are still honoured", fromFile.inPlace());
+        // Review of PR #12: the flag check sat after the --goal-file early return, so a typo
+        // meant to make this a preview was ignored and the real run would have gone ahead.
+        check.rejects("an unknown flag beside --goal-file is refused as well",
+                "do does not know --dry-rnu",
+                () -> DoCommand.parse(new String[] {
+                        "do", "--goal-file", goalFile.toString(), "--dry-rnu"}));
 
         check.rejects("an unreadable goal file is an error, not an empty goal", "could not be read",
                 () -> DoCommand.parse(new String[] {"do", "--goal-file", sandbox.resolve("absent").toString()}));

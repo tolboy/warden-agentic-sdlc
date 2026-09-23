@@ -168,6 +168,9 @@ public final class DoCommand {
             "--no-wait-for-gate", "--no-workspace-status");
 
     public static Options parse(String[] args) {
+        // Before any early return: `--goal-file` used to skip the check, so a mistyped
+        // `--dry-rnu` beside it was ignored and the run it meant to preview went ahead.
+        List<String> positional = positionalWords(args);
         String goalFile = option(args, "--goal-file", null);
         if (goalFile != null) {
             try {
@@ -182,6 +185,16 @@ public final class DoCommand {
             }
         }
         String goal = option(args, "--goal", null);
+        if (goal == null && !positional.isEmpty()) goal = String.join(" ", positional);
+        if (goal == null || goal.isBlank()) {
+            throw new IllegalArgumentException("do requires a goal, for example: "
+                    + "warden do --project C:/repo --scope code \"Add a Settings button\"");
+        }
+        return withGoal(args, goal.strip());
+    }
+
+    /** The words that are not flags or flag values; an unknown flag is refused by name. */
+    private static List<String> positionalWords(String[] args) {
         List<String> positional = new ArrayList<>();
         for (int index = 1; index < args.length; index++) {
             String arg = args[index];
@@ -196,12 +209,7 @@ public final class DoCommand {
             }
             positional.add(arg);
         }
-        if (goal == null && !positional.isEmpty()) goal = String.join(" ", positional);
-        if (goal == null || goal.isBlank()) {
-            throw new IllegalArgumentException("do requires a goal, for example: "
-                    + "warden do --project C:/repo --scope code \"Add a Settings button\"");
-        }
-        return withGoal(args, goal.strip());
+        return positional;
     }
 
     private static Options withGoal(String[] args, String goal) {
