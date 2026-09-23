@@ -141,7 +141,10 @@ public final class PlannerTest implements Suite {
         check.eq("the goal is the contract's, not the draft's", "Show a greeting and a toggle", parsed.goal());
         check.contains("the operator's comment is still there", amended, "# written by hand");
         check.contains("and the start command", amended, "python -m http.server 4173");
-        check.contains("a named check from project.yaml is added", amended, "names: [text]");
+        // The contract names no checks, so it runs the project's default set, `fast` here. An
+        // explicit list replaces the default, so writing `names: [text]` alone dropped it.
+        check.contains("a named check from project.yaml is added beside the default the contract ran",
+                amended, "names: [fast, text]");
         check.that("a name project.yaml does not define is not", !amended.contains("not-a-check"));
         check.that("and a shell string is never promoted to a check", !amended.contains("rm-rf"));
 
@@ -154,6 +157,16 @@ public final class PlannerTest implements Suite {
         String fromFlow = PlannerDraft.amend(flow, draft, project, "hello.yaml");
         check.eq("a flow list is rewritten as a block holding both", 2,
                 fromFlow == null ? -1 : TaskSpec.parse(fromFlow, "hello.yaml").visualQa().scenarios().size());
+
+        // A scenario is free text. Split at its comma, this one became two altered conditions.
+        String withComma = before.replace("  scenarios:\n    - \"1280x720: testid=greeting visible\"\n",
+                "  scenarios: [\"1280x720: testid=greeting visible -> text=Hello, World visible\"]\n");
+        String fromComma = PlannerDraft.amend(withComma, Map.of("visual_qa", Map.of("required", true,
+                "scenarios", List.of("1280x720: testid=toggle visible"))), project, "hello.yaml");
+        check.eq("a quoted comma in a flow-list scenario survives the rewrite", List.of(
+                "1280x720: testid=greeting visible -> text=Hello, World visible",
+                "1280x720: testid=toggle visible"),
+                fromComma == null ? null : TaskSpec.parse(fromComma, "hello.yaml").visualQa().scenarios());
     }
 
     private void parseAndResolve(Check check) {
@@ -1290,7 +1303,60 @@ public final class PlannerTest implements Suite {
         check.eq("and the contract is exactly as it was", inForce, Files.readString(unreadTask));
         check.eq("the decision is left to a person", dev.warden.approval.HumanDecision.State.PENDING,
                 new dev.warden.approval.ApprovalStore(unread).read("gap-1").state());
+
+        // The chain pays for the amendment, so the chain's ceilings bound each of its calls,
+        // not only the loop's decision to route there. Money: the planner's $0.01 takes the
+        // chain to its ceiling, and the plan reviewer must not start after it.
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
+                sandbox.resolve("amend-spent-review.count"), 1);
+        Path spent = amendmentProject(sandbox.resolve("amend-spent"), inForce
+                + "budgets:\n  max_role_runs: 40\n  max_cost_usd: 0.5\n", summary,
+                Map.of("runs", List.of("gap-1"), "role_runs", 3L, "cost_usd", 0.495,
+                        "elapsed_seconds", 100L, "elapsed_known", true));
+        Map<String, Object> overBudget = (Map<String, Object>) Main.amendContract(spent, "gap-1", summary,
+                new String[] {"--no-workspace-status", "--quiet"}, env).get("contract_amendment");
+        check.eq("a plan reviewer is not dispatched once the planner spent the chain's money",
+                "budget_exhausted", overBudget == null ? null : overBudget.get("code"));
+        check.eq("the unreviewed amendment is withdrawn", inForce + "budgets:\n  max_role_runs: 40\n"
+                + "  max_cost_usd: 0.5\n", Files.readString(spent.resolve(".warden/tasks/hello.yaml")));
+        check.eq("and the receipt counts the planner alone: the reviewer was never paid", 1L, ((Number) Json.parseObject(Files.readString(
+                spent.resolve(".warden/runs/gap-1").resolve(TaskLoop.AMENDMENT_RECEIPT)))
+                .get("role_runs")).longValue());
+
+        // Time: 90 seconds of the chain's ten minutes are left, and the planner's profile
+        // declares two. The call gets what the chain has, not what the profile allows.
+        Path late = amendmentProject(sandbox.resolve("amend-late"), inForce
+                + "budgets:\n  max_role_runs: 40\n  max_cost_usd: 5.0\n  max_elapsed_minutes: 10\n", summary,
+                Map.of("runs", List.of("gap-1"), "role_runs", 3L, "cost_usd", 0.1,
+                        "elapsed_seconds", 510L, "elapsed_known", true));
+        Main.amendContract(late, "gap-1", summary, new String[] {"--no-workspace-status", "--quiet"}, env);
+        boolean capped;
+        try (var files = Files.walk(late.resolve(".warden/runs/gap-1-amend"))) {
+            capped = files.filter(Files::isRegularFile).anyMatch(file -> {
+                try {
+                    return Files.readString(file).contains("\"wall_clock_capped_by\"");
+                } catch (IOException unreadable) {
+                    return false;
+                }
+            });
+        }
+        check.that("the planner's wall clock is lowered to what the chain's deadline leaves", capped);
         writePolicy(home, "stub-plan");
+    }
+
+    /** A project whose run gap-1 stopped for a contract amendment, with the chain it spent. */
+    private Path amendmentProject(Path project, String contract, Map<String, Object> summary,
+                                  Map<String, Object> chain) throws Exception {
+        scaffoldProject(project);
+        Files.writeString(project.resolve(".warden/tasks/hello.yaml"), contract);
+        Path summaryFile = project.resolve(".warden/runs/gap-1/task-run.json");
+        Files.createDirectories(summaryFile.getParent());
+        Map<String, Object> withChain = new LinkedHashMap<>(summary);
+        withChain.put("chain", chain);
+        Files.writeString(summaryFile, Json.write(withChain));
+        new dev.warden.approval.ApprovalStore(project).createFailure("gap-1", "hello",
+                TaskLoop.CONTRACT_AMENDMENT, summaryFile, null);
+        return project;
     }
 
     private void writeReviewingPolicy(Path home, String planner, String reviewer) throws IOException {

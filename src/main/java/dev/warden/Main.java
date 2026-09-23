@@ -1624,6 +1624,11 @@ public final class Main {
             narration.blank();
             narration.line("prep  the readers found the acceptance too weak (" + ids
                     + "); the planner amends it, the plan reviewer reads the amendment");
+            // The chain's ceilings bound every call the amendment makes, not only the decision
+            // to route there: read before the reservation below, which it would count as spent.
+            RoleRunner.DispatchGate chainGate = TaskLoop.amendmentGate(root, runId,
+                    spec.resolve(project, taskFile.toString()).budget(),
+                    () -> env.clock.nowMillis() * 1_000_000L);
             // The chain pays for this, so the chain is told before the first call: the receipt
             // reserves the most an amendment can spend, and a crash leaves that reservation
             // standing rather than an amendment nobody counted.
@@ -1640,6 +1645,7 @@ public final class Main {
             java.nio.file.Files.writeString(receipt, Json.write(reserved));
             Preparation.Outcome amended = new Preparation(new ProcessRunner(), narration)
                     .amending(new Preparation.Amendment(before, gaps))
+                    .within(chainGate)
                     .run(root, project, env.user(), taskId, amendRunId, spec.goal(),
                             scopes.size() == 1 ? scopes.get(0) : String.valueOf(scopes),
                             spec.risk(), dev.warden.config.PlannerDraft.Access.DO_DEFAULT, false);

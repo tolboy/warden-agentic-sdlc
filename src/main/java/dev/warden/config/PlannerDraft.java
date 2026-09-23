@@ -129,7 +129,7 @@ public final class PlannerDraft {
             }
         }
         if (!fresh.isEmpty() && existing.visualQa() != null && existing.visualQa().required()) {
-            added |= appendScenarios(lines, fresh);
+            added |= appendScenarios(lines, have, fresh);
         }
 
         List<String> named = new ArrayList<>();
@@ -143,7 +143,7 @@ public final class PlannerDraft {
                 }
             }
         }
-        if (!named.isEmpty()) added |= mergeCheckNames(lines, named);
+        if (!named.isEmpty()) added |= mergeCheckNames(lines, named, project);
 
         if (!added) return null;
         String amended = String.join(newline, lines);
@@ -151,8 +151,15 @@ public final class PlannerDraft {
         return amended;
     }
 
-    /** Appends scenarios after the last item of the top-level `visual_qa.scenarios` list. */
-    private static boolean appendScenarios(List<String> lines, List<String> fresh) {
+    /**
+     * Appends scenarios after the last item of the top-level `visual_qa.scenarios` list.
+     *
+     * @param have the scenarios already in force, as the contract parsed them. A flow list is
+     *             rewritten from these rather than from its own text: a scenario is free text,
+     *             and splitting `["… -> text=Hello, World visible"]` at its comma turned one
+     *             condition into two altered ones.
+     */
+    private static boolean appendScenarios(List<String> lines, List<String> have, List<String> fresh) {
         int visual = -1;
         for (int i = 0; i < lines.size(); i++) {
             if (lines.get(i).equals("visual_qa:") || lines.get(i).startsWith("visual_qa: ")
@@ -175,20 +182,9 @@ public final class PlannerDraft {
         String inline = header.stripLeading().substring("scenarios:".length()).strip();
         if (inline.startsWith("[") ) {
             // `scenarios: []` or a flow list: rewritten as a block list holding both.
-            List<String> existing = new ArrayList<>();
-            String body = inline.substring(1, Math.max(1, inline.lastIndexOf(']'))).strip();
-            if (!body.isEmpty()) {
-                for (String part : body.split(",")) {
-                    String value = part.strip();
-                    if (value.length() >= 2 && (value.startsWith("\"") || value.startsWith("'"))) {
-                        value = value.substring(1, value.length() - 1);
-                    }
-                    if (!value.isEmpty()) existing.add(value);
-                }
-            }
             List<String> block = new ArrayList<>();
             block.add(" ".repeat(headerIndent) + "scenarios:");
-            for (String value : existing) block.add(" ".repeat(headerIndent + 2) + "- " + TaskDraft.quote(value));
+            for (String value : have) block.add(" ".repeat(headerIndent + 2) + "- " + TaskDraft.quote(value));
             for (String value : fresh) block.add(" ".repeat(headerIndent + 2) + "- " + TaskDraft.quote(value));
             lines.remove(scenarios);
             lines.addAll(scenarios, block);
@@ -215,8 +211,13 @@ public final class PlannerDraft {
     /**
      * Merges check names into a bare `checks: name` or a `checks:` block with `names: [...]`,
      * or adds the key when the contract has none. A literal command list is left alone.
+     *
+     * A contract with no names of its own runs the project's `defaults.checks`, and that set
+     * is kept in the list written: an explicit `names:` replaces the default rather than
+     * adding to it, so an amendment that wrote only the new name stopped running every check
+     * the candidate had passed.
      */
-    private static boolean mergeCheckNames(List<String> lines, List<String> named) {
+    private static boolean mergeCheckNames(List<String> lines, List<String> named, ProjectConfig project) {
         int key = -1;
         for (int i = 0; i < lines.size(); i++) {
             if (lines.get(i).equals("checks:") || lines.get(i).startsWith("checks: ")) { key = i; break; }
@@ -244,6 +245,7 @@ public final class PlannerDraft {
                 }
             }
         }
+        if (current.isEmpty() && project.defaultChecks() != null) current.add(project.defaultChecks());
         List<String> union = new ArrayList<>(current);
         for (String name : named) if (!union.contains(name)) union.add(name);
         if (union.size() == current.size()) return false;
