@@ -39,7 +39,9 @@ import java.util.Set;
  *       gets pushed must be what a human said yes to, not what is there now;</li>
  *   <li>the repository's own default branch. A landing step that can commit to `main` is a
  *       merge with extra steps;</li>
- *   <li>anything under `.warden`. Evidence is not the change.</li>
+ *   <li>anything under `.warden`. Evidence is not the change;</li>
+ *   <li>anything else in the index. The commit holds the accepted paths and nothing the
+ *       operator had staged besides; that stays staged, and the report lists it.</li>
  * </ul>
  *
  * <h2>What it does not know</h2>
@@ -179,10 +181,20 @@ public final class LandCommand {
 
         // Exactly what the report calls the change, and nothing else. Warden's own evidence
         // is not part of it, and neither is whatever else the worktree happens to be holding.
-        List<String> paths = sourcePaths(report);
-        if (paths.isEmpty()) {
+        List<String> accepted = sourcePaths(report);
+        if (accepted.isEmpty()) {
             return refuse("nothing_to_land", root, "the accepted run changed no source file");
         }
+        // What the commit will hold, computed before anything is written, so the preview and
+        // the commit are one list. An accepted path that no longer differs from HEAD is
+        // already committed (by an earlier `land --commit`, or by hand) and is not committed
+        // again. Anything else staged is left staged and out of the commit: the fingerprint
+        // guard above cannot see a `.warden/` file or a staged-only edit whose working copy
+        // matches HEAD, and a plain `git commit` used to carry both.
+        Set<String> uncommitted = git.changedPaths();
+        List<String> paths = accepted.stream().filter(uncommitted::contains).toList();
+        List<String> alreadyCommitted = accepted.stream().filter(path -> !uncommitted.contains(path)).toList();
+        List<String> leftStaged = stagedPaths(git).stream().filter(path -> !accepted.contains(path)).toList();
 
         String message = options.messageFile() != null
                 ? Files.readString(options.messageFile(), StandardCharsets.UTF_8)
@@ -201,6 +213,8 @@ public final class LandCommand {
         result.put("accepted_by", decision.actor());
         result.put("accepted_at", decision.updatedAt().toString());
         result.put("paths", paths);
+        if (!alreadyCommitted.isEmpty()) result.put("already_committed", alreadyCommitted);
+        if (!leftStaged.isEmpty()) result.put("left_staged", leftStaged);
         result.put("commit_message", message);
         result.put("pull_request_title", title);
         result.put("would_run", plan(paths, branch, remote, target, land, title, options));
@@ -214,28 +228,45 @@ public final class LandCommand {
             return new Outcome(true, "planned", result);
         }
 
-        List<String> add = new ArrayList<>(List.of("git", "add", "--"));
-        add.addAll(paths);
-        ProcessRunner.Result staged = processes.run(add, root, GIT_TIMEOUT);
-        if (!staged.ok()) return failed(result, "git_add_failed", staged);
+        if (paths.isEmpty()) {
+            // Every accepted path is already at HEAD. `git commit` would fail with "nothing to
+            // commit", which is how `land --commit` followed by `land --push` used to stop.
+            result.put("committed", null);
+        } else {
+            ProcessRunner.Result staged = processes.run(addCommand(paths), root, GIT_TIMEOUT);
+            if (!staged.ok()) return failed(result, "git_add_failed", staged);
 
-        Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
-        ProcessRunner.Result committed;
-        try {
-            Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
-            committed = processes.run(
-                    List.of("git", "commit", "-F", messageOnDisk.toString()), root, GIT_TIMEOUT);
-        } finally {
-            Files.deleteIfExists(messageOnDisk);
+            Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
+            ProcessRunner.Result committed;
+            try {
+                Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
+                committed = processes.run(commitCommand(messageOnDisk.toString(), paths), root, GIT_TIMEOUT);
+            } finally {
+                Files.deleteIfExists(messageOnDisk);
+            }
+            if (!committed.ok()) return failed(result, "git_commit_failed", committed);
+            String sha = commitSha(root);
+            result.put("committed", sha);
+            // `--only` leaves the rest of the index out by construction; a commit hook that
+            // stages more is the one way left for the commit to differ from the preview.
+            List<String> landed = committedPaths(git);
+            if (!new java.util.HashSet<>(landed).equals(new java.util.HashSet<>(paths))) {
+                result.put("committed_paths", landed);
+                result.put("ok", false);
+                result.put("code", "commit_differs_from_plan");
+                result.put("message", "commit " + sha + " holds " + landed + ", not the accepted "
+                        + paths + "; a commit hook probably staged more. Nothing was pushed. "
+                        + "Inspect it, and undo it with `git reset --soft HEAD~1` if it is wrong.");
+                return new Outcome(false, "commit_differs_from_plan", result);
+            }
         }
-        if (!committed.ok()) return failed(result, "git_commit_failed", committed);
-        result.put("committed", commitSha(root));
 
         if (!options.push()) {
+            String code = paths.isEmpty() ? "already_committed" : "committed";
             result.put("ok", true);
-            result.put("code", "committed");
+            result.put("code", code);
             result.put("next", "re-run with --push or --pull-request");
-            return new Outcome(true, "committed", result);
+            return new Outcome(true, code, result);
         }
 
         ProcessRunner.Result pushed = processes.run(
@@ -485,11 +516,16 @@ public final class LandCommand {
 
     // ---------------------------------------------------------------------- mechanics
 
+    /** The commands the plan prints, in the form they are run. */
     private static List<String> plan(List<String> paths, String branch, String remote, String base,
                                      ProjectConfig.Land land, String title, Options options) {
         List<String> plan = new ArrayList<>();
-        plan.add("git add -- " + String.join(" ", paths));
-        plan.add("git commit -F <message file>");
+        if (paths.isEmpty()) {
+            plan.add("(nothing to commit: every accepted path is already at HEAD)");
+        } else {
+            plan.add(String.join(" ", addCommand(paths)));
+            plan.add(String.join(" ", commitCommand("<message file>", paths)));
+        }
         if (options.push() || options.pullRequest()) {
             plan.add("git push -u " + (remote == null ? "<remote>" : remote) + " " + branch);
         }
@@ -500,6 +536,42 @@ public final class LandCommand {
                     : "(this project declares no land.pull_request command)");
         }
         return plan;
+    }
+
+    /**
+     * Literal pathspecs: a file named {@code *.txt} or {@code :x} is that file, not a glob or
+     * pathspec magic that would pull its neighbours into the commit.
+     */
+    private static List<String> addCommand(List<String> paths) {
+        List<String> command = new ArrayList<>(List.of("git", "--literal-pathspecs", "add", "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    /**
+     * {@code --only} commits HEAD plus the working-tree content of exactly these paths, and
+     * leaves whatever else is staged staged and out of the commit.
+     */
+    private static List<String> commitCommand(String messageFile, List<String> paths) {
+        List<String> command = new ArrayList<>(List.of(
+                "git", "--literal-pathspecs", "commit", "--only", "-F", messageFile, "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    private static List<String> stagedPaths(GitRepository git) throws IOException, InterruptedException {
+        return nulSeparated(git.git(List.of("diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--")));
+    }
+
+    private static List<String> committedPaths(GitRepository git) throws IOException, InterruptedException {
+        return nulSeparated(git.git(List.of("diff-tree", "-r", "--no-commit-id", "--name-only", "-z",
+                "--no-renames", "HEAD")));
+    }
+
+    private static List<String> nulSeparated(ProcessRunner.Result result) {
+        List<String> paths = new ArrayList<>();
+        for (String path : result.stdout().split("\0", -1)) if (!path.isBlank()) paths.add(path);
+        return List.copyOf(paths);
     }
 
     /** Argv substitution only: no shell, so a title with a quote in it stays one argument. */

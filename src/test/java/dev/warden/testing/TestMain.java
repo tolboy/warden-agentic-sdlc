@@ -24,6 +24,7 @@ public final class TestMain {
                 new dev.warden.TaskLoopTest(),
                 new dev.warden.HeartbeatTest(),
                 new dev.warden.LandMessageTest(),
+                new dev.warden.LandCommandTest(),
                 new dev.warden.DoCommandTest(),
                 new dev.warden.PlannerTest(),
                 new dev.warden.VisualQaTest(),
