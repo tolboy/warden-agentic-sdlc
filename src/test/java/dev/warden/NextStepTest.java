@@ -66,7 +66,8 @@ public final class NextStepTest implements Suite {
         check.eq("failover", "confirm_failover",
                 kind("failover_requires_confirmation", summary("run-1", "hello")));
         for (String reason : List.of("role_timed_out", "vendor_call_failed",
-                "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached")) {
+                "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached",
+                "orca_worker_not_started")) {
             check.eq(reason, "retry_infrastructure", kind(reason, summary("run-1", "hello")));
         }
         check.eq("reproduction passed", "fix_contract",
