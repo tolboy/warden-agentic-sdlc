@@ -56,12 +56,17 @@ public final class ProfileVerifier {
     public ProfileVerifier(ProcessRunner processes) { this.processes = processes; }
 
     public Probe run(Profile profile, Path home, Duration timeout) throws IOException, InterruptedException {
-        String command = profile.verificationProbe();
-        if (command == null || command.isBlank()) {
+        String declared = profile.verificationProbe();
+        if (declared == null || declared.isBlank()) {
             throw new IllegalStateException("profile '" + profile.name() + "' declares no "
                     + "verification.probe, so there is nothing to run. Add the exact command that "
                     + "would settle whether this vendor works, then verify it.");
         }
+        // The same values the role's own args receive. A probe that spelled the model out
+        // kept testing the old one after `roster model`, and the stamp went on the new one.
+        String command = declared
+                .replace("{{model}}", profile.model() == null ? "" : profile.model())
+                .replace("{{effort}}", profile.effort() == null ? "" : profile.effort());
         ProcessRunner.Result result = processes.run(shell(command), home, timeout, 256 * 1024);
 
         Path directory = home.resolve("verification");

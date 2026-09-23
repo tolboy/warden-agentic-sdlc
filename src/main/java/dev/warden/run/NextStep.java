@@ -99,7 +99,8 @@ public final class NextStep {
             case "quota_exhausted", "rate_limited" -> "wait_or_add_vendor";
             case "failover_requires_confirmation" -> "confirm_failover";
             case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
-                    "prompt_undeliverable", "turn_ceiling_reached" -> "retry_infrastructure";
+                    "prompt_undeliverable", "turn_ceiling_reached", "orca_worker_not_started"
+                    -> "retry_infrastructure";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
             case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
             case "escalation_unavailable", "independent_review_unavailable" -> "wait_or_add_vendor";

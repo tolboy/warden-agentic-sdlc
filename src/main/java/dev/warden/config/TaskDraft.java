@@ -57,10 +57,8 @@ public final class TaskDraft {
             boolean sameGoal = goal.strip().equals(existing.goal());
             boolean sameId = id.equals(existing.id());
             if (!sameId || !sameGoal || !sameScope || !sameRisk) {
-                throw new TaskConflict("task '" + id + "' already exists with different intent; "
-                        + "choose a different --task-id or explicitly edit/review " + file
-                        + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
-                        + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk());
+                throw conflict(file, existing, id, goal, scope, risk,
+                        sameId, sameGoal, sameScope, sameRisk);
             }
             return new Written(file, id, true);
         }
@@ -149,13 +147,34 @@ public final class TaskDraft {
                 && scope.equals(existing.scope().entries().get(0));
         boolean sameRisk = risk.equals(existing.risk());
         boolean sameId = id.equals(existing.id());
-        if (!sameId || !goalPreserved(goal, existing.goal()) || !sameScope || !sameRisk) {
-            throw new TaskConflict("task '" + id + "' already exists with different intent; "
-                    + "choose a different --task-id or explicitly edit/review " + file
-                    + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
-                    + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk());
+        boolean sameGoal = goalPreserved(goal, existing.goal());
+        if (!sameId || !sameGoal || !sameScope || !sameRisk) {
+            throw conflict(file, existing, id, goal, scope, risk,
+                    sameId, sameGoal, sameScope, sameRisk);
         }
         return new Written(file, id, true);
+    }
+
+    /**
+     * Both sides, and which fields differ. The message used to print only the file's values,
+     * so a goal that had silently picked up a stray argument (`--watch` swallowing the flag
+     * after it) read as identical to the one on disk.
+     */
+    private static TaskConflict conflict(Path file, TaskSpec existing, String id, String goal,
+                                         String scope, String risk, boolean sameId,
+                                         boolean sameGoal, boolean sameScope, boolean sameRisk) {
+        java.util.List<String> differs = new java.util.ArrayList<>();
+        if (!sameId) differs.add("id");
+        if (!sameGoal) differs.add("goal");
+        if (!sameScope) differs.add("scope");
+        if (!sameRisk) differs.add("risk");
+        return new TaskConflict("task '" + id + "' already exists with different intent ("
+                + String.join(", ", differs) + " differ); choose a different --task-id or "
+                + "explicitly edit/review " + file
+                + ". Existing id='" + existing.id() + "', goal='" + existing.goal()
+                + "', scope=" + existing.scope().entries() + ", risk=" + existing.risk()
+                + ". Requested id='" + id + "', goal='" + goal.strip() + "', scope=[" + scope
+                + "], risk=" + risk);
     }
 
     /**

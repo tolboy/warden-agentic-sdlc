@@ -31,6 +31,21 @@ public final class DoCommandTest implements Suite {
         check.rejects("a missing goal is refused before anything runs", "do requires a goal",
                 () -> DoCommand.parse(new String[] {"do", "--in-place"}));
 
+        // Measured 2026-09-22: `--watch` was not known to take no value, so it swallowed the
+        // `--use` after it, `implement=…` joined the goal, and a contract whose goal was on disk
+        // word for word was refused as task_conflict.
+        DoCommand.Options watched = DoCommand.parse(new String[] {
+                "do", "Add a Settings button", "--task-id", "settings", "--isolation", "orca",
+                "--watch", "--use", "implement=orca-grok-implement", "--host", "review=orca",
+                "--no-orca-gate", "--no-workspace-status", "--no-wait-for-gate",
+                "--wait-for-gate", "5", "--effort", "review=xhigh"
+        });
+        check.eq("switches and overlay flags leave the goal alone", "Add a Settings button",
+                watched.goal());
+        check.rejects("an unknown flag is refused by name instead of eating the next word",
+                "do does not know --wacth",
+                () -> DoCommand.parse(new String[] {"do", "Add a Settings button", "--wacth"}));
+
         Path sandbox = Files.createTempDirectory("warden-do-");
         try {
             Path project = sandbox.resolve("project");
@@ -93,6 +108,12 @@ public final class DoCommandTest implements Suite {
         });
         check.eq("a goal read from a UTF-8 file arrives intact", goal, fromFile.goal());
         check.that("and the other flags are still honoured", fromFile.inPlace());
+        // Review of PR #12: the flag check sat after the --goal-file early return, so a typo
+        // meant to make this a preview was ignored and the real run would have gone ahead.
+        check.rejects("an unknown flag beside --goal-file is refused as well",
+                "do does not know --dry-rnu",
+                () -> DoCommand.parse(new String[] {
+                        "do", "--goal-file", goalFile.toString(), "--dry-rnu"}));
 
         check.rejects("an unreadable goal file is an error, not an empty goal", "could not be read",
                 () -> DoCommand.parse(new String[] {"do", "--goal-file", sandbox.resolve("absent").toString()}));

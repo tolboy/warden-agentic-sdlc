@@ -286,7 +286,7 @@ public final class WorkflowTest implements Suite {
         // told to wait out and continue — and the continuation then threw every verdict away.
         for (String reason : List.of("quota_exhausted", "rate_limited",
                 "failover_requires_confirmation", "role_timed_out", "vendor_call_failed",
-                "vendor_protocol_failed", "prompt_undeliverable")) {
+                "vendor_protocol_failed", "prompt_undeliverable", "orca_worker_not_started")) {
             check.eq(reason + " is not a verdict on the work",
                     false, dev.warden.run.TaskLoop.isAboutTheWork(reason));
         }
@@ -302,6 +302,35 @@ public final class WorkflowTest implements Suite {
             check.eq(code + " is an infrastructure failure", true,
                     dev.warden.run.TaskLoop.isInfrastructureFailure(code));
         }
+        // An Orca worker that never took its first turn read nothing. Measured 2026-09-22: a
+        // Claude reviewer stuck on Claude Code's trust question became `reviewer_failed`, and
+        // the continuation paid the implementer and the first reader again.
+        for (String code : List.of("role_orca_start_failed", "role_orca_no_coordinator",
+                "role_orca_unavailable", "role_orca_no_worktree", "role_orca_worker_active")) {
+            check.eq(code + " is an Orca worker that never started", true,
+                    dev.warden.run.TaskLoop.isInfrastructureFailure(code));
+        }
+        check.that("an Orca wall clock is infrastructure too",
+                dev.warden.run.TaskLoop.isInfrastructureFailure("role_orca_timeout"));
+        // The run that found it was written before the code was classified; its continuation
+        // reads the failed step's code rather than the generic reason on disk.
+        java.util.Map<String, Object> recorded = java.util.Map.of(
+                "reason", "reviewer_failed",
+                "steps", List.of(
+                        java.util.Map.of("step", "implementer", "ok", true, "code", "ok"),
+                        java.util.Map.of("step", "reviewer", "stage", "review-second", "ok", false,
+                                "code", "role_orca_start_failed")));
+        check.eq("a recorded reviewer_failed whose step never started is read as that",
+                "orca_worker_not_started", dev.warden.run.TaskLoop.reasonForContinuation(recorded));
+        java.util.Map<String, Object> objected = java.util.Map.of(
+                "reason", "reviewer_failed",
+                "steps", List.of(java.util.Map.of("step", "reviewer", "ok", false,
+                        "code", "role_reported_blocked")));
+        check.eq("a role that reported itself blocked keeps its reason", "reviewer_failed",
+                dev.warden.run.TaskLoop.reasonForContinuation(objected));
+        check.eq("and a specific reason is never re-read", "blocking_findings_remain",
+                dev.warden.run.TaskLoop.reasonForContinuation(java.util.Map.of(
+                        "reason", "blocking_findings_remain", "steps", List.of())));
         // An Orca worker that reported failure or escalated gave its own account of the work.
         check.that("an Orca worker's own failure report stops for a person",
                 dev.warden.run.TaskLoop.roleFailureRequiresOperator("role_orca_reported_failure"));

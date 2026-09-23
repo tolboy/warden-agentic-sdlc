@@ -115,6 +115,28 @@ public final class ProfileVerifierTest implements Suite {
                     "verification.expect must be a non-empty string",
                     () -> load(write(home, "blank", succeeds(), null, "")));
 
+            // --- the probe asks for the model the profile declares ----------------------
+            // A probe that spelled `--model opus` kept testing the old model after `roster
+            // model`, and the stamp went on the new one. {{model}} and {{effort}} are filled
+            // from the profile, as the role's own args are.
+            Path placeholder = home.resolve("profiles/placeholder.yaml");
+            Files.writeString(placeholder, """
+                    version: 1
+                    profile: placeholder
+                    role: reviewer
+                    vendor: somevendor
+                    model: m-55
+                    command: echo
+                    read_only: true
+                    verification:
+                      probe: 'echo asked-for-{{model}}-at-{{effort}}'
+                      expect: "asked-for-m-55-at-"
+                    """);
+            ProfileVerifier.Probe filled = verifier.run(load(placeholder), home, Duration.ofSeconds(60));
+            check.that("the probe is given the declared model", filled.ok());
+            check.contains("and the report shows the command that ran",
+                    filled.command(), "asked-for-m-55-at-");
+
             // --- a failing probe is reported, and the caller must not stamp it --------
             Path bad = write(home, "bad", fails(), null);
             ProfileVerifier.Probe failed = verifier.run(load(bad), home, Duration.ofSeconds(60));
