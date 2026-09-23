@@ -38,6 +38,76 @@ public final class DecisionPageTest implements Suite {
         onlyTheLastAttemptIsShown(check);
         aDecisionOutlivesItsPage(check);
         anAnswerDoesNotClaimTheNextRunStarted(check);
+        oneSupervisorPerRunAcrossProcesses(check);
+        anAnswerStartsOneContinuation(check);
+    }
+
+    /**
+     * The lease was read and then written, two steps, and the only lock around them was a
+     * monitor inside one JVM. Two `warden decide` processes, or the CLI and the Dashboard,
+     * could each find no lease and each supervise the run: amend its contract, wait, and start
+     * a continuation. Here the first supervisor is another process, as it would be.
+     */
+    private void oneSupervisorPerRunAcrossProcesses(Check check) throws Exception {
+        Path root = project("Toggle the greeting");
+        Path home = Files.createDirectories(root.resolve("home"));
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(
+                root.resolve(".warden/runs/run-1/task-run.json"))));
+        summary.put("decision_kind", "failure");
+        summary.put("reason", dev.warden.run.TaskLoop.CONTRACT_AMENDMENT);
+        Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis, millis -> { },
+                (path, gate) -> { throw new IllegalStateException("no gate"); }, home);
+        String[] args = {"--no-workspace-status", "--quiet"};
+
+        try (var here = DecisionPage.supervise(root, "run-1")) {
+            check.that("a run can be supervised", here != null);
+            check.that("but not twice in one process", DecisionPage.supervise(root, "run-1") == null);
+        }
+
+        String launcher = Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name").toLowerCase().contains("win") ? "java.exe" : "java").toString();
+        Process other = new ProcessBuilder(launcher, "-cp", System.getProperty("java.class.path"),
+                "dev.warden.testing.HoldsSupervision", root.toString(), "run-1")
+                .redirectErrorStream(true).start();
+        try {
+            String first = new java.io.BufferedReader(new java.io.InputStreamReader(
+                    other.getInputStream(), StandardCharsets.UTF_8)).readLine();
+            check.eq("another process supervises the run", "held", first);
+            check.that("so this one cannot", DecisionPage.supervise(root, "run-1") == null);
+            int[] calls = {0};
+            Map<String, Object> result = Main.superviseGates(root, "run-1", summary, args, env,
+                    (path, decision, passed, environment) -> {
+                        calls[0]++;
+                        return Map.of("started", true);
+                    },
+                    (path, runId, shown) -> {
+                        calls[0]++;
+                        return Map.of();
+                    });
+            check.eq("a second supervisor steps aside", "run-1", result.get("supervised_elsewhere"));
+            check.eq("without waiting or starting anything", 0, calls[0]);
+            check.that("and without paying for an amendment", !Files.exists(root.resolve(".warden/runs/run-1")
+                    .resolve(dev.warden.run.TaskLoop.AMENDMENT_RECEIPT)));
+        } finally {
+            other.getOutputStream().close();
+            if (!other.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) other.destroyForcibly().waitFor();
+        }
+        try (var after = DecisionPage.supervise(root, "run-1")) {
+            check.that("the run is free again once that process has gone", after != null);
+        }
+    }
+
+    /**
+     * The same `retry` or `apply` could be acted on by a supervisor and by `warden approve`
+     * without `--no-start`, and each started a continuation under its own unused run id.
+     */
+    private void anAnswerStartsOneContinuation(Check check) throws Exception {
+        Path root = project("Toggle the greeting");
+        check.eq("the first start of a continuation claims it", null,
+                Main.claimContinuation(root, "run-1", "run-2"));
+        Map<String, Object> second = Main.claimContinuation(root, "run-1", "run-3");
+        check.eq("a second finds the run that already continues it", "run-2",
+                second == null ? null : second.get("run_id"));
     }
 
     /**

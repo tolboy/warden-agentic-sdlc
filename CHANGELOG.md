@@ -37,9 +37,18 @@ that exists in code but has never been run live says so.
   `decide` runs, and answers still go only through `approveDecision`; retry, advance,
   switch and apply continue the loop from the Dashboard's process. The action is a POST
   carrying a token that exists only in the page the Dashboard served, on loopback, with
-  the Host and Origin checks unchanged. `warden decide` shows a page that is already up
-  instead of starting a second supervisor, and a second supervisor does not pay for a
-  contract amendment its run has already had. The decision page now waits for an answer's
+  the Host and Origin checks unchanged. One process supervises a run: it holds an
+  operating-system lock on `supervisor.lock` beside the run from before a contract
+  amendment is paid until its continuation has started, and every other supervisor —
+  `warden decide`, the Dashboard, a `do` that lost the race — steps aside as
+  `supervised_elsewhere` and goes to that process's page. The lease says where the page is;
+  it was read and then written, two steps, and the only lock around them was a monitor
+  inside one JVM, so two processes could both supervise, both pay an amendment and both
+  start a continuation. An answer is also consumed once: the first start of a continuation
+  creates `continuation.json` beside the answered run with `CREATE_NEW`, and any other —
+  a supervisor and `warden approve` acting on the same `apply` — is refused as
+  `continuation_already_started` instead of taking the next unused run id. The amendment's
+  reservation is created the same way, so a run pays for one amendment. The decision page now waits for an answer's
   response before it closes; with no grace, the tab showed a broken connection instead of
   "recorded". Found by the review (UI-08). Suites `decision-page`, `dashboard`.
 - The shipped Orca profiles can be verified with the command Warden advises for them.
@@ -192,9 +201,18 @@ that exists in code but has never been run live says so.
   reading again under the amended terms. The amendment is paid by the chain: the loop routes
   there only when the budget covers the most calls an amendment can make plus the readings
   taken again (`contract_amendment_calls`; otherwise `contract_amendment_skipped` and the gaps
-  go to the gate), never under a strict cost cap, and the supervisor writes
+  go to the gate), never under a strict cost cap. Each of its calls then passes the chain's
+  own ceilings as the loop's calls do (`TaskLoop.amendmentGate`): none starts once the chain's
+  calls or money are spent or less than a minute of its deadline is left, and each call's
+  wall clock is lowered to what the deadline leaves, so a plan reviewer cannot start after
+  the planner spent the last of the money (`budget_exhausted`, and the amendment is
+  withdrawn). The supervisor writes
   `contract-amendment.json` beside the stopped run — the reservation before the first call,
-  the actual spend after — which the next run inherits into `chain`. Any outcome short of a
+  the actual spend after — which the next run inherits into `chain`. A named check is added
+  beside the checks the contract already ran: one with no `checks:` of its own keeps the
+  project's `defaults.checks` in the `names:` list, which would otherwise replace it. A
+  scenario list written in flow form is rewritten from the parsed scenarios, so a comma
+  inside a quoted scenario no longer splits it in two. Any outcome short of a
   passed plan review (an unavailable or timed-out reviewer, an unreadable verdict, an
   exception) puts the contract back as it was, unless someone else edited it meanwhile. It is
   offered once per chain, and a retry of the amended run after, say, a quota stop keeps

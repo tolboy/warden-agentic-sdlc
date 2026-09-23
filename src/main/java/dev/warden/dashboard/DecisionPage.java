@@ -12,10 +12,14 @@ import dev.warden.process.ProcessRunner;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -120,8 +124,70 @@ public final class DecisionPage implements AutoCloseable {
      * would have put up a second page and a second supervisor, and each would have started
      * the continuation. The lease is how the Dashboard and `decide` find the page that is
      * already up, and tell a live one from one whose process is gone.
+     *
+     * It says where the page is, not who owns the run: reading it and writing it are two
+     * steps, so two processes could both find none. {@link #supervise} is the ownership.
      */
     public record Lease(String url, long pid, String processStartedAt) {}
+
+    /** Beside the lease: locked by the one process that supervises the run's decision. */
+    public static final String SUPERVISOR_LOCK = "supervisor.lock";
+
+    /**
+     * One process's ownership of a run's decision: the amendment, the page, the wait and the
+     * continuation it may start. Held as an operating-system lock on {@link #SUPERVISOR_LOCK},
+     * so it ends with its process however that process ends; closing releases it.
+     *
+     * The lease could not do this. Two `warden decide` processes, or the CLI and the
+     * Dashboard, could both find no lease, both put up a page, both see the same retry and
+     * both start a continuation, each under a run id of its own; the monitor that serialised
+     * the Dashboard's clicks protected nothing across processes, and an amendment was paid
+     * before any lease existed. Whoever holds this lock supervises; everyone else goes to the
+     * page it serves.
+     */
+    public static final class Supervision implements AutoCloseable {
+        private final FileChannel channel;
+        private final FileLock lock;
+
+        private Supervision(FileChannel channel, FileLock lock) {
+            this.channel = channel;
+            this.lock = lock;
+        }
+
+        @Override public void close() {
+            try {
+                lock.release();
+            } catch (IOException alreadyGone) {
+                // The channel closing below releases it as well.
+            }
+            try {
+                channel.close();
+            } catch (IOException alreadyClosed) {
+                // Nothing is left to release.
+            }
+        }
+    }
+
+    /**
+     * Take ownership of {@code runId}'s decision for this process, or null when another
+     * process, or another supervisor in this one, already holds it. Never waits.
+     */
+    public static Supervision supervise(Path root, String runId) throws IOException {
+        Path file = runFile(root, runId, SUPERVISOR_LOCK);
+        Files.createDirectories(file.getParent());
+        FileChannel channel = FileChannel.open(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try {
+            FileLock lock = channel.tryLock();
+            if (lock != null) return new Supervision(channel, lock);
+        } catch (OverlappingFileLockException heldInThisProcess) {
+            // Another supervisor of this JVM holds it: the same answer as another process.
+        } catch (IOException | RuntimeException failed) {
+            channel.close();
+            throw failed;
+        }
+        channel.close();
+        return null;
+    }
 
     /** Record that this process serves {@code url} for {@code runId}. */
     public static void lease(Path root, String runId, String url) throws IOException {
@@ -168,10 +234,14 @@ public final class DecisionPage implements AutoCloseable {
     }
 
     private static Path leaseFile(Path root, String runId) {
+        return runFile(root, runId, LEASE_FILE);
+    }
+
+    private static Path runFile(Path root, String runId, String name) {
         if (runId == null || !runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) {
             throw new IllegalArgumentException("unsafe run id: " + runId);
         }
-        return root.toAbsolutePath().normalize().resolve(".warden/runs").resolve(runId).resolve(LEASE_FILE);
+        return root.toAbsolutePath().normalize().resolve(".warden/runs").resolve(runId).resolve(name);
     }
 
     private static String startOf(ProcessHandle process) {

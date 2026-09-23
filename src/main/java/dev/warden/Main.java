@@ -576,6 +576,26 @@ public final class Main {
             report.put("message", unchanged);
             return report;
         }
+        Map<String, Object> claimed;
+        try {
+            claimed = claimContinuation(root, resolved.runId(), nextId);
+        } catch (Exception unclaimable) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "advance_start_failed");
+            report.put("message", "could not record which run continues " + resolved.runId() + ": "
+                    + unclaimable.getMessage());
+            return report;
+        }
+        if (claimed != null) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "continuation_already_started");
+            report.put("run_id", claimed.get("run_id"));
+            report.put("message", "run " + claimed.get("run_id") + " already continues " + resolved.runId()
+                    + "; one answer starts one run");
+            return report;
+        }
         try {
             ConfigLoader.Loaded loaded = new ConfigLoader().load(root, resolved.taskId());
             UserConfig user = env.user();
@@ -668,6 +688,41 @@ public final class Main {
             "preflight_outside_scope", "preflight_dirty_tree", "contract_invalid",
             "policy_invalid", "baseline_failed", "run_override_invalid",
             "independent_review_unavailable", "visual_qa_unavailable", "mcp_config_missing");
+
+    /** Beside an answered run: the run that continues it, written once. */
+    static final String CONTINUATION_CLAIM = "continuation.json";
+
+    /**
+     * Record that {@code nextId} continues {@code runId}, unless a run already does: null when
+     * this call made the record, the existing one otherwise.
+     *
+     * An answer is consumed once. The same `retry` or `apply` could be seen by a supervisor
+     * and by `warden approve` without `--no-start`, or by two supervisors, and each started a
+     * continuation; {@link #nextRunId} gave the second a different unused id, so both ran
+     * against one worktree. The record is created with {@code CREATE_NEW}, which only one
+     * caller can win, before any run folder exists.
+     */
+    static Map<String, Object> claimContinuation(Path root, String runId, String nextId)
+            throws java.io.IOException {
+        Path claim = root.resolve(".warden/runs").resolve(runId).resolve(CONTINUATION_CLAIM);
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("run_id", nextId);
+        record.put("continues", runId);
+        record.put("pid", ProcessHandle.current().pid());
+        record.put("claimed_at", java.time.Instant.now().toString());
+        try {
+            java.nio.file.Files.createDirectories(claim.getParent());
+            java.nio.file.Files.writeString(claim, Json.write(record), java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE);
+            return null;
+        } catch (java.nio.file.FileAlreadyExistsException taken) {
+            try {
+                return Json.parseObject(java.nio.file.Files.readString(claim, java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception beingWritten) {
+                return Map.of("run_id", "(being recorded)");
+            }
+        }
+    }
 
     /** bakery-3 → bakery-4; a name without a trailing number gets {@code -2}. */
     static String nextRunId(Path root, String runId) {
@@ -1190,6 +1245,16 @@ public final class Main {
                                 .invoke(path, Duration.ofSeconds(20),
                                         List.of("tab", "create", "--worktree", "path:" + path, "--url", url))
                                 .ok())));
+        if (runId.equals(report.get("supervised_elsewhere"))) {
+            // Another process took the run between the lease check above and here, or holds it
+            // while it amends the contract, before any page is up. Its page is the one to use.
+            report.put("ok", true);
+            report.put("code", "decision_supervised_elsewhere");
+            report.put("message", "another process supervises " + runId + "; its page is listed by "
+                    + "`warden dashboard` once it is up, and `warden approve` still answers it");
+            System.out.println(Json.write(report));
+            return 0;
+        }
         HumanDecision after = new ApprovalStore(root).read(runId);
         report.put("ok", after.state() == HumanDecision.State.RESOLVED);
         report.put("decision", after.toMap());
@@ -1688,7 +1753,8 @@ public final class Main {
             }
             // A supervisor that is not the first one for this run — `warden decide`, or the
             // Dashboard's button after the original wait ended — finds the receipt of the
-            // amendment the first one already paid for, and leaves the gaps to a person.
+            // amendment the first one already paid for, and leaves the gaps to a person. The
+            // reservation below is what decides it; this only saves reading the contract.
             if (java.nio.file.Files.exists(root.resolve(".warden/runs").resolve(runId)
                     .resolve(TaskLoop.AMENDMENT_RECEIPT))) {
                 report.put("contract_amendment", skippedGateWait("amendment_already_attempted"));
@@ -1712,6 +1778,11 @@ public final class Main {
             narration.blank();
             narration.line("prep  the readers found the acceptance too weak (" + ids
                     + "); the planner amends it, the plan reviewer reads the amendment");
+            // The chain's ceilings bound every call the amendment makes, not only the decision
+            // to route there: read before the reservation below, which it would count as spent.
+            RoleRunner.DispatchGate chainGate = TaskLoop.amendmentGate(root, runId,
+                    spec.resolve(project, taskFile.toString()).budget(),
+                    () -> env.clock.nowMillis() * 1_000_000L);
             // The chain pays for this, so the chain is told before the first call: the receipt
             // reserves the most an amendment can spend, and a crash leaves that reservation
             // standing rather than an amendment nobody counted.
@@ -1725,9 +1796,17 @@ public final class Main {
             reserved.put("cost_usd", 0.0);
             reserved.put("unpriced_calls", (long) Preparation.mostAmendmentCalls(env.user()));
             reserved.put("gaps", ids);
-            java.nio.file.Files.writeString(receipt, Json.write(reserved));
+            // Created, never replaced: one amendment per run is paid, whoever else gets here.
+            try {
+                java.nio.file.Files.writeString(receipt, Json.write(reserved), java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE);
+            } catch (java.nio.file.FileAlreadyExistsException another) {
+                report.put("contract_amendment", skippedGateWait("amendment_already_attempted"));
+                return report;
+            }
             Preparation.Outcome amended = new Preparation(new ProcessRunner(), narration)
                     .amending(new Preparation.Amendment(before, gaps))
+                    .within(chainGate)
                     .run(root, project, env.user(), taskId, amendRunId, spec.goal(),
                             scopes.size() == 1 ? scopes.get(0) : String.valueOf(scopes),
                             spec.risk(), dev.warden.config.PlannerDraft.Access.DO_DEFAULT, false);
@@ -1811,7 +1890,8 @@ public final class Main {
             try {
                 dev.warden.dashboard.DecisionPage.lease(root, runId, page.url());
             } catch (Exception unrecorded) {
-                // The page still works; only the Dashboard cannot find it.
+                // The page still works, and no second supervisor can start: the supervisor
+                // lock, not this file, keeps it out. Only the Dashboard cannot find the page.
             }
             try {
                 boolean shown;
@@ -1910,9 +1990,17 @@ public final class Main {
             java.util.concurrent.CompletableFuture<String> shown = new java.util.concurrent.CompletableFuture<>();
             Thread.ofPlatform().daemon().name("warden-decide-" + runId).start(() -> {
                 try {
-                    superviseGates(root, runId, summary, args, env, Main::startAdvance,
+                    Map<String, Object> supervised = superviseGates(root, runId, summary, args, env,
+                            Main::startAdvance,
                             (path, id, ignored) -> awaitDecision(path, id, args, DASHBOARD_PAGE_MINUTES,
                                     env, url -> shown.complete(url) || tabs.open(url)));
+                    if (runId.equals(supervised.get("supervised_elsewhere"))) {
+                        var leased = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+                        if (leased != null) shown.complete(leased.url());
+                        shown.completeExceptionally(new ApprovalException("decision_supervised_elsewhere",
+                                "another process supervises run " + runId + " and has no page up yet "
+                                        + "(it may be amending the contract); try again in a moment"));
+                    }
                 } catch (Throwable failed) {
                     shown.completeExceptionally(failed);
                 } finally {
@@ -1936,25 +2024,48 @@ public final class Main {
         List<Object> chain = new java.util.ArrayList<>();
         for (int count = 0; count < 100; count++) {
             if (summary.get("decision_kind") == null) break;
-            // A passing run whose readers found the acceptance too weak is the planner's to
-            // answer first. When the amendment goes through it records a retry, and the wait
-            // below finds the decision already made; when it does not, a person decides.
-            if (TaskLoop.CONTRACT_AMENDMENT.equals(summary.get("reason"))) {
-                chain.add(amendContract(root, runId, summary, args, env));
-            }
-            Map<String, Object> waited = waiter.await(root, runId, summary);
-            chain.add(waited);
             HumanDecision resolved;
+            Map<String, Object> next;
+            // One supervisor per run, across processes, from before the amendment is paid until
+            // the continuation has started. See DecisionPage.Supervision.
+            dev.warden.dashboard.DecisionPage.Supervision owned;
             try {
-                resolved = new ApprovalStore(root).read(runId);
-            } catch (Exception unreadable) {
+                owned = dev.warden.dashboard.DecisionPage.supervise(root, runId);
+            } catch (Exception unlockable) {
+                // Not knowing whether someone else supervises is not permission to.
+                Map<String, Object> skipped = skippedGateWait("supervision_unavailable");
+                skipped.put("message", String.valueOf(unlockable.getMessage()));
+                chain.add(skipped);
                 break;
             }
-            if (resolved.state() != HumanDecision.State.RESOLVED) break;
-            // A retry answered on the page is the operator saying "go again": leaving it to a
-            // command typed at the machine made the answer from Orca half an answer.
-            if (!continues(resolved)) break;
-            Map<String, Object> next = starter.start(root, resolved, args, env);
+            if (owned == null) {
+                Map<String, Object> elsewhere = skippedGateWait("supervised_elsewhere");
+                var leased = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+                if (leased != null) elsewhere.put("url", leased.url());
+                chain.add(elsewhere);
+                result.put("supervised_elsewhere", runId);
+                break;
+            }
+            try (owned) {
+                // A passing run whose readers found the acceptance too weak is the planner's to
+                // answer first. When the amendment goes through it records a retry, and the wait
+                // below finds the decision already made; when it does not, a person decides.
+                if (TaskLoop.CONTRACT_AMENDMENT.equals(summary.get("reason"))) {
+                    chain.add(amendContract(root, runId, summary, args, env));
+                }
+                Map<String, Object> waited = waiter.await(root, runId, summary);
+                chain.add(waited);
+                try {
+                    resolved = new ApprovalStore(root).read(runId);
+                } catch (Exception unreadable) {
+                    break;
+                }
+                if (resolved.state() != HumanDecision.State.RESOLVED) break;
+                // A retry answered on the page is the operator saying "go again": leaving it to a
+                // command typed at the machine made the answer from Orca half an answer.
+                if (!continues(resolved)) break;
+                next = starter.start(root, resolved, args, env);
+            }
             chain.add(next);
             if (!Boolean.TRUE.equals(next.get("started"))) break;
             // The answered run's tab names the run that took over, now that one did.
