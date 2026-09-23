@@ -293,8 +293,8 @@ public final class OrcaExecutor implements RoleExecutor {
         evidence.put("orca_run_reused", runId != null && !owned.created());
         if (run == null || !run.ok() || runId == null) {
             evidence.put("failure", "role_orca_no_coordinator");
-            evidence.put("stderr_tail", tail(run.stderr(), 2000));
-            evidence.put("stdout_tail", tail(run.stdout(), 2000));
+            evidence.put("stderr_tail", run == null ? "" : tail(run.stderr(), 2000));
+            evidence.put("stdout_tail", run == null ? "" : tail(run.stdout(), 2000));
             evidence.put("resolution", "Orca could not bind a Run to Warden's coordinator terminal");
             return fail("role_orca_no_coordinator", evidence, elapsed(deadline, profile),
                     run == null ? "" : run.stdout());
