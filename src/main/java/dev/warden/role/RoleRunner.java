@@ -1375,6 +1375,14 @@ public final class RoleRunner {
 
     /** A vendor whose executable is absent is skipped, never attempted mid-loop. */
     private boolean available(Profile profile) {
+        return executableFound(processes, profile);
+    }
+
+    /**
+     * Whether the program a profile needs is on this machine — the resolver's availability
+     * question, public so the panel asks it the same way.
+     */
+    public static boolean executableFound(ProcessRunner processes, Profile profile) {
         // A local profile has no process to find: the model is already listening on HTTP.
         // Probing `command` would skip every local profile whose command is a label.
         if ("local".equals(profile.runner())) return true;

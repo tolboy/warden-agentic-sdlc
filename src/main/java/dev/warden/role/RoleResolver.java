@@ -134,33 +134,13 @@ public final class RoleResolver {
                               Writers writers, long rotation, Availability availability,
                               Set<String> exhausted) {
         Policy.RoleSpec roleSpec = policy.roles().get(role);
-        if (roleSpec == null) throw new IllegalArgumentException("role is not configured: " + role);
-        Writers known = writers == null ? Writers.NONE : writers;
-
         Map<String, String> rejected = new LinkedHashMap<>();
         List<Profile> eligible = new ArrayList<>();
         Map<String, String> assurances = new LinkedHashMap<>();
-        for (String name : roleSpec.profiles()) {
-            Profile profile = profiles.get(name);
-            if (profile == null) { rejected.put(name, "profile_not_found"); continue; }
-            if (!profile.role().equals(role)) { rejected.put(name, "role_mismatch"); continue; }
-            if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
-                rejected.put(name, "vision_capability_unverified");
-                continue;
-            }
-            if (!profile.verified()) { rejected.put(name, "profile_unverified"); continue; }
-            if (exhausted.contains(name)) { rejected.put(name, "quota_exhausted_this_run"); continue; }
-            String assurance = assuranceOf(roleSpec, profile, profiles, known);
-            if (assurance.startsWith("refused:")) {
-                rejected.put(name, assurance.substring("refused:".length()));
-                continue;
-            }
-            // The probe answers one question — is the executable there. Calling that
-            // "unavailable or quota exhausted" claimed knowledge Warden did not have; a spent
-            // subscription is only ever learned by running, and is reported separately.
-            if (!availability.available(profile)) { rejected.put(name, "executable_not_found"); continue; }
-            eligible.add(profile);
-            assurances.put(name, assurance);
+        for (Candidate candidate : candidates(role, policy, profiles, writers, availability, exhausted)) {
+            if (!candidate.eligible()) { rejected.put(candidate.profile(), candidate.rejected()); continue; }
+            eligible.add(profiles.get(candidate.profile()));
+            assurances.put(candidate.profile(), candidate.assurance());
         }
         if (eligible.isEmpty()) {
             throw new Unresolvable("no eligible profile for role " + role + ": " + rejected, rejected);
@@ -168,6 +148,56 @@ public final class RoleResolver {
         int index = roleSpec.strategy().equals("first") ? 0 : Math.floorMod(rotation, eligible.size());
         Profile chosen = eligible.get(index);
         return new Resolution(chosen, Map.copyOf(rejected), assurances.get(chosen.name()));
+    }
+
+    /**
+     * One profile the policy names for a role, with the resolver's verdict on it: the reason
+     * it is refused, or the assurance it would read with.
+     */
+    public record Candidate(String profile, String rejected, String assurance) {
+        public boolean eligible() { return rejected == null; }
+    }
+
+    /**
+     * Every profile the policy names for {@code role}, in policy order, each with the verdict
+     * {@link #resolve} reaches on it. {@code resolve} is built on this, so a surface that shows
+     * why a candidate is out — the Warden panel does — shows the resolver's own reason and
+     * never one of its own.
+     */
+    public List<Candidate> candidates(String role, Policy policy, Map<String, Profile> profiles,
+                                      Writers writers, Availability availability, Set<String> exhausted) {
+        Policy.RoleSpec roleSpec = policy.roles().get(role);
+        if (roleSpec == null) throw new IllegalArgumentException("role is not configured: " + role);
+        Writers known = writers == null ? Writers.NONE : writers;
+        List<Candidate> verdicts = new ArrayList<>();
+        for (String name : roleSpec.profiles()) {
+            Profile profile = profiles.get(name);
+            if (profile == null) { verdicts.add(new Candidate(name, "profile_not_found", null)); continue; }
+            if (!profile.role().equals(role)) { verdicts.add(new Candidate(name, "role_mismatch", null)); continue; }
+            if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
+                verdicts.add(new Candidate(name, "vision_capability_unverified", null));
+                continue;
+            }
+            if (!profile.verified()) { verdicts.add(new Candidate(name, "profile_unverified", null)); continue; }
+            if (exhausted.contains(name)) {
+                verdicts.add(new Candidate(name, "quota_exhausted_this_run", null));
+                continue;
+            }
+            String assurance = assuranceOf(roleSpec, profile, profiles, known);
+            if (assurance.startsWith("refused:")) {
+                verdicts.add(new Candidate(name, assurance.substring("refused:".length()), null));
+                continue;
+            }
+            // The probe answers one question — is the executable there. Calling that
+            // "unavailable or quota exhausted" claimed knowledge Warden did not have; a spent
+            // subscription is only ever learned by running, and is reported separately.
+            if (!availability.available(profile)) {
+                verdicts.add(new Candidate(name, "executable_not_found", null));
+                continue;
+            }
+            verdicts.add(new Candidate(name, null, assurance));
+        }
+        return List.copyOf(verdicts);
     }
 
     /**

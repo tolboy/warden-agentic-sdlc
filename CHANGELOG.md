@@ -116,6 +116,32 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- `warden dashboard` shows the settings the next run would start with (phase 3a of the
+  2026-09-23 control plan, read-only):
+  - **every stage with its candidate profiles** in policy order, the profile the run would
+    dispatch, and for every other candidate the resolver's own reason it is out. A reader is
+    judged against the writer the chain would dispatch, as the preflight judges it. The
+    reasons come from the new `RoleResolver.candidates`, which `resolve` is now built on, so
+    the panel cannot disagree with `warden roster` or a dry run; the `config-view` suite
+    checks it against both, and against the preflight's `explainFill` for a stage nobody can
+    fill;
+  - **the limits in force** (failover mode, review risks, repair severities, contract-gap
+    route, repair reserve, rate-limit retry, escalation), and **for each task** its risk,
+    call and money budget (a strict cap shown apart from a threshold), deadline, fix rounds,
+    visual QA and its `use:` overlay with what the preflight will say about each row. Every
+    value names its source: personal (`~/.warden`), project, task, or Warden's default;
+  - **failovers on each run**: who was spent, who took over, and a switch waiting for
+    confirmation, from the summary's own step rows;
+  - **what an Orca role does not report**: its cost is unknown rather than blank, a model it
+    does not set is the agent's default, and a worker that never started says what it
+    waited on (the folder-trust question, the CLI update prompt) with the one click that
+    clears it. The agent's raw screen stays off the page.
+
+  The settings are served on their own route, `/api/config`, read when the page opens and
+  on "Перечитать настройки", not every two seconds. The old "Настроенный workflow" table,
+  which listed candidates without saying which ones were eligible, is gone. An opened run
+  timeline now stays open across the two-second refresh. Suites `config-view` (new),
+  `dashboard`, `role-resolver`.
 - The human decision is answered with a button in Orca. When a run stops for a person inside
   an Orca worktree, `warden do` (and `warden run`, which already waited on failure gates)
   opens a "Warden · решение" tab in that worktree's Orca browser: the goal, what each stage
