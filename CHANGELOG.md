@@ -11,6 +11,17 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A prompt delivered on stdin (`prompt_delivery: stdin`) can no longer hang the controller
+  past every limit. `ProcessRunner` wrote the whole prompt before it started reading the
+  child's output and before it started the timeout. A vendor that never read a prompt larger
+  than its pipe held that write, and the run, for as long as it lived: no timeout, wall clock
+  or chain deadline applied, and no human gate appeared. One that printed before reading
+  deadlocked for good, because each side waited on the other. Measured on Windows against the
+  old runner: an 8 MB prompt to a child that ignores stdin was still blocked when the test's
+  60 s bound expired (timeout 2 s), and a child that prints 4 MB first never returned. The
+  output readers now start first, and the prompt is written on its own thread under the
+  timeout. On a stop, the process tree is killed, which breaks the pipe and ends the write.
+  Suite `runtime`.
 - An Antigravity (`agy`) spent plan that exits 0 with `Individual quota reached` in the
   JSON `error` field is `role_quota_exhausted`, so failover can switch. bakery-agy-3's
   look used to stop as `role_artifact_incomplete` because the envelope was missing
