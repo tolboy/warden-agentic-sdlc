@@ -194,6 +194,19 @@ public final class StubVendor {
                         + "\"status\":\"completed\",\"summary\":\"revision " + revision + "\","
                         + "\"files_changed\":[\"src/result.txt\",\"src/rev.txt\"]}}");
             }
+            // An implementer that moves a tracked file on disk as well as writing the result, so
+            // the candidate adds, deletes and renames at once without telling git about any of
+            // it — the shape an agent's file tools leave behind.
+            case "impl-moves" -> {
+                Path src = Path.of("src");
+                Files.createDirectories(src);
+                Files.writeString(src.resolve("result.txt"), "ok", StandardCharsets.UTF_8);
+                Path seed = src.resolve("seed.txt");
+                if (Files.isRegularFile(seed)) Files.move(seed, src.resolve("renamed.txt"));
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created and moved\","
+                        + "\"files_changed\":[\"src/result.txt\",\"src/seed.txt\",\"src/renamed.txt\"]}}");
+            }
             // An implementer that reports success and writes nothing at all. The live shape of
             // a repair whose finding is not the implementer's to fix — a weak acceptance
             // command, a missing grant — where the honest answer is to change no bytes.

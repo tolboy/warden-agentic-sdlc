@@ -214,21 +214,45 @@ public final class LandCommand {
             return new Outcome(true, "planned", result);
         }
 
-        List<String> add = new ArrayList<>(List.of("git", "add", "--"));
-        add.addAll(paths);
-        ProcessRunner.Result staged = processes.run(add, root, GIT_TIMEOUT);
-        if (!staged.ok()) return failed(result, "git_add_failed", staged);
-
-        Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
-        ProcessRunner.Result committed;
-        try {
-            Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
-            committed = processes.run(
-                    List.of("git", "commit", "-F", messageOnDisk.toString()), root, GIT_TIMEOUT);
-        } finally {
-            Files.deleteIfExists(messageOnDisk);
+        // `--push` after `--commit` — the order this command itself recommends — finds the
+        // accepted paths already in HEAD. `git commit` then fails with nothing to commit, and
+        // before it `git add` fails outright on a path the candidate deleted, which is in
+        // neither the index nor the tree any more. The fingerprint above has just shown the tree
+        // is the one accepted, so a HEAD that already matches it on these paths holds it.
+        // Asked of content, not of `status --porcelain`, for the reason changedPaths gives.
+        List<String> diff = new ArrayList<>(
+                List.of("git", "diff", "--name-only", "--no-renames", "-z", "HEAD", "--"));
+        diff.addAll(paths);
+        ProcessRunner.Result differs = processes.run(diff, root, GIT_TIMEOUT);
+        if (!differs.ok()) return failed(result, "git_diff_failed", differs);
+        boolean inHead = differs.stdout().isEmpty();
+        if (inHead) {
+            List<String> listUntracked = new ArrayList<>(
+                    List.of("git", "ls-files", "-o", "--exclude-standard", "-z", "--"));
+            listUntracked.addAll(paths);
+            ProcessRunner.Result untracked = processes.run(listUntracked, root, GIT_TIMEOUT);
+            if (!untracked.ok()) return failed(result, "git_ls_files_failed", untracked);
+            inHead = untracked.stdout().isEmpty();
         }
-        if (!committed.ok()) return failed(result, "git_commit_failed", committed);
+        if (inHead) {
+            result.put("already_committed", true);
+        } else {
+            List<String> add = new ArrayList<>(List.of("git", "add", "--"));
+            add.addAll(paths);
+            ProcessRunner.Result staged = processes.run(add, root, GIT_TIMEOUT);
+            if (!staged.ok()) return failed(result, "git_add_failed", staged);
+
+            Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
+            ProcessRunner.Result committed;
+            try {
+                Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
+                committed = processes.run(
+                        List.of("git", "commit", "-F", messageOnDisk.toString()), root, GIT_TIMEOUT);
+            } finally {
+                Files.deleteIfExists(messageOnDisk);
+            }
+            if (!committed.ok()) return failed(result, "git_commit_failed", committed);
+        }
         result.put("committed", commitSha(root));
 
         if (!options.push()) {

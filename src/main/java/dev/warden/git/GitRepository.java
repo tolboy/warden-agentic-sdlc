@@ -41,7 +41,10 @@ public final class GitRepository {
         // "modified" in the index/worktree because of CRLF after `npm install` while
         // `git diff --name-only HEAD` is empty. That false dirty bit stopped a live
         // `warden do` before review — the implementer had only edited an in-scope CSS file.
-        for (String path : git(List.of("diff", "--name-only", "-z", "HEAD", "--")).stdout().split("\0", -1)) {
+        // `--no-renames`: a rename git has paired names only its destination, so the path it
+        // emptied dropped out of the set the moment both sides were tracked. See fingerprint.
+        for (String path : git(List.of("diff", "--name-only", "--no-renames", "-z", "HEAD", "--"))
+                .stdout().split("\0", -1)) {
             if (!path.isBlank()) addChangedPath(paths, path);
         }
         for (String path : git(List.of("ls-files", "-o", "--exclude-standard", "-z")).stdout().split("\0", -1)) {
@@ -53,7 +56,7 @@ public final class GitRepository {
     /** Every path changed by commits, index, working tree or untracked files since merge-base. */
     public Set<String> changedPaths(String mergeBase) throws IOException, InterruptedException {
         Set<String> paths = new LinkedHashSet<>();
-        String[] committedAndWorking = git(List.of("diff", "--name-only", "-z", mergeBase, "--"))
+        String[] committedAndWorking = git(List.of("diff", "--name-only", "--no-renames", "-z", mergeBase, "--"))
                 .stdout().split("\0", -1);
         for (String path : committedAndWorking) if (!path.isBlank()) addChangedPath(paths, path);
         paths.addAll(changedPaths());
@@ -88,7 +91,14 @@ public final class GitRepository {
         MessageDigest digest = sha256();
         // Raw metadata catches deletion, rename and mode/status changes. File bytes catch
         // edits to already-dirty and binary files without decoding a binary patch as text.
-        digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout(), sourceOnly)
+        //
+        // `--no-renames` because rename detection only pairs paths git tracks. A file moved on
+        // disk is `D old` plus an untracked `new` while it is judged, and `R100 old new` once
+        // `warden land --commit` has added `new` — the same tree, two shapes, and the second
+        // one also dropped `old` from the path list below. Unpaired, a rename is `D old` and
+        // `A new` wherever the new side sits, and the deletion is still in the shape.
+        digest.update(shapeOf(git(List.of("diff", "--raw", "--no-renames", "-z", mergeBase, "--")).stdout(),
+                        sourceOnly)
                 .getBytes(StandardCharsets.UTF_8));
         Set<String> paths = evidenceRemoved(changedPaths(mergeBase));
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
@@ -119,9 +129,10 @@ public final class GitRepository {
      * and then `warden land --push` refused it as `candidate_changed`, having been invalidated
      * by Warden's own previous step.
      *
-     * What the raw line is here for survives: a deletion, a rename and a mode change all show
-     * in the modes, the status letter and the path. The content is hashed separately below and
-     * never depended on the blob ids at all.
+     * What the raw line is here for survives: a deletion, a rename (the deletion of its old
+     * path, since the diff is taken unpaired) and a mode change all show in the modes, the
+     * status letter and the path. The content is hashed separately below and never depended
+     * on the blob ids at all.
      */
     static String shapeOf(String raw) {
         return shapeOf(raw, false);
@@ -136,6 +147,21 @@ public final class GitRepository {
      *                   run as `candidate_changed`. That is the same failure the fingerprint
      *                   split was written to end, firing again through the one input the split
      *                   did not reach.
+     *
+     *                   It also drops every addition. A file the candidate adds is untracked
+     *                   while the run is judged and accepted, so it has no raw record then,
+     *                   and after `warden land --commit` it has {@code :000000 100644 A}. The
+     *                   hash stripping above made that flow safe for modified and deleted
+     *                   files only, and `warden land --push` refused every run that added one
+     *                   (reproduced 2026-09-23). The record adds nothing but "tracked yet": the
+     *                   path, its presence and its bytes are in the content half however it
+     *                   sits. What goes with it is the mode an added file is committed with,
+     *                   which an untracked file never had in the fingerprint either. Leaving
+     *                   the record out, rather than inventing one for each untracked file,
+     *                   keeps every fingerprint an untracked addition was accepted under.
+     *
+     *                   The read-only fingerprint keeps the record: there, a role that stages
+     *                   or commits a file it was only meant to read is still a mutation.
      */
     static String shapeOf(String raw, boolean sourceOnly) {
         StringBuilder shape = new StringBuilder();
@@ -169,6 +195,10 @@ public final class GitRepository {
             }
             // Warden's own evidence is dropped from BOTH fingerprints. See evidenceRemoved.
             if (!paths.isEmpty() && paths.stream().allMatch(GitRepository::isEvidencePath)) {
+                index += paths.size();
+                continue;
+            }
+            if (sourceOnly && status.equals("A")) {
                 index += paths.size();
                 continue;
             }
