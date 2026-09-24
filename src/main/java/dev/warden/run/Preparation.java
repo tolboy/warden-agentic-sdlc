@@ -13,6 +13,7 @@ import dev.warden.json.Json;
 import dev.warden.json.Schema;
 import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
+import dev.warden.role.RoleResolver;
 import dev.warden.role.RoleRunner;
 
 import java.io.IOException;
@@ -243,6 +244,12 @@ public final class Preparation {
         int redrafts = 0;
         Path plannerContext = context;
         List<Map<String, Object>> reviewRounds = new ArrayList<>();
+
+        // A plan reviewer that may write would be refused after the planner was paid.
+        String writableJudge = writableJudge(roles, user, "plan-review", "plan_reviewer");
+        if (writableJudge != null) {
+            return fail(RoleResolver.JUDGE_NOT_READ_ONLY, writableJudge, null, spent, reviewRounds);
+        }
 
         while (true) {
             progress.line("prep  planner  one read-only call, no repair"
@@ -483,6 +490,26 @@ public final class Preparation {
         } catch (Exception cannotRestore) {
             // The stop names the violation; a tree that cannot be restored is the person's.
         }
+    }
+
+    /**
+     * The refusal for a judging role that cannot be filled because its candidates may write,
+     * or null. Shared with the loop's preflight so both surfaces say the same thing.
+     */
+    static String writableJudge(RoleRunner roles, UserConfig user, String stage, String role) {
+        if (user == null || user.policy() == null || !user.policy().roles().containsKey(role)) return null;
+        Map<String, String> refused = roles.explainFill(user, stage, role, RoleResolver.Writers.NONE, 0);
+        if (refused == null) return null;
+        List<String> writable = refused.entrySet().stream()
+                .filter(entry -> RoleResolver.JUDGE_NOT_READ_ONLY.equals(entry.getValue()))
+                .map(Map.Entry::getKey).toList();
+        if (writable.isEmpty()) return null;
+        return "stage '" + stage + "' judges as role '" + role + "', and profile"
+                + (writable.size() == 1 ? " '" + writable.get(0) + "' declares" : "s " + writable + " declare")
+                + " read_only: false. A judge that may write can change what it judges, and "
+                + "whether its vendor is independent of the writer would go unchecked. Set "
+                + "read_only: true in the profile and verify it again, or give the role a "
+                + "read-only profile. Nothing was dispatched. Every candidate refused: " + refused;
     }
 
     private static Outcome fail(String code, String message, RoleRunner.Outcome role, Spend spent,

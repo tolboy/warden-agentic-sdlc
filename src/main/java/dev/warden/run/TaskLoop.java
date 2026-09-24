@@ -824,6 +824,15 @@ public final class TaskLoop {
             if (!dryRun) return stop(ledger, summary, "run_override_invalid", steps, 0, budget);
             summary.putIfAbsent("would_stop", "run_override_invalid");
         }
+        Map<String, Object> judgeGap = judgeGap(workflow, user, task, reviewByRisk, roles);
+        if (judgeGap != null) {
+            summary.put("unavailable_role", judgeGap);
+            summary.put("resolution", String.valueOf(judgeGap.get("message")));
+            progress.line("      " + judgeGap.get("message"));
+            progress.line("      stopping before the first dispatch rather than after it");
+            if (!dryRun) return stop(ledger, summary, RoleResolver.JUDGE_NOT_READ_ONLY, steps, 0, budget);
+            summary.putIfAbsent("would_stop", RoleResolver.JUDGE_NOT_READ_ONLY);
+        }
         Map<String, Object> toolingGap = toolingGap(root, workflow, user, task, reviewByRisk, roles);
         if (toolingGap != null) {
             String stopReason = String.valueOf(toolingGap.get("stop_reason"));
@@ -1597,6 +1606,33 @@ public final class TaskLoop {
             gap.put("code", "run_override_undeliverable");
             gap.put("stop_reason", "run_override_invalid");
             gap.put("message", problem);
+            return gap;
+        }
+        return null;
+    }
+
+    /**
+     * The first judging stage nobody can fill because its candidates may write, or null.
+     *
+     * The resolver refuses such a profile outright. Checked here, before anyone is paid and
+     * ahead of the reader and tooling checks, because both would describe the same roster
+     * wrongly: as a missing independent vendor, or as a visual profile to verify.
+     */
+    private static Map<String, Object> judgeGap(Workflow workflow, UserConfig user,
+                                                TaskSpec.ResolvedTask task, boolean reviewByRisk,
+                                                RoleRunner roles) {
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE || !RoleResolver.judges(stage.role())) continue;
+            if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            String message = dev.warden.run.Preparation.writableJudge(roles, user, stage.name(),
+                    stage.role());
+            if (message == null) continue;
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("stage", stage.name());
+            gap.put("role", stage.role());
+            gap.put("code", RoleResolver.JUDGE_NOT_READ_ONLY);
+            gap.put("blocked_at", "preflight");
+            gap.put("message", message);
             return gap;
         }
         return null;

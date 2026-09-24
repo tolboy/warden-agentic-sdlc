@@ -194,6 +194,19 @@ public final class StubVendor {
                         + "\"status\":\"completed\",\"summary\":\"revision " + revision + "\","
                         + "\"files_changed\":[\"src/result.txt\",\"src/rev.txt\"]}}");
             }
+            // An implementer that moves a tracked file on disk as well as writing the result, so
+            // the candidate adds, deletes and renames at once without telling git about any of
+            // it — the shape an agent's file tools leave behind.
+            case "impl-moves" -> {
+                Path src = Path.of("src");
+                Files.createDirectories(src);
+                Files.writeString(src.resolve("result.txt"), "ok", StandardCharsets.UTF_8);
+                Path seed = src.resolve("seed.txt");
+                if (Files.isRegularFile(seed)) Files.move(seed, src.resolve("renamed.txt"));
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created and moved\","
+                        + "\"files_changed\":[\"src/result.txt\",\"src/seed.txt\",\"src/renamed.txt\"]}}");
+            }
             // An implementer that reports success and writes nothing at all. The live shape of
             // a repair whose finding is not the implementer's to fix — a weak acceptance
             // command, a missing grant — where the honest answer is to change no bytes.
@@ -581,6 +594,21 @@ public final class StubVendor {
                         + "\"is_error\":true,\"num_turns\":40,\"total_cost_usd\":1.33483082}");
                 System.err.println("Error: max turns reached");
                 System.exit(1);
+            }
+            // A vendor that never reads the prompt it was handed on stdin. With the prompt
+            // larger than a pipe holds, whoever writes it blocks until something reads — and
+            // nothing here ever will.
+            case "stdin-ignored" -> Thread.sleep(120_000);
+            // A vendor that prints a lot before it reads its input, as a CLI streaming a banner
+            // or an event log does. Its stdout pipe fills, and it waits for that to be read
+            // before it gets to stdin. Says on stderr how much of the prompt arrived.
+            case "stdout-before-stdin" -> {
+                byte[] line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n"
+                        .getBytes(StandardCharsets.UTF_8);
+                for (int i = 0; i < 65_536; i++) System.out.write(line);
+                System.out.flush();
+                long read = System.in.readAllBytes().length;
+                System.err.println("read " + read);
             }
             case "stdin" -> {
                 // Answers only if the prompt reached it through standard input, so a profile
