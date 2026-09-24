@@ -297,7 +297,9 @@ public final class RoleRunner {
         Map<String, String> rejected = new LinkedHashMap<>();
         if (profile == null) rejected.put(pinned, "profile_not_found");
         else if (!profile.role().equals(role)) rejected.put(pinned, "role_mismatch");
-        else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
+        else if (RoleResolver.judges(role) && !profile.readOnly()) {
+            rejected.put(pinned, RoleResolver.JUDGE_NOT_READ_ONLY);
+        } else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
             rejected.put(pinned, "vision_capability_unverified");
         } else if (!profile.verified()) rejected.put(pinned, "profile_unverified");
         else if (exhausted.contains(pinned)) rejected.put(pinned, "quota_exhausted_this_run");

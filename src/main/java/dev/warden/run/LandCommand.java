@@ -6,6 +6,7 @@ import dev.warden.config.ConfigLoader;
 import dev.warden.config.ProjectConfig;
 import dev.warden.config.WardenTree;
 import dev.warden.git.GitRepository;
+import dev.warden.json.Json;
 import dev.warden.ledger.RunReport;
 import dev.warden.process.ProcessRunner;
 
@@ -39,7 +40,9 @@ import java.util.Set;
  *       gets pushed must be what a human said yes to, not what is there now;</li>
  *   <li>the repository's own default branch. A landing step that can commit to `main` is a
  *       merge with extra steps;</li>
- *   <li>anything under `.warden`. Evidence is not the change.</li>
+ *   <li>anything under `.warden`. Evidence is not the change;</li>
+ *   <li>anything else in the index. The commit holds the accepted paths and nothing the
+ *       operator had staged besides; that stays staged, and the report lists it.</li>
  * </ul>
  *
  * <h2>What it does not know</h2>
@@ -83,6 +86,8 @@ public final class LandCommand {
     private static final Set<String> COMMIT_TYPES = Set.of(
             "feat", "fix", "docs", "chore", "refactor", "test", "perf");
     private static final int SUBJECT_LIMIT = 72;
+    /** Beside the run's decision: the commits land made for it and refused. */
+    private static final String REFUSED_COMMITS_FILE = "land-refused.json";
 
     private final ProcessRunner processes;
 
@@ -179,10 +184,25 @@ public final class LandCommand {
 
         // Exactly what the report calls the change, and nothing else. Warden's own evidence
         // is not part of it, and neither is whatever else the worktree happens to be holding.
-        List<String> paths = sourcePaths(report);
-        if (paths.isEmpty()) {
+        List<String> accepted = sourcePaths(report);
+        if (accepted.isEmpty()) {
             return refuse("nothing_to_land", root, "the accepted run changed no source file");
         }
+        // What the commit will hold, computed before anything is written, so the preview and
+        // the commit are one list. An accepted path that no longer differs from HEAD is
+        // already committed (by an earlier `land --commit`, or by hand) and is not committed
+        // again. Anything else staged is left staged and out of the commit: the fingerprint
+        // guard above cannot see a `.warden/` file or a staged-only edit whose working copy
+        // matches HEAD, and a plain `git commit` used to carry both.
+        Set<String> uncommitted = git.changedPaths();
+        List<String> paths = accepted.stream().filter(uncommitted::contains).toList();
+        List<String> alreadyCommitted = accepted.stream().filter(path -> !uncommitted.contains(path)).toList();
+        List<String> leftStaged = stagedPaths(git).stream().filter(path -> !accepted.contains(path)).toList();
+        // What `git add` is given. A deletion already staged — as after `git reset --soft`, the
+        // undo this command recommends for a commit it refused — is in neither the working tree
+        // nor the index, and `git add` rejects such a path outright. `commit --only` commits it
+        // from HEAD's side all the same, so it needs no staging.
+        List<String> toStage = paths.isEmpty() ? List.of() : stageable(git, root, paths);
 
         String message = options.messageFile() != null
                 ? Files.readString(options.messageFile(), StandardCharsets.UTF_8)
@@ -201,11 +221,21 @@ public final class LandCommand {
         result.put("accepted_by", decision.actor());
         result.put("accepted_at", decision.updatedAt().toString());
         result.put("paths", paths);
+        if (!alreadyCommitted.isEmpty()) result.put("already_committed", alreadyCommitted);
+        if (!leftStaged.isEmpty()) result.put("left_staged", leftStaged);
         result.put("commit_message", message);
         result.put("pull_request_title", title);
-        result.put("would_run", plan(paths, branch, remote, target, land, title, options));
+        result.put("would_run", plan(paths, toStage, branch, remote, target, land, title, options));
         result.put("lands", false);
         result.put("note", "a pull request is a request; nothing is merged by this command");
+
+        // A commit an earlier land made and refused stays in place for the operator to
+        // inspect. It must not ride along with a later push: with the source already at HEAD,
+        // a second `land --push` has nothing to commit, so nothing re-checks what that commit
+        // holds — a `.warden/` file a hook added is invisible to the source fingerprint.
+        Path refusals = decisions.decisionPath(options.runId()).resolveSibling(REFUSED_COMMITS_FILE);
+        List<String> refusedInHistory = refusedInHistory(root, refusals);
+        if (!refusedInHistory.isEmpty()) result.put("refused_commits_in_history", refusedInHistory);
 
         if (!options.commit()) {
             result.put("ok", true);
@@ -214,28 +244,82 @@ public final class LandCommand {
             return new Outcome(true, "planned", result);
         }
 
-        List<String> add = new ArrayList<>(List.of("git", "add", "--"));
-        add.addAll(paths);
-        ProcessRunner.Result staged = processes.run(add, root, GIT_TIMEOUT);
-        if (!staged.ok()) return failed(result, "git_add_failed", staged);
-
-        Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
-        ProcessRunner.Result committed;
-        try {
-            Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
-            committed = processes.run(
-                    List.of("git", "commit", "-F", messageOnDisk.toString()), root, GIT_TIMEOUT);
-        } finally {
-            Files.deleteIfExists(messageOnDisk);
+        if (!refusedInHistory.isEmpty()) {
+            result.put("ok", false);
+            result.put("code", "refused_commit_in_history");
+            result.put("message", "HEAD still contains " + joinEnglish(refusedInHistory) + ", which an "
+                    + "earlier `warden land` for this run made and refused. Nothing was committed or "
+                    + "pushed. Inspect it, undo it (`git reset --soft " + refusedInHistory.get(0)
+                    + "~1` for the most recent one), and land again.");
+            return new Outcome(false, "refused_commit_in_history", result);
         }
-        if (!committed.ok()) return failed(result, "git_commit_failed", committed);
-        result.put("committed", commitSha(root));
+
+        if (paths.isEmpty()) {
+            // Every accepted path is already at HEAD. `git commit` would fail with "nothing to
+            // commit", which is how `land --commit` followed by `land --push` used to stop.
+            result.put("committed", null);
+        } else {
+            if (!toStage.isEmpty()) {
+                ProcessRunner.Result staged = processes.run(addCommand(toStage), root, GIT_TIMEOUT);
+                if (!staged.ok()) return failed(result, "git_add_failed", staged);
+            }
+            // The accepted content as git stores it, blob and mode per path: the working tree the
+            // fingerprint has just matched, staged. Taken before `git commit`, so before any hook.
+            Map<String, String> intended = entries(git.git(indexCommand(paths)), true);
+
+            Path messageOnDisk = Files.createTempFile("warden-commit-", ".txt");
+            ProcessRunner.Result committed;
+            try {
+                Files.writeString(messageOnDisk, message, StandardCharsets.UTF_8);
+                committed = processes.run(commitCommand(messageOnDisk.toString(), paths), root, GIT_TIMEOUT);
+            } finally {
+                Files.deleteIfExists(messageOnDisk);
+            }
+            if (!committed.ok()) return failed(result, "git_commit_failed", committed);
+            String sha = commitSha(root);
+            result.put("committed", sha);
+            // `--only` leaves the rest of the index out by construction; a commit hook that
+            // stages more is the one way left for the commit to differ from the preview.
+            List<String> landed = committedPaths(git);
+            if (!new java.util.HashSet<>(landed).equals(new java.util.HashSet<>(paths))) {
+                result.put("committed_paths", landed);
+                recordRefusal(refusals, sha, "commit_differs_from_plan");
+                result.put("ok", false);
+                result.put("code", "commit_differs_from_plan");
+                result.put("message", "commit " + sha + " holds " + landed + ", not the accepted "
+                        + paths + "; a commit hook probably staged more. Nothing was pushed, and "
+                        + "land will not push while this commit is in HEAD's history. Inspect it, "
+                        + "and undo it with `git reset --soft HEAD~1` if it is wrong.");
+                return new Outcome(false, "commit_differs_from_plan", result);
+            }
+            // The same paths do not make the same commit. A hook that formats a file and stages
+            // it again — in the index alone, or in the working tree too — keeps the path list and
+            // changes the bytes or the mode nobody accepted.
+            Map<String, String> committedEntries = entries(git.git(treeCommand(paths)), false);
+            List<String> altered = new ArrayList<>();
+            for (String path : paths) {
+                if (!java.util.Objects.equals(intended.get(path), committedEntries.get(path))) altered.add(path);
+            }
+            if (!altered.isEmpty()) {
+                result.put("altered_paths", altered);
+                recordRefusal(refusals, sha, "commit_differs_from_accepted");
+                result.put("ok", false);
+                result.put("code", "commit_differs_from_accepted");
+                result.put("message", "commit " + sha + " holds " + joinEnglish(altered) + " with content "
+                        + "or a mode other than the accepted one; a commit hook probably rewrote and "
+                        + "restaged it. Nothing was pushed, and land will not push while this commit "
+                        + "is in HEAD's history. Inspect it, and undo it with `git reset --soft HEAD~1`; "
+                        + "a change the hook makes is a new candidate to run and accept.");
+                return new Outcome(false, "commit_differs_from_accepted", result);
+            }
+        }
 
         if (!options.push()) {
+            String code = paths.isEmpty() ? "already_committed" : "committed";
             result.put("ok", true);
-            result.put("code", "committed");
+            result.put("code", code);
             result.put("next", "re-run with --push or --pull-request");
-            return new Outcome(true, "committed", result);
+            return new Outcome(true, code, result);
         }
 
         ProcessRunner.Result pushed = processes.run(
@@ -485,11 +569,16 @@ public final class LandCommand {
 
     // ---------------------------------------------------------------------- mechanics
 
-    private static List<String> plan(List<String> paths, String branch, String remote, String base,
-                                     ProjectConfig.Land land, String title, Options options) {
+    /** The commands the plan prints, in the form they are run. */
+    private static List<String> plan(List<String> paths, List<String> toStage, String branch, String remote,
+                                     String base, ProjectConfig.Land land, String title, Options options) {
         List<String> plan = new ArrayList<>();
-        plan.add("git add -- " + String.join(" ", paths));
-        plan.add("git commit -F <message file>");
+        if (paths.isEmpty()) {
+            plan.add("(nothing to commit: every accepted path is already at HEAD)");
+        } else {
+            if (!toStage.isEmpty()) plan.add(String.join(" ", addCommand(toStage)));
+            plan.add(String.join(" ", commitCommand("<message file>", paths)));
+        }
         if (options.push() || options.pullRequest()) {
             plan.add("git push -u " + (remote == null ? "<remote>" : remote) + " " + branch);
         }
@@ -500,6 +589,115 @@ public final class LandCommand {
                     : "(this project declares no land.pull_request command)");
         }
         return plan;
+    }
+
+    /**
+     * Literal pathspecs: a file named {@code *.txt} or {@code :x} is that file, not a glob or
+     * pathspec magic that would pull its neighbours into the commit.
+     */
+    private static List<String> addCommand(List<String> paths) {
+        List<String> command = new ArrayList<>(List.of("git", "--literal-pathspecs", "add", "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    /**
+     * {@code --only} commits HEAD plus the working-tree content of exactly these paths, and
+     * leaves whatever else is staged staged and out of the commit.
+     */
+    private static List<String> commitCommand(String messageFile, List<String> paths) {
+        List<String> command = new ArrayList<>(List.of(
+                "git", "--literal-pathspecs", "commit", "--only", "-F", messageFile, "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    /** The paths that exist in the working tree or the index, in their order. */
+    private static List<String> stageable(GitRepository git, Path root, List<String> paths)
+            throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of("--literal-pathspecs", "ls-files", "-z", "--"));
+        command.addAll(paths);
+        Set<String> indexed = new java.util.HashSet<>(nulSeparated(git.git(command)));
+        return paths.stream()
+                .filter(path -> indexed.contains(path)
+                        || Files.exists(root.resolve(path), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                .toList();
+    }
+
+    /** The index entries of these paths: {@code <mode> <object> <stage>\t<path>}. */
+    private static List<String> indexCommand(List<String> paths) {
+        List<String> command = new ArrayList<>(List.of("--literal-pathspecs", "ls-files", "-s", "-z", "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    /** HEAD's entries for these paths: {@code <mode> <type> <object>\t<path>}. */
+    private static List<String> treeCommand(List<String> paths) {
+        List<String> command = new ArrayList<>(List.of("--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--"));
+        command.addAll(paths);
+        return command;
+    }
+
+    /** Path to {@code <mode> <object>}, from either listing; a deleted path has no entry. */
+    private static Map<String, String> entries(ProcessRunner.Result listing, boolean index) {
+        Map<String, String> entries = new LinkedHashMap<>();
+        for (String record : listing.stdout().split("\0", -1)) {
+            int tab = record.indexOf('\t');
+            if (tab < 0) continue;
+            String[] fields = record.substring(0, tab).trim().split("\\s+");
+            if (fields.length < 3) continue;
+            String object = index ? fields[1] : fields[2];
+            entries.put(record.substring(tab + 1), fields[0] + " " + object);
+        }
+        return entries;
+    }
+
+    /**
+     * Commits land made for this run and refused, which are still reachable from HEAD, most
+     * recent first. A commit the operator has undone, or amended into a new one, is not.
+     */
+    private List<String> refusedInHistory(Path root, Path refusals) throws IOException, InterruptedException {
+        if (!Files.isRegularFile(refusals)) return List.of();
+        List<String> inHistory = new ArrayList<>();
+        for (Object item : list(Json.parseObject(Files.readString(refusals, StandardCharsets.UTF_8))
+                .get("refused_commits"))) {
+            if (!(item instanceof Map<?, ?> row) || !(row.get("commit") instanceof String sha)) continue;
+            ProcessRunner.Result ancestor = processes.run(
+                    List.of("git", "merge-base", "--is-ancestor", sha, "HEAD"), root, GIT_TIMEOUT);
+            // Exit 1 is "not an ancestor"; anything else — a commit since collected — is not in
+            // a history HEAD can reach either.
+            if (ancestor.exitCode() == 0 && !inHistory.contains(sha)) inHistory.add(0, sha);
+        }
+        return List.copyOf(inHistory);
+    }
+
+    private static void recordRefusal(Path refusals, String sha, String code) throws IOException {
+        Map<String, Object> record = Files.isRegularFile(refusals)
+                ? Json.parseObject(Files.readString(refusals, StandardCharsets.UTF_8))
+                : new LinkedHashMap<>();
+        List<Object> rows = new ArrayList<>(list(record.get("refused_commits")));
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("commit", sha);
+        row.put("code", code);
+        row.put("at", java.time.Instant.now().toString());
+        rows.add(row);
+        record.put("refused_commits", rows);
+        Files.writeString(refusals, Json.writePretty(record), StandardCharsets.UTF_8);
+    }
+
+    private static List<String> stagedPaths(GitRepository git) throws IOException, InterruptedException {
+        return nulSeparated(git.git(List.of("diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--")));
+    }
+
+    private static List<String> committedPaths(GitRepository git) throws IOException, InterruptedException {
+        return nulSeparated(git.git(List.of("diff-tree", "-r", "--no-commit-id", "--name-only", "-z",
+                "--no-renames", "HEAD")));
+    }
+
+    private static List<String> nulSeparated(ProcessRunner.Result result) {
+        List<String> paths = new ArrayList<>();
+        for (String path : result.stdout().split("\0", -1)) if (!path.isBlank()) paths.add(path);
+        return List.copyOf(paths);
     }
 
     /** Argv substitution only: no shell, so a title with a quote in it stays one argument. */

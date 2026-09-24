@@ -11,6 +11,53 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `warden land --commit` commits the accepted paths and nothing else in the index. It ran
+  `git add -- <paths>` and then a plain `git commit`, which takes the whole index: a file the
+  operator had staged under `.warden/`, or a staged edit whose working copy was put back to
+  HEAD's, rode into the accepted commit, and the source fingerprint could see neither. The
+  commit is now `git commit --only -- <paths>` with literal pathspecs; whatever else was
+  staged stays staged and out of it, and the report lists it as `left_staged`. The plan
+  prints the argv that runs and names the paths the commit will hold, computed before
+  anything is written; an accepted path already at HEAD is `already_committed` rather than
+  committed again, so `land --commit` followed by `land --push` pushes instead of failing
+  with "nothing to commit". A commit that still differs from the plan (a pre-commit hook
+  that stages more) stops as `commit_differs_from_plan` before the push, and one with the
+  planned paths but other content — a formatter hook that rewrites an accepted file and
+  stages it again, even in the index alone — stops as `commit_differs_from_accepted`: land
+  compares the blob and mode of every path in its commit (`ls-tree`) with what it staged
+  from the accepted working tree before the hook ran (`ls-files -s`). A commit refused
+  either way is recorded beside the run's decision (`land-refused.json`), and every later
+  `land --commit` or `--push` refuses as `refused_commit_in_history` while that commit is
+  reachable from HEAD: with the source already at HEAD, a second `--push` used to have
+  nothing to commit, nothing to check, and published the commit the first had refused. A
+  deletion already staged, as after the `git reset --soft HEAD~1` the refusal recommends,
+  is no longer handed to `git add`, which rejected it. Found by the 2026-09-22 review
+  (CORE-04) and the review of this change. Suite `land`, new.
+- A judging role cannot be given a profile that may write. A reviewer copied from an
+  implementer with `read_only: false` and the writer's vendor was labelled `none` by the
+  resolver, which asked the independence question only of read-only profiles, so it passed
+  `require_independent_vendor: true` and read its own vendor's work; the task's write
+  authority let it past the one other check. `reviewer`, `visual_qa` and `plan_reviewer`
+  profiles with `read_only: false` are now refused as `judge_not_read_only`, pinned or not,
+  and a chain whose judging stage has no other candidate stops before the first dispatch
+  under that name, naming the profile; preparation stops before the planner is paid. Found
+  by the 2026-09-22 review (CFG-04). Suites `role-resolver`, `role runner`, `task loop`,
+  `planner`.
+- `warden roster model` clears a stamp written as a flow mapping. It removed whole lines
+  holding `verified_on`, so `verification: { verified_on: 2026-08-27 }` — the spelling
+  `ConfigTest` itself uses — survived the switch and the new model read as verified. The
+  key is now removed from the `verification` mapping in its block or its flow form, keeping
+  the other entries and a trailing comment, and the profile is parsed before it is written:
+  one that would still read as verified without `--keep-verified` is refused as
+  `verification_not_cleared` and left untouched. Found by the 2026-09-22 review (CFG-01).
+  Suite `roster`.
+- `warden pilot prepare` no longer fails one run in three to ten on Windows. The bundle is
+  published with one directory rename, which Windows refuses with `AccessDeniedException`
+  while a scanner still holds a file in the tree written a moment before; the fallback moved
+  again with `COPY_ATTRIBUTES`, which `Files.move` never supports, so the refusal was final.
+  The rename is now retried while the tree is busy, up to two seconds, and never over an
+  output that exists. The `pilot-prepare` suite, which counted 7, 129 or 136 checks between
+  runs of one build, counted 145 in 25 consecutive runs. Suite `pilot-prepare`.
 - A prompt delivered on stdin (`prompt_delivery: stdin`) can no longer hang the controller
   past every limit. `ProcessRunner` wrote the whole prompt before it started reading the
   child's output and before it started the timeout. A vendor that never read a prompt larger
