@@ -77,7 +77,6 @@ that exists in code but has never been run live says so.
   naming the stage. Every preflight loop skipped non-role stages, so `--host browser=orca`
   was accepted and ignored and the run went ahead as if it had not been typed. Found by the
   review (CFG-03). Suite `task loop`.
-
 - `warden land --push` after `warden land --commit` lands a candidate that adds or moves
   files. A file the candidate adds is untracked while the run is judged and accepted, so
   `git diff --raw` had no record for it then and `:000000 100644 … A` once `--commit` had
