@@ -158,6 +158,29 @@ public final class RunOverrideTest implements Suite {
                 Map.of(direct.name(), direct, unstamped.name(), unstamped));
         check.that("a prepared but unstamped twin is told to be stamped, not written again",
                 unverified != null && unverified.contains("--verify orca-claude-review"));
+        // `profiles --verify` refuses a profile with no probe, so that advice alone led into a
+        // refusal. A twin without one is told which probe line to add first.
+        check.contains("a twin with no probe is given the Orca channel probe to add",
+                unverified, "warden probe orca --agent claude");
+        Profile probed = Profile.parse("""
+                version: 1
+                profile: orca-claude-review
+                role: reviewer
+                vendor: claude
+                model: opus
+                command: claude
+                runner: orca
+                prompt_delivery: workspace_file
+                read_only: true
+                verification:
+                  probe: "warden probe orca --agent claude --model {{model}} --worktree {{worktree}}"
+                  expect: "probe-answer: matched"
+                """, "orca-claude-review.yaml");
+        String toStamp = host.problem("review-second", direct,
+                Map.of(direct.name(), direct, probed.name(), probed));
+        check.that("a twin that has its probe is only told to run it",
+                toStamp != null && toStamp.contains("--verify orca-claude-review --confirm")
+                        && !toStamp.contains("no verification.probe"));
 
         Profile bare = Profile.parse("""
                 version: 1

@@ -264,7 +264,10 @@ The loop runs for tens of minutes. It used to print nothing for all of it and th
 JSON object at the end, so "where are we now" had to be worked out from file timestamps in
 four run directories. Now `do` and `run` narrate themselves **on stderr**. The same picture is
 on the local page `warden dashboard` serves (and `--open-orca` opens in an Orca tab): every
-run with its stage timeline, verdicts, cost and decision.
+run with its stage timeline, verdicts, cost and decision. Its first table is the decisions
+still waiting for you. A button there opens that decision's page, or puts it back up when
+the run that asked has stopped waiting, so a question left unanswered never needs
+`warden decide` typed in the worktree.
 
 ```text
 run   chapter-hearth-4

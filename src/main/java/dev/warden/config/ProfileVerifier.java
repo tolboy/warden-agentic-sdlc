@@ -51,11 +51,37 @@ public final class ProfileVerifier {
     /** Why a stamp was refused, or the file it was written to. */
     public record Stamp(boolean written, String code, String message, Path profileFile, String date) {}
 
-    private final ProcessRunner processes;
+    /**
+     * A probe Warden runs itself: a {@code verification.probe} that starts with
+     * {@code warden probe}. Run in this process rather than through a shell, so it needs no
+     * {@code warden} on PATH, and a worktree path with a space in it stays one argument.
+     */
+    @FunctionalInterface
+    public interface BuiltIn {
+        ProcessRunner.Result run(List<String> argv, Duration timeout) throws Exception;
+    }
 
-    public ProfileVerifier(ProcessRunner processes) { this.processes = processes; }
+    private final ProcessRunner processes;
+    private final BuiltIn builtIn;
+
+    public ProfileVerifier(ProcessRunner processes) { this(processes, null); }
+
+    public ProfileVerifier(ProcessRunner processes, BuiltIn builtIn) {
+        this.processes = processes;
+        this.builtIn = builtIn;
+    }
 
     public Probe run(Profile profile, Path home, Duration timeout) throws IOException, InterruptedException {
+        return run(profile, home, timeout, Path.of("."));
+    }
+
+    /**
+     * @param worktree what {@code {{worktree}}} stands for: the directory the verification was
+     *                 asked from. An Orca probe needs a worktree Orca manages, and the config
+     *                 home the probe runs in is not one.
+     */
+    public Probe run(Profile profile, Path home, Duration timeout, Path worktree)
+            throws IOException, InterruptedException {
         String declared = profile.verificationProbe();
         if (declared == null || declared.isBlank()) {
             throw new IllegalStateException("profile '" + profile.name() + "' declares no "
@@ -64,10 +90,24 @@ public final class ProfileVerifier {
         }
         // The same values the role's own args receive. A probe that spelled the model out
         // kept testing the old one after `roster model`, and the stamp went on the new one.
+        String place = worktree.toAbsolutePath().normalize().toString();
         String command = declared
                 .replace("{{model}}", profile.model() == null ? "" : profile.model())
-                .replace("{{effort}}", profile.effort() == null ? "" : profile.effort());
-        ProcessRunner.Result result = processes.run(shell(command), home, timeout, 256 * 1024);
+                .replace("{{effort}}", profile.effort() == null ? "" : profile.effort())
+                .replace("{{worktree}}", place);
+        List<String> own = builtIn == null ? null : ownProbe(declared, profile, place);
+        ProcessRunner.Result result;
+        if (own != null) {
+            try {
+                result = builtIn.run(own, timeout);
+            } catch (IOException | InterruptedException | RuntimeException failed) {
+                throw failed;
+            } catch (Exception failed) {
+                throw new IOException(failed.getMessage(), failed);
+            }
+        } else {
+            result = processes.run(shell(command), home, timeout, 256 * 1024);
+        }
 
         Path directory = home.resolve("verification");
         Files.createDirectories(directory);
@@ -200,6 +240,24 @@ public final class ProfileVerifier {
             result.put("answer_found", probe.answerFound());
         }
         return result;
+    }
+
+    /**
+     * The argv after {@code warden} for a probe Warden runs itself, or null for any other.
+     * Split before the placeholders are filled, so an empty model stays an empty argument
+     * rather than letting the next flag become its value.
+     */
+    public static List<String> ownProbe(String declared, Profile profile, String worktree) {
+        String[] tokens = declared.strip().split("\\s+");
+        if (tokens.length < 2 || !"warden".equals(tokens[0]) || !"probe".equals(tokens[1])) return null;
+        List<String> argv = new ArrayList<>();
+        for (int index = 1; index < tokens.length; index++) {
+            argv.add(tokens[index]
+                    .replace("{{model}}", profile.model() == null ? "" : profile.model())
+                    .replace("{{effort}}", profile.effort() == null ? "" : profile.effort())
+                    .replace("{{worktree}}", worktree));
+        }
+        return List.copyOf(argv);
     }
 
     private static List<String> shell(String command) {

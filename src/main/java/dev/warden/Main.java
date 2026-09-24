@@ -79,6 +79,7 @@ public final class Main {
                 case "decide" -> decide(args);
                 case "land" -> land(args);
                 case "pilot" -> pilot(args);
+                case "probe" -> probe(args);
                 default -> {
                     System.err.println("warden: unknown command '" + args[0] + "'");
                     usage();
@@ -124,14 +125,49 @@ public final class Main {
         return 0;
     }
 
+    /** {@code warden probe orca ...}: the verification probe for a runner: orca profile. */
+    private static int probe(String[] args) {
+        var outcome = new dev.warden.execution.orca.OrcaProbe(new ProcessRunner())
+                .run(dev.warden.execution.orca.OrcaProbe.parse(args));
+        outcome.lines().forEach(System.out::println);
+        return outcome.exitCode();
+    }
+
+    /** A {@code warden probe} named by a profile's verification, run in this process. */
+    static ProcessRunner.Result ownProbe(List<String> argv, Duration timeout) {
+        long started = System.nanoTime();
+        String[] args = argv.toArray(String[]::new);
+        if (args.length < 2 || !"probe".equals(args[0]) || !"orca".equals(args[1])) {
+            return new ProcessRunner.Result(argv, 2, false, 0L, "",
+                    "warden probe knows one channel: orca", false, false);
+        }
+        dev.warden.execution.orca.OrcaProbe.Outcome outcome;
+        try {
+            outcome = new dev.warden.execution.orca.OrcaProbe(new ProcessRunner())
+                    .run(dev.warden.execution.orca.OrcaProbe.parse(args));
+        } catch (IllegalArgumentException misspelled) {
+            return new ProcessRunner.Result(argv, 2, false, 0L, "", misspelled.getMessage(), false, false);
+        }
+        return new ProcessRunner.Result(argv, outcome.exitCode(), false,
+                (System.nanoTime() - started) / 1_000_000L,
+                String.join(System.lineSeparator(), outcome.lines()), "", false, false);
+    }
+
     private static int dashboard(String[] args) throws Exception {
         Path project = Path.of(option(args, "--project", ".")).toAbsolutePath().normalize();
         int port = Integer.parseInt(option(args, "--port", "0"));
         if (port < 0 || port > 65535) throw new IllegalArgumentException("dashboard port must be 0..65535");
-        try (var dashboard = new dev.warden.dashboard.Dashboard(project, port)) {
+        dev.warden.dashboard.Dashboard.DecisionOpener opener = runId -> openDecision(project, runId,
+                new String[] {"decide", runId, "--quiet"}, ApproveEnv.realtime(),
+                url -> new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
+                        List.of("tab", "create", "--worktree", "path:" + project, "--url", url)).ok());
+        try (var dashboard = new dev.warden.dashboard.Dashboard(project, port, opener)) {
             dashboard.start();
+            // Read-only except for one action: putting up the page for a pending decision.
+            // The answer is given on that page, through the same path as `warden approve`.
             System.out.println(Json.write(Map.of("ok", true, "url", dashboard.url(),
-                    "project", project.toString(), "read_only", true)));
+                    "project", project.toString(), "read_only", false,
+                    "actions", List.of("open_decision_page"))));
             if (hasFlag(args, "--open-orca")) {
                 var opened = new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", dashboard.url()));
@@ -308,8 +344,9 @@ public final class Main {
             return 1;
         }
 
-        ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner());
-        ProfileVerifier.Probe probe = verifier.run(profile, user.home(), Duration.ofMinutes(10));
+        ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner(), Main::ownProbe);
+        ProfileVerifier.Probe probe = verifier.run(profile, user.home(), Duration.ofMinutes(10),
+                Path.of("."));
         Map<String, Object> result = new LinkedHashMap<>(ProfileVerifier.report(profile, probe));
         result.put("already_verified", profile.verified());
 
@@ -539,10 +576,45 @@ public final class Main {
             report.put("message", unchanged);
             return report;
         }
+        // Everything that can refuse without dispatching is asked before the answer is
+        // consumed: a contract that does not load must not use up the one continuation.
+        ConfigLoader.Loaded loaded;
+        UserConfig user;
+        Carried carried;
         try {
-            ConfigLoader.Loaded loaded = new ConfigLoader().load(root, resolved.taskId());
-            UserConfig user = env.user();
-            Carried carried = continuation(root, resolved.runId());
+            loaded = new ConfigLoader().load(root, resolved.taskId());
+            user = env.user();
+            carried = continuation(root, resolved.runId());
+        } catch (Exception invalid) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "advance_start_failed");
+            report.put("message", String.valueOf(invalid.getMessage()));
+            return report;
+        }
+        Map<String, Object> claimed;
+        try {
+            claimed = claimContinuation(root, resolved.runId(), nextId);
+        } catch (Exception unclaimable) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "advance_start_failed");
+            report.put("message", "could not record which run continues " + resolved.runId() + ": "
+                    + unclaimable.getMessage());
+            return report;
+        }
+        if (claimed != null) {
+            report.put("started", false);
+            report.put("ok", false);
+            report.put("code", "continuation_already_started");
+            report.put("run_id", claimed.get("run_id"));
+            report.put("message", "run " + claimed.get("run_id") + " already continues " + resolved.runId()
+                    + (continuationRunCreated(root, String.valueOf(claimed.get("run_id"))) ? ""
+                        : ", and the process starting it (pid " + claimed.get("pid") + ") is still alive")
+                    + "; one answer starts one run");
+            return report;
+        }
+        try {
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
             java.nio.file.Path narration = narrationFile(root, nextId);
             if (hasFlag(args, "--watch")) card.watch(narration, nextId);
@@ -563,7 +635,15 @@ public final class Main {
             report.put("started", false);
             report.put("ok", false);
             report.put("code", "advance_start_failed");
-            report.put("message", String.valueOf(failed.getMessage()));
+            // A run that reserved its evidence may have paid for something: its claim stands,
+            // and it is continued by the printed command. One that did not never dispatched,
+            // and the answer is free to be acted on again once the cause is fixed.
+            boolean created = continuationRunCreated(root, nextId);
+            if (!created) releaseContinuation(root, resolved.runId(), nextId);
+            report.put("continuation_released", !created);
+            report.put("message", String.valueOf(failed.getMessage())
+                    + (created ? "; run " + nextId + " was created, so it keeps the claim: continue it with "
+                            + command : "; no run was created, so the answer can be acted on again"));
         }
         return report;
     }
@@ -632,6 +712,94 @@ public final class Main {
             "policy_invalid", "baseline_failed", "run_override_invalid",
             "independent_review_unavailable", "visual_qa_unavailable", "mcp_config_missing",
             dev.warden.role.RoleResolver.JUDGE_NOT_READ_ONLY);
+
+    /** Beside an answered run: the run that continues it, written once. */
+    static final String CONTINUATION_CLAIM = "continuation.json";
+
+    /**
+     * Record that {@code nextId} continues {@code runId}, unless a run already does: null when
+     * this call made the record, the existing one otherwise.
+     *
+     * An answer is consumed once. The same `retry` or `apply` could be seen by a supervisor
+     * and by `warden approve` without `--no-start`, or by two supervisors, and each started a
+     * continuation; {@link #nextRunId} gave the second a different unused id, so both ran
+     * against one worktree. Claims are read and written under one cross-process lock, before
+     * any run folder exists.
+     *
+     * A claim is a reservation, not a run. It stands while the run it names has reserved its
+     * evidence ({@code run.json}, written before the first paid call), or while the process
+     * that made it is alive and may still be starting it. A claim with neither — its process
+     * died between the claim and the run — is taken over, so the answer is not lost to a
+     * crash; a failed start in a live process gives its claim back itself
+     * ({@link #releaseContinuation}).
+     */
+    static Map<String, Object> claimContinuation(Path root, String runId, String nextId)
+            throws java.io.IOException {
+        Path claim = root.resolve(".warden/runs").resolve(runId).resolve(CONTINUATION_CLAIM);
+        return dev.warden.json.JsonFile.underExclusiveLock(claim, CONTINUATION_CLAIM + ".lock", () -> {
+            if (java.nio.file.Files.exists(claim, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                Map<String, Object> existing;
+                try {
+                    existing = Json.parseObject(java.nio.file.Files.readString(claim,
+                            java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception unreadable) {
+                    // Nothing says which run it protects, so it protects all of them.
+                    return Map.<String, Object>of("run_id", "(unreadable claim: " + claim + ")");
+                }
+                if (continuationRunCreated(root, String.valueOf(existing.get("run_id")))
+                        || claimantAlive(existing)) {
+                    return existing;
+                }
+            }
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("run_id", nextId);
+            record.put("continues", runId);
+            record.put("pid", ProcessHandle.current().pid());
+            record.put("process_started_at", ProcessHandle.current().info().startInstant()
+                    .map(Object::toString).orElse(null));
+            record.put("claimed_at", java.time.Instant.now().toString());
+            dev.warden.json.JsonFile.writeAtomically(claim, record);
+            return null;
+        });
+    }
+
+    /** Give back this process's claim for {@code nextId}, if the run never came to exist. */
+    static void releaseContinuation(Path root, String runId, String nextId) {
+        Path claim = root.resolve(".warden/runs").resolve(runId).resolve(CONTINUATION_CLAIM);
+        try {
+            dev.warden.json.JsonFile.underExclusiveLock(claim, CONTINUATION_CLAIM + ".lock", () -> {
+                if (!java.nio.file.Files.isRegularFile(claim, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
+                Map<String, Object> existing = Json.parseObject(java.nio.file.Files.readString(claim,
+                        java.nio.charset.StandardCharsets.UTF_8));
+                boolean ours = nextId.equals(existing.get("run_id"))
+                        && existing.get("pid") instanceof Number pid && pid.longValue() == ProcessHandle.current().pid();
+                if (ours && !continuationRunCreated(root, nextId)) java.nio.file.Files.delete(claim);
+                return null;
+            });
+        } catch (Exception cannotRelease) {
+            // The claim then waits for this process to end, and is taken over after that.
+        }
+    }
+
+    /** Whether {@code runId} reserved its evidence, which every run does before its first paid call. */
+    static boolean continuationRunCreated(Path root, String runId) {
+        // A name that is not a run id cannot be looked up, so it is treated as a run that exists.
+        if (runId == null || !runId.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}")) return true;
+        Path directory = root.resolve(".warden/runs").resolve(runId);
+        return java.nio.file.Files.isRegularFile(directory.resolve("run.json"))
+                || java.nio.file.Files.isRegularFile(directory.resolve("task-run.json"));
+    }
+
+    /** Whether the process that wrote a claim is still the one running under its pid. */
+    private static boolean claimantAlive(Map<String, Object> claim) {
+        if (!(claim.get("pid") instanceof Number pid)) return false;
+        Object started = claim.get("process_started_at");
+        return ProcessHandle.of(pid.longValue())
+                .filter(ProcessHandle::isAlive)
+                .filter(process -> started == null || String.valueOf(started).equals(
+                        process.info().startInstant().map(Object::toString).orElse(null)))
+                .isPresent();
+    }
 
     /** bakery-3 → bakery-4; a name without a trailing number gets {@code -2}. */
     static String nextRunId(Path root, String runId) {
@@ -893,9 +1061,31 @@ public final class Main {
         return root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
     }
 
+    /**
+     * The last line of the run's narration, for the tab that follows it. The tab is where the
+     * operator was told to decide; without this it ended on the question.
+     */
+    private static void narrateDecision(Path root, String runId, String choice, String actor,
+                                        boolean closes) {
+        try {
+            Path file = narrationFile(root, runId);
+            if (!java.nio.file.Files.isRegularFile(file)) return;
+            java.nio.file.Files.writeString(file, System.lineSeparator() + "decision  " + choice
+                    + " by " + actor + (closes ? "; this run is closed" : "; the next run says when it starts")
+                    + System.lineSeparator(), java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.APPEND);
+        } catch (Exception notOurProblem) {
+            // The decision is recorded; only the narration missed its last line.
+        }
+    }
+
+    /** Where a board comes from. Tests put a recording one here; production asks Orca. */
+    static dev.warden.run.Workspace.Source boards =
+            worktree -> dev.warden.execution.orca.OrcaWorkspace.attach(new ProcessRunner(), worktree);
+
     private static dev.warden.run.Workspace.Source board(String[] args) {
         if (hasFlag(args, "--no-workspace-status")) return dev.warden.run.Workspace.Source.NONE;
-        return worktree -> dev.warden.execution.orca.OrcaWorkspace.attach(new ProcessRunner(), worktree);
+        return boards;
     }
 
     private static boolean hasFlag(String[] args, String name) {
@@ -1104,6 +1294,24 @@ public final class Main {
             return 1;
         }
         Integer minutes = optionalMinutes(args, "--wait-minutes");
+        // A page that is already up has a supervisor behind it. A second one would start the
+        // continuation a second time after the answer, so this shows the one that is there.
+        var live = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+        if (live != null) {
+            boolean opened = !hasFlag(args, "--no-open") && new OrcaClient(new ProcessRunner())
+                    .invoke(root, Duration.ofSeconds(20),
+                            List.of("tab", "create", "--worktree", "path:" + root, "--url", live.url()))
+                    .ok();
+            Map<String, Object> reused = new LinkedHashMap<>();
+            reused.put("ok", true);
+            reused.put("code", "decision_page_open");
+            reused.put("run_id", runId);
+            reused.put("url", live.url());
+            reused.put("served_by_pid", live.pid());
+            reused.put("orca_tab_opened", opened);
+            System.out.println(Json.write(reused));
+            return 0;
+        }
         ApproveEnv env = ApproveEnv.realtime();
         Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(summaryFile));
         Map<String, Object> report = new LinkedHashMap<>();
@@ -1114,6 +1322,16 @@ public final class Main {
                                 .invoke(path, Duration.ofSeconds(20),
                                         List.of("tab", "create", "--worktree", "path:" + path, "--url", url))
                                 .ok())));
+        if (runId.equals(report.get("supervised_elsewhere"))) {
+            // Another process took the run between the lease check above and here, or holds it
+            // while it amends the contract, before any page is up. Its page is the one to use.
+            report.put("ok", true);
+            report.put("code", "decision_supervised_elsewhere");
+            report.put("message", "another process supervises " + runId + "; its page is listed by "
+                    + "`warden dashboard` once it is up, and `warden approve` still answers it");
+            System.out.println(Json.write(report));
+            return 0;
+        }
         HumanDecision after = new ApprovalStore(root).read(runId);
         report.put("ok", after.state() == HumanDecision.State.RESOLVED);
         report.put("decision", after.toMap());
@@ -1282,17 +1500,20 @@ public final class Main {
             UserConfig user = env.user();
             EvidenceLedger decisionLedger = new EvidenceLedger(root, runId, user.home());
             decisionLedger.append("human_decision", recorded);
-            // The card stops asking. `accept`, `abort` and a rejection with nothing to carry
-            // close the run; every other decision expects another one, so it goes back to the
-            // running column rather than to a column that reads as done to whoever glances at
-            // the board next.
+            // The card and the tab stop asking. `accept`, `abort` and a rejection with nothing
+            // to carry close the run. Every other decision expects another run, and the card
+            // goes to the running column when that run actually starts, not here: set here,
+            // it said "running" over a retry nobody had started and a continuation that was
+            // refused. The tab was opened by another process; its handle is on disk.
             boolean closes = "accept".equals(choice) || "abort".equals(choice)
                     || ("reject".equals(choice) && !rejectedWithNote(resolved.kind(), choice, note));
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
-            card.state(closes ? dev.warden.run.Workspace.State.SETTLED
-                    : dev.warden.run.Workspace.State.RUNNING);
+            card.adopt(runId);
+            if (closes) card.state(dev.warden.run.Workspace.State.SETTLED);
+            else card.answered(choice);
             card.note(runId + " · " + choice + " by " + actor
                     + (note.isBlank() ? "" : " · " + note) + " · nothing was landed");
+            narrateDecision(root, runId, choice, actor, closes);
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", true);
@@ -1607,6 +1828,15 @@ public final class Main {
                 report.put("contract_amendment", skippedGateWait("already_decided"));
                 return report;
             }
+            // A supervisor that is not the first one for this run — `warden decide`, or the
+            // Dashboard's button after the original wait ended — finds the receipt of the
+            // amendment the first one already paid for, and leaves the gaps to a person. The
+            // reservation below is what decides it; this only saves reading the contract.
+            if (java.nio.file.Files.exists(root.resolve(".warden/runs").resolve(runId)
+                    .resolve(TaskLoop.AMENDMENT_RECEIPT))) {
+                report.put("contract_amendment", skippedGateWait("amendment_already_attempted"));
+                return report;
+            }
             String taskId = String.valueOf(summary.get("task_id"));
             Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
             String before = java.nio.file.Files.readString(taskFile);
@@ -1643,7 +1873,14 @@ public final class Main {
             reserved.put("cost_usd", 0.0);
             reserved.put("unpriced_calls", (long) Preparation.mostAmendmentCalls(env.user()));
             reserved.put("gaps", ids);
-            java.nio.file.Files.writeString(receipt, Json.write(reserved));
+            // Created, never replaced: one amendment per run is paid, whoever else gets here.
+            try {
+                java.nio.file.Files.writeString(receipt, Json.write(reserved), java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE);
+            } catch (java.nio.file.FileAlreadyExistsException another) {
+                report.put("contract_amendment", skippedGateWait("amendment_already_attempted"));
+                return report;
+            }
             Preparation.Outcome amended = new Preparation(new ProcessRunner(), narration)
                     .amending(new Preparation.Amendment(before, gaps))
                     .within(chainGate)
@@ -1727,59 +1964,133 @@ public final class Main {
             return approveDecision(root, approve.toArray(String[]::new), env).report();
         }, preview::open)) {
             page.start();
-            boolean shown;
             try {
-                shown = opener.open(page.url());
-            } catch (Exception failed) {
-                shown = false;
+                dev.warden.dashboard.DecisionPage.lease(root, runId, page.url());
+            } catch (Exception unrecorded) {
+                // The page still works, and no second supervisor can start: the supervisor
+                // lock, not this file, keeps it out. Only the Dashboard cannot find the page.
             }
-            Map<String, Object> described = new LinkedHashMap<>();
-            described.put("url", page.url());
-            described.put("orca_tab_opened", shown);
-            result.put("decision_page", described);
-            narration.line(shown
-                    ? "      decide in Orca: the \"Warden · решение\" tab in this worktree has a button "
-                            + "for each option (or open " + page.url() + ")"
-                    : "      decide here: " + page.url());
+            try {
+                boolean shown;
+                try {
+                    shown = opener.open(page.url());
+                } catch (Exception failed) {
+                    shown = false;
+                }
+                Map<String, Object> described = new LinkedHashMap<>();
+                described.put("url", page.url());
+                described.put("orca_tab_opened", shown);
+                result.put("decision_page", described);
+                narration.line(shown
+                        ? "      decide in Orca: the \"Warden · решение\" tab in this worktree has a button "
+                                + "for each option (or open " + page.url() + ")"
+                        : "      decide here: " + page.url());
 
-            long deadline = env.clock.nowMillis() + Math.max(1, minutes) * 60_000L;
-            // The first read is at once. A "last read" sentinel of Long.MIN_VALUE overflowed
-            // `clock - last` to a negative number, so the gate was never read at all.
-            long nextGateRead = env.clock.nowMillis();
-            while (true) {
-                HumanDecision now = store.read(runId);
-                if (now.state() != HumanDecision.State.PENDING) {
-                    described.put("decided", now.decision());
-                    described.put("actor", now.actor());
-                    break;
-                }
-                long clock = env.clock.nowMillis();
-                // The Orca gate is still an answer, from a phone for instance. Read once per
-                // ten seconds; a pending or unreadable gate is simply not an answer yet.
-                if (clock >= nextGateRead) {
-                    nextGateRead = clock + 10_000L;
-                    List<String> fromOrca = new java.util.ArrayList<>(
-                            List.of("approve", runId, "--from-orca", "--no-start"));
-                    fromOrca.addAll(passThrough);
-                    ApproveOutcome imported = approveDecision(root, fromOrca.toArray(String[]::new), env);
-                    if (imported.ok()) {
-                        result.put("gate_import", imported.report());
-                        continue;
+                long deadline = env.clock.nowMillis() + Math.max(1, minutes) * 60_000L;
+                // The first read is at once. A "last read" sentinel of Long.MIN_VALUE overflowed
+                // `clock - last` to a negative number, so the gate was never read at all.
+                long nextGateRead = env.clock.nowMillis();
+                while (true) {
+                    HumanDecision now = store.read(runId);
+                    if (now.state() != HumanDecision.State.PENDING) {
+                        described.put("decided", now.decision());
+                        described.put("actor", now.actor());
+                        break;
                     }
+                    long clock = env.clock.nowMillis();
+                    // The Orca gate is still an answer, from a phone for instance. Read once per
+                    // ten seconds; a pending or unreadable gate is simply not an answer yet.
+                    if (clock >= nextGateRead) {
+                        nextGateRead = clock + 10_000L;
+                        List<String> fromOrca = new java.util.ArrayList<>(
+                                List.of("approve", runId, "--from-orca", "--no-start"));
+                        fromOrca.addAll(passThrough);
+                        ApproveOutcome imported = approveDecision(root, fromOrca.toArray(String[]::new), env);
+                        if (imported.ok()) {
+                            result.put("gate_import", imported.report());
+                            continue;
+                        }
+                    }
+                    if (clock >= deadline) {
+                        described.put("timed_out", true);
+                        narration.line("      the decision page closed after " + minutes + " min without an "
+                                + "answer; the decision is still open: reopen its page from `warden dashboard` "
+                                + "or with warden decide " + runId + ", or answer with warden approve "
+                                + runId + " --decision <option>");
+                        break;
+                    }
+                    env.sleeper.sleep(2_000L);
                 }
-                if (clock >= deadline) {
-                    described.put("timed_out", true);
-                    narration.line("      the decision page closed after " + minutes + " min without an "
-                            + "answer; answer with warden approve " + runId + " --decision <option>");
-                    break;
-                }
-                env.sleeper.sleep(2_000L);
+                // The page's own POST is answered after the store records it; give that response a
+                // moment to reach the tab before the server goes away.
+                env.sleeper.sleep(1_500L);
+            } finally {
+                dev.warden.dashboard.DecisionPage.release(root, runId, page.url());
             }
-            // The page's own POST is answered after the store records it; give that response a
-            // moment to reach the tab before the server goes away.
-            env.sleeper.sleep(1_500L);
         }
         return result;
+    }
+
+    /** How long a page the Dashboard put up waits: until the answer, in practice. */
+    static final int DASHBOARD_PAGE_MINUTES = 7 * 24 * 60;
+
+    /** One opener at a time per run, so two clicks cannot put up two supervisors. */
+    private static final Map<String, Object> OPENING = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * The decision page for a pending run, for the Dashboard's "open" button: the page some
+     * process already serves, or a new one this process keeps up until the decision is made.
+     *
+     * The page used to live exactly as long as the `warden do` that asked the question. When
+     * that stopped waiting the page went with it, the decision stayed pending on disk, and the
+     * only way back was `warden decide` typed in the worktree. This is `warden decide` behind
+     * a button: the same supervisor, the same page, answers only through
+     * {@link #approveDecision}, and a retry, advance, switch or apply continues the loop from
+     * this process. Its wait is not the gate's TTL: the page stays until it is answered.
+     *
+     * @param tabs opens anything after the page itself in Orca: the candidate preview
+     */
+    static String openDecision(Path root, String runId, String[] args, ApproveEnv env,
+                               PageOpener tabs) throws Exception {
+        Object lock = OPENING.computeIfAbsent(root.toAbsolutePath().normalize() + "|" + runId,
+                ignored -> new Object());
+        synchronized (lock) {
+            var live = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+            if (live != null) return live.url();
+            HumanDecision pending = new ApprovalStore(root).read(runId);
+            if (pending.state() != HumanDecision.State.PENDING) {
+                throw new ApprovalException("duplicate_decision", "run " + runId + " is already "
+                        + pending.state().jsonValue());
+            }
+            Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(
+                    root.resolve(".warden/runs").resolve(runId).resolve("task-run.json")));
+            java.util.concurrent.CompletableFuture<String> shown = new java.util.concurrent.CompletableFuture<>();
+            Thread.ofPlatform().daemon().name("warden-decide-" + runId).start(() -> {
+                try {
+                    Map<String, Object> supervised = superviseGates(root, runId, summary, args, env,
+                            Main::startAdvance,
+                            (path, id, ignored) -> awaitDecision(path, id, args, DASHBOARD_PAGE_MINUTES,
+                                    env, url -> shown.complete(url) || tabs.open(url)));
+                    if (runId.equals(supervised.get("supervised_elsewhere"))) {
+                        var leased = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+                        if (leased != null) shown.complete(leased.url());
+                        shown.completeExceptionally(new ApprovalException("decision_supervised_elsewhere",
+                                "another process supervises run " + runId + " and has no page up yet "
+                                        + "(it may be amending the contract); try again in a moment"));
+                    }
+                } catch (Throwable failed) {
+                    shown.completeExceptionally(failed);
+                } finally {
+                    shown.complete(null);
+                }
+            });
+            String url = shown.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            if (url == null) {
+                throw new ApprovalException("decision_page_not_started",
+                        "run " + runId + " has no pending question this page could show");
+            }
+            return url;
+        }
     }
 
     static Map<String, Object> superviseGates(Path root, String runId, Map<String, Object> summary,
@@ -1790,27 +2101,54 @@ public final class Main {
         List<Object> chain = new java.util.ArrayList<>();
         for (int count = 0; count < 100; count++) {
             if (summary.get("decision_kind") == null) break;
-            // A passing run whose readers found the acceptance too weak is the planner's to
-            // answer first. When the amendment goes through it records a retry, and the wait
-            // below finds the decision already made; when it does not, a person decides.
-            if (TaskLoop.CONTRACT_AMENDMENT.equals(summary.get("reason"))) {
-                chain.add(amendContract(root, runId, summary, args, env));
-            }
-            Map<String, Object> waited = waiter.await(root, runId, summary);
-            chain.add(waited);
             HumanDecision resolved;
+            Map<String, Object> next;
+            // One supervisor per run, across processes, from before the amendment is paid until
+            // the continuation has started. See DecisionPage.Supervision.
+            dev.warden.dashboard.DecisionPage.Supervision owned;
             try {
-                resolved = new ApprovalStore(root).read(runId);
-            } catch (Exception unreadable) {
+                owned = dev.warden.dashboard.DecisionPage.supervise(root, runId);
+            } catch (Exception unlockable) {
+                // Not knowing whether someone else supervises is not permission to.
+                Map<String, Object> skipped = skippedGateWait("supervision_unavailable");
+                skipped.put("message", String.valueOf(unlockable.getMessage()));
+                chain.add(skipped);
                 break;
             }
-            if (resolved.state() != HumanDecision.State.RESOLVED) break;
-            // A retry answered on the page is the operator saying "go again": leaving it to a
-            // command typed at the machine made the answer from Orca half an answer.
-            if (!continues(resolved)) break;
-            Map<String, Object> next = starter.start(root, resolved, args, env);
+            if (owned == null) {
+                Map<String, Object> elsewhere = skippedGateWait("supervised_elsewhere");
+                var leased = dev.warden.dashboard.DecisionPage.liveLease(root, runId);
+                if (leased != null) elsewhere.put("url", leased.url());
+                chain.add(elsewhere);
+                result.put("supervised_elsewhere", runId);
+                break;
+            }
+            try (owned) {
+                // A passing run whose readers found the acceptance too weak is the planner's to
+                // answer first. When the amendment goes through it records a retry, and the wait
+                // below finds the decision already made; when it does not, a person decides.
+                if (TaskLoop.CONTRACT_AMENDMENT.equals(summary.get("reason"))) {
+                    chain.add(amendContract(root, runId, summary, args, env));
+                }
+                Map<String, Object> waited = waiter.await(root, runId, summary);
+                chain.add(waited);
+                try {
+                    resolved = new ApprovalStore(root).read(runId);
+                } catch (Exception unreadable) {
+                    break;
+                }
+                if (resolved.state() != HumanDecision.State.RESOLVED) break;
+                // A retry answered on the page is the operator saying "go again": leaving it to a
+                // command typed at the machine made the answer from Orca half an answer.
+                if (!continues(resolved)) break;
+                next = starter.start(root, resolved, args, env);
+            }
             chain.add(next);
             if (!Boolean.TRUE.equals(next.get("started"))) break;
+            // The answered run's tab names the run that took over, now that one did.
+            dev.warden.run.Workspace previous = dev.warden.run.Workspace.guarded(board(args).at(root));
+            previous.adopt(runId);
+            previous.answered(resolved.decision() + " -> " + next.get("run_id"));
             result.put("continued_run_id", next.get("run_id"));
             result.put("continued_ok", next.get("ok"));
             if (!(next.get("summary_report") instanceof Map<?, ?> raw)) break;
@@ -1902,12 +2240,18 @@ public final class Main {
                   warden setup                 create a starter ~/.warden (never overwrites)
                   warden doctor                verify Java, vendor profiles and live Orca readiness
                   warden dashboard [--project DIR] [--port N] [--open-orca]
-                                               serve a local read-only role/settings view;
-                                               stays running until Ctrl+C, launches no agents
+                                               serve a local role/settings view; stays running
+                                               until Ctrl+C. Its one action reopens the page of
+                                               a pending decision; an answer given there that
+                                               continues the loop runs it from this process
                   warden profiles              which profiles load, which are eligible, and why not
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                  warden probe orca --agent A [--model M] [--effort E] [--image] [--worktree DIR]
+                                           the probe a runner: orca profile names: one worker
+                                           through Orca reads a word Warden just wrote, and
+                                           says it back. Run from an Orca worktree
                   warden roster [--text]       which profile fills which role, the workflow,
                                                and any dangling policy references
                   warden roster set <role> --profiles a,b[,c] [--strategy first|rotate]

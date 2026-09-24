@@ -561,6 +561,15 @@ public final class TaskLoop {
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
         if (carried.continuesRun()) {
             ledger.bindParent(EvidenceLedger.runInstanceIdOf(root, carried.fromRunId()));
+            // One chain, one Orca Run: the continuation's stage rows, workers and gate go on
+            // the Run its predecessor used rather than on a new one per attempt.
+            if (!dryRun) {
+                try {
+                    OrcaLifecycle.inheritRun(root, carried.fromRunId(), runId);
+                } catch (Exception notOurProblem) {
+                    // A run without an Orca history is still a run.
+                }
+            }
         }
         // Reservation is the first mutation. A duplicate controller is refused before it can
         // overwrite evidence, spend a token, or start a second Orca worker in the same tree.
@@ -1586,6 +1595,28 @@ public final class TaskLoop {
                     + "naming it would do nothing. The stages that run are " + named
                     + ". Overlays are keyed by stage, not by role: two reviewer stages share a "
                     + "role and only one of them is the one you meant.");
+            return gap;
+        }
+        // Machine gates and the browser harness have no profile, effort or host to change.
+        // An overlay naming one was accepted and then skipped by every loop below, so
+        // `--host browser=orca` ran exactly what it would have run without it.
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() == Workflow.Kind.ROLE || !overlay.stages().contains(stage.name())) continue;
+            List<String> roleStages = workflow.stages().stream()
+                    .filter(candidate -> candidate.kind() == Workflow.Kind.ROLE)
+                    .map(Workflow.Stage::name).toList();
+            Map<String, Object> gap = new LinkedHashMap<>();
+            gap.put("stage", stage.name());
+            gap.put("kind", stage.kind().name().toLowerCase(java.util.Locale.ROOT));
+            gap.put("code", "run_override_not_a_role_stage");
+            gap.put("stop_reason", "run_override_invalid");
+            gap.put("role_stages", roleStages);
+            gap.put("message", "stage '" + stage.name() + "' is "
+                    + (stage.kind() == Workflow.Kind.MACHINE_GATES ? "the machine gates"
+                        : "the browser harness")
+                    + ", which no profile fills, so --use, --effort and --host have nothing to "
+                    + "change there and would be ignored. The stages an overlay can change are "
+                    + roleStages + "; nothing was dispatched.");
             return gap;
         }
         for (Workflow.Stage stage : workflow.stages()) {
@@ -3036,6 +3067,12 @@ public final class TaskLoop {
                 heartbeat = alive;
                 heartbeatNote = (profile, vendor) -> runningNote(stage, profile, vendor);
                 outcome = dispatch(stage);
+            } catch (Exception stopped) {
+                // The stage's row on the board is closed with what happened, not left open.
+                if (!dryRun) workspace.stageEnded(false, position(stage) + " " + stage.name()
+                        + " · stopped: " + (stopped instanceof StopException stop
+                            ? stop.getMessage() : stopped.getClass().getSimpleName()));
+                throw stopped;
             } finally {
                 heartbeat = Heartbeat.none();
                 heartbeatNote = null;
@@ -3101,7 +3138,6 @@ public final class TaskLoop {
             java.util.function.BinaryOperator<String> note = heartbeatNote;
             if (dryRun || note == null) return;
             workspace.note(note.apply(profile, vendor));
-            workspace.stage(note.apply(profile, vendor));
         }
 
         /**
@@ -3109,9 +3145,16 @@ public final class TaskLoop {
          * work is, and a person who wants the history has the terminal and the ledger.
          */
         private void post(Workflow.Stage stage, Object outcome, long millis) {
-            if (dryRun || outcome == null) return;
+            if (dryRun) return;
             StringBuilder note = new StringBuilder(position(stage))
                     .append(' ').append(stage.name()).append(" · ");
+            if (outcome == null) {
+                workspace.stageEnded(true, note.append("no dispatch").toString());
+                return;
+            }
+            boolean ok = outcome instanceof RoleRunner.Outcome role ? role.ok()
+                    : outcome instanceof GateRunner.Outcome gate ? gate.ok()
+                    : !(outcome instanceof VisualQaRunner.Outcome visual) || visual.ok();
             if (outcome instanceof RoleRunner.Outcome role) {
                 note.append(role.ok() ? "ok" : "failed " + role.code());
                 Map<String, Object> details = role.details() == null ? Map.of() : role.details();
@@ -3125,9 +3168,12 @@ public final class TaskLoop {
             } else if (outcome instanceof VisualQaRunner.Outcome visual) {
                 note.append(visual.ok() ? "ok" : "failed " + visual.code());
             } else {
+                workspace.stageEnded(ok, note.append("done").toString());
                 return;
             }
-            workspace.note(note.append(" · ").append(Progress.elapsed(millis)).toString());
+            String line = note.append(" · ").append(Progress.elapsed(millis)).toString();
+            workspace.note(line);
+            workspace.stageEnded(ok, line);
         }
 
         private String position(Workflow.Stage stage) {
