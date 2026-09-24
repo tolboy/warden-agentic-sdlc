@@ -103,11 +103,60 @@ public final class DecisionPageTest implements Suite {
      */
     private void anAnswerStartsOneContinuation(Check check) throws Exception {
         Path root = project("Toggle the greeting");
+        Path claim = root.resolve(".warden/runs/run-1").resolve(Main.CONTINUATION_CLAIM);
         check.eq("the first start of a continuation claims it", null,
-                Main.claimContinuation(root, "run-1", "run-2"));
-        Map<String, Object> second = Main.claimContinuation(root, "run-1", "run-3");
-        check.eq("a second finds the run that already continues it", "run-2",
+                Main.claimContinuation(root, "run-1", "run-5"));
+        Map<String, Object> second = Main.claimContinuation(root, "run-1", "run-6");
+        check.eq("a second, while the first is still starting, is refused", "run-5",
                 second == null ? null : second.get("run_id"));
+
+        // A claim is a reservation, not a run. The first claim above was written by this
+        // process, which is alive; one whose process has gone and whose run never reserved
+        // its evidence — a crash between the claim and the run — is taken over.
+        Map<String, Object> stranded = new LinkedHashMap<>(Json.parseObject(Files.readString(claim)));
+        stranded.put("process_started_at", "1970-01-01T00:00:00Z");
+        Files.writeString(claim, Json.write(stranded));
+        check.eq("a claim whose process is gone and whose run never started is taken over", null,
+                Main.claimContinuation(root, "run-1", "run-7"));
+        check.eq("and names the run that took it", "run-7", Json.parseObject(Files.readString(claim)).get("run_id"));
+
+        // Once the run has reserved its evidence it may have paid for something, and its claim
+        // stands whoever made it.
+        Files.createDirectories(root.resolve(".warden/runs/run-7"));
+        Files.writeString(root.resolve(".warden/runs/run-7/run.json"), "{}");
+        Map<String, Object> afterRun = new LinkedHashMap<>(Json.parseObject(Files.readString(claim)));
+        afterRun.put("process_started_at", "1970-01-01T00:00:00Z");
+        Files.writeString(claim, Json.write(afterRun));
+        Map<String, Object> protectedClaim = Main.claimContinuation(root, "run-1", "run-8");
+        check.eq("a claim whose run exists stands after its process has gone", "run-7",
+                protectedClaim == null ? null : protectedClaim.get("run_id"));
+        Main.releaseContinuation(root, "run-1", "run-7");
+        check.that("and is not given back by a failed start either", Files.exists(claim));
+
+        // Measured in the review of 40024ac: a contract that failed to load after the claim
+        // left it standing, and after the contract was fixed `warden decide` answered
+        // continuation_already_started for a run that never existed.
+        Path broken = project("Toggle the greeting");
+        Path brokenSummary = broken.resolve(".warden/runs/run-1/task-run.json");
+        HumanDecision pending = new ApprovalStore(broken).createFailure("run-1", "hello",
+                "orca_worker_not_started", brokenSummary, null);
+        HumanDecision retry = new ApprovalStore(broken).resolve("run-1", pending.updatedAt().toString(),
+                "retry", "tester", "");
+        Files.writeString(broken.resolve(".warden/tasks/hello.yaml"), "version: 1\nid: hello\n");
+        Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis, millis -> { },
+                (path, gate) -> { throw new IllegalStateException("no gate"); },
+                Files.createDirectories(broken.resolve("home")));
+        Map<String, Object> failed = Main.startAdvance(broken, retry,
+                new String[] {"--no-workspace-status", "--quiet"}, env);
+        check.eq("a continuation whose contract does not load does not start", "advance_start_failed",
+                failed.get("code"));
+        check.that("and does not use up the answer", !Files.exists(
+                broken.resolve(".warden/runs/run-1").resolve(Main.CONTINUATION_CLAIM)));
+        check.eq("which can be acted on again once the contract is fixed", null,
+                Main.claimContinuation(broken, "run-1", "run-3"));
+        Main.releaseContinuation(broken, "run-1", "run-3");
+        check.that("and a live process gives back a claim whose run never came to exist",
+                !Files.exists(broken.resolve(".warden/runs/run-1").resolve(Main.CONTINUATION_CLAIM)));
     }
 
     /**
