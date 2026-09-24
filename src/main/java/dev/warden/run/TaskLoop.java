@@ -283,6 +283,9 @@ public final class TaskLoop {
         }
     }
 
+    /** A passing run whose readers found the acceptance too weak, sent to the planner. */
+    public static final String CONTRACT_AMENDMENT = "contract_amendment_requested";
+
     /**
      * Failures that were never about the work.
      *
@@ -340,7 +343,10 @@ public final class TaskLoop {
             "vendor_call_failed",
             "vendor_protocol_failed",
             "prompt_undeliverable",
-            "orca_worker_not_started");
+            "orca_worker_not_started",
+            // The candidate passed; what is being fixed is what it was judged by. The writer's
+            // product is carried into the amended run, and every reading is taken again there.
+            CONTRACT_AMENDMENT);
 
     /**
      * Role outcome codes that describe the call rather than the candidate, and the stop reason
@@ -450,6 +456,53 @@ public final class TaskLoop {
     /** True when a role outcome code is about the call, not about the candidate. */
     public static boolean isInfrastructureFailure(String roleCode) {
         return roleCode != null && INFRASTRUCTURE_REASONS.containsKey(roleCode);
+    }
+
+    /**
+     * What an amendment spent, written by the supervisor into the directory of the run that
+     * stopped for it: the planner's calls belong to that run's chain, and {@link Chain#after}
+     * adds them to what the next run inherits.
+     */
+    public static final String AMENDMENT_RECEIPT = "contract-amendment.json";
+
+    /**
+     * The run whose contract gaps were already offered to the planner in the chain that ends
+     * at {@code priorRunId}, or null when none were. Read from the prior summary's own
+     * marker, from its stop reason, or from an amendment receipt in its directory.
+     */
+    public static String amendmentOffered(Path root, String priorRunId) {
+        Path dir = root.resolve(".warden/runs").resolve(priorRunId);
+        try {
+            Path file = dir.resolve("task-run.json");
+            if (Files.isRegularFile(file)) {
+                Map<String, Object> prior = Json.parseObject(Files.readString(file));
+                if (prior.get("contract_amended_from") instanceof String earlier && !earlier.isBlank()) {
+                    return earlier;
+                }
+                if (CONTRACT_AMENDMENT.equals(prior.get("reason"))) return priorRunId;
+            }
+        } catch (Exception unreadable) {
+            // The receipt below still answers whether the planner was paid.
+        }
+        return Files.isRegularFile(dir.resolve(AMENDMENT_RECEIPT)) ? priorRunId : null;
+    }
+
+    /**
+     * The open `contract_gap` findings the policy sends to the planner before the gate, or an
+     * empty list. Empty when the route is `gate`, when no planner is on the roster, or when
+     * this run is itself the amended one: the amendment is offered once per chain.
+     */
+    static List<Map<String, Object>> contractGapsToPlan(UserConfig user, Map<String, Object> summary) {
+        if (user == null || user.policy() == null || !"plan".equals(user.policy().contractGaps())) {
+            return List.of();
+        }
+        if (!user.policy().roles().containsKey("planner")) return List.of();
+        if (summary.get("contract_amended_from") != null) return List.of();
+        List<Map<String, Object>> gaps = new ArrayList<>();
+        for (Map<String, Object> finding : dev.warden.dashboard.DecisionPage.openFindings(summary)) {
+            if ("contract_gap".equals(finding.get("category"))) gaps.add(finding);
+        }
+        return gaps;
     }
 
     /**
@@ -626,6 +679,12 @@ public final class TaskLoop {
             summary.put("budget_max_elapsed_minutes", task.budget().maxElapsedMinutes());
         }
         describeChain(summary, budget, runId, task);
+        // The planner is offered a chain's contract gaps once. A retry after the amended run
+        // stopped on a quota is the same chain, and must not send the same gaps back.
+        if (carried.continuesRun() && carried.reuseJudgements()) {
+            String offered = amendmentOffered(root, carried.fromRunId());
+            if (offered != null) summary.put("contract_amended_from", offered);
+        }
         summary.put("review_required", reviewRequired);
         summary.put("visual_qa_required", task.visualQa().required());
         summary.put("visual_qa_role", visualRoleConfigured);
@@ -1027,6 +1086,42 @@ public final class TaskLoop {
             }
             progress.blank();
             return new Outcome(true, "dry_run", "none", file, summary);
+        }
+
+        // A passing candidate whose readers found the acceptance too weak to have proved it
+        // goes to the planner first when the policy routes contract gaps there: once per
+        // chain, before a person is asked to accept on terms a reader said were short.
+        List<Map<String, Object>> gaps = contractGapsToPlan(user, summary);
+        if (!gaps.isEmpty()) {
+            List<Object> ids = new ArrayList<>();
+            for (Map<String, Object> gap : gaps) ids.add(gap.get("id"));
+            // The planner and the plan reviewer are calls of this chain, and so is every
+            // reading the amended run takes again. Routing there is a promise to pay for all of
+            // it; a chain that cannot keeps its gaps listed at the gate instead.
+            int calls = dev.warden.run.Preparation.mostAmendmentCalls(user)
+                    + callPlan.readingsWithout("implementer");
+            String unaffordable = budget.strict() ? "strict_cost_cap"
+                    : !budget.hasRoom() ? "budget"
+                    : budget.remaining() < calls ? "max_role_runs" : null;
+            if (unaffordable == null) {
+                summary.put("contract_gaps_to_plan", ids);
+                summary.put("contract_amendment_calls", (long) calls);
+                progress.line("      " + gaps.size() + " reader finding(s) say the acceptance is too weak "
+                        + "to have proved this candidate; the planner amends it before the gate");
+                return stop(ledger, summary, CONTRACT_AMENDMENT, steps, engine.attempt(), budget);
+            }
+            Map<String, Object> skipped = new LinkedHashMap<>();
+            skipped.put("reason", unaffordable);
+            skipped.put("gaps", ids);
+            skipped.put("calls_needed", (long) calls);
+            if (budget.remaining() != Integer.MAX_VALUE) skipped.put("calls_remaining", (long) budget.remaining());
+            summary.put("contract_amendment_skipped", skipped);
+            progress.line("      " + gaps.size() + " reader finding(s) say the acceptance is too weak, but "
+                    + ("strict_cost_cap".equals(unaffordable)
+                        ? "a strict cost cap cannot bound what the planner would spend"
+                        : "the chain cannot pay for the planner (" + calls + " call(s) at most, with "
+                            + "the readings taken again)")
+                    + "; they go to the gate as listed findings");
         }
 
         summary.put("reason", "ready_for_human");
@@ -2223,12 +2318,13 @@ public final class TaskLoop {
             RoleRunner.Outcome reviewed = (RoleRunner.Outcome) outcome;
             long blocking = recordFindings(stage, reviewed);
             while (repairableFindings(stage) > 0 && "fix".equals(stage.onFindings())
-                    && fixRoundsUsed() < task.maxFixAttempts()) {
+                    && fixRoundsUsed() < task.maxFixAttempts()
+                    && (blockingRepairable(stage) > 0 || optionalRepairAffordable(stage, index))) {
                 // Who repairs is decided here, before the repair is costed and paid for. Off
                 // the ladder this is a no-op; on it, the next rung's pair is pinned or the
                 // run stops for a reason that names the rung.
                 maybeEscalate(stage, index);
-                fixRound(stage, index, reviewContext(loaded.root(), reviewed));
+                fixRound(stage, index, reviewContext(loaded.root(), reviewed, repairSeverities()));
                 outcome = execute(stage);
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
                 reviewed = (RoleRunner.Outcome) outcome;
@@ -2651,18 +2747,72 @@ public final class TaskLoop {
          * contract_gap, access grant, quota or disagreement still blocks acceptance, but
          * handing the diff back will not close it.
          */
+        /**
+         * Product defects this stage's last reading left that the policy sends back to the
+         * implementer: P1 always, P2 and P3 when `review.repair_severities` names them.
+         */
         private long repairableFindings(Workflow.Stage stage) {
+            return productDefects(stage, repairSeverities());
+        }
+
+        /** The P1 product defects: the ones that stop the loop if they are not repaired. */
+        private long blockingRepairable(Workflow.Stage stage) {
+            return productDefects(stage, java.util.Set.of("P1"));
+        }
+
+        private long productDefects(Workflow.Stage stage, java.util.Set<String> severities) {
             Map<String, Object> now = lastFindingRound(stage.name());
             if (now == null || !(now.get("findings") instanceof List<?> rows)) return 0;
             long n = 0;
             for (Object row : rows) {
                 if (row instanceof Map<?, ?> finding
-                        && "P1".equals(String.valueOf(finding.get("severity")))
+                        && severities.contains(String.valueOf(finding.get("severity")))
                         && "product_defect".equals(String.valueOf(finding.get("category")))) {
                     n++;
                 }
             }
             return n;
+        }
+
+        private java.util.Set<String> repairSeverities() {
+            return user.policy() == null ? Policy.DEFAULT_REPAIR_SEVERITIES : user.policy().repairSeverities();
+        }
+
+        /**
+         * Whether a repair that only P2/P3 findings ask for can be paid and judged.
+         *
+         * A P1 repair that cannot be afforded stops the run, because the candidate cannot be
+         * accepted with it open. A P2 or P3 is not a reason to stop: the candidate goes to the
+         * person with the finding listed, and the reason the repair was skipped is recorded.
+         */
+        private boolean optionalRepairAffordable(Workflow.Stage stage, int index) {
+            String mode = user.policy() == null ? "full" : user.policy().repairReserve();
+            String skipped = null;
+            if (budget.remaining() < callPlan.requiredFor(index, mode) || !budget.hasRoom()) {
+                skipped = "budget";
+            } else {
+                Object priorGap = summary.get("unavailable_role");
+                Object priorResolution = summary.get("resolution");
+                try {
+                    requireJudgesRemain(stage, index);
+                } catch (StopException noJudge) {
+                    if (priorGap == null) summary.remove("unavailable_role");
+                    else summary.put("unavailable_role", priorGap);
+                    if (priorResolution == null) summary.remove("resolution");
+                    else summary.put("resolution", priorResolution);
+                    skipped = "no_independent_judge";
+                }
+            }
+            if (skipped == null) return true;
+            @SuppressWarnings("unchecked")
+            List<Object> notes = summary.get("optional_repairs_skipped") instanceof List<?> list
+                    ? new ArrayList<>((List<Object>) list) : new ArrayList<>();
+            notes.add(Map.of("stage", stage.name(), "reason", skipped));
+            summary.put("optional_repairs_skipped", notes);
+            progress.line("      the " + stage.name() + " findings left open are P2/P3 and the "
+                    + ("budget".equals(skipped) ? "remaining budget" : "roster")
+                    + " cannot pay for and judge a repair; they go to the gate as listed findings");
+            return false;
         }
 
         /** Name the leftover when the only remaining P1s are not the implementer's. */
@@ -3119,6 +3269,33 @@ public final class TaskLoop {
                     evidence rather than leaving it unaddressed.
                     """.formatted(carried.fromRunId(),
                             carried.rejectionNote().replace("\n", "\n> "));
+            // The person decided with the readers' open findings in front of them — the
+            // decision page lists every one — so the writer is handed the same list.
+            StringBuilder open = new StringBuilder();
+            try {
+                Path prior = loaded.root().resolve(".warden/runs").resolve(carried.fromRunId())
+                        .resolve("task-run.json");
+                if (Files.isRegularFile(prior)) {
+                    for (Map<String, Object> finding : dev.warden.dashboard.DecisionPage.openFindings(
+                            Json.parseObject(Files.readString(prior)))) {
+                        open.append("- ").append(finding.get("severity")).append(" [")
+                                .append(finding.get("category")).append("] ")
+                                .append(finding.get("message")).append('\n');
+                        for (String key : List.of("expected", "actual", "suggestion")) {
+                            if (finding.get(key) != null) {
+                                open.append("  - ").append(key).append(": ").append(finding.get(key)).append('\n');
+                            }
+                        }
+                    }
+                }
+            } catch (Exception unreadable) {
+                open.setLength(0);
+            }
+            if (!open.isEmpty()) {
+                text += "\n## What the readers left open on that candidate\n\n"
+                        + "The person saw these when they rejected it. Close the ones the objection is "
+                        + "about, and any product defect among them you can.\n\n" + open;
+            }
             return writeContext(ledger, 0, "rejection", text);
         }
 
@@ -3619,7 +3796,9 @@ public final class TaskLoop {
         private String failureContext(Workflow.Stage stage, Object outcome) throws Exception {
             if (outcome instanceof GateRunner.Outcome gate) return gateContext(gate);
             if (outcome instanceof VisualQaRunner.Outcome visual) return visualContext(visual);
-            if (outcome instanceof RoleRunner.Outcome role) return reviewContext(loaded.root(), role);
+            if (outcome instanceof RoleRunner.Outcome role) {
+                return reviewContext(loaded.root(), role, repairSeverities());
+            }
             return "# " + stage.name() + " failed\n";
         }
     }
@@ -3888,6 +4067,45 @@ public final class TaskLoop {
         }
     }
 
+    /**
+     * The gate a contract amendment's planner and plan reviewer dispatch through: the ceilings
+     * in {@code ceilings}, spent as far as the chain {@code runId} belongs to has spent them.
+     *
+     * The loop routes contract gaps to the planner only when the chain can pay for every call
+     * an amendment may make. Those calls run afterwards, in the supervisor, and preparation's
+     * own gate counts calls and nothing else: a planner dispatched with two minutes of the
+     * chain's deadline left was given its profile's whole wall clock, and a plan reviewer or
+     * a redraft could start after the money ceiling had been reached. This gate asks the
+     * chain's budget before every call, as the loop does, and lowers each call's wall clock
+     * to what is left.
+     *
+     * Build it before the amendment's reservation receipt is written: the chain read here
+     * counts a receipt it finds, so a fresh reservation would be counted as already spent.
+     */
+    public static RoleRunner.DispatchGate amendmentGate(Path root, String runId, TaskSpec.Budget ceilings,
+                                                        java.util.function.LongSupplier nanos) {
+        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.maxCostUsd(),
+                ceilings.maxElapsedMinutes(), nanos);
+        budget.inherit(Chain.after(root, runId));
+        return new RoleRunner.DispatchGate() {
+            @Override public void requireDispatch() {
+                try {
+                    budget.requireRoleRun();
+                } catch (Budget.ExceededException exceeded) {
+                    throw new dev.warden.run.Preparation.Exhausted(exceeded.getMessage());
+                }
+            }
+
+            @Override public boolean hasRoom() { return budget.hasRoom(); }
+
+            @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            @Override public void settleAttempt(Object costUsd, Double declaredBound) {
+                budget.settleAttempt(costUsd, declaredBound);
+            }
+        };
+    }
+
     /** The shortest time a vendor call is started with. See {@link Budget#requireRoleRun}. */
     private static final long MINIMUM_CALL_SECONDS = 60;
 
@@ -3925,6 +4143,7 @@ public final class TaskLoop {
                 Path file = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
                 if (!Files.isRegularFile(file)) return NONE;
                 Map<String, Object> prior = Json.parseObject(Files.readString(file));
+                Path receipt = file.resolveSibling(AMENDMENT_RECEIPT);
                 if (prior.get("chain") instanceof Map<?, ?> chain) {
                     List<String> runs = new ArrayList<>();
                     if (chain.get("runs") instanceof List<?> names) {
@@ -3936,15 +4155,39 @@ public final class TaskLoop {
                             !Boolean.FALSE.equals(chain.get("elapsed_known")),
                             number(chain.get("blocking_reviews_seen")),
                             number(chain.get("escalation_rung")),
-                            decimal(chain.get("cost_cap_unpriced_charge_usd")));
+                            decimal(chain.get("cost_cap_unpriced_charge_usd"))).withAmendment(receipt);
                 }
                 // Written before chains were recorded: the run's own totals are the chain.
                 return new Chain(List.of(runId), number(prior.get("role_runs")),
                         decimal(prior.get("total_cost_usd")), number(prior.get("unpriced_calls")),
-                        number(prior.get("attempts_used")), 0, false);
+                        number(prior.get("attempts_used")), 0, false).withAmendment(receipt);
             } catch (Exception unreadable) {
                 return NONE;
             }
+        }
+
+        /**
+         * This chain with the contract amendment that followed its last run, when there was
+         * one. The planner and the plan reviewer were paid between two runs, so neither run's
+         * own totals hold them; without this a chain could spend on amendments outside every
+         * ceiling it declared. The receipt is written as a reservation of the most calls an
+         * amendment can make before any of them, and replaced by the actual spend after.
+         */
+        Chain withAmendment(Path receipt) {
+            if (!Files.isRegularFile(receipt)) return this;
+            Map<String, Object> spent;
+            try {
+                spent = Json.parseObject(Files.readString(receipt));
+            } catch (Exception unreadable) {
+                return this;
+            }
+            List<String> names = new ArrayList<>(runs);
+            if (spent.get("run_id") instanceof String id && !names.contains(id)) names.add(id);
+            return new Chain(List.copyOf(names), roleRuns + number(spent.get("role_runs")),
+                    costUsd + decimal(spent.get("cost_usd")),
+                    unpricedCalls + number(spent.get("unpriced_calls")), fixAttempts,
+                    elapsedSeconds + number(spent.get("elapsed_seconds")), elapsedKnown,
+                    blockingReviewsSeen, escalationRung, unpricedChargeUsd);
         }
 
         private static long number(Object value) {
@@ -4131,7 +4374,19 @@ public final class TaskLoop {
                     + "`, which is a verdict on the work; only a failure that was never about "
                     + "the work leaves an earlier judgement standing");
         }
-        if (!contractHash.equals(prior.get("contract_sha256"))) {
+        // The run before this one stopped so the planner could amend the acceptance. Its
+        // readers judged the old terms, so none of their verdicts stand; the writer's product
+        // is the candidate being judged again, and paying the writer to reproduce it would
+        // buy the same tree. Only writer stages are kept, and only on the same bytes.
+        // An amendment that did not go through left the contract as it was, and a person
+        // answering retry on it is continuing on the same terms: those verdicts stand.
+        boolean amended = CONTRACT_AMENDMENT.equals(priorReason)
+                && !contractHash.equals(prior.get("contract_sha256"));
+        if (amended) {
+            progress.line("note  " + priorRunId + " sent its acceptance to the planner; the writer's "
+                    + "product is kept and every reading is taken again under the amended contract");
+        }
+        if (!amended && !contractHash.equals(prior.get("contract_sha256"))) {
             // The contract moved. That is usually the end of it — but there is exactly one
             // way it moves that no reviewer would care about, and it is the way an operator is
             // forced to move it in order to continue at all. A run stopped by its call ceiling
@@ -4318,6 +4573,11 @@ public final class TaskLoop {
                         + "': " + entry.getValue());
             }
         }
+        if (amended) {
+            for (String key : List.copyOf(reusable.keySet())) {
+                if (!"implementer".equals(keyToRole.get(key))) reusable.remove(key);
+            }
+        }
         // `reused_judgements` is not set here. What is carried over is decided at the moment
         // each verdict is consumed, because a stage that looks reusable now can be invalidated
         // before its turn by an ordinary dispatch earlier in this same resume. The engine
@@ -4454,6 +4714,20 @@ public final class TaskLoop {
         // this exists: the reviewer's verdict was the most expensive thing the run produced.
         if (Boolean.TRUE.equals(summary.get("candidate_review_passed"))) {
             progress.line("      the candidate passed every review that ran");
+        }
+        // Only P1 stops the loop, so a reader's P2 or P3 used to end here as a clean pass. The
+        // first all-Orca run hid two: the toggle button moves 30 px when the text hides, and the
+        // acceptance never checks the text. The person deciding is owed what the readers said.
+        List<Map<String, Object>> openFindings = dev.warden.dashboard.DecisionPage.openFindings(summary);
+        if (!openFindings.isEmpty()) {
+            progress.line("      " + openFindings.size() + " finding(s) the readers left open "
+                    + "(they did not stop the loop; read them before deciding):");
+            for (Map<String, Object> finding : openFindings.subList(0, Math.min(5, openFindings.size()))) {
+                String message = String.valueOf(finding.get("message"));
+                progress.line("        " + finding.get("severity") + " " + finding.get("category") + " · "
+                        + finding.get("_stage") + ": "
+                        + (message.length() > 160 ? message.substring(0, 157) + "..." : message));
+            }
         }
         if (summary.get("pending_stages") instanceof List<?> pending && !pending.isEmpty()) {
             List<String> names = new ArrayList<>();
@@ -5095,6 +5369,10 @@ public final class TaskLoop {
             case "role_timed_out" -> "the " + failedProfile(summary) + " call ran out of wall "
                     + "clock. Raise limits.wall_clock_minutes on that profile if the task "
                     + "needs longer, or narrow the task, then: " + carryOn + kept(summary);
+            case CONTRACT_AMENDMENT -> "the candidate passed, and its readers found the acceptance "
+                    + "too weak to have proved it (contract_gaps_to_plan). The supervisor of "
+                    + "`warden do`/`warden run` hands that to the planner and continues on its own; "
+                    + "if it did not, answer retry to continue on the current terms: " + carryOn;
             case "orca_worker_not_started" -> "the " + failedProfile(summary) + " Orca worker "
                     + "never took its first turn, so it read nothing. The usual cause is the agent "
                     + "CLI waiting on a first-run screen in that tab: Claude Code asks once per "
@@ -5416,17 +5694,22 @@ public final class TaskLoop {
                 .count();
     }
 
-    private String reviewContext(Path root, RoleRunner.Outcome review) throws Exception {
+    private String reviewContext(Path root, RoleRunner.Outcome review, java.util.Set<String> severities)
+            throws Exception {
         Map<String, Object> artifact = readArtifact(root, review);
-        StringBuilder builder = new StringBuilder("# Independent review returned a failing verdict\n\n");
+        StringBuilder builder = new StringBuilder("# An independent reading asked for changes\n\n");
         if (artifact == null) return builder.append("(the reviewer artifact could not be read)\n").toString();
         builder.append("Reviewer summary: ").append(artifact.get("summary")).append("\n\n");
         for (Findings.Finding finding : Findings.of(artifact)) {
-            if (!finding.blocking()) continue;
+            // P1 always; P2 and P3 when the policy repairs them before the human gate. A
+            // non-blocking finding handed over here is what the operator would otherwise have
+            // had to read at the gate and send back by hand.
+            if (!finding.blocking() && !severities.contains(finding.severity())) continue;
             Map<String, Object> raw = finding.raw();
             builder.append("## ").append(finding.id()).append(" — ").append(finding.path());
             if (raw.get("line") != null) builder.append(':').append(raw.get("line"));
             builder.append("\n\n")
+                    .append("- severity: ").append(finding.severity()).append('\n')
                     .append("- category: ").append(finding.category()).append('\n')
                     .append("- expected: ").append(raw.get("expected")).append('\n')
                     .append("- actual: ").append(raw.get("actual")).append('\n');

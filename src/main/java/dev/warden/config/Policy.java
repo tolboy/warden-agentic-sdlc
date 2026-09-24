@@ -24,7 +24,48 @@ import java.util.Set;
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                      Workflow workflow, boolean workflowDeclared, String failoverMode,
-                     String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry) {
+                     String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry,
+                     Set<String> repairSeverities, String contractGaps) {
+
+    /**
+     * What a reader's `contract_gap` finding on a passing candidate leads to.
+     *
+     * `gate` (the default): it is listed at the human gate. `plan`: before the gate, the
+     * planner is handed the contract and the gaps and may only add acceptance — named checks
+     * and browser scenarios — the plan reviewer reads the amendment, and the chain continues
+     * with the writer's product kept and every reading taken again under the amended terms.
+     * Once per chain. Measured need, 2026-09-22: the second reader filed that the acceptance
+     * never checked the greeting's text, and nothing but the operator could act on it.
+     */
+    public static final Set<String> CONTRACT_GAP_ROUTES = Set.of("gate", "plan");
+
+    public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                  Workflow workflow, boolean workflowDeclared, String failoverMode,
+                  String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry,
+                  Set<String> repairSeverities) {
+        this(roles, reviewRequiredForRisk, workflow, workflowDeclared, failoverMode,
+                repairReserve, escalation, rateLimitRetry, repairSeverities, "gate");
+    }
+
+    /**
+     * Which severities of a reader's `product_defect` finding go back to the implementer
+     * before the human gate. Only P1 ever stops the loop; this decides what else is worth a
+     * bounded repair round. The default is P1 alone, as before.
+     *
+     * Declared as `review.repair_severities: [P1, P2, P3]`, a P2 or P3 is repaired while the
+     * task's fix allowance and budget last, and whatever is still open reaches the gate as a
+     * listed finding rather than a stop. Measured need, 2026-09-22: the visual reader filed
+     * that the toggle button jumps 30 px when the text hides — a P3 that meant a second press
+     * in the same place misses — and the loop, which fixed only P1, called the run clean.
+     */
+    public static final Set<String> DEFAULT_REPAIR_SEVERITIES = Set.of("P1");
+
+    public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                  Workflow workflow, boolean workflowDeclared, String failoverMode,
+                  String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry) {
+        this(roles, reviewRequiredForRisk, workflow, workflowDeclared, failoverMode,
+                repairReserve, escalation, rateLimitRetry, DEFAULT_REPAIR_SEVERITIES);
+    }
 
     public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                   Workflow workflow, boolean workflowDeclared, String failoverMode,
@@ -183,7 +224,8 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     private static final Set<String> ROLE_KEYS = Set.of(
             "profiles", "strategy", "require_independent_vendor", "same_vendor_peer");
     private static final Set<String> PEER_KEYS = Set.of("implementer", "reviewer");
-    private static final Set<String> REVIEW_KEYS = Set.of("required_for_risk", "note");
+    private static final Set<String> REVIEW_KEYS =
+            Set.of("required_for_risk", "repair_severities", "contract_gaps", "note");
 
     public static Policy parse(String yamlText, String source) {
         Values root = Values.of(Yaml.parse(yamlText), source);
@@ -232,6 +274,20 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
                         + "', expected one of " + ProjectConfig.RISK_LEVELS);
             }
         }
+
+        List<String> repairSeverities = review.optStringList("repair_severities", List.of("P1"));
+        for (String severity : repairSeverities) {
+            if (!Set.of("P1", "P2", "P3").contains(severity)) {
+                root.collector().add("review.repair_severities contains '" + severity
+                        + "', expected P1, P2 or P3");
+            }
+        }
+        if (!repairSeverities.contains("P1")) {
+            root.collector().add("review.repair_severities must include P1: a P1 is always repaired "
+                    + "before anything else, and leaving it out would repair a P3 while a P1 stops");
+        }
+
+        String contractGaps = review.requireEnum("contract_gaps", CONTRACT_GAP_ROUTES, "gate");
 
         // A policy that says nothing about order gets the documented loop. Declaring the
         // block replaces the chain wholesale rather than patching it: a workflow assembled
@@ -286,7 +342,8 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
 
         root.throwIfAny();
         return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
-                failoverMode, repairReserve, escalation, rateLimitRetry);
+                failoverMode, repairReserve, escalation, rateLimitRetry, Set.copyOf(repairSeverities),
+                contractGaps);
     }
 
     public boolean reviewRequired(String risk) {

@@ -49,6 +49,7 @@ public final class Preparation {
     public static final String PROTOCOL = "planner_protocol_violation";
     public static final String DRAFT_INVALID = "planner_draft_invalid";
     public static final String REVIEW_REMAINS = "plan_review_findings_remain";
+    public static final String AMENDMENT_EMPTY = "contract_amendment_empty";
 
     /** One retry after a protocol failure, then stop. Not a repair: the draft is discarded. */
     private static final int PROTOCOL_RETRIES = 1;
@@ -74,6 +75,41 @@ public final class Preparation {
 
     private final ProcessRunner processes;
     private final Progress progress;
+
+    /**
+     * A contract already in force, the text it had before this preparation, and the reader
+     * findings that say its acceptance is too weak. Present only when the loop sends a passing
+     * candidate's contract gaps to the planner (`review.contract_gaps: plan`).
+     */
+    public record Amendment(String before, List<Map<String, Object>> gaps) {}
+
+    private Amendment amendment;
+    /** The amended contract this preparation wrote and has not yet seen through review. */
+    private String amendedText;
+    /** The ceilings of a chain this preparation spends for; none for a first plan. */
+    private RoleRunner.DispatchGate chain = () -> { };
+
+    /**
+     * The same preparation, amending the contract on disk instead of drafting one: the
+     * planner is handed the contract and the gaps, only what it adds to the acceptance is
+     * kept ({@link PlannerDraft#amend}), the plan reviewer reads the amended contract, and an
+     * objection restores the previous text before the one redraft. A second objection leaves
+     * the contract as it was.
+     */
+    public Preparation amending(Amendment amendment) {
+        this.amendment = amendment;
+        return this;
+    }
+
+    /**
+     * The same preparation, with every call also admitted by {@code chain} and its wall clock
+     * lowered to what {@code chain} has left. An amendment is paid by a chain that already
+     * spent; see {@link TaskLoop#amendmentGate}.
+     */
+    public Preparation within(RoleRunner.DispatchGate chain) {
+        this.chain = chain;
+        return this;
+    }
 
     public Preparation(ProcessRunner processes, Progress progress) {
         this.processes = processes;
@@ -139,8 +175,60 @@ public final class Preparation {
     public Outcome run(Path root, ProjectConfig project, UserConfig user, String taskId,
                        String runId, String goal, String scope, String risk,
                        PlannerDraft.Access granted, boolean dryRun) throws Exception {
+        if (amendment == null) return prepare(root, project, user, taskId, runId, goal, scope, risk, granted, dryRun);
+        // Whatever ends an amendment short of a passed plan review — an unavailable reviewer,
+        // a timeout, an unreadable verdict, an exception — ends it with the contract that was
+        // in force. The amended text is written before the review so the reviewer reads the
+        // real file; that must never make it the contract by default.
+        Outcome outcome = null;
+        try {
+            outcome = prepare(root, project, user, taskId, runId, goal, scope, risk, granted, dryRun);
+            return outcome;
+        } finally {
+            if (outcome == null || !outcome.ok()) {
+                withdrawAmendment(root.resolve(".warden/tasks").resolve(taskId + ".yaml"));
+            }
+        }
+    }
+
+    /**
+     * Put the contract back as it was before this amendment, unless someone else has edited
+     * it since: a person's edit made while the planner worked is theirs, not this run's to undo.
+     */
+    private void withdrawAmendment(Path taskFile) {
+        if (amendedText == null) return;
+        try {
+            String now = Files.readString(taskFile, StandardCharsets.UTF_8);
+            if (now.equals(amendedText)) {
+                Files.writeString(taskFile, amendment.before(), StandardCharsets.UTF_8);
+                progress.line("      the amendment was withdrawn; the contract is as it was");
+            } else if (!now.equals(amendment.before())) {
+                progress.line("      the contract was edited by someone else while the amendment was "
+                        + "read; it is left as they wrote it");
+            }
+        } catch (IOException unreadable) {
+            progress.line("      could not put the contract back after the amendment failed: "
+                    + unreadable.getMessage() + "; check " + taskFile);
+        } finally {
+            amendedText = null;
+        }
+    }
+
+    /**
+     * The most vendor calls one amendment can make: the planner, its one protocol retry and
+     * its one redraft, and each reading of the plan reviewer when the policy names one. The
+     * loop routes a contract gap to the planner only when the chain can pay for all of them.
+     */
+    public static int mostAmendmentCalls(UserConfig user) {
+        return 1 + PROTOCOL_RETRIES + REDRAFTS + (reviewsPlans(user) ? 1 + REDRAFTS : 0);
+    }
+
+    private Outcome prepare(Path root, ProjectConfig project, UserConfig user, String taskId,
+                            String runId, String goal, String scope, String risk,
+                            PlannerDraft.Access granted, boolean dryRun) throws Exception {
         ConfigLoader.Loaded loaded = bootstrap(root, project, taskId, goal, scope, risk);
         Path context = writeContext(root, runId, goal, granted, project);
+        if (amendment != null) appendAmendment(context);
         GitRepository git = new GitRepository(root, processes);
         GitRepository.WorkingTreeSnapshot baseline;
         try {
@@ -148,7 +236,7 @@ public final class Preparation {
         } catch (Exception cannotSnapshot) {
             baseline = null;
         }
-        Bootstrap gate = new Bootstrap();
+        Bootstrap gate = new Bootstrap(chain);
         RoleRunner roles = new RoleRunner(processes, gate).atStage("prepare");
 
         Spend spent = new Spend(0, 0, 0);
@@ -253,8 +341,23 @@ public final class Preparation {
             }
             TaskDraft.Written written;
             try {
-                written = PlannerDraft.write(root, taskId, goal, project, granted, artifact);
-                progress.line("      compiled " + written.file());
+                if (amendment != null) {
+                    Path taskFile = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+                    String amended = PlannerDraft.amend(amendment.before(), artifact, project,
+                            taskFile.toString());
+                    if (amended == null) {
+                        return fail(AMENDMENT_EMPTY, "the planner added no named check and no browser "
+                                + "scenario the contract did not already have; the contract is as it "
+                                + "was, and the gaps go to a person", outcome, spent, reviewRounds);
+                    }
+                    Files.writeString(taskFile, amended, StandardCharsets.UTF_8);
+                    amendedText = amended;
+                    written = new TaskDraft.Written(taskFile, taskId, true);
+                    progress.line("      amended " + written.file());
+                } else {
+                    written = PlannerDraft.write(root, taskId, goal, project, granted, artifact);
+                    progress.line("      compiled " + written.file());
+                }
             } catch (TaskDraft.TaskConflict conflict) {
                 return fail("task_conflict", conflict.getMessage(), outcome, spent, reviewRounds);
             } catch (ConfigException invalid) {
@@ -325,6 +428,23 @@ public final class Preparation {
             }
             progress.line("      plan review objected: " + blocking.size()
                     + " blocking finding(s)");
+            if (amendment != null) {
+                // An amendment is this preparation's own edit to a contract that was in force:
+                // the objection withdraws it, and the one redraft starts from the old text.
+                withdrawAmendment(written.file());
+                if (redrafts >= REDRAFTS) {
+                    return new Outcome(false, REVIEW_REMAINS, reviewMessage(blocking, written)
+                            + " The amendment was withdrawn; the contract is as it was.",
+                            review, written, spent.runs, spent.cost, spent.unpriced,
+                            planReview(reviewRounds));
+                }
+                redrafts++;
+                gate.grant(1);
+                plannerContext = writeRedraftContext(root, runId, goal, granted, project, blocking, written);
+                appendAmendment(plannerContext);
+                progress.line("      sending the objection back to the planner once");
+                continue;
+            }
             // A contract that was already on disk is not this preparation's to discard: the
             // objection goes to a person, with the contract and the findings both intact.
             if (written.existed() || redrafts >= REDRAFTS) {
@@ -504,22 +624,42 @@ public final class Preparation {
      * RoleRunner returns the spent-subscription outcome instead of paying a successor.
      * The plan review and the one redraft it may cause are granted one call at a time by
      * the preparation that decides to make them; nothing here assumes them.
+     *
+     * Every call granted here must also be admitted by {@code chain}, which answers for the
+     * money, the calls and the time of a chain the preparation spends for.
      */
     static final class Bootstrap implements RoleRunner.DispatchGate {
+        private final RoleRunner.DispatchGate chain;
         private int remaining = 1;
         private int protocolRetries = PROTOCOL_RETRIES;
+
+        Bootstrap() { this(() -> { }); }
+
+        Bootstrap(RoleRunner.DispatchGate chain) { this.chain = chain; }
 
         @Override
         public void requireDispatch() {
             if (remaining <= 0) {
                 throw new Exhausted("planner bootstrap allows one call with no repair");
             }
+            chain.requireDispatch();
             remaining--;
         }
 
         @Override
         public boolean hasRoom() {
-            return remaining > 0;
+            return remaining > 0 && chain.hasRoom();
+        }
+
+        @Override
+        public java.time.Duration wallClockCap() { return chain.wallClockCap(); }
+
+        @Override
+        public void reserve(Double declaredBound) { chain.reserve(declaredBound); }
+
+        @Override
+        public void settleAttempt(Object costUsd, Double declaredBound) {
+            chain.settleAttempt(costUsd, declaredBound);
         }
 
         void grantProtocolRetry() {
@@ -608,6 +748,37 @@ public final class Preparation {
             body.append("- `").append(entry.getKey()).append("`: ").append(entry.getValue()).append('\n');
         }
         return body.toString();
+    }
+
+    /**
+     * What an amending planner is told on top of the bootstrap: what it may change, the
+     * contract as it stands, and the findings it is answering.
+     */
+    private void appendAmendment(Path context) throws IOException {
+        StringBuilder body = new StringBuilder("\n# This is an amendment to a contract in force, not a new plan\n\n");
+        body.append("The task below has been implemented and passed the checks it has. Independent readers of\n"
+                + "the candidate found its acceptance too weak to have proved it. Close those gaps, and\n"
+                + "only those:\n\n"
+                + "- keep `operator_goal`, `scope` and `risk` exactly as in the contract below;\n"
+                + "- in `acceptance`, name checks from the list above that would fail if a finding's\n"
+                + "  expected behaviour broke; in `visual_qa.scenarios`, add browser scenarios in the\n"
+                + "  harness grammar `WxH: <matcher> <assertion> [-> <matcher> <assertion> ...]`, with\n"
+                + "  matchers `testid=`, `css=`, `role=`, `text=` and assertions `visible`, `hidden`,\n"
+                + "  `click`; a `text=` step needs an anchored step (`testid=`, `css=`, `role=`) before it\n"
+                + "  in the same scenario, e.g. `1280x720: testid=greeting visible -> text=Hello, World visible`;\n"
+                + "- nothing you leave out is removed: Warden keeps every existing check and scenario and\n"
+                + "  adds only what you name that is not there yet; your other fields are not used;\n"
+                + "- if a finding cannot be expressed as a named check or a scenario, say so in `summary`.\n\n");
+        body.append("## The contract as it stands\n\n```yaml\n").append(amendment.before().strip()).append("\n```\n\n");
+        body.append("## What the readers found\n\n");
+        for (Map<String, Object> gap : amendment.gaps()) {
+            body.append("- **").append(gap.get("severity")).append("** [").append(gap.get("category")).append("] ")
+                    .append(gap.get("message")).append('\n');
+            for (String key : List.of("expected", "actual", "suggestion")) {
+                if (gap.get(key) != null) body.append("  - ").append(key).append(": ").append(gap.get(key)).append('\n');
+            }
+        }
+        Files.writeString(context, body.toString(), StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.APPEND);
     }
 
     /** What the second planner is handed: the compiled contract and the draft it came from. */

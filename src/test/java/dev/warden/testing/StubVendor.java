@@ -336,6 +336,36 @@ public final class StubVendor {
                                 "summary", objects ? "still open" : "closed A",
                                 "findings", findings))));
             }
+            // A passing reading that still files a P3 product defect: on the first reading only
+            // (`-once`), or on every reading (`-always`). The shape of the first all-Orca run's
+            // visual finding: pass, and the button moves when the text hides.
+            // A passing reading that says the acceptance is too weak to have proved the candidate:
+            // the first all-Orca run's second reader, on a contract that never checked the text.
+            case "review-gap-p3" -> System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of(
+                    "structuredOutput", java.util.Map.of("role", "reviewer", "task_id", "hello",
+                            "status", "completed", "verdict", "pass", "summary", "passes; acceptance is thin",
+                            "findings", List.of(java.util.Map.<String, Object>of("id", "GAP-1", "severity", "P3",
+                                    "category", "contract_gap", "path", ".warden/tasks/hello.yaml",
+                                    "message", "the acceptance never checks the text",
+                                    "expected", "a check fails when the text is wrong",
+                                    "actual", "every check passes whatever the text says",
+                                    "confidence", "confirmed", "scenario", "change the text",
+                                    "evidence_refs", List.of("receipt-0")))))));
+            case "review-p3-once", "review-p3-always" -> {
+                boolean objects = mode.equals("review-p3-always") || withinFirst(args);
+                var findings = objects
+                        ? List.of(java.util.Map.<String, Object>of("id", "B", "severity", "P3",
+                                "category", "product_defect", "path", "src/result.txt",
+                                "message", "the button moves when the text hides",
+                                "expected", "the button stays put", "actual", "it moves 30px",
+                                "confidence", "confirmed", "scenario", "press it twice",
+                                "evidence_refs", List.of("receipt-0")))
+                        : List.of();
+                System.out.println(dev.warden.json.Json.writePretty(java.util.Map.of("structuredOutput",
+                        java.util.Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                                "verdict", "pass", "summary", objects ? "passes, one nit" : "passes clean",
+                                "findings", findings))));
+            }
             // Always re-raises A on receipt-0. Used as review-second after review-closes-one.
             case "review-reraise-stale" -> System.out.println(
                     "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
@@ -665,7 +695,7 @@ public final class StubVendor {
                         + "\"total_cost_usd\":0.004}");
             }
             case "plan", "plan-shell", "plan-scope", "plan-goal", "plan-access", "plan-sneaky",
-                    "plan-commit", "plan-stage", "plan-schema" -> {
+                    "plan-commit", "plan-stage", "plan-schema", "plan-amend" -> {
                 String prompt = "";
                 String promptFile = flag(args, "--prompt-file");
                 if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
@@ -718,6 +748,11 @@ public final class StubVendor {
                 artifact.put("stop_conditions", java.util.List.of("stop if the file already exists"));
                 artifact.put("summary", "drafted");
                 artifact.put("call_plan_reserved_before_dispatch", reserved);
+                if (mode.equals("plan-amend")) {
+                    // An amending planner answering "the acceptance never checks the text".
+                    artifact.put("visual_qa", java.util.Map.of("required", true, "scenarios", java.util.List.of(
+                            "1280x720: testid=greeting visible -> text=Hello, World visible")));
+                }
                 java.util.Map<String, Object> envelope = new java.util.LinkedHashMap<>();
                 envelope.put("structuredOutput", artifact);
                 envelope.put("total_cost_usd", 0.01);

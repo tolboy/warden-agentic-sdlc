@@ -312,7 +312,7 @@ public final class VisualQaRunner {
         }
     }
 
-    private static String defaultStart(Path root) {
+    public static String defaultStart(Path root) {
         dev.warden.config.PreviewServer serving = dev.warden.config.PreviewServer.detect(root);
         return serving == null ? null : serving.command();
     }
@@ -331,7 +331,7 @@ public final class VisualQaRunner {
         }
     }
 
-    private static Process startServer(Path root, String command, Path log) throws IOException {
+    public static Process startServer(Path root, String command, Path log) throws IOException {
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         List<String> shell = windows ? List.of("cmd.exe", "/d", "/s", "/c", command)
                 : List.of("/bin/sh", "-lc", command);
@@ -340,7 +340,7 @@ public final class VisualQaRunner {
                 .redirectOutput(log.toFile()).start();
     }
 
-    private static boolean waitForHttp(String url, Duration limit) throws InterruptedException {
+    public static boolean waitForHttp(String url, Duration limit) throws InterruptedException {
         long deadline = System.nanoTime() + limit.toNanos();
         while (System.nanoTime() < deadline) {
             if (httpOk(url)) return true;

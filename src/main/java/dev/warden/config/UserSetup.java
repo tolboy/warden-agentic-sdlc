@@ -125,6 +125,13 @@ public final class UserSetup {
             review:
               # A low-risk task still passes every machine gate; it just does not pay a reviewer.
               required_for_risk: [medium, high]
+              # Only a P1 stops the loop. Name P2/P3 here and a reader's non-blocking product
+              # defect goes back to the writer for a bounded repair before the human gate:
+              # repair_severities: [P1, P2, P3]
+              # A reader's contract_gap on a passing candidate: `gate` lists it for the person;
+              # `plan` sends it to the planner, which may only add checks and browser scenarios,
+              # and the chain continues with every reading taken again.
+              # contract_gaps: plan
 
             # The opt-in escalation ladder. After `after_blocking_reviews` readings of one task
             # objected with blocking product findings, the repair goes to the next rung's

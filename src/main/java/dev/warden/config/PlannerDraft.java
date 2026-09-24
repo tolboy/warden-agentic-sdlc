@@ -98,6 +98,170 @@ public final class PlannerDraft {
     }
 
     /**
+     * The existing contract with what an amending planner added to its acceptance, and
+     * nothing else changed; null when the draft adds nothing.
+     *
+     * An amendment answers readers who found the acceptance too weak to have proved a
+     * candidate that already passed. It may add: browser scenarios, appended to the existing
+     * `visual_qa` list with the operator's start, url and comments left as they were; and named
+     * checks from `project.yaml`, merged into a bare name or a `names:` list. It may not touch
+     * the goal, scope, risk, authority, budgets or any existing check or scenario — the draft's
+     * other fields are read for nothing. A contract whose checks are a literal command list
+     * gains no checks (those are commands, not names), and one with no browser gains no
+     * scenarios, because there is nothing to start. The result must parse and resolve against
+     * the project, or it is refused.
+     */
+    public static String amend(String before, Map<String, Object> artifact, ProjectConfig project,
+                               String source) {
+        TaskSpec existing = TaskSpec.parse(before, source);
+        String newline = before.contains("\r\n") ? "\r\n" : "\n";
+        List<String> lines = new ArrayList<>(List.of(before.split("\r?\n", -1)));
+        boolean added = false;
+
+        List<String> have = existing.visualQa() == null ? List.of() : existing.visualQa().scenarios();
+        List<String> fresh = new ArrayList<>();
+        if (artifact.get("visual_qa") instanceof Map<?, ?> visual && visual.get("scenarios") instanceof List<?> listed) {
+            for (Object item : listed) {
+                if (item instanceof String scenario && !scenario.isBlank()
+                        && !have.contains(scenario.strip()) && !fresh.contains(scenario.strip())) {
+                    fresh.add(scenario.strip());
+                }
+            }
+        }
+        if (!fresh.isEmpty() && existing.visualQa() != null && existing.visualQa().required()) {
+            added |= appendScenarios(lines, have, fresh);
+        }
+
+        List<String> named = new ArrayList<>();
+        if (artifact.get("acceptance") instanceof List<?> acceptance) {
+            // `{check: <name>}` only, exactly as a draft is compiled: a bare string is a shell
+            // command and is never promoted to a trusted check, not even by an amendment.
+            for (Object item : acceptance) {
+                if (item instanceof Map<?, ?> entry && entry.get("check") instanceof String name
+                        && project.checks().containsKey(name) && !named.contains(name)) {
+                    named.add(name);
+                }
+            }
+        }
+        if (!named.isEmpty()) added |= mergeCheckNames(lines, named, project);
+
+        if (!added) return null;
+        String amended = String.join(newline, lines);
+        TaskSpec.parse(amended, source).resolve(project, source);
+        return amended;
+    }
+
+    /**
+     * Appends scenarios after the last item of the top-level `visual_qa.scenarios` list.
+     *
+     * @param have the scenarios already in force, as the contract parsed them. A flow list is
+     *             rewritten from these rather than from its own text: a scenario is free text,
+     *             and splitting `["… -> text=Hello, World visible"]` at its comma turned one
+     *             condition into two altered ones.
+     */
+    private static boolean appendScenarios(List<String> lines, List<String> have, List<String> fresh) {
+        int visual = -1;
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).equals("visual_qa:") || lines.get(i).startsWith("visual_qa: ")
+                    || lines.get(i).startsWith("visual_qa:\t")) { visual = i; break; }
+        }
+        if (visual < 0) return false;
+        int scenarios = -1;
+        int end = lines.size();
+        for (int i = visual + 1; i < lines.size(); i++) {
+            String line = lines.get(i);
+            if (!line.isBlank() && !line.startsWith(" ") && !line.startsWith("\t") && !line.startsWith("#")) {
+                end = i;
+                break;
+            }
+            if (line.stripLeading().startsWith("scenarios:")) scenarios = i;
+        }
+        if (scenarios < 0) return false;
+        String header = lines.get(scenarios);
+        int headerIndent = header.length() - header.stripLeading().length();
+        String inline = header.stripLeading().substring("scenarios:".length()).strip();
+        if (inline.startsWith("[") ) {
+            // `scenarios: []` or a flow list: rewritten as a block list holding both.
+            List<String> block = new ArrayList<>();
+            block.add(" ".repeat(headerIndent) + "scenarios:");
+            for (String value : have) block.add(" ".repeat(headerIndent + 2) + "- " + TaskDraft.quote(value));
+            for (String value : fresh) block.add(" ".repeat(headerIndent + 2) + "- " + TaskDraft.quote(value));
+            lines.remove(scenarios);
+            lines.addAll(scenarios, block);
+            return true;
+        }
+        int insertAt = scenarios + 1;
+        String itemIndent = " ".repeat(headerIndent + 2);
+        for (int i = scenarios + 1; i < end; i++) {
+            String line = lines.get(i);
+            if (line.isBlank() || line.stripLeading().startsWith("#")) continue;
+            int indent = line.length() - line.stripLeading().length();
+            if (indent <= headerIndent) break;
+            if (line.stripLeading().startsWith("-")) {
+                insertAt = i + 1;
+                itemIndent = line.substring(0, indent);
+            }
+        }
+        List<String> block = new ArrayList<>();
+        for (String value : fresh) block.add(itemIndent + "- " + TaskDraft.quote(value));
+        lines.addAll(insertAt, block);
+        return true;
+    }
+
+    /**
+     * Merges check names into a bare `checks: name` or a `checks:` block with `names: [...]`,
+     * or adds the key when the contract has none. A literal command list is left alone.
+     *
+     * A contract with no names of its own runs the project's `defaults.checks`, and that set
+     * is kept in the list written: an explicit `names:` replaces the default rather than
+     * adding to it, so an amendment that wrote only the new name stopped running every check
+     * the candidate had passed.
+     */
+    private static boolean mergeCheckNames(List<String> lines, List<String> named, ProjectConfig project) {
+        int key = -1;
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).equals("checks:") || lines.get(i).startsWith("checks: ")) { key = i; break; }
+        }
+        List<String> current = new ArrayList<>();
+        int end = key + 1;
+        if (key >= 0) {
+            String inline = lines.get(key).substring("checks:".length()).strip();
+            if (inline.startsWith("[")) return false; // literal commands, not names
+            if (!inline.isEmpty() && !inline.startsWith("#")) {
+                current.add(inline);
+            } else {
+                while (end < lines.size() && (lines.get(end).isBlank() || lines.get(end).startsWith(" "))) {
+                    String entry = lines.get(end).strip();
+                    if (entry.startsWith("names:")) {
+                        String list = entry.substring("names:".length()).strip();
+                        if (!list.startsWith("[")) return false;
+                        for (String part : list.substring(1, Math.max(1, list.lastIndexOf(']'))).split(",")) {
+                            if (!part.isBlank()) current.add(part.strip());
+                        }
+                    } else if (!entry.isEmpty() && !entry.startsWith("#")) {
+                        return false; // a shape this edit does not know; leave it to a person
+                    }
+                    end++;
+                }
+            }
+        }
+        if (current.isEmpty() && project.defaultChecks() != null) current.add(project.defaultChecks());
+        List<String> union = new ArrayList<>(current);
+        for (String name : named) if (!union.contains(name)) union.add(name);
+        if (union.size() == current.size()) return false;
+        List<String> block = List.of("checks:", "  names: [" + String.join(", ", union) + "]");
+        if (key < 0) {
+            int insertAt = lines.size();
+            while (insertAt > 0 && lines.get(insertAt - 1).isBlank()) insertAt--;
+            lines.addAll(insertAt, block);
+        } else {
+            for (int i = end - 1; i >= key; i--) lines.remove(i);
+            lines.addAll(key, block);
+        }
+        return true;
+    }
+
+    /**
      * The keys a person owns in a contract, in the order they are written.
      *
      * A planner drafts what the work is; these say what it may spend, who does it, and what

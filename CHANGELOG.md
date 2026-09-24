@@ -155,6 +155,78 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- The human decision is answered with a button in Orca. When a run stops for a person inside
+  an Orca worktree, `warden do` (and `warden run`, which already waited on failure gates)
+  opens a "Warden · решение" tab in that worktree's Orca browser: the goal, what each stage
+  concluded and who read it, the changed files, the screenshots, and a button per option
+  with a note field. A button goes through the same path as `warden approve` (version token,
+  candidate fingerprint for an acceptance, gate expiry, duplicate refusal), and a refusal is
+  shown on the page. `warden approve` and the Orca gate still count; whichever answers first
+  wins, and the Orca gate is read at once and then every ten seconds while the page is
+  open. `retry`, like `advance`, `switch` and `apply`, now continues the loop instead of
+  printing a command, and so does "Отклонить" with a note: the note is handed to the next
+  implementer, as `--continue` does, now together with the readers' open findings from the
+  rejected run — the list the person decided on; without a note the rejection closes the work. An
+  `advance` that would stop on the same unchanged blocker is refused before the decision is
+  recorded, so the gate stays open to another answer. `warden decide <run-id>` opens the
+  same page for a run already waiting. The page listens on 127.0.0.1 under a random path token and serves only this
+  run's screenshots. `--no-decision-page` keeps the old wait. Measured need: on 2026-09-22
+  the only ways to answer were `warden approve` or `run-use` then `gate-resolve --from` in an
+  Orca terminal. Suite `decision-page`.
+- The gate says what the readers said. Only P1 stops the loop, so a P2 or P3 used to reach
+  the person as a clean pass: on the first all-Orca run the visual reader filed that hiding
+  the greeting moves the button 30 px, so a second press in the same place misses, and the
+  second reader filed that the acceptance never checks the text; the gate said "every stage
+  passed" and the operator asked exactly the question the first finding answers. Every open
+  finding is now on the decision page (severity, category, who, expected, actual, suggestion)
+  and listed in the run's closing narration. Screenshots are captioned from the harness's
+  own report, in the order they were taken ("клик №2 по toggle → greeting виден ✓"), not by
+  file name, and the scenarios it checked are listed — from the newest attempt of each stage
+  only, so frames of a browser pass a repair replaced are not shown under the verdict of the
+  pass that followed it. "Открыть кандидата в браузере Orca"
+  starts the candidate with the task's own `visual_qa.start` and opens it as a tab, so the
+  person deciding can press the button themselves; the server stops with the page.
+- `review.repair_severities` in policy: which non-blocking product defects go back to the
+  writer before the human gate. The default stays `[P1]`. Declared `[P1, P2, P3]`, a reader's
+  P2 or P3 `product_defect` gets a repair round, bounded by the task's `max_fix_attempts`
+  and paid for only when the call reserve, the budget and an independent judge allow it —
+  otherwise it is skipped (`optional_repairs_skipped`) and listed at the gate rather than
+  stopping the run. Only P1 still stops the loop. The repair context hands the writer every
+  severity the policy repairs, with its severity named. Suite `task loop`.
+- `review.contract_gaps: plan` in policy: a passing run whose readers filed `contract_gap`
+  findings goes to the planner before the gate. The run stops as
+  `contract_amendment_requested` (not a verdict on the work); the supervisor of `warden do` /
+  `warden run` hands the planner the contract and the gaps, keeps only what the draft adds —
+  named checks from `project.yaml` and browser scenarios appended to the operator's own
+  `visual_qa` list, with the goal, scope, risk, start, url and comments untouched
+  (`PlannerDraft.amend`) — lets the plan reviewer read the amendment (one redraft, and the
+  old text is restored if it objects twice), then answers the pending decision `retry` as
+  `warden:contract-amendment`. The continuation keeps the writer's product and takes every
+  reading again under the amended terms. The amendment is paid by the chain: the loop routes
+  there only when the budget covers the most calls an amendment can make plus the readings
+  taken again (`contract_amendment_calls`; otherwise `contract_amendment_skipped` and the gaps
+  go to the gate), never under a strict cost cap. Each of its calls then passes the chain's
+  own ceilings as the loop's calls do (`TaskLoop.amendmentGate`): none starts once the chain's
+  calls or money are spent or less than a minute of its deadline is left, and each call's
+  wall clock is lowered to what the deadline leaves, so a plan reviewer cannot start after
+  the planner spent the last of the money (`budget_exhausted`, and the amendment is
+  withdrawn). The supervisor writes
+  `contract-amendment.json` beside the stopped run — the reservation before the first call,
+  the actual spend after — which the next run inherits into `chain`. A named check is added
+  beside the checks the contract already ran: one with no `checks:` of its own keeps the
+  project's `defaults.checks` in the `names:` list, which would otherwise replace it. A
+  scenario list written in flow form is rewritten from the parsed scenarios, so a comma
+  inside a quoted scenario no longer splits it in two. Any outcome short of a
+  passed plan review (an unavailable or timed-out reviewer, an unreadable verdict, an
+  exception) puts the contract back as it was, unless someone else edited it meanwhile. It is
+  offered once per chain, and a retry of the amended run after, say, a quota stop keeps
+  `contract_amended_from`. Default `gate`: the gaps are listed on the decision page. Suites
+  `planner`, `task loop`.
+- `warden do` plans by default: `--prepare auto`. A task with no contract yet gets the
+  planner (and the plan reviewer, when the policy names one); a task that already has a
+  contract is not replanned, and a policy with no planner role drafts as before. On
+  2026-09-22 a greenfield page drafted without a planner got two generic scenarios and its
+  acceptance was written by hand. Suite `planner`.
 - Per-run roster overlays so a Unity loop does not rewrite `~/.warden`. `warden run` and
   `warden do` take `--use <stage>=<profile>`, `--effort <stage>=<level>` and
   `--host <stage>=orca`; a task may declare the same under `use:`, and flags win. Overlays
