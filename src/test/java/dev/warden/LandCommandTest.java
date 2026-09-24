@@ -86,8 +86,8 @@ public final class LandCommandTest implements Suite {
     /**
      * {@code land --commit}, then {@code land --push}. Push implies commit, and the commit
      * step used to fail with "nothing to commit" instead of moving on. The candidate adds no
-     * file: a new file's acceptance fingerprint does not survive its own commit yet, which is
-     * a separate defect in the fingerprint, not in this step.
+     * file; one that adds or moves files is landed the same way in the `task loop` suite,
+     * where the fingerprint that has to survive land's own commit is the subject.
      */
     private static void aSecondLandPushesWhatTheFirstCommitted(Check check, Path sandbox) throws Exception {
         Path project = acceptedProject(sandbox, "land-twice", false);
