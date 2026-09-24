@@ -28,6 +28,7 @@ public final class RuntimeTest implements Suite {
         ProcessRunner.Result timedOut = runner.run(shell(slowCommand()), Path.of("."), Duration.ofMillis(100), 1024);
         check.that("timeout settles", timedOut.timedOut());
         check.that("timed-out process is no longer successful", !timedOut.ok());
+        stdinChecks(check, runner);
 
         Path repository = fixture();
         try {
@@ -467,6 +468,82 @@ public final class RuntimeTest implements Suite {
         Process process = new ProcessBuilder(command).directory(cwd.toFile()).redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes());
         if (process.waitFor() != 0) throw new IllegalStateException(String.join(" ", command) + ": " + output);
+    }
+
+    /**
+     * A prompt delivered on stdin must not be able to stop the controller.
+     *
+     * The runner wrote the whole prompt before it started reading the child's output and
+     * before it began timing the child. A vendor that never read its stdin, handed a prompt
+     * larger than a pipe holds, blocked that write for as long as the vendor lived — no
+     * timeout, wall-clock cap or chain deadline applied — and one that printed before reading
+     * deadlocked outright: it waited for its stdout to be read, the runner waited for its stdin
+     * to be. Each call is bounded here, so a regression fails the check instead of the suite.
+     */
+    private static void stdinChecks(Check check, ProcessRunner runner) throws Exception {
+        String prompt = "x".repeat(8 * 1024 * 1024);
+
+        long started = System.nanoTime();
+        ProcessRunner.Result ignored = bounded(() -> runner.run(stub("stdin-ignored"), Path.of("."),
+                Duration.ofSeconds(2), 1024, prompt), Duration.ofSeconds(60));
+        long seconds = Duration.ofNanos(System.nanoTime() - started).toSeconds();
+        check.that("a child that never reads a prompt larger than its pipe is stopped by the "
+                + "timeout rather than waited on", ignored != null && ignored.timedOut());
+        check.that("and the call returns about when the timeout says (" + seconds + " s)", seconds < 20);
+
+        ProcessRunner.Result printed = bounded(() -> runner.run(stub("stdout-before-stdin"), Path.of("."),
+                Duration.ofSeconds(60), 1024, prompt), Duration.ofSeconds(90));
+        check.that("a child that prints before it reads does not deadlock with the runner",
+                printed != null && printed.ok());
+        check.contains("and it reads the whole prompt", printed == null ? "" : printed.stderr(),
+                "read " + prompt.length());
+        check.that("while its output is still capped", printed != null && printed.stdoutTruncated());
+
+        // Unix only: there Process.destroy closes stdin after the signal, and that close waits
+        // for the lock the blocked prompt write holds. A child that ignores SIGTERM and never
+        // reads kept the stop inside destroy until it exited by itself, here after 60 s.
+        // Windows terminates without touching the streams, so it has nothing to show.
+        if (!System.getProperty("os.name").toLowerCase().contains("win")) {
+            started = System.nanoTime();
+            ProcessRunner.Result stubborn = bounded(() -> runner.run(
+                    List.of("sh", "-c", "trap '' TERM; exec sleep 60"), Path.of("."),
+                    Duration.ofSeconds(1), 1024, prompt), Duration.ofSeconds(45));
+            seconds = Duration.ofNanos(System.nanoTime() - started).toSeconds();
+            check.that("a child that ignores SIGTERM and never reads its prompt is killed after "
+                    + "the grace period", stubborn != null && stubborn.timedOut());
+            check.that("and the stop does not wait for it to exit by itself (" + seconds + " s)",
+                    seconds < 20);
+        }
+    }
+
+    /** The call's result, or null when it had not returned within {@code limit}. */
+    private static <T> T bounded(java.util.concurrent.Callable<T> call, Duration limit) throws Exception {
+        var result = new java.util.concurrent.atomic.AtomicReference<T>();
+        var failure = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        Thread caller = Thread.ofVirtual().start(() -> {
+            try {
+                result.set(call.call());
+            } catch (Exception failed) {
+                failure.set(failed);
+            }
+        });
+        caller.join(limit);
+        if (failure.get() != null) throw failure.get();
+        return result.get();
+    }
+
+    /** The stand-in vendor on the JVM already running this suite, identical on every platform. */
+    private static List<String> stub(String mode) {
+        String separator = java.io.File.pathSeparator;
+        StringBuilder classPath = new StringBuilder();
+        for (String entry : System.getProperty("java.class.path").split(java.util.regex.Pattern.quote(separator))) {
+            if (entry.isBlank()) continue;
+            if (classPath.length() > 0) classPath.append(separator);
+            classPath.append(Path.of(entry).toAbsolutePath().normalize());
+        }
+        String java = Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name").toLowerCase().contains("win") ? "java.exe" : "java").toString();
+        return List.of(java, "-cp", classPath.toString(), "dev.warden.testing.StubVendor", mode);
     }
 
     private static List<String> shell(String command) {

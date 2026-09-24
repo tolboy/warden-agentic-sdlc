@@ -41,6 +41,21 @@ that exists in code but has never been run live says so.
   at `warden approve --decision accept` (run the gates again) and at `warden land` (run the
   task again and accept the result) — and a carried judgement for it is re-judged rather
   than reused. Suites `runtime`, `task loop`.
+- A prompt delivered on stdin (`prompt_delivery: stdin`) can no longer hang the controller
+  past every limit. `ProcessRunner` wrote the whole prompt before it started reading the
+  child's output and before it started the timeout. A vendor that never read a prompt larger
+  than its pipe held that write, and the run, for as long as it lived: no timeout, wall clock
+  or chain deadline applied, and no human gate appeared. One that printed before reading
+  deadlocked for good, because each side waited on the other. Measured on Windows against the
+  old runner: an 8 MB prompt to a child that ignores stdin was still blocked when the test's
+  60 s bound expired (timeout 2 s), and a child that prints 4 MB first never returned. The
+  output readers now start first, and the prompt is written on its own thread under the
+  timeout. On a stop, the process tree is killed, which breaks the pipe and ends the write.
+  The stop signals through `ProcessHandle`, not `Process.destroy`: on Unix the latter closes
+  stdin after the signal, and that close waits for the lock the blocked write holds, so a child
+  that ignored SIGTERM kept the stop inside `destroy` until it exited by itself. Measured in a
+  Linux container with a child that ignores SIGTERM and sleeps 40 s: 40.1 s before, 3.1 s
+  after (killed after the 2 s grace). Suite `runtime`.
 - `warden roster model` switches the model the vendor is asked for, not only the label.
   A direct profile that spells the old model in `args` (every hand-written profile on the
   maintainer's machine passed `--model opus` literally) now has that item rewritten to

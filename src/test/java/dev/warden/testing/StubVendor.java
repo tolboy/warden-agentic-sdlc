@@ -565,6 +565,21 @@ public final class StubVendor {
                 System.err.println("Error: max turns reached");
                 System.exit(1);
             }
+            // A vendor that never reads the prompt it was handed on stdin. With the prompt
+            // larger than a pipe holds, whoever writes it blocks until something reads — and
+            // nothing here ever will.
+            case "stdin-ignored" -> Thread.sleep(120_000);
+            // A vendor that prints a lot before it reads its input, as a CLI streaming a banner
+            // or an event log does. Its stdout pipe fills, and it waits for that to be read
+            // before it gets to stdin. Says on stderr how much of the prompt arrived.
+            case "stdout-before-stdin" -> {
+                byte[] line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n"
+                        .getBytes(StandardCharsets.UTF_8);
+                for (int i = 0; i < 65_536; i++) System.out.write(line);
+                System.out.flush();
+                long read = System.in.readAllBytes().length;
+                System.err.println("read " + read);
+            }
             case "stdin" -> {
                 // Answers only if the prompt reached it through standard input, so a profile
                 // that claims stdin delivery and does not get it fails loudly.
