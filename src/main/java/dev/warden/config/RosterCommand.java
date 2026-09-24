@@ -498,6 +498,15 @@ public final class RosterCommand {
             String unreached = unreachedModel(document.render(), file, profile.model());
             if (unreached != null) return fail("model_not_forwarded", unreached, file, null, null);
         }
+        // The reader has the last word here too: a stamp the edit could not find in some
+        // spelling would hand the old model's verification to the new one.
+        if (!keepVerified && stillVerified(document.render(), file)) {
+            return fail("verification_not_cleared", "profile '" + name + "' would still read as "
+                    + "verified after the model change: roster could not find verification.verified_on "
+                    + "in the layout this file uses, and the new model has not been checked. Nothing "
+                    + "was written. Remove verified_on by hand, or pass --keep-verified if the stamp "
+                    + "really covers the new model", file, null, null);
+        }
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("verify_with", "warden profiles --verify " + name);
         extra.put("profile", name);
@@ -604,6 +613,14 @@ public final class RosterCommand {
                 + "this again";
     }
 
+    private static boolean stillVerified(String rewritten, Path file) {
+        try {
+            return Profile.parse(rewritten, file.toString()).verified();
+        } catch (RuntimeException unreadable) {
+            return false; // rewriteAndReparse reports it and restores the original bytes
+        }
+    }
+
     /**
      * Said, not refused: a probe is free text, and one that asks the vendor for its default
      * may be deliberate. But `profiles --verify` would then stamp the new model on the
@@ -686,14 +703,95 @@ public final class RosterCommand {
             }
         }
 
-        if (!keepVerified) {
-            for (int i = lines.size() - 1; i >= 0; i--) {
-                if (!isKey(lines.get(i), "verified_on")) continue;
-                before.add(lines.get(i));
-                lines.remove(i);
+        if (!keepVerified) unverify(lines, before, after);
+        return null;
+    }
+
+    /**
+     * Takes {@code verified_on} out of the profile's {@code verification} mapping, in either
+     * spelling the reader accepts: a block, where it is one child line, or a flow mapping on
+     * the key's own line, where it is one entry among others. Only whole lines holding the
+     * key used to be removed, so {@code verification: { verified_on: 2026-09-22, probe: ... }}
+     * survived a model change intact and the new model inherited the old model's stamp.
+     * {@link #model} parses the result and refuses to write a profile that still reads as
+     * verified.
+     */
+    static void unverify(List<String> lines, List<String> before, List<String> after) {
+        int base = documentIndent(lines);
+        int key = findKey(lines, 0, lines.size(), "verification", base, base);
+        if (key < 0) return;
+        String line = lines.get(key);
+        String content = stripComment(line);
+        String value = content.substring(content.indexOf(':') + 1).strip();
+        if (value.startsWith("{")) {
+            int open = content.indexOf('{');
+            int close = content.lastIndexOf('}');
+            if (close <= open) return;
+            List<String> kept = new ArrayList<>();
+            for (String entry : flowEntries(content.substring(open + 1, close))) {
+                if (!"verified_on".equals(flowKey(entry))) kept.add(entry.strip());
+            }
+            String inner = kept.isEmpty() ? "{}" : "{ " + String.join(", ", kept) + " }";
+            replaceLine(lines, key, content.substring(0, open) + inner
+                    + content.substring(close + 1) + line.substring(content.length()), before, after);
+            return;
+        }
+        int end = blockEnd(lines, key, base);
+        int child = Integer.MAX_VALUE;
+        for (int i = key + 1; i < end; i++) {
+            if (!isBlankOrComment(lines.get(i))) child = Math.min(child, indent(lines.get(i)));
+        }
+        for (int i = end - 1; i > key; i--) {
+            String candidate = lines.get(i);
+            if (indent(candidate) != child || !isKey(candidate, "verified_on")) continue;
+            before.add(candidate);
+            lines.remove(i);
+        }
+    }
+
+    /** The top-level entries of a flow mapping's inside, split on commas outside quotes and brackets. */
+    private static List<String> flowEntries(String inside) {
+        List<String> entries = new ArrayList<>();
+        int depth = 0;
+        boolean inSingle = false;
+        boolean inDouble = false;
+        int start = 0;
+        for (int i = 0; i < inside.length(); i++) {
+            char c = inside.charAt(i);
+            if (inDouble) {
+                if (c == '\\') i++;
+                else if (c == '"') inDouble = false;
+            } else if (inSingle) {
+                if (c == '\'') inSingle = false;
+            } else if (c == '"') {
+                inDouble = true;
+            } else if (c == '\'') {
+                inSingle = true;
+            } else if (c == '[' || c == '{') {
+                depth++;
+            } else if (c == ']' || c == '}') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                entries.add(inside.substring(start, i));
+                start = i + 1;
             }
         }
-        return null;
+        String last = inside.substring(start);
+        if (!last.isBlank()) entries.add(last);
+        return entries;
+    }
+
+    /** The key of one flow entry, unquoted, or null when it has none. */
+    private static String flowKey(String entry) {
+        String text = entry.strip();
+        int colon = text.indexOf(':');
+        if (colon < 0) return null;
+        String key = text.substring(0, colon).strip();
+        if (key.length() >= 2 && (key.startsWith("\"") && key.endsWith("\"")
+                || key.startsWith("'") && key.endsWith("'"))) {
+            key = key.substring(1, key.length() - 1);
+        }
+        return key;
     }
 
     // ---------------------------------------------------------------- file + line helpers

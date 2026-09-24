@@ -335,7 +335,7 @@ public final class TaskLoopTest implements Suite {
         check.eq("the commit covers the source the run changed, and only that",
                 List.of("src/result.txt"), planned.report().get("paths"));
         check.contains("the exact commands are printed rather than described",
-                String.valueOf(planned.report().get("would_run")), "git add -- src/result.txt");
+                String.valueOf(planned.report().get("would_run")), "git --literal-pathspecs add -- src/result.txt");
         check.eq("and it says outright that it merges nothing",
                 Boolean.FALSE, planned.report().get("lands"));
 
@@ -2421,6 +2421,30 @@ public final class TaskLoopTest implements Suite {
                 .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu2", true);
         check.eq("a dry run names the same stop", "independent_review_unavailable",
                 previewed.summaryReport().get("would_stop"));
+
+        // The same roster with the reviewer copied from the implementer: `read_only: false`
+        // left in. The write flag used to skip the independence question, the task's write
+        // authority let it past the only other check, and it read its own vendor's work.
+        Path copied = newProject(sandbox, "writable-judge");
+        writeProfile(home, "loop-review", "reviewer", "onevendor", false,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("writable-judge-review.count"), 1);
+        List<String> said = new java.util.ArrayList<>();
+        TaskLoop.Outcome writable = new TaskLoop(new ProcessRunner())
+                .withProgress(said::add)
+                .run(new ConfigLoader().load(copied, "hello"), UserConfig.load(home), "wj1", false);
+        check.eq("a writable judge stops the chain for what it is", "judge_not_read_only", writable.reason());
+        check.eq("before anything was spent", 0L, writable.summaryReport().get("role_runs"));
+        check.contains("naming the profile and saying what to change",
+                String.valueOf(writable.summaryReport().get("resolution")),
+                "profile 'loop-review' declares read_only: false");
+        check.eq("a dry run names the same stop", "judge_not_read_only",
+                new TaskLoop(new ProcessRunner())
+                        .run(new ConfigLoader().load(copied, "hello"), UserConfig.load(home), "wj2", true)
+                        .summaryReport().get("would_stop"));
+        writeProfile(home, "loop-review", "reviewer", "onevendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("roster-too-thin-review.count"), 1);
     }
 
     /**

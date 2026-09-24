@@ -47,6 +47,7 @@ public final class RoleResolverTest implements Suite {
 
         profiles.put("claude", profile("claude", "anthropic", "2026-08-26"));
         writerSetChecks(check, resolver, policy, profiles);
+        writableJudgeChecks(check, resolver);
         profiles.put("local-only", Profile.parse("""
                 version: 1
                 profile: local-only
@@ -173,6 +174,93 @@ public final class RoleResolverTest implements Suite {
         check.rejects("the same model at another effort is not a peer", "peer_pair_invalid", () ->
                 resolver.resolve("reviewer", paired, withWriter, openai, 0, profile -> true,
                         java.util.Set.of()));
+    }
+
+    /**
+     * A reviewer copied from the implementer, {@code read_only: false} left in, the writer's
+     * vendor, and a strict policy. The write flag used to skip the independence question
+     * altogether: the resolver labelled it {@code none} and it read its own vendor's work.
+     */
+    private void writableJudgeChecks(Check check, RoleResolver resolver) {
+        Policy strict = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer:
+                    profiles: [copied-review]
+                    strategy: first
+                    require_independent_vendor: true
+                  visual_qa:
+                    profiles: [copied-eyes]
+                    strategy: first
+                  plan_reviewer:
+                    profiles: [copied-plan]
+                    strategy: first
+                  implementer:
+                    profiles: [codex-writer]
+                    strategy: first
+                """, "policy.yaml");
+        Map<String, Profile> roster = new LinkedHashMap<>();
+        roster.put("copied-review", modelled("copied-review", "openai", "reviewer", "gpt-6-sol", false));
+        roster.put("copied-plan", modelled("copied-plan", "openai", "plan_reviewer", "gpt-6-sol", false));
+        roster.put("copied-eyes", Profile.parse("""
+                version: 1
+                profile: copied-eyes
+                role: visual_qa
+                vendor: openai
+                command: codex
+                runner: orca
+                read_only: false
+                capabilities:
+                  vision:
+                    delivery: workspace_file
+                    verification: required
+                verification:
+                  verified_on: "2026-08-27"
+                """, "copied-eyes.yaml"));
+        roster.put("codex-writer", modelled("codex-writer", "openai", "implementer", "gpt-6-sol", false));
+        RoleResolver.Writers openai = new RoleResolver.Writers(
+                java.util.Set.of("openai"), java.util.Set.of("codex-writer"), true, false);
+
+        for (String role : java.util.List.of("reviewer", "visual_qa", "plan_reviewer")) {
+            String name = strict.roles().get(role).profiles().get(0);
+            try {
+                resolver.resolve(role, strict, roster, openai, 0, profile -> true, java.util.Set.of());
+                check.that("a writable " + role + " is refused", false);
+            } catch (RoleResolver.Unresolvable refused) {
+                check.eq("a writable " + role + " is refused, named, for being writable",
+                        RoleResolver.JUDGE_NOT_READ_ONLY, refused.rejected().get(name));
+                check.that("which is not an independence reason, so it is not reported as a missing vendor",
+                        !refused.onlyIndependence());
+            }
+            try {
+                resolver.resolve(role, strict, roster, RoleResolver.Writers.NONE, 0, profile -> true,
+                        java.util.Set.of());
+                check.that("with no writer yet a writable " + role + " is still refused", false);
+            } catch (RoleResolver.Unresolvable refused) {
+                check.eq("with no writer yet a writable " + role + " is still refused",
+                        RoleResolver.JUDGE_NOT_READ_ONLY, refused.rejected().get(name));
+            }
+        }
+
+        roster.put("fixed-review", modelled("fixed-review", "anthropic", "reviewer", "opus", true));
+        Policy mixed = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer:
+                    profiles: [copied-review, fixed-review]
+                    strategy: first
+                    require_independent_vendor: true
+                """, "policy.yaml");
+        RoleResolver.Resolution skipped = resolver.resolve("reviewer", mixed, roster, openai, 0,
+                profile -> true, java.util.Set.of());
+        check.eq("a read-only reader behind it is chosen instead", "fixed-review", skipped.selected().name());
+        check.eq("and the writable one is listed as refused", RoleResolver.JUDGE_NOT_READ_ONLY,
+                skipped.rejected().get("copied-review"));
+        check.eq("the reading that remains is independent", RoleResolver.INDEPENDENT, skipped.assurance());
+
+        RoleResolver.Resolution writer = resolver.resolve("implementer", strict, roster, openai, 0,
+                profile -> true, java.util.Set.of());
+        check.eq("a writer is still a writer: no independence question", RoleResolver.NONE, writer.assurance());
     }
 
     private static Profile modelled(String name, String vendor, String role, String model,

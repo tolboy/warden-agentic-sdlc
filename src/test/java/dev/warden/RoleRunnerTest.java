@@ -143,6 +143,23 @@ public final class RoleRunnerTest implements Suite {
             check.eq("and the reason is recorded", "same_vendor_as_writer",
                     independent.rejected().get("stub-sneaky"));
 
+            // --- a judge that may write is refused before any vendor is called ----------
+            // Copied from the implementer, `read_only: false` left in, the writer's vendor.
+            // The write flag used to skip the independence question, and the task's write
+            // authority let it through the check below that stops writers without one.
+            writePolicy(home, "stub-writable-review", "stub-impl");
+            writeProfile(home, "stub-writable-review", "reviewer", "stubvendor",
+                    "review", false, "reviewer",
+                    "role, task_id, status, verdict, summary, findings");
+            RoleRunner.Outcome writable =
+                    runRole(project, home, "reviewer", "writable-judge", "stubvendor", null, false);
+            check.eq("a writable reviewer is not dispatched", "role_unresolved", writable.code());
+            check.eq("it is refused, by name, for being writable", "judge_not_read_only",
+                    writable.rejected().get("stub-writable-review"));
+            check.that("no vendor was called",
+                    !Files.exists(project.resolve(".warden/runs/writable-judge/raw")));
+            Files.delete(home.resolve("profiles/stub-writable-review.yaml"));
+
             // --- a transient rate limit is retried only when the policy says so ---------
             Path rateCounter = home.resolve("stub-rate.count");
             Files.deleteIfExists(rateCounter);
