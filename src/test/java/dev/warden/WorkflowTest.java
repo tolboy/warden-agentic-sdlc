@@ -312,6 +312,17 @@ public final class WorkflowTest implements Suite {
         }
         check.that("an Orca wall clock is infrastructure too",
                 dev.warden.run.TaskLoop.isInfrastructureFailure("role_orca_timeout"));
+        // Orca 1.4.209 can fail to see a worker's first turn; Warden then waits the role's wall
+        // clock. If that runs out with no turn ever seen, the advice is the agent's screen,
+        // not a longer wall clock.
+        check.eq("an Orca wall clock spent on a turn never seen is a worker that never started",
+                "orca_worker_not_started", dev.warden.run.TaskLoop.reasonFor(new dev.warden.role.RoleRunner.Outcome(
+                        false, "role_orca_timeout", "reviewer", "orca-review", "claude", java.util.Map.of(),
+                        null, java.util.Map.of("worker_turn", "unobserved")), "reviewer_failed"));
+        check.eq("one spent after the turn was seen is a timeout", "role_timed_out",
+                dev.warden.run.TaskLoop.reasonFor(new dev.warden.role.RoleRunner.Outcome(
+                        false, "role_orca_timeout", "reviewer", "orca-review", "claude", java.util.Map.of(),
+                        null, java.util.Map.of("worker_turn", "observed")), "reviewer_failed"));
         // The run that found it was written before the code was classified; its continuation
         // reads the failed step's code rather than the generic reason on disk.
         java.util.Map<String, Object> recorded = java.util.Map.of(

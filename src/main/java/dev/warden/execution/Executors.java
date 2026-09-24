@@ -17,6 +17,12 @@ public final class Executors {
 
     private Executors() {}
 
+    /** {@link #forProfile}'s shape, so a runner can be handed another. */
+    @FunctionalInterface
+    public interface Factory {
+        RoleExecutor forProfile(Profile profile, ProcessRunner processes, GitRepository git);
+    }
+
     public static RoleExecutor forProfile(Profile profile, ProcessRunner processes, GitRepository git) {
         return switch (profile.runner()) {
             case "orca" -> new OrcaExecutor(processes, git);

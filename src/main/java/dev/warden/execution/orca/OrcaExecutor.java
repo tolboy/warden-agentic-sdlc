@@ -172,6 +172,9 @@ public final class OrcaExecutor implements RoleExecutor {
         }
         boolean resuming = prior != null && prior.active();
         evidence.put("resumed", resuming);
+        // True while Orca has not yet seen the worker's agent take its first turn. The settlement
+        // wait then also reads the agent's screen, and fences on a first-run question.
+        boolean turnPending = false;
         if (resuming) {
             if (!OrcaLaunch.contract(profile).equals(prior.launchContract())) {
                 evidence.put("failure", "role_orca_launch_contract_changed");
@@ -189,6 +192,12 @@ public final class OrcaExecutor implements RoleExecutor {
                 evidence.put("failure", "role_orca_launch_unverified");
                 evidence.put("resolution", "Cannot verify the existing dispatch launch options; retained without starting another worker");
                 return fail("role_orca_launch_unverified", evidence, Duration.ZERO, "");
+            }
+            // A controller that died while waiting on an unobserved start leaves the worker in
+            // start_unknown; the one that attaches keeps watching it the same way.
+            if ("start_unknown".equals(OrcaSettlement.workerState(launchProbe.envelope()))) {
+                turnPending = true;
+                evidence.put("worker_turn", "unobserved");
             }
         }
         if (resuming && profile.readOnly() && prior.readOnlyFingerprint() != null) {
@@ -382,14 +391,36 @@ public final class OrcaExecutor implements RoleExecutor {
                         now, now, OrcaLaunch.contract(profile), Map.of()), evidence);
                 dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
             }
-            if (!started.ok() || !OrcaSettlement.startReady(started.envelope())) {
+            boolean ready = started.ok() && OrcaSettlement.startReady(started.envelope());
+            if (!ready) {
                 // Read before fencing: once the worker is stopped its tab is gone, and the
                 // screen is the only place that says why the first turn never started.
                 recordAgentScreen(request.projectRoot(), dispatchId, evidence);
+            }
+            boolean blocked = evidence.get("agent_blocked_on") != null;
+            if (!ready && dispatchId != null && !blocked
+                    && OrcaSettlement.turnUnobserved(started.envelope())) {
+                // Orca typed the task and submitted it, then watched 30 s for the turn to
+                // begin and did not see it. Measured 2026-09-24 on Orca 1.4.209: a Codex
+                // reviewer once and a Claude look twice, each fenced 47-57 s in on a screen
+                // with nothing on it to answer, and each start charged as a vendor call.
+                // Orca calls that state unverifiable and settles the dispatch normally if the
+                // agent reports, so it is waited on within the role's own wall clock. The
+                // screen is read again on every poll until a turn is seen, and a first-run
+                // question showing up there still fences at once.
+                turnPending = true;
+                evidence.put("worker_start_state", OrcaSettlement.resultOf(started.envelope()).get("state"));
+                evidence.put("worker_start_error",
+                        OrcaSettlement.resultOf(started.envelope()).get("lastError"));
+                evidence.put("worker_turn", "unobserved");
+            } else if (!ready) {
                 boolean fenced = dispatchId != null
                         && stopWorker(request.projectRoot(), dispatchId, evidence);
                 if (fenced) {
                     markWorker(lifecycle, workerKey, OrcaLifecycle.State.STOPPED, "start_failed", evidence);
+                    // A first-run question on the screen is the one start failure that proves
+                    // the task never reached a model: the agent was not taking input yet.
+                    if (blocked) evidence.put("vendor_turn_started", false);
                 } else {
                     retainCoordinator = true;
                     evidence.put("coordinator_retained", true);
@@ -447,11 +478,37 @@ public final class OrcaExecutor implements RoleExecutor {
         }
 
         OrcaSettlement.Outcome settlement = waitForSettlement(request.projectRoot(), taskId, dispatchId,
-                runId, coordinatorHandle, deadline, evidence);
+                runId, coordinatorHandle, deadline, turnPending, evidence);
         evidence.put("settlement", settlement.kind().name().toLowerCase());
         evidence.put("settlement_reason", settlement.reason());
         if (settlement.deliveryId() != null) evidence.put("orca_delivery_id", settlement.deliveryId());
         if (settlement.messageId() != null) evidence.put("orca_message_id", settlement.messageId());
+        if ("unobserved".equals(evidence.get("worker_turn")) && settlement.type() != null
+                && List.of("worker_done", "worker-done", "escalation", "question").contains(settlement.type())) {
+            // Only the agent sends worker_done, an escalation or a question: its turn ran.
+            evidence.put("worker_turn", "observed");
+            evidence.put("worker_turn_observed_by", settlement.type());
+        }
+
+        if (TURN_START_BLOCKED.equals(settlement.reason())) {
+            // A start Orca could not see, and the screen now shows why: the agent is sitting on
+            // a first-run question and never took the task. Fenced exactly as a start that
+            // failed outright, and not charged, because no model was asked anything.
+            boolean fenced = stopWorker(request.projectRoot(), dispatchId, evidence);
+            if (!fenced) {
+                retainCoordinator = true;
+                evidence.put("coordinator_retained", true);
+                evidence.put("failure", "role_orca_lifecycle_unaccounted");
+                evidence.put("resolution", "the worker's agent is blocked on "
+                        + evidence.get("agent_blocked_on") + " and Orca did not confirm fencing "
+                        + "dispatch " + dispatchId + "; answer or close it in Orca before recovery");
+                return fail("role_orca_lifecycle_unaccounted", evidence, elapsed(deadline, profile), "");
+            }
+            markWorker(lifecycle, workerKey, OrcaLifecycle.State.STOPPED, "start_blocked", evidence);
+            evidence.put("vendor_turn_started", false);
+            evidence.put("failure", "role_orca_start_failed");
+            return fail("role_orca_start_failed", evidence, elapsed(deadline, profile), "");
+        }
 
         if (settlement.kind() == OrcaSettlement.Kind.QUESTION) {
             retainCoordinator = true;
@@ -576,8 +633,12 @@ public final class OrcaExecutor implements RoleExecutor {
         if (settlement.kind() != OrcaSettlement.Kind.COMPLETED) {
             evidence.put("failure", remaining(deadline).isZero() || remaining(deadline).isNegative()
                     ? "role_orca_timeout" : "role_orca_unsettled");
-            evidence.put("resolution", "Orca did not prove worker_done for this dispatch; terminal "
-                    + "text is not treated as completion");
+            evidence.put("resolution", "unobserved".equals(evidence.get("worker_turn"))
+                    ? "Orca never saw this worker's first turn start (no heartbeat, no working "
+                            + "status, worker still start_unknown) and no worker_done arrived; "
+                            + "agent_screen_tail is the agent's last screen before the fence"
+                    : "Orca did not prove worker_done for this dispatch; terminal "
+                            + "text is not treated as completion");
             return fail(String.valueOf(evidence.get("failure")), evidence, duration, raw);
         }
 
@@ -731,9 +792,16 @@ public final class OrcaExecutor implements RoleExecutor {
         }
     }
 
+    /**
+     * The settlement reason for a start that Orca could not see and whose screen then showed a
+     * first-run question. The caller fences it as a start failure, not as a stalled worker.
+     */
+    private static final String TURN_START_BLOCKED = "turn_start_blocked";
+
     private OrcaSettlement.Outcome waitForSettlement(Path root, String taskId, String dispatchId,
                                                      String runId, String coordinatorHandle,
-                                                     long deadline, Map<String, Object> evidence)
+                                                     long deadline, boolean turnPending,
+                                                     Map<String, Object> evidence)
             throws Exception {
         OrcaSettlement.Outcome last = new OrcaSettlement.Outcome(
                 OrcaSettlement.Kind.CHECKPOINT, taskId, dispatchId, null, Map.of(), "not_waited");
@@ -795,6 +863,23 @@ public final class OrcaExecutor implements RoleExecutor {
                         && "agent_wait_checked_clear".equals(observed.reason())) {
                     lastProvenAgentWait = null;
                     evidence.remove("agent_wait");
+                }
+                if (turnPending) {
+                    // Until a turn is seen, the screen is still a start screen and is read for
+                    // what it waits on. Not after: a working agent's screen is its work, and a
+                    // file that says "update now" is not a prompt the agent is stuck on.
+                    String seen = OrcaSettlement.turnObserved(worker.envelope());
+                    if (seen != null) {
+                        turnPending = false;
+                        evidence.put("worker_turn", "observed");
+                        evidence.put("worker_turn_observed_by", seen);
+                        evidence.put("worker_turn_observed_at", Instant.now().toString());
+                    } else if (noteScreen(nestedString(worker.result(), "terminal", "preview"),
+                            evidence) != null) {
+                        return new OrcaSettlement.Outcome(OrcaSettlement.Kind.UNKNOWN, taskId,
+                                dispatchId, "turn_start", Map.of("blocked_on",
+                                        evidence.get("agent_blocked_on")), TURN_START_BLOCKED);
+                    }
                 }
             }
             Duration showBudget = bounded(remaining(deadline), Duration.ofSeconds(15));
@@ -929,22 +1014,27 @@ public final class OrcaExecutor implements RoleExecutor {
         try {
             OrcaClient.Rpc shown = orca.invoke(root, PROBE_TIMEOUT,
                     List.of("orchestration", "worker-show", "--dispatch", dispatchId));
-            String screen = nestedString(shown.result(), "terminal", "preview");
-            if (screen == null || screen.isBlank()) return;
-            evidence.put("agent_screen_tail", tail(screen, 1500));
-            String blockedOn = blockedOn(screen);
-            if (blockedOn == null) return;
-            evidence.put("agent_blocked_on", blockedOn);
-            evidence.put("resolution", "folder_trust".equals(blockedOn)
-                    ? "the agent CLI stopped on its first-run question for this repository "
-                            + "(Claude Code: \"Is this a project you created or one you trust?\"). "
-                            + "Answer Yes once in an Orca tab in this worktree; Claude records it "
-                            + "for the whole repository, so later worktrees do not ask again"
-                    : "the agent CLI asked to update before it would start. Choose Skip or update "
-                            + "it once in an Orca tab, then retry");
+            noteScreen(nestedString(shown.result(), "terminal", "preview"), evidence);
         } catch (Exception unreadable) {
             // The screen is a diagnosis, not a condition of fencing; the stop goes ahead.
         }
+    }
+
+    /** Keep a start screen's tail and name what it waits on; returns that name, or null. */
+    private static String noteScreen(String screen, Map<String, Object> evidence) {
+        if (screen == null || screen.isBlank()) return null;
+        evidence.put("agent_screen_tail", tail(screen, 1500));
+        String blockedOn = blockedOn(screen);
+        if (blockedOn == null) return null;
+        evidence.put("agent_blocked_on", blockedOn);
+        evidence.put("resolution", "folder_trust".equals(blockedOn)
+                ? "the agent CLI stopped on its first-run question for this repository "
+                        + "(Claude Code: \"Is this a project you created or one you trust?\"). "
+                        + "Answer Yes once in an Orca tab in this worktree; Claude records it "
+                        + "for the whole repository, so later worktrees do not ask again"
+                : "the agent CLI asked to update before it would start. Choose Skip or update "
+                        + "it once in an Orca tab, then retry");
+        return blockedOn;
     }
 
     /** What a first-run screen is waiting on, or null when Warden does not recognise it. */

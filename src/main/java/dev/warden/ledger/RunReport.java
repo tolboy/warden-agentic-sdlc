@@ -472,14 +472,21 @@ public final class RunReport {
                                               List<Map<String, Object>> stages) {
         long roleRuns = 0;
         long failedRoleRuns = 0;
+        long unchargedRoleRuns = 0;
         long gateRuns = 0;
         long failedGateRuns = 0;
         for (Map<String, Object> stage : stages) {
             if ("role".equals(stage.get("kind"))) {
                 List<Map<String, Object>> calls = callsOf(stage);
-                roleRuns += calls.size();
+                // A call the budget gave back (an Orca worker fenced before its first turn)
+                // is not a role run to the loop, so it is not one here either.
+                long uncharged = calls.stream()
+                        .filter(call -> Boolean.FALSE.equals(call.get("budget_charged"))).count();
+                unchargedRoleRuns += uncharged;
+                roleRuns += calls.size() - uncharged;
                 failedRoleRuns += calls.stream()
-                        .filter(call -> Boolean.FALSE.equals(call.get("ok"))).count();
+                        .filter(call -> Boolean.FALSE.equals(call.get("ok"))
+                                && !Boolean.FALSE.equals(call.get("budget_charged"))).count();
             } else {
                 gateRuns++;
                 if (Boolean.FALSE.equals(stage.get("ok"))) failedGateRuns++;
@@ -488,6 +495,7 @@ public final class RunReport {
         Map<String, Object> totals = new LinkedHashMap<>();
         totals.put("role_runs", roleRuns);
         totals.put("failed_role_runs", failedRoleRuns);
+        if (unchargedRoleRuns > 0) totals.put("uncharged_role_runs", unchargedRoleRuns);
         totals.put("machine_stage_runs", gateRuns);
         totals.put("failed_machine_stage_runs", failedGateRuns);
         totals.put("fix_rounds", summary.get("attempts_used"));

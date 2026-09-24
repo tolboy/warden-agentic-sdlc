@@ -38,6 +38,7 @@ public final class TestMain {
                 new dev.warden.OrcaWorkspaceTest(),
                 new dev.warden.OrcaRunIdentityTest(),
                 new dev.warden.OrcaRecoveryTest(),
+                new dev.warden.OrcaStartTest(),
                 new dev.warden.OrcaDecisionGateTest(),
                 new dev.warden.NextStepTest(),
                 new dev.warden.LocalHttpExecutorTest(),

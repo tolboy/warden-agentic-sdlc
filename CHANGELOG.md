@@ -11,6 +11,24 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- An Orca worker whose first turn Orca could not see is waited on, not fenced. Orca 1.4.209
+  answers `worker-start` with exit 1, `state: outcome_unknown` and a `turn_unobserved` effect
+  when it typed the task but did not see the agent's turn begin within 30 s, and says that is
+  "unverifiable, not proof the worker is dead"; a worker that reports later settles
+  normally. Warden fenced on it at once: on 2026-09-24 a Codex reviewer once and a Claude look
+  twice were stopped 47-57 s in, on screens with nothing to answer. The dispatch is now kept
+  and the settlement wait continues within the role's wall clock. Until a turn is seen (the
+  worker leaves `start_unknown`, the agent sends a heartbeat, Orca shows it `working`, or its
+  `worker_done` arrives) every poll reads the agent's screen, and a Claude trust question or a
+  CLI update prompt there fences the worker as `role_orca_start_failed`, as before. A worker
+  fenced on such a question never reached a model, so its call is given back to
+  `max_role_runs` (`budget_charged: false` on the attempt; the report counts it as
+  `uncharged_role_runs`). A start that failed for any other reason stays charged. A wall
+  clock that runs out with no turn ever seen stops as `orca_worker_not_started`, not
+  `role_timed_out`, whose advice is to raise the wall clock; one the chain deadline cut is
+  still `budget_exhausted`. `warden probe orca` no longer reads the same receipt as "no
+  dispatch". The Orca calls are exercised against a fake Orca; this has not been run live.
+  Suites `orca-start` (new), `orca-settlement`, `profile verifier`, `workflow`.
 - One Warden run is one Orca Run. The `--watch` board made a Run of its own and kept its id
   in a field, while the executor and the decision gate found or made one through
   `orca.json`, so a watched run put its stage rows in one Run and its workers and gate in

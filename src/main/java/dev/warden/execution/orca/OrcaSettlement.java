@@ -50,6 +50,71 @@ public final class OrcaSettlement {
         return "ready".equals(status);
     }
 
+    /**
+     * Whether worker-start typed the task into the agent and then could not see its turn begin.
+     *
+     * Orca 1.4.209 answers that with exit 1, {@code ok: true}, {@code state: outcome_unknown},
+     * {@code turnStart: unobserved} and a {@code dispatch_input} effect in state
+     * {@code turn_unobserved}, after a 30 s observation. Its own words: "unverifiable, not proof
+     * the worker is dead", and a worker that later reports settles the dispatch normally. Only
+     * this receipt counts: an {@code outcome_unknown} for any other reason (a provider write
+     * that failed, a runtime restart mid-start) is not a task sitting in a live agent.
+     */
+    public static boolean turnUnobserved(Map<String, Object> envelope) {
+        if (!envelopeOk(envelope)) return false;
+        Map<String, Object> result = resultOf(envelope);
+        if (!"outcome_unknown".equals(result.get("state"))) return false;
+        if ("unobserved".equals(result.get("turnStart"))
+                || "turn_start_unobserved".equals(result.get("stage"))) {
+            return true;
+        }
+        if (result.get("effects") instanceof List<?> effects) {
+            for (Object effect : effects) {
+                if (effect instanceof Map<?, ?> map && "dispatch_input".equals(map.get("kind"))
+                        && "turn_unobserved".equals(map.get("state"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * What in a {@code worker-show} proves the agent took its first turn, or null when nothing
+     * does yet.
+     *
+     * Three signs, each one only a working agent produces: the worker left {@code start_unknown}
+     * for {@code ready} (or already succeeded), the dispatch recorded a heartbeat — a message the
+     * agent sends itself — or Orca's fleet projection shows the agent {@code working}. An idle
+     * agent is not one: a task left unsent in the composer looks idle too.
+     */
+    public static String turnObserved(Map<String, Object> envelope) {
+        if (!envelopeOk(envelope)) return null;
+        Map<String, Object> result = resultOf(envelope);
+        if (result.get("worker") instanceof Map<?, ?> worker) {
+            Object state = worker.get("state");
+            if ("ready".equals(state) || "succeeded".equals(state)) return "worker_" + state;
+        }
+        if (result.get("dispatch") instanceof Map<?, ?> dispatch
+                && first(cast(dispatch), "lastHeartbeatAt", "last_heartbeat_at") != null) {
+            return "heartbeat";
+        }
+        if (result.get("projection") instanceof Map<?, ?> projection
+                && projection.get("stage") instanceof Map<?, ?> stage
+                && "working".equals(stage.get("activity"))) {
+            return "agent_working";
+        }
+        return null;
+    }
+
+    /** The supervised worker's own state as {@code worker-show} reports it, e.g. {@code start_unknown}. */
+    public static String workerState(Map<String, Object> envelope) {
+        if (resultOf(envelope).get("worker") instanceof Map<?, ?> worker && worker.get("state") != null) {
+            return String.valueOf(worker.get("state"));
+        }
+        return null;
+    }
+
     public static String dispatchId(Map<String, Object> envelope) {
         Map<String, Object> result = resultOf(envelope);
         Object nested = result.get("dispatch");
