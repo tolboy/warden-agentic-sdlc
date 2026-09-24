@@ -47,7 +47,12 @@ that exists in code but has never been run live says so.
   start a continuation. An answer is also consumed once: the first start of a continuation
   creates `continuation.json` beside the answered run with `CREATE_NEW`, and any other —
   a supervisor and `warden approve` acting on the same `apply` — is refused as
-  `continuation_already_started` instead of taking the next unused run id. The amendment's
+  `continuation_already_started` instead of taking the next unused run id. The claim is a
+  reservation, not a run: the contract, the user config and the carried verdicts are loaded
+  before it is taken, so a contract that does not load no longer uses up the answer; a start
+  that fails before the new run reserves its evidence (`run.json`, written before any paid
+  call) gives the claim back; and a claim whose process has died with no run behind it is
+  taken over by the next start. A claim whose run exists stands, whoever made it. The amendment's
   reservation is created the same way, so a run pays for one amendment. The decision page now waits for an answer's
   response before it closes; with no grace, the tab showed a broken connection instead of
   "recorded". Found by the review (UI-08). Suites `decision-page`, `dashboard`.
