@@ -111,6 +111,15 @@ public final class RoleRunner {
          * {@code declaredBound} when the cap is strict.
          */
         default void settleAttempt(Object costUsd, Double declaredBound) { }
+
+        /**
+         * Give back the call {@link #requireDispatch} admitted, in place of
+         * {@link #settleAttempt}, when the executor proved no vendor was asked anything: an
+         * Orca worker fenced while its agent sat on a first-run question. Only that proof
+         * counts. A call whose outcome is merely unknown may still have been served and
+         * billed, and stays charged.
+         */
+        default void release() { }
     }
 
     /**
@@ -150,6 +159,14 @@ public final class RoleRunner {
     /** The same runner, pausing through {@code sleeper} instead of the clock. */
     public RoleRunner withSleeper(java.util.function.LongConsumer sleeper) {
         this.sleeper = sleeper == null ? millis -> { } : sleeper;
+        return this;
+    }
+
+    /** How a profile becomes an executor; the suite hands Orca profiles a fake Orca. */
+    private Executors.Factory executors = Executors::forProfile;
+
+    public RoleRunner withExecutors(Executors.Factory executors) {
+        this.executors = executors == null ? Executors::forProfile : executors;
         return this;
     }
     /** 1-based dispatch of this runner for the current role. A later {@link #run} of the
@@ -828,7 +845,7 @@ public final class RoleRunner {
                     + "  dispatching, up to " + profile.wallClockMinutes() + " min");
 
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
-            RoleExecutor executor = Executors.forProfile(profile, processes, git);
+            RoleExecutor executor = executors.forProfile(profile, processes, git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
                     runId, workflowRunId != null ? workflowRunId : runId,
                     role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
@@ -861,10 +878,17 @@ public final class RoleRunner {
             }
 
             Map<String, Object> attemptRow = attemptRecord(attempt, profile, result, inheritsUnfinishedWork);
+            // Still an attempt in every record; only the budget gives the call back.
+            boolean charged = !Boolean.FALSE.equals(result.evidence().get("vendor_turn_started"));
+            if (!charged) {
+                attemptRow.put("budget_charged", false);
+                report.put("budget_charged", false);
+            }
             attempts.add(attemptRow);
             if (report.get("cost_usd") instanceof Number number) spent += number.doubleValue();
             journalAttempt(ledger, role, roleInvocationId, report, attemptRow);
-            gate.settleAttempt(report.get("cost_usd"), profile.maxCostUsd());
+            if (charged) gate.settleAttempt(report.get("cost_usd"), profile.maxCostUsd());
+            else gate.release();
 
             // A transient rate limit is the one failure worth asking the same vendor again
             // for, and only when the policy said how often. The wait honours the seconds the

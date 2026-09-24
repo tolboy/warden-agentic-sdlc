@@ -234,6 +234,18 @@ public final class ProfileVerifierTest implements Suite {
                 wrong.lines().stream().anyMatch(line -> line.startsWith("probe-answer: mismatched")));
         check.eq("the worker that guessed is stopped", 1, guessing.calls("orchestration worker-stop").size());
 
+        // Orca 1.4.209 exits 1 on a turn it could not see start; the agent may still answer.
+        FakeOrca unseen = new FakeOrca(worktree).starting(FakeOrca.Start.TURN_UNOBSERVED);
+        unseen.answering(args -> FakeOrca.workerDone(unseen.lastTask(), unseen.lastDispatch(),
+                Map.of("answer", readProbeWord(worktree, unseen))));
+        OrcaProbe.Outcome late = new OrcaProbe(unseen.client())
+                .run(OrcaProbe.parse(new String[] {"probe", "orca", "--agent", "claude", "--worktree",
+                        worktree.toString()}));
+        check.eq("a start Orca could not see still gets its answer read", 0, late.exitCode());
+        check.that("and the probe says the start was unobserved",
+                late.lines().stream().anyMatch(line -> line.startsWith("probe-note: Orca could not see")));
+        check.eq("the worker that answered is not stopped", 0, unseen.calls("orchestration worker-stop").size());
+
         FakeOrca elsewhere = new FakeOrca(worktree).notAWorktree();
         OrcaProbe.Outcome outside = new OrcaProbe(elsewhere.client())
                 .run(OrcaProbe.parse(new String[] {"probe", "orca", "--agent", "codex", "--worktree",

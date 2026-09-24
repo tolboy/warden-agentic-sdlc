@@ -167,7 +167,13 @@ public final class OrcaProbe {
                     "--timeout-ms", String.valueOf(START.toMillis())));
             OrcaClient.Rpc started = call(lines, options.worktree(), START.plusSeconds(30), start);
             dispatch = OrcaSettlement.dispatchId(started.envelope());
-            if (!started.ok() || dispatch == null) return failed(lines, "worker-start did not return a dispatch");
+            // Orca 1.4.209 exits 1 when it could not see the agent's turn begin, and settles
+            // the dispatch normally if the agent then answers; the wait below is what decides.
+            boolean unobserved = OrcaSettlement.turnUnobserved(started.envelope());
+            if (unobserved) lines.add("probe-note: Orca could not see the agent's turn start; waiting for its answer");
+            if ((!started.ok() && !unobserved) || dispatch == null) {
+                return failed(lines, "worker-start did not return a dispatch");
+            }
 
             long deadline = System.nanoTime() + Duration.ofMinutes(options.waitMinutes()).toNanos();
             while (System.nanoTime() < deadline) {

@@ -662,6 +662,10 @@ public final class Preparation {
             chain.settleAttempt(costUsd, declaredBound);
         }
 
+        /** The chain's reservation goes back; this bootstrap's own grant stays spent. */
+        @Override
+        public void release() { chain.release(); }
+
         void grantProtocolRetry() {
             if (protocolRetries <= 0) return;
             protocolRetries--;
