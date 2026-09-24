@@ -1499,6 +1499,80 @@ public final class TaskLoop {
         return rows;
     }
 
+    /**
+     * What a run of {@code loaded} would dispatch at each role stage, and what would stop it,
+     * without dispatching or advancing anything: the settings panel's answer for one task.
+     *
+     * Built from the preflight's own calls, in its order. The task's {@code use:} is pinned
+     * and overlaid on the runner as the loop does it, the workflow is the one the task runs
+     * (agent evidence swaps the browser stage), the writer is peeked first and every reader
+     * that judges findings is peeked against it with the task's {@code review_assurance}, and
+     * an overlay the chosen profile cannot deliver is refused with {@link RunOverride#problem},
+     * the check {@code overlayGap} stops a run on. A table built from the policy alone named
+     * the policy's writer for a task that pins another, and called a same-vendor peer the task
+     * allows {@code peer_not_allowed_by_task}.
+     *
+     * The overlay is the task's own: flags given to one run and handovers are not on disk yet.
+     */
+    public static List<Map<String, Object>> dispatchPreview(Path root, ConfigLoader.Loaded loaded,
+                                                            UserConfig user,
+                                                            RoleResolver.Availability availability) {
+        TaskSpec.ResolvedTask task = loaded.resolved();
+        Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
+        if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
+        boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
+        RunOverride overlay = loaded.task().use();
+        RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
+        overlay.pin(roles);
+        roles.overlay(overlay);
+        RoleResolver.Writers written = RoleResolver.Writers.NONE;
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Workflow.Stage stage : workflow.stages()) {
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.name());
+            row.put("role", stage.role());
+            rows.add(row);
+            String skipped = skipReason(stage, user, task, reviewByRisk);
+            if (skipped != null) {
+                row.put("skipped", skipped);
+                continue;
+            }
+            RoleResolver.Writers judgedBy = stage.onFindings() != null ? written : RoleResolver.Writers.NONE;
+            int position = workflow.rotationPositionOf(stage);
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    judgedBy, position);
+            if (chosen == null) {
+                row.put("profile", null);
+                Map<String, String> why = roles.explainFill(user, stage.name(), stage.role(), judgedBy, position);
+                row.put("unresolved", why == null ? Map.of() : why);
+                continue;
+            }
+            row.put("profile", chosen.name());
+            row.put("vendor", chosen.vendor());
+            row.put("model", chosen.model());
+            row.put("effort", chosen.effort());
+            row.put("runner", chosen.runner());
+            if (judgedBy != RoleResolver.Writers.NONE) {
+                row.put("judged_against", judgedBy.profiles().stream().sorted().toList());
+            }
+            if (overlay.stages().contains(stage.name())) {
+                String problem = overlay.problem(stage.name(), chosen, user.profiles());
+                row.put("from_overlay", problem == null);
+                if (problem != null) {
+                    row.put("refused", "run_override_undeliverable");
+                    row.put("message", problem);
+                }
+            }
+            if ("implementer".equals(stage.role()) && written == RoleResolver.Writers.NONE) {
+                written = new RoleResolver.Writers(java.util.Set.of(chosen.vendor()),
+                        java.util.Set.of(chosen.name()), true,
+                        "same_vendor_peer".equals(task.reviewAssurance()));
+            }
+        }
+        return rows;
+    }
+
     /** The cast as a person reads it: one stage per line, aligned, with the overlay marked. */
     private void printCast(List<Map<String, Object>> rows) {
         if (rows.isEmpty()) return;

@@ -4,6 +4,8 @@ import com.sun.net.httpserver.HttpServer;
 import dev.warden.config.Profile;
 import dev.warden.config.UserConfig;
 import dev.warden.json.Json;
+import dev.warden.process.ProcessRunner;
+import dev.warden.role.RoleRunner;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -91,6 +93,14 @@ public final class Dashboard implements AutoCloseable {
                 contentType = "text/html; charset=utf-8";
                 body = HTML.replace("{{TOKEN}}", decisions == null ? "" : token)
                         .replace("{{ACTIONS}}", decisions == null ? "false" : "true");
+            } else if ("/api/config".equals(path)) {
+                try {
+                    ProcessRunner processes = new ProcessRunner();
+                    body = Json.write(ConfigView.of(project, UserConfig.load(),
+                            profile -> RoleRunner.executableFound(processes, profile)));
+                } catch (Exception failed) {
+                    status = 503; body = Json.write(Map.of("error", "Settings unavailable; inspect Warden configuration"));
+                }
             } else if ("/api/state".equals(path)) {
                 try { body = Json.write(snapshot(project, UserConfig.load())); }
                 catch (Exception failed) { status = 503; body = Json.write(Map.of("error", "State unavailable; inspect Warden configuration")); }
@@ -245,6 +255,8 @@ public final class Dashboard implements AutoCloseable {
         if (steps != null) row.put("steps", steps);
         List<Map<String, Object>> pending = objectList(source.get("pending_stages"), List.of("stage", "reason"));
         if (pending != null) row.put("pending_stages", pending);
+        List<Map<String, Object>> failovers = failovers(source.get("steps"));
+        if (!failovers.isEmpty()) row.put("failovers", failovers);
         Map<String, Object> decision = readDecision(directory, runsRoot);
         if (decision != null) row.put("decision", decision);
         if (source.get("orca_gate") instanceof Map<?, ?> gate) {
@@ -269,6 +281,49 @@ public final class Dashboard implements AutoCloseable {
         }
         row.put("updated_at", Files.getLastModifiedTime(summaryFile).toInstant().toString());
         return row;
+    }
+
+    /**
+     * Who ran out and who took over, per stage, as the summary recorded it: a vendor switch
+     * inside a role, a spent subscription that stopped it, and a switch waiting for a person.
+     * The failover machinery existed and was invisible; a panel that says "review ok" without
+     * "claude was spent, codex read it" hides who actually judged the work.
+     */
+    public static List<Map<String, Object>> failovers(Object steps) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        if (!(steps instanceof List<?> list)) return rows;
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> step)) continue;
+            Object stage = step.get("stage") != null ? step.get("stage") : step.get("step");
+            List<String> from = stringList(step.get("failed_over_from"));
+            if (from != null && !from.isEmpty()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("stage", stage);
+                row.put("kind", "switched");
+                row.put("from_profiles", from);
+                copyScalar(row, step, "profile");
+                copyScalar(row, step, "vendor");
+                rows.add(row);
+            }
+            List<String> spent = stringList(step.get("exhausted_profiles"));
+            if ("role_quota_exhausted".equals(step.get("code")) && spent != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("stage", stage);
+                row.put("kind", "exhausted");
+                row.put("exhausted_profiles", spent);
+                rows.add(row);
+            }
+            if (step.get("failover_pending") instanceof Map<?, ?> waiting) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("stage", stage);
+                row.put("kind", "awaiting_confirmation");
+                for (String key : List.of("from_profile", "from_vendor", "to_profile", "to_vendor", "to_model")) {
+                    copyScalar(row, waiting, key);
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private static Map<String, Object> readDecision(Path directory, Path runsRoot) {
@@ -322,7 +377,8 @@ public final class Dashboard implements AutoCloseable {
         Map<String, Object> row = new LinkedHashMap<>();
         for (String key : List.of("workflow_run_id", "run_id", "task_id", "stage", "role", "profile", "vendor",
                 "model", "effort_requested", "runner", "read_only", "view_state", "updated_at", "code",
-                "orca_dispatch_id", "orca_task_id", "vendor_attempt")) {
+                "orca_dispatch_id", "orca_task_id", "vendor_attempt", "cost_usd", "model_reported",
+                "agent_blocked_on")) {
             Object value = source.get(key);
             if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean) row.put(key, value);
         }
@@ -338,6 +394,18 @@ public final class Dashboard implements AutoCloseable {
                 }
             }
             visible.put("effective", effective); row.put("launch", visible);
+        }
+        // Orca workers report no price and no tokens, and an Orca profile with no model runs
+        // the agent's own default. Both are stated rather than shown as blanks, which read as
+        // "free" and "the model you asked for".
+        row.put("cost_known", source.get("cost_usd") instanceof Number);
+        if ("orca".equals(source.get("runner")) && source.get("model") == null) {
+            row.put("model_note", "agent_default");
+        }
+        // Warden's own sentence about the one click that unblocks the worker; the agent's
+        // screen itself stays out, as every other raw output does.
+        if (source.get("agent_blocked_on") instanceof String && source.get("resolution") instanceof String fix) {
+            row.put("resolution", fix);
         }
         if ("running".equals(row.get("view_state"))) {
             boolean controllerAlive = source.get("controller_pid") instanceof Number pid
@@ -357,7 +425,7 @@ public final class Dashboard implements AutoCloseable {
             .scroll{overflow:auto;border:1px solid #30404d;border-radius:12px}table{border-collapse:collapse;width:100%;white-space:nowrap}
             th,td{text-align:left;padding:12px 14px;border-bottom:1px solid #263541}th{color:#9fb4c6;font-weight:500;background:#19232c}
             tr:last-child td{border:0}td:first-child{font-weight:600}code{font-size:12px}input{background:#19232c;border:1px solid #405363;border-radius:6px;padding:8px 12px;color:inherit;min-width:240px}
-            .badge{background:#233a35;color:#9ee9c6;border-radius:5px;padding:3px 7px}.bad{color:#ffae94}#path{overflow-wrap:anywhere}.empty{padding:28px;color:#9caebd}
+            button{background:#233a35;color:#9ee9c6;border:1px solid #2f5a4d;border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}.badge{background:#233a35;color:#9ee9c6;border-radius:5px;padding:3px 7px}.bad{color:#ffae94}#path{overflow-wrap:anywhere}.empty{padding:28px;color:#9caebd}
             details.timeline{white-space:normal;font-weight:400;max-width:480px}details.timeline summary{cursor:pointer;color:#9fb4c6}details.timeline div{padding:2px 0}
             </style><h1>Warden <span class="muted">/ Agents</span></h1>
             <meta name="warden-token" content="{{TOKEN}}"><meta name="warden-actions" content="{{ACTIONS}}">
@@ -365,23 +433,29 @@ public final class Dashboard implements AutoCloseable {
             <h2>Ждут вашего решения</h2><p class="muted">Кнопка открывает страницу решения или возвращает к уже открытой. Если процесс, задавший вопрос, перестал ждать, панель поднимает страницу заново и продолжает работу после ответа.</p>
             <div class="scroll"><table><thead><tr><th>Run / задача</th><th>Вопрос</th><th>Варианты</th><th>Задан</th><th>Страница</th><th></th></tr></thead><tbody id="pending"></tbody></table><div id="pending-empty" class="empty" hidden>Открытых решений нет.</div></div>
             <p class="muted">Workflow и роли задаёт Warden. Orca подтверждает параметры запуска. Эти данные не подтверждают фактическую модель inference и не заменяют результат проверок.</p>
+            <h2>Состав по стадиям</h2><p class="muted">По политике, до настроек конкретной задачи: её <code>use:</code> может закрепить другой профиль, а <code>review_assurance</code> — допустить пару того же вендора. Что запустится для задачи, показывает столбец «Запустится» в таблице задач. Кто заполнит каждую стадию и почему остальные кандидаты не подходят — это ответы самого резолвера. Ридеры проверены против писателя, которого выбрал бы запуск. Источник: личное — ~/.warden, проект — .warden/project.yaml, задача — файл задачи, по умолчанию — встроенное значение Warden.</p>
+            <p><button id="reload-config" type="button">Перечитать настройки</button> <span id="config-status" class="muted"></span></p>
+            <div class="scroll"><table><thead><tr><th>Этап</th><th>Кандидат</th><th>Модель · effort · runner</th><th>Проверен</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
+            <h2>Ограничения</h2><div class="scroll"><table><thead><tr><th>Параметр</th><th>Значение</th><th>Источник</th></tr></thead><tbody id="limits"></tbody></table></div>
+            <h2>Задачи</h2><div class="scroll"><table><thead><tr><th>Задача</th><th>Риск</th><th>Вызовы</th><th>Деньги</th><th>Время</th><th>Фиксы</th><th>Visual QA</th><th>Запустится</th><th>Overlay</th></tr></thead><tbody id="tasks"></tbody></table><div id="tasks-empty" class="empty" hidden>Задач нет.</div></div>
             <h2>Запуски</h2><p class="muted">Каждый запуск со своей хронологией этапов, вердиктами, стоимостью и решением. Dry-run в этот список не входят.</p>
             <p id="dry-hidden" class="muted"></p>
             <div class="scroll"><table><thead><tr><th>Run / задача</th><th>Исход</th><th>Review</th><th>Блокеры</th><th>Вызовы</th><th>Стоимость</th><th>Фикс</th><th>Решение</th><th>Gate</th><th>Хронология</th></tr></thead><tbody id="runs"></tbody></table><div id="runs-empty" class="empty" hidden>Запусков пока нет.</div></div>
             <h2>Попытки исполнения</h2><input id="filter" aria-label="Фильтр запусков" placeholder="Поиск по run, роли или профилю">
             <p class="muted">Обновление каждые 2 секунды. После остановки контроллера работа агента может продолжаться; статус становится неизвестным.</p>
             <div class="scroll"><table><thead><tr><th>Run / этап</th><th>Роль / профиль</th><th>Runner</th><th>Запрошено</th><th>Подтверждено Orca</th><th>Состояние / dispatch</th></tr></thead><tbody id="attempts"></tbody></table><div id="empty" class="empty" hidden>Попыток пока нет. Запуск агентов из этой панели не выполняется.</div></div>
-            <h2>Настроенный workflow</h2><p class="muted">Перечислены кандидаты для каждого этапа. Это конфигурация, не доказательство запуска; выбор зависит от проверки профиля, стратегии и доступности.</p>
-            <div class="scroll"><table><thead><tr><th>Этап</th><th>Роль</th><th>Профиль-кандидат</th><th>Модель</th><th>Effort</th><th>Runner</th><th>Ограничения / проверка</th></tr></thead><tbody id="plan"></tbody></table></div><p id="problems" class="bad"></p>
+            <p id="problems" class="bad"></p>
             <script>
             const $=id=>document.getElementById(id); let data;
             function cell(tr,value){const td=document.createElement('td');td.textContent=value??'—';tr.append(td)}
             function table(id,rows){const body=$(id);body.replaceChildren();for(const values of rows){const tr=document.createElement('tr');values.forEach(v=>cell(tr,v));body.append(tr)}}
             function line(parent,text){const div=document.createElement('div');div.textContent=text;parent.append(div)}
-            function timeline(run){const details=document.createElement('details');details.className='timeline';const summary=document.createElement('summary');summary.textContent='Хронология';details.append(summary);
+            let openRuns=new Set();
+            function timeline(run){const details=document.createElement('details');details.className='timeline';details.dataset.run=run.run_id??'';if(openRuns.has(details.dataset.run))details.open=true;const summary=document.createElement('summary');summary.textContent='Хронология';details.append(summary);
             for(const s of run.steps||[]){const who=[s.profile,s.vendor].filter(Boolean).join('/');let text=(s.stage||s.step||'—')+(who?' · '+who:'');text+=' · '+(s.ok===true?'ok':s.ok===false?'fail':'—')+(s.code?' / '+s.code:'');if(s.cost_usd!=null)text+=' · '+s.cost_usd;if(s.reused_from)text+=' · reused from '+s.reused_from;if(s.fix_for)text+=' · fix for '+s.fix_for;line(details,text)}
             for(const c of run.review_coverage||[]){line(details,'coverage '+(c.stage??'')+' · '+(c.role??'')+(c.assurance!=null?' · '+c.assurance:''))}
             for(const p of run.pending_stages||[]){line(details,'pending '+(p.stage??'')+' · '+(p.reason??''))}
+            for(const f of run.failovers||[]){line(details,f.kind==='switched'?('failover '+(f.stage??'')+' · '+(f.from_profiles||[]).join(', ')+' → '+(f.profile??'')):f.kind==='exhausted'?('квота исчерпана '+(f.stage??'')+' · '+(f.exhausted_profiles||[]).join(', ')):('ждёт подтверждения подмены '+(f.stage??'')+' · '+(f.from_profile??'')+' → '+(f.to_profile??'')))}
             if(run.next_step?.summary)line(details,run.next_step.summary);
             const options=run.decision?.options;if(options&&options.length)line(details,'warden approve '+(run.run_id??'')+' --decision '+options.join('|'));
             return details}
@@ -391,7 +465,22 @@ public final class Dashboard implements AutoCloseable {
             const td=document.createElement('td');if(actions){const form=document.createElement('form');form.method='post';form.action='/decide/'+encodeURIComponent(d.run_id);
             const hidden=document.createElement('input');hidden.type='hidden';hidden.name='token';hidden.value=token;const button=document.createElement('button');button.textContent=d.page_open?'Открыть решение':'Продолжить ожидание и открыть';form.append(hidden,button);td.append(form)}else td.textContent='warden decide '+d.run_id;
             tr.append(td);body.append(tr)}$('pending-empty').hidden=rows.length>0}
-            function drawRuns(){const body=$('runs');body.replaceChildren();const runs=data.runs||[];
+            const reasons={profile_unverified:'не проверен (нет verified_on)',judge_not_read_only:'проверяющий с правом записи',vision_capability_unverified:'зрение не проверено',same_vendor_as_writer:'тот же вендор, что у писателя',shares_vendor_with_writer:'делит вендора с писателем',peer_not_allowed_by_task:'пара того же вендора не разрешена задачей',quota_exhausted_this_run:'квота исчерпана в этом запуске',executable_not_found:'программа не найдена',role_mismatch:'профиль другой роли',profile_not_found:'профиля нет',role_not_configured:'роль не настроена',no_eligible_profile:'некому заполнить стадию'};
+            const sources={personal:'личное',project:'проект',task:'задача',default:'по умолчанию'};
+            function reason(code){if(!code)return 'допущен';const base=code.split(':')[0];return (reasons[base]??code)+(code.includes(':')?' ('+code.slice(base.length+1)+')':'')}
+            function sourced(v){if(!v)return '—';const value=v.value==null?'нет':typeof v.value==='object'?JSON.stringify(v.value):String(v.value);return value+' · '+(sources[v.source]??v.source)}
+            function drawConfig(config){const stages=$('stages');stages.replaceChildren();
+            for(const s of config.stages||[]){const head=document.createElement('tr');const td=document.createElement('td');td.colSpan=6;
+            let text=s.stage+(s.role?' · '+s.role:'')+' · '+(s.kind==='role'?('стратегия '+(s.strategy??'—')+(s.require_independent_vendor?' · нужен независимый вендор':'')+(s.same_vendor_peer?' · пара '+s.same_vendor_peer:'')+(s.judged_against?' · против писателя '+s.judged_against.profile+' ('+s.judged_against.vendor+')':'')):'механическая стадия: профиль не заполняет, overlay отвергается')+(s.when&&s.when.length?' · когда '+s.when.join(', '):'');
+            if(s.unresolved)text+=' · '+reason(s.unresolved);td.textContent=text;td.style.fontWeight='600';head.append(td);stages.append(head);
+            for(const c of s.candidates||[]){const tr=document.createElement('tr');const verdict=s.judged_against?c.rejected_after_writer:c.rejected;
+            [(c.would_run?'▶ ':'')+c.profile,[(c.model??(c.model_note==='agent_default'?'модель агента по умолчанию':'модель не задана')),c.effort??'effort не задан',c.runner].join(' · '),c.verified?'да':'нет',reason(verdict)+(c.assurance&&c.assurance!=='independent'&&!verdict?' · '+c.assurance:''),c.cost_reported===false?'неизвестна: Orca не сообщает':(c.max_cost_usd!=null?'граница $'+c.max_cost_usd:'по отчёту вендора')].forEach(v=>cell(tr,v));stages.append(tr)}}
+            table('limits',(config.limits||[]).map(l=>[l.key,l.value==null?'—':typeof l.value==='object'?JSON.stringify(l.value):String(l.value),sources[l.source]??l.source]));
+            const tasks=config.tasks||[];table('tasks',tasks.map(t=>t.problem?[t.task,'ошибка: '+t.problem,'','','','','','','']:[t.task,sourced(t.risk),sourced(t.max_role_runs),(t.cost_cap?.value==='strict'?'строгий cap $':'порог $')+(t.max_cost_usd?.value??'—')+' · '+(sources[t.max_cost_usd?.source]??''),sourced(t.max_elapsed_minutes),sourced(t.max_fix_attempts),sourced(t.visual_qa),(t.would_run||[]).map(d=>d.stage+' → '+(d.skipped?'пропуск':d.profile?d.profile+(d.from_overlay===true?' (overlay)':'')+(d.refused?' (отвергнется: '+reason(d.refused)+')':''):'некому: '+Object.entries(d.unresolved||{}).map(([p,r])=>p+' '+reason(r)).join(', '))).join('; ')||'—',(t.overlay||[]).map(o=>o.stage+' '+o.what+'='+o.value+(o.refused?' (отвергнется: '+reason(o.refused)+')':o.skipped?' (стадия пропускается)':'')).join('; ')||'—']));
+            $('tasks-empty').hidden=tasks.length>0}
+            async function loadConfig(){$('config-status').textContent='читаю…';try{const response=await fetch('/api/config',{cache:'no-store'});if(!response.ok)throw Error('unavailable');drawConfig(await response.json());$('config-status').textContent='прочитано '+new Date().toLocaleTimeString()}catch(e){$('config-status').textContent='настройки недоступны'}}
+            $('reload-config').addEventListener('click',loadConfig);loadConfig();
+            function drawRuns(){openRuns=new Set([...document.querySelectorAll('#runs details[open]')].map(d=>d.dataset.run));const body=$('runs');body.replaceChildren();const runs=data.runs||[];
             for(const r of runs){const tr=document.createElement('tr');const chain=r.chain||{},decision=r.decision||{},gate=r.orca_gate||{};
             const cost=chain.cost_usd??r.total_cost_usd,unpriced=chain.unpriced_calls??r.unpriced_calls;
             let costText=cost==null?'—':String(cost);if(unpriced)costText+=' · '+unpriced+' без цены';
@@ -401,8 +490,7 @@ public final class Dashboard implements AutoCloseable {
             $('runs-empty').hidden=runs.length>0;$('dry-hidden').textContent=data.dry_runs_hidden?('Скрыто dry-run: '+data.dry_runs_hidden):''}
             const states={running:'В работе',completed:'Завершено',failed:'Ошибка',needs_you:'Нужен ответ',dry_run:'Dry run',unknown_controller_stopped:'Контроллер остановлен · агент не проверен'};
             function draw(){if(!data)return;drawPending();drawRuns();const q=$('filter').value.toLowerCase();const rows=data.attempts.filter(r=>JSON.stringify(r).toLowerCase().includes(q));
-            table('attempts',rows.map(r=>{const l=r.launch,e=l?.effective;return [r.workflow_run_id+' / '+r.stage,r.role+' / '+r.profile,r.runner,(r.model??'по умолчанию')+' · '+(r.effort_requested??'effort не задан'),l?.status==='matched'?(e?.model??'не задана')+' · '+(e?.effort??'effort неизвестен'):(l?.status??'не подтверждено'),(states[r.view_state]??r.view_state)+' / '+(r.orca_dispatch_id??'—')]}));$('empty').hidden=rows.length>0;
-            table('plan',data.plan.map(r=>[r.stage,r.role,r.profile,r.model,r.effort??'не задан',r.runner,(r.read_only?'read-only':'запись')+' / '+(r.verified?'профиль проверен':'требуется проверка')]));
+            table('attempts',rows.map(r=>{const l=r.launch,e=l?.effective;return [r.workflow_run_id+' / '+r.stage,r.role+' / '+r.profile,r.runner+(r.runner==='orca'&&!r.cost_known?' · стоимость неизвестна':''),(r.model??(r.model_note==='agent_default'?'модель агента по умолчанию':'по умолчанию'))+' · '+(r.effort_requested??'effort не задан'),l?.status==='matched'?(e?.model??'не задана')+' · '+(e?.effort??'effort неизвестен'):(l?.status??'не подтверждено'),(states[r.view_state]??r.view_state)+' / '+(r.orca_dispatch_id??'—')+(r.agent_blocked_on?' · не стартовал: '+(r.agent_blocked_on==='folder_trust'?'вопрос о доверии к папке':r.agent_blocked_on==='cli_update_prompt'?'предложение обновить CLI':r.agent_blocked_on)+(r.resolution?' — '+r.resolution:''):'')]}));$('empty').hidden=rows.length>0;
             $('path').textContent=data.project+' · '+data.config_home;$('problems').textContent=Object.entries(data.problems).map(([k,v])=>k+': '+v).join('; ')}
             $('filter').addEventListener('input',draw);
             async function refresh(){try{const response=await fetch('/api/state',{cache:'no-store'});if(!response.ok)throw Error('unavailable');data=await response.json();draw();$('connection').textContent='Данные обновлены · '+new Date(data.observed_at).toLocaleTimeString();$('connection').className=''}catch(e){$('connection').textContent='Нет связи · показаны последние полученные данные';$('connection').className='bad'}finally{setTimeout(refresh,2000)}}refresh();
