@@ -70,6 +70,21 @@ public final class RoleResolver {
     public static final String UNPROVEN = "unproven";
     public static final String NONE = "none";
 
+    /**
+     * Roles whose verdict is the check on somebody else's work: the code, the screenshots,
+     * the contract. A judge that may write can change what it is judging, so it is refused
+     * before dispatch rather than admitted as a writer. The write flag used to decide
+     * whether independence was asked at all: a reviewer copied from an implementer with
+     * {@code read_only: false} and the writer's vendor was labelled {@code none} and passed a
+     * strict {@code require_independent_vendor: true} policy, reading its own vendor's work.
+     */
+    public static final Set<String> JUDGING_ROLES = Set.of("reviewer", "visual_qa", "plan_reviewer");
+
+    /** The rejection a writable profile gets for a judging role. */
+    public static final String JUDGE_NOT_READ_ONLY = "judge_not_read_only";
+
+    public static boolean judges(String role) { return JUDGING_ROLES.contains(role); }
+
     public record Resolution(Profile selected, Map<String, String> rejected, String assurance) {
         public Resolution(Profile selected, Map<String, String> rejected) {
             this(selected, rejected, NONE);
@@ -174,6 +189,12 @@ public final class RoleResolver {
             Profile profile = profiles.get(name);
             if (profile == null) { verdicts.add(new Candidate(name, "profile_not_found", null)); continue; }
             if (!profile.role().equals(role)) { verdicts.add(new Candidate(name, "role_mismatch", null)); continue; }
+            // A judge that may write can change what it is judging: refused before anything
+            // else is asked of it, pinned or rotated. See JUDGING_ROLES.
+            if (judges(role) && !profile.readOnly()) {
+                verdicts.add(new Candidate(name, JUDGE_NOT_READ_ONLY, null));
+                continue;
+            }
             if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
                 verdicts.add(new Candidate(name, "vision_capability_unverified", null));
                 continue;
@@ -211,10 +232,12 @@ public final class RoleResolver {
      * only as the declared peer of the single writer — a pair the operator named, with two
      * different models, which the resolution then labels as the weaker assurance it is.
      * `require_independent_vendor: false` alone used to admit any same-vendor reader, silently
-     * and with no mark on the verdict; it no longer does.
+     * and with no mark on the verdict; it no longer does. A judging role is measured whatever
+     * its write flag says; see {@link #JUDGING_ROLES}.
      */
     static String assuranceOf(Policy.RoleSpec spec, Profile profile,
                               Map<String, Profile> profiles, Writers writers) {
+        if (judges(spec.role()) && !profile.readOnly()) return "refused:" + JUDGE_NOT_READ_ONLY;
         if (!profile.readOnly()) return NONE;
         if (!writers.known()) return UNPROVEN;
         if (!writers.contains(profile.vendor())) return INDEPENDENT;

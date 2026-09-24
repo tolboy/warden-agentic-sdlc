@@ -710,7 +710,8 @@ public final class Main {
     private static final java.util.Set<String> REPEATS_WITHOUT_AN_EDIT = java.util.Set.of(
             "preflight_outside_scope", "preflight_dirty_tree", "contract_invalid",
             "policy_invalid", "baseline_failed", "run_override_invalid",
-            "independent_review_unavailable", "visual_qa_unavailable", "mcp_config_missing");
+            "independent_review_unavailable", "visual_qa_unavailable", "mcp_config_missing",
+            dev.warden.role.RoleResolver.JUDGE_NOT_READ_ONLY);
 
     /** Beside an answered run: the run that continues it, written once. */
     static final String CONTINUATION_CLAIM = "continuation.json";

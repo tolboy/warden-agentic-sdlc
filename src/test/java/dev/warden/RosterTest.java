@@ -259,6 +259,71 @@ public final class RosterTest implements Suite {
         check.contains("effort inserted after model", effortText, "model: new-model\neffort: high\n");
         check.that("adding a model still drops the old stamp", !effortText.contains("verified_on"));
         Profile.parse(effortText, extra.toString());
+
+        inlineVerificationIsCleared(check, sandbox);
+    }
+
+    /**
+     * The flow spelling ConfigTest already uses, {@code verification: { verified_on: ... }}.
+     * Only whole lines holding the key used to be removed, so the stamp survived the model
+     * change on the key's own line and the new model read as verified.
+     */
+    private void inlineVerificationIsCleared(Check check, Path sandbox) throws Exception {
+        Path alone = home(sandbox, "model-inline-alone");
+        Path aloneFile = alone.resolve("profiles").resolve("orca-eyes.yaml");
+        Files.writeString(aloneFile, """
+                version: 1
+                profile: orca-eyes
+                role: visual_qa
+                vendor: codex
+                model: gpt-6-astra
+                command: codex
+                runner: orca
+                capabilities:
+                  vision: { delivery: workspace_file, verification: required }
+                verification: { verified_on: 2026-08-27 }
+                """, StandardCharsets.UTF_8);
+        RosterCommand.Outcome cleared = roster(alone, "roster", "model", "orca-eyes", "--model", "gpt-6-luna");
+        check.that("an inline stamp does not stop the switch", cleared.ok());
+        Profile parsedAlone = Profile.parse(Files.readString(aloneFile, StandardCharsets.UTF_8), aloneFile.toString());
+        check.that("and the new model is not verified", !parsedAlone.verified());
+        check.eq("the vision capability's own `verification` key is not the profile's",
+                "workspace_file", parsedAlone.vision().delivery());
+        check.contains("the emptied mapping stays valid YAML",
+                Files.readString(aloneFile, StandardCharsets.UTF_8), "verification: {}");
+
+        Path mixed = home(sandbox, "model-inline-mixed");
+        Path mixedFile = mixed.resolve("profiles").resolve("inline-review.yaml");
+        Files.writeString(mixedFile, """
+                version: 1
+                profile: inline-review
+                role: reviewer
+                vendor: grok
+                model: old-model
+                command: grok
+                runner: orca
+                verification: { probe: "grok -p 'say, ok: {x}' --model {{model}}", verified_on: "2026-09-22", what_to_check: ["one, two", three] }  # stamped by hand
+                """, StandardCharsets.UTF_8);
+        RosterCommand.Outcome mixedOutcome = roster(mixed, "roster", "model", "inline-review",
+                "--model", "new-model");
+        check.that("a flow mapping with other keys is switched", mixedOutcome.ok());
+        String mixedText = Files.readString(mixedFile, StandardCharsets.UTF_8);
+        Profile parsedMixed = Profile.parse(mixedText, mixedFile.toString());
+        check.that("the stamp is gone", !parsedMixed.verified());
+        check.eq("the probe, commas and braces inside quotes, is kept whole",
+                "grok -p 'say, ok: {x}' --model {{model}}", parsedMixed.verificationProbe());
+        check.eq("and so is what_to_check", List.of("one, two", "three"), parsedMixed.verificationChecks());
+        check.contains("the comment after the mapping survived", mixedText, "# stamped by hand");
+
+        Path kept = home(sandbox, "model-inline-kept");
+        Path keptFile = kept.resolve("profiles").resolve("inline-review.yaml");
+        Files.writeString(keptFile, Files.readString(mixedFile, StandardCharsets.UTF_8)
+                .replace("verification: { probe", "verification: { verified_on: \"2026-09-22\", probe"),
+                StandardCharsets.UTF_8);
+        RosterCommand.Outcome keptOutcome = roster(kept, "roster", "model", "inline-review",
+                "--model", "newer-model", "--keep-verified");
+        check.that("--keep-verified keeps an inline stamp", keptOutcome.ok()
+                && Profile.parse(Files.readString(keptFile, StandardCharsets.UTF_8), keptFile.toString()).verified());
     }
 
     /**

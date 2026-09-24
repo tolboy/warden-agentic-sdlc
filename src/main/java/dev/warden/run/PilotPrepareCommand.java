@@ -18,9 +18,10 @@ import dev.warden.role.RoleResolver;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -54,6 +55,8 @@ public final class PilotPrepareCommand {
 
     private static final Duration GIT_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration WHICH_TIMEOUT = Duration.ofSeconds(10);
+    private static final int PUBLISH_ATTEMPTS = 40;
+    private static final Duration PUBLISH_PAUSE = Duration.ofMillis(50);
     private static final int MAX_NESTED_RESOURCES = 32;
     private static final Pattern PROFILE_LINE = Pattern.compile("(?m)^profile:\\s*.*$");
     private static final Set<String> SECRET_NAMES = Set.of(
@@ -261,14 +264,15 @@ public final class PilotPrepareCommand {
                         Map.of("output", options.output().toString(), "preserved", true));
             }
             try {
-                Files.move(staging, options.output());
+                publish(staging, options.output(), Files::move, PUBLISH_ATTEMPTS, PUBLISH_PAUSE);
+            } catch (FileAlreadyExistsException raced) {
+                return fail(OUTPUT_EXISTS, List.of(
+                        "output '" + options.output() + "' appeared before publish; the existing "
+                                + "directory was left unchanged"),
+                        Map.of("output", options.output().toString(), "preserved", true));
             } catch (IOException move) {
-                try {
-                    Files.move(staging, options.output(), StandardCopyOption.COPY_ATTRIBUTES);
-                } catch (IOException retry) {
-                    return fail(PREPARE_REFUSED, List.of("cannot publish bundle: " + retry.getMessage()),
-                            Map.of("output", options.output().toString()));
-                }
+                return fail(PREPARE_REFUSED, List.of("cannot publish bundle: " + move),
+                        Map.of("output", options.output().toString()));
             }
             staging = null;
             return new Outcome(true, PREPARED_CODE, report);
@@ -278,6 +282,40 @@ public final class PilotPrepareCommand {
                     "output", options.output().toString()));
         } finally {
             if (staging != null) deleteQuietly(staging);
+        }
+    }
+
+    /** Moves a directory from one path to another; {@link Files#move} in production. */
+    @FunctionalInterface
+    public interface Rename {
+        void move(Path from, Path to) throws IOException;
+    }
+
+    /**
+     * Publishes the staged bundle with one directory rename, retried while Windows reports
+     * the tree as in use. A rename of a tree written a moment ago fails now and then with
+     * {@link AccessDeniedException} while another process (a virus scanner, the search
+     * indexer) still holds a handle on a file inside it, and succeeds a few milliseconds
+     * later. The fallback this replaces moved again with {@code COPY_ATTRIBUTES}, which
+     * {@link Files#move} never supports, so one prepare in three to ten failed on the
+     * maintainer's host and the {@code pilot-prepare} suite counted 7, 129 or 136 checks
+     * between runs of one build. A target that exists is never retried or replaced.
+     */
+    public static void publish(Path staging, Path output, Rename rename, int attempts, Duration pause)
+            throws IOException {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                rename.move(staging, output);
+                return;
+            } catch (AccessDeniedException busy) {
+                if (attempt >= attempts || Files.exists(output)) throw busy;
+            }
+            try {
+                Thread.sleep(pause.toMillis());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted while publishing " + output, interrupted);
+            }
         }
     }
 

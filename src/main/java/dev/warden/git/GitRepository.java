@@ -36,27 +36,50 @@ public final class GitRepository {
     }
 
     public Set<String> changedPaths() throws IOException, InterruptedException {
-        Set<String> paths = new LinkedHashSet<>();
-        // Content changes vs HEAD. Do not use `status --porcelain`: on Windows a file can be
-        // "modified" in the index/worktree because of CRLF after `npm install` while
-        // `git diff --name-only HEAD` is empty. That false dirty bit stopped a live
-        // `warden do` before review — the implementer had only edited an in-scope CSS file.
-        for (String path : git(List.of("diff", "--name-only", "-z", "HEAD", "--")).stdout().split("\0", -1)) {
-            if (!path.isBlank()) addChangedPath(paths, path);
-        }
-        for (String path : git(List.of("ls-files", "-o", "--exclude-standard", "-z")).stdout().split("\0", -1)) {
-            if (!path.isBlank()) addChangedPath(paths, path);
-        }
+        Set<String> paths = changedSinceHead();
+        paths.addAll(untracked());
         return paths;
     }
 
     /** Every path changed by commits, index, working tree or untracked files since merge-base. */
     public Set<String> changedPaths(String mergeBase) throws IOException, InterruptedException {
+        return changes(mergeBase).all();
+    }
+
+    /** {@link #changedPaths(String)}, with the untracked part kept apart for the fingerprint. */
+    private record Changes(Set<String> all, Set<String> untracked) {}
+
+    private Changes changes(String mergeBase) throws IOException, InterruptedException {
         Set<String> paths = new LinkedHashSet<>();
-        String[] committedAndWorking = git(List.of("diff", "--name-only", "-z", mergeBase, "--"))
+        String[] committedAndWorking = git(List.of("diff", "--name-only", "--no-renames", "-z", mergeBase, "--"))
                 .stdout().split("\0", -1);
         for (String path : committedAndWorking) if (!path.isBlank()) addChangedPath(paths, path);
-        paths.addAll(changedPaths());
+        paths.addAll(changedSinceHead());
+        Set<String> untracked = untracked();
+        paths.addAll(untracked);
+        return new Changes(paths, untracked);
+    }
+
+    private Set<String> changedSinceHead() throws IOException, InterruptedException {
+        Set<String> paths = new LinkedHashSet<>();
+        // Content changes vs HEAD. Do not use `status --porcelain`: on Windows a file can be
+        // "modified" in the index/worktree because of CRLF after `npm install` while
+        // `git diff --name-only HEAD` is empty. That false dirty bit stopped a live
+        // `warden do` before review — the implementer had only edited an in-scope CSS file.
+        // `--no-renames`: a rename git has paired names only its destination, so the path it
+        // emptied dropped out of the set the moment both sides were tracked. See fingerprint.
+        for (String path : git(List.of("diff", "--name-only", "--no-renames", "-z", "HEAD", "--"))
+                .stdout().split("\0", -1)) {
+            if (!path.isBlank()) addChangedPath(paths, path);
+        }
+        return paths;
+    }
+
+    private Set<String> untracked() throws IOException, InterruptedException {
+        Set<String> paths = new LinkedHashSet<>();
+        for (String path : git(List.of("ls-files", "-o", "--exclude-standard", "-z")).stdout().split("\0", -1)) {
+            if (!path.isBlank()) addChangedPath(paths, path);
+        }
         return paths;
     }
 
@@ -88,15 +111,34 @@ public final class GitRepository {
         MessageDigest digest = sha256();
         // Raw metadata catches deletion, rename and mode/status changes. File bytes catch
         // edits to already-dirty and binary files without decoding a binary patch as text.
-        digest.update(shapeOf(git(List.of("diff", "--raw", "-z", mergeBase, "--")).stdout(), sourceOnly)
-                .getBytes(StandardCharsets.UTF_8));
-        Set<String> paths = evidenceRemoved(changedPaths(mergeBase));
+        //
+        // `--no-renames` because rename detection only pairs paths git tracks. A file moved on
+        // disk is `D old` plus an untracked `new` while it is judged, and `R100 old new` once
+        // `warden land --commit` has added `new` — the same tree, two shapes, and the second
+        // one also dropped `old` from the path list below. Unpaired, a rename is `D old` and
+        // `A new` wherever the new side sits, and the deletion is still in the shape.
+        String raw = git(List.of("diff", "--raw", "--no-renames", "-z", mergeBase, "--")).stdout();
+        digest.update(shapeOf(raw, sourceOnly).getBytes(StandardCharsets.UTF_8));
+        Changes changes = changes(mergeBase);
+        Set<String> paths = evidenceRemoved(changes.all());
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
+        Map<String, String> additions = sourceOnly ? additionModes(raw) : Map.of();
+        FileModeTrust trust = new FileModeTrust();
         List<String> changed = paths.stream().sorted().toList();
         for (String relative : changed) {
             digest.update((byte) 0);
             digest.update(normalize(relative).getBytes(StandardCharsets.UTF_8));
             Path file = root.resolve(relative).normalize();
+            if (sourceOnly) {
+                // The mode an added file lands with, in one form whether it is untracked,
+                // staged or committed. See shapeOf for why it is not the raw record.
+                String mode = additions.get(normalize(relative));
+                if (mode == null && changes.untracked().contains(relative)) mode = untrackedMode(file, trust);
+                if (mode != null && !mode.equals(REGULAR_FILE)) {
+                    digest.update((byte) 3);
+                    digest.update(mode.getBytes(StandardCharsets.UTF_8));
+                }
+            }
             if (Files.isRegularFile(file)) {
                 digest.update((byte) 1);
                 digest.update(Files.readAllBytes(file));
@@ -119,9 +161,10 @@ public final class GitRepository {
      * and then `warden land --push` refused it as `candidate_changed`, having been invalidated
      * by Warden's own previous step.
      *
-     * What the raw line is here for survives: a deletion, a rename and a mode change all show
-     * in the modes, the status letter and the path. The content is hashed separately below and
-     * never depended on the blob ids at all.
+     * What the raw line is here for survives: a deletion, a rename (the deletion of its old
+     * path, since the diff is taken unpaired) and a mode change all show in the modes, the
+     * status letter and the path. The content is hashed separately below and never depended
+     * on the blob ids at all.
      */
     static String shapeOf(String raw) {
         return shapeOf(raw, false);
@@ -136,6 +179,24 @@ public final class GitRepository {
      *                   run as `candidate_changed`. That is the same failure the fingerprint
      *                   split was written to end, firing again through the one input the split
      *                   did not reach.
+     *
+     *                   It also drops every addition. A file the candidate adds is untracked
+     *                   while the run is judged and accepted, so it has no raw record then,
+     *                   and after `warden land --commit` it has {@code :000000 100644 A}. The
+     *                   hash stripping above made that flow safe for modified and deleted
+     *                   files only, and `warden land --push` refused every run that added one
+     *                   (reproduced 2026-09-23). Past "tracked yet", the record holds one
+     *                   thing the content half does not — the path, its presence and its bytes
+     *                   are there however the file sits — and that is the mode the file lands
+     *                   with. It must not be lost: an executable script accepted as
+     *                   {@code 100755} and committed as {@code 100644} with the same bytes is
+     *                   not the candidate that was accepted. So the fingerprint takes the mode
+     *                   from wherever the file sits — the record once it is tracked, the file
+     *                   and {@code core.fileMode} while it is not — in a form that does not say
+     *                   which. See {@link #additionModes} and {@link #untrackedMode}.
+     *
+     *                   The read-only fingerprint keeps the record: there, a role that stages
+     *                   or commits a file it was only meant to read is still a mutation.
      */
     static String shapeOf(String raw, boolean sourceOnly) {
         StringBuilder shape = new StringBuilder();
@@ -172,10 +233,75 @@ public final class GitRepository {
                 index += paths.size();
                 continue;
             }
+            if (sourceOnly && status.equals("A")) {
+                index += paths.size();
+                continue;
+            }
             shape.append(':').append(fields[0]).append(' ').append(fields[1]).append(' ')
                     .append(status).append('\0');
         }
         return shape.toString();
+    }
+
+    /** The mode git gives a plain file; an addition with it adds nothing to the fingerprint. */
+    private static final String REGULAR_FILE = "100644";
+
+    /**
+     * The destination mode of every addition in a raw diff, by path.
+     *
+     * With {@code core.fileMode} on, git reads it from the working tree's executable bit; off,
+     * from the index. Either way it is the mode the file lands with, and {@link #untrackedMode}
+     * answers the same question for a file that is not tracked yet. Only a mode other than a
+     * plain file's is hashed, so a candidate whose additions are all plain files — the usual
+     * run — keeps the fingerprint it had before additions left the raw shape.
+     */
+    static Map<String, String> additionModes(String raw) {
+        Map<String, String> modes = new LinkedHashMap<>();
+        String[] records = raw.split("\0", -1);
+        for (int index = 0; index + 1 < records.length; index++) {
+            String record = records[index];
+            if (record.isEmpty() || record.charAt(0) != ':') continue;
+            String[] fields = record.substring(1).trim().split("\\s+");
+            if (fields.length < 5) continue;
+            String status = fields[fields.length - 1];
+            int pathCount = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+            if (status.equals("A")) modes.put(normalize(records[index + 1]), fields[1]);
+            index += pathCount;
+        }
+        return modes;
+    }
+
+    /**
+     * The mode `git add` would give an untracked file: a symlink's, or a plain file's unless
+     * the owner may execute it and the repository trusts that bit ({@code core.fileMode},
+     * which git defaults to true and `git init` turns off on file systems without it). A file
+     * system with no POSIX permissions — Windows — has no executable bit to trust.
+     */
+    private String untrackedMode(Path file, FileModeTrust trust) throws IOException, InterruptedException {
+        if (Files.isSymbolicLink(file)) return "120000";
+        if (!Files.isRegularFile(file)) return null;
+        Set<java.nio.file.attribute.PosixFilePermission> permissions;
+        try {
+            permissions = Files.getPosixFilePermissions(file, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        } catch (UnsupportedOperationException noPosixPermissions) {
+            return REGULAR_FILE;
+        }
+        if (!permissions.contains(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE)) return REGULAR_FILE;
+        return trust.executableBit(this) ? "100755" : REGULAR_FILE;
+    }
+
+    /** {@code core.fileMode}, asked at most once per fingerprint and only for an executable file. */
+    private static final class FileModeTrust {
+        private Boolean executableBit;
+
+        boolean executableBit(GitRepository git) throws IOException, InterruptedException {
+            if (executableBit == null) {
+                ProcessRunner.Result read = git.gitRaw(List.of("config", "--type=bool", "--get", "core.fileMode"));
+                // Exit 1 is "not set", and git trusts the bit by default.
+                executableBit = !read.ok() || !read.stdout().strip().equals("false");
+            }
+            return executableBit;
+        }
     }
 
     /**
