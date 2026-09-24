@@ -7,6 +7,7 @@ import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.Workflow;
 import dev.warden.role.RoleResolver;
+import dev.warden.run.TaskLoop;
 import dev.warden.yaml.Yaml;
 
 import java.io.IOException;
@@ -29,6 +30,11 @@ import java.util.Set;
  * source of a value is one of three levels — {@code personal} (the config home: policy and
  * profiles), {@code project} ({@code .warden/project.yaml}) and {@code task} (a task file) —
  * or {@code default} when nothing declares it and Warden's built-in value applies.
+ *
+ * The stage table is the policy's answer, before any task: {@code stages_basis} says so. A
+ * task can pin a profile in {@code use:} or allow a same-vendor peer in
+ * {@code review_assurance}, and what a run of that task would dispatch is its own
+ * {@code would_run}, resolved by {@link TaskLoop#dispatchPreview} — the preflight's calls.
  */
 public final class ConfigView {
 
@@ -51,9 +57,10 @@ public final class ConfigView {
         view.put("policy_file", user.home().resolve("policy.yaml").toString());
         view.put("policy_loaded", policy != null);
         view.put("workflow_source", policy != null && policy.workflowDeclared() ? "personal" : "default");
+        view.put("stages_basis", "policy");
         view.put("stages", stages(workflow, user, cached));
         view.put("limits", limits(user));
-        view.put("tasks", tasks(project, workflow));
+        view.put("tasks", tasks(project, user, cached));
         return view;
     }
 
@@ -206,7 +213,8 @@ public final class ConfigView {
 
     // ------------------------------------------------------------------ tasks
 
-    private static List<Map<String, Object>> tasks(Path project, Workflow workflow) {
+    private static List<Map<String, Object>> tasks(Path project, UserConfig user,
+                                                   RoleResolver.Availability availability) {
         List<Map<String, Object>> rows = new ArrayList<>();
         Path tasks = project.toAbsolutePath().normalize().resolve(".warden/tasks");
         if (!Files.isDirectory(tasks, LinkOption.NOFOLLOW_LINKS)) return rows;
@@ -227,6 +235,8 @@ public final class ConfigView {
             try {
                 ConfigLoader.Loaded loaded = new ConfigLoader().load(project, id);
                 TaskSpec.ResolvedTask task = loaded.resolved();
+                Workflow workflow = user.policy() == null ? Workflow.builtIn() : user.policy().workflow();
+                if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
                 Map<String, Object> raw = raw(file);
                 row.put("risk", valued(task.risk(), sourceOf(raw, "risk", projectRaw, "defaults.risk")));
                 row.put("max_role_runs", valued(task.budget().maxRoleRuns(),
@@ -246,7 +256,9 @@ public final class ConfigView {
                         ? "required · " + task.visualQa().evidence() : "off", sourceOf(raw, "visual_qa", null, null)));
                 row.put("review_assurance", valued(task.reviewAssurance(),
                         sourceOf(raw, "review_assurance", null, null)));
-                row.put("overlay", overlay(loaded.task().use().toMap(), workflow));
+                List<Map<String, Object>> dispatch = TaskLoop.dispatchPreview(project, loaded, user, availability);
+                row.put("would_run", dispatch);
+                row.put("overlay", overlay(loaded.task().use().toMap(), workflow, dispatch));
             } catch (Exception invalid) {
                 row.put("problem", String.valueOf(invalid.getMessage()));
             }
@@ -256,9 +268,13 @@ public final class ConfigView {
 
     /**
      * The task's {@code use:} rows, each checked the way the preflight checks it: a stage the
-     * workflow does not have, and a stage no profile fills, are both refused before dispatch.
+     * workflow does not have, and a stage no profile fills, are both refused before dispatch;
+     * so is an effort or a host the chosen profile cannot deliver, and a pin nobody can fill
+     * stops the run at that stage. The last two come from {@code dispatch}, the task's own
+     * {@link TaskLoop#dispatchPreview}, so the panel and the preflight give one answer.
      */
-    private static List<Map<String, Object>> overlay(Map<String, Object> use, Workflow workflow) {
+    private static List<Map<String, Object>> overlay(Map<String, Object> use, Workflow workflow,
+                                                     List<Map<String, Object>> dispatch) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Map.Entry<String, Object> kind : use.entrySet()) {
             if (!(kind.getValue() instanceof Map<?, ?> byStage)) continue;
@@ -272,6 +288,20 @@ public final class ConfigView {
                         .filter(candidate -> candidate.name().equals(stage)).findFirst().orElse(null);
                 row.put("refused", named == null ? "run_override_unknown_stage"
                         : named.kind() != Workflow.Kind.ROLE ? "run_override_not_a_role_stage" : null);
+                Map<String, Object> dispatched = dispatch.stream()
+                        .filter(candidate -> stage.equals(candidate.get("stage"))).findFirst().orElse(null);
+                if (row.get("refused") == null && dispatched != null) {
+                    if (dispatched.get("skipped") != null) {
+                        row.put("skipped", dispatched.get("skipped"));
+                    } else if (dispatched.get("refused") != null) {
+                        row.put("refused", dispatched.get("refused"));
+                        row.put("message", dispatched.get("message"));
+                    } else if (dispatched.get("unresolved") instanceof Map<?, ?> reasons) {
+                        Object pinned = "profile".equals(kind.getKey()) ? reasons.get(String.valueOf(entry.getValue())) : null;
+                        row.put("refused", pinned != null ? String.valueOf(pinned) : "no_eligible_profile");
+                        row.put("message", "nobody can fill stage '" + stage + "': " + reasons);
+                    }
+                }
                 row.put("source", "task");
                 rows.add(row);
             }

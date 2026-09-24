@@ -256,6 +256,18 @@ public final class RoleRunner {
         return this;
     }
 
+    /** Who is installed, when the caller already asked; null probes the machine. */
+    private RoleResolver.Availability availability;
+
+    /**
+     * The same runner, taking {@code known} as the answer to "is this profile's program here".
+     * The settings panel previews every task on each refresh and probes each program once.
+     */
+    public RoleRunner availability(RoleResolver.Availability known) {
+        this.availability = known;
+        return this;
+    }
+
     /** The pin that applies to a dispatch of {@code role} at {@code stage}, or null. */
     private String pinFor(String stage, String role) {
         String key = stage == null ? role : stage;
@@ -1375,7 +1387,7 @@ public final class RoleRunner {
 
     /** A vendor whose executable is absent is skipped, never attempted mid-loop. */
     private boolean available(Profile profile) {
-        return executableFound(processes, profile);
+        return availability != null ? availability.available(profile) : executableFound(processes, profile);
     }
 
     /**

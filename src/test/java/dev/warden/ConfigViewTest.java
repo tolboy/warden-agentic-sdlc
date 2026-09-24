@@ -49,6 +49,7 @@ public final class ConfigViewTest implements Suite {
             orcaRolesSayWhatIsUnknown(check, view);
             attemptsAndFailovers(check);
             servedOnDemand(check, project);
+            aTaskResolvesItsOwnDispatch(check, sandbox);
         } finally {
             deleteTree(sandbox);
         }
@@ -145,10 +146,14 @@ public final class ConfigViewTest implements Suite {
         Map<String, String> refused = new LinkedHashMap<>();
         for (Map<String, Object> row : overlay) refused.put(String.valueOf(row.get("stage")), (String) row.get("refused"));
         Map<String, String> expected = new java.util.HashMap<>();
-        expected.put("review", null);
+        // The reviewer this task gets, rev-ok, has no {{effort}} in its args, so the preflight
+        // refuses `effort: high` for it; the panel used to check only that the stage existed.
+        expected.put("review", "run_override_undeliverable");
         expected.put("browser", "run_override_not_a_role_stage");
         expected.put("nope", "run_override_unknown_stage");
         check.eq("a task overlay is shown with what the preflight will say about it", expected, refused);
+        check.eq("the stage table says it is the policy's answer, before any task", "policy",
+                view.get("stages_basis"));
     }
 
     @SuppressWarnings("unchecked")
@@ -202,6 +207,90 @@ public final class ConfigViewTest implements Suite {
                     HttpResponse.BodyHandlers.ofString());
             check.contains("and the page has a place for them", page.body(), "Состав по стадиям");
         }
+    }
+
+    /**
+     * The stage table answers for the policy. A task that pins a writer in `use:`, or allows
+     * a same-vendor peer in `review_assurance`, runs something else, and the panel showed the
+     * policy's pick as what would run and `peer_not_allowed_by_task` for a reader the task
+     * admits. Each task now carries its own dispatch, from the preflight's calls.
+     */
+    @SuppressWarnings("unchecked")
+    private void aTaskResolvesItsOwnDispatch(Check check, Path sandbox) throws Exception {
+        Path home = Files.createDirectories(sandbox.resolve("peer-home/profiles")).getParent();
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [impl-a, impl-b], strategy: first, require_independent_vendor: false }
+                  reviewer:
+                    profiles: [rev-same, rev-ok]
+                    strategy: first
+                    require_independent_vendor: false
+                    same_vendor_peer: { implementer: impl-a, reviewer: rev-same }
+                review: { required_for_risk: [medium, high] }
+                """);
+        String launcher = yaml(Path.of(System.getProperty("java.home"), "bin", WINDOWS ? "java.exe" : "java").toString());
+        profile(home, "impl-a", "implementer", "vendor-a", launcher, false, true, "model: writer-model\n");
+        profile(home, "impl-b", "implementer", "vendor-b", launcher, false, true, "model: other-writer\n");
+        profile(home, "rev-same", "reviewer", "vendor-a", launcher, true, true, "model: reader-model\n");
+        profile(home, "rev-ok", "reviewer", "vendor-d", launcher, true, true, "model: outside-model\n");
+        Path project = project(sandbox.resolve("peer-project"));
+        Files.delete(project.resolve(".warden/tasks/hello.yaml"));
+        String task = """
+                version: 1
+                id: %s
+                goal: Say hello
+                risk: medium
+                scope: app
+                """;
+        Files.writeString(project.resolve(".warden/tasks/plain.yaml"), task.formatted("plain"));
+        Files.writeString(project.resolve(".warden/tasks/peer.yaml"), task.formatted("peer")
+                + "review_assurance: same_vendor_peer\n");
+        Files.writeString(project.resolve(".warden/tasks/pinned.yaml"), task.formatted("pinned")
+                + "use:\n  implement: { profile: impl-b }\n");
+        Files.writeString(project.resolve(".warden/tasks/missing.yaml"), task.formatted("missing")
+                + "use:\n  implement: { profile: no-such }\n");
+        UserConfig user = UserConfig.load(home);
+        Map<String, Object> view = ConfigView.of(project, user, ConfigViewTest::available);
+
+        check.eq("the policy's table picks the outside reviewer: no task has allowed the peer", "rev-ok",
+                stage(view, "review").get("would_run"));
+        Map<String, Map<String, Object>> tasks = new LinkedHashMap<>();
+        for (Map<String, Object> row : (List<Map<String, Object>>) view.get("tasks")) {
+            tasks.put(String.valueOf(row.get("task")), row);
+        }
+        check.eq("a task with no settings of its own runs what the policy names", "rev-ok",
+                dispatched(tasks.get("plain"), "review").get("profile"));
+
+        Map<String, Object> peer = dispatched(tasks.get("peer"), "review");
+        check.eq("a task that allows the peer runs it", "rev-same", peer.get("profile"));
+        var workflow = user.policy().workflow();
+        var reviewStage = workflow.stages().stream().filter(s -> s.name().equals("review")).findFirst().orElseThrow();
+        var peeked = new RoleRunner(new ProcessRunner()).peek(project, user, "review", "reviewer",
+                new RoleResolver.Writers(java.util.Set.of("vendor-a"), java.util.Set.of("impl-a"), true, true),
+                workflow.rotationPositionOf(reviewStage));
+        check.eq("which is what the resolver gives the loop for it", peeked == null ? null : peeked.name(),
+                peer.get("profile"));
+
+        check.eq("a task that pins another writer shows that writer", "impl-b",
+                dispatched(tasks.get("pinned"), "implement").get("profile"));
+        check.eq("while the policy's table still names its own", "impl-a", stage(view, "implement").get("would_run"));
+        check.eq("and its readers are judged against the pinned writer", "rev-same",
+                dispatched(tasks.get("pinned"), "review").get("profile"));
+
+        Map<String, Object> missing = dispatched(tasks.get("missing"), "implement");
+        check.eq("a pin nobody can fill leaves the stage empty", null, missing.get("profile"));
+        check.eq("with the resolver's reason", Map.of("no-such", "profile_not_found"), missing.get("unresolved"));
+        Map<String, Object> pinRow = ((List<Map<String, Object>>) tasks.get("missing").get("overlay")).getFirst();
+        check.eq("and the overlay row says the run will be refused there", "profile_not_found", pinRow.get("refused"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> dispatched(Map<String, Object> task, String stage) {
+        for (Map<String, Object> row : (List<Map<String, Object>>) task.get("would_run")) {
+            if (stage.equals(row.get("stage"))) return row;
+        }
+        throw new IllegalStateException("no dispatch row for " + stage + " in " + task.get("task"));
     }
 
     // ------------------------------------------------------------------ fixture

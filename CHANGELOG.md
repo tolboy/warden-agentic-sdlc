@@ -133,12 +133,20 @@ that exists in code but has never been run live says so.
     reasons come from the new `RoleResolver.candidates`, which `resolve` is now built on, so
     the panel cannot disagree with `warden roster` or a dry run; the `config-view` suite
     checks it against both, and against the preflight's `explainFill` for a stage nobody can
-    fill;
+    fill. That table is the policy's answer before any task, and says so (`stages_basis:
+    policy`);
   - **the limits in force** (failover mode, review risks, repair severities, contract-gap
     route, repair reserve, rate-limit retry, escalation), and **for each task** its risk,
     call and money budget (a strict cap shown apart from a threshold), deadline, fix rounds,
-    visual QA and its `use:` overlay with what the preflight will say about each row. Every
-    value names its source: personal (`~/.warden`), project, task, or Warden's default;
+    visual QA, **what a run of that task would dispatch** at each stage, and its `use:`
+    overlay with what the preflight will say about each row. The dispatch comes from the new
+    `TaskLoop.dispatchPreview`, built from the preflight's own calls: the task's pins and
+    overlay applied, readers judged against the writer with the task's `review_assurance`.
+    So a task that pins another writer shows that writer, a same-vendor peer the task allows
+    is not shown as `peer_not_allowed_by_task`, and an overlay the chosen profile cannot
+    deliver (an effort its args cannot carry, `host: orca` with no verified twin) or a pin
+    nobody can fill is shown as refused rather than as fine. Every value names its source:
+    personal (`~/.warden`), project, task, or Warden's default;
   - **failovers on each run**: who was spent, who took over, and a switch waiting for
     confirmation, from the summary's own step rows;
   - **what an Orca role does not report**: its cost is unknown rather than blank, a model it
