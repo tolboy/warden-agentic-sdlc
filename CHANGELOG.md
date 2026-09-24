@@ -78,6 +78,98 @@ that exists in code but has never been run live says so.
   was accepted and ignored and the run went ahead as if it had not been typed. Found by the
   review (CFG-03). Suite `task loop`.
 
+- `warden land --push` after `warden land --commit` lands a candidate that adds or moves
+  files. A file the candidate adds is untracked while the run is judged and accepted, so
+  `git diff --raw` had no record for it then and `:000000 100644 … A` once `--commit` had
+  added it; a file moved on disk was `D old` plus an untracked file, then `R100 old new`, and
+  `--name-only` stopped naming `old`. Either one moved the candidate fingerprint, and the
+  push refused the run it had just committed as `candidate_changed` (reproduced 2026-09-23).
+  The candidate fingerprint now leaves additions out of the raw shape — the path, its
+  presence and its bytes are hashed from the file either way — and takes the diff with
+  `--no-renames`, so a rename is the deletion of the old path plus the new file, tracked or
+  not. Deletions, renames and mode changes of files the base already had still move it, and
+  so does the mode an added file lands with: it is hashed in one form wherever the file
+  sits — from the `A` record once tracked, from the file's executable bit and
+  `core.fileMode` while untracked — and only when it is not a plain file's `100644`. An
+  added script accepted as `100755` and committed as `100644` with the same bytes is a
+  different candidate. The read-only fingerprint keeps the `A` record: a reader that stages
+  a file is still a mutation. Past the fingerprint, `--push` then failed on the commit it did not
+  need: `git commit` had nothing to commit, and a deleted path, in neither the index nor the
+  tree any more, made `git add` fail before it. When HEAD already holds the accepted paths
+  as they stand, `land` now skips both, reports `already_committed` and goes on to push. The
+  changed-path set (blast radius, `changed_files`, the working-tree snapshot) is also taken
+  unpaired, so a staged `git mv` no longer hides the path it emptied from the scope check.
+  **Decisions recorded before this:** a candidate whose added files were untracked plain
+  files and that renamed nothing through the index — the usual run — has the fingerprint it
+  had, and a test pins it against the old definition. That includes a run accepted before this and
+  already committed by `land --commit`: `land --push` now takes it. A candidate that had an
+  addition staged or committed, a rename git had paired, or an untracked executable addition
+  on a file system with the bit, reads `candidate_changed` once —
+  at `warden approve --decision accept` (run the gates again) and at `warden land` (run the
+  task again and accept the result) — and a carried judgement for it is re-judged rather
+  than reused. Suites `runtime`, `task loop`.
+- `warden land --commit` commits the accepted paths and nothing else in the index. It ran
+  `git add -- <paths>` and then a plain `git commit`, which takes the whole index: a file the
+  operator had staged under `.warden/`, or a staged edit whose working copy was put back to
+  HEAD's, rode into the accepted commit, and the source fingerprint could see neither. The
+  commit is now `git commit --only -- <paths>` with literal pathspecs; whatever else was
+  staged stays staged and out of it, and the report lists it as `left_staged`. The plan
+  prints the argv that runs and names the paths the commit will hold, computed before
+  anything is written; an accepted path already at HEAD is `already_committed` rather than
+  committed again, so `land --commit` followed by `land --push` pushes instead of failing
+  with "nothing to commit". A commit that still differs from the plan (a pre-commit hook
+  that stages more) stops as `commit_differs_from_plan` before the push, and one with the
+  planned paths but other content — a formatter hook that rewrites an accepted file and
+  stages it again, even in the index alone — stops as `commit_differs_from_accepted`: land
+  compares the blob and mode of every path in its commit (`ls-tree`) with what it staged
+  from the accepted working tree before the hook ran (`ls-files -s`). A commit refused
+  either way is recorded beside the run's decision (`land-refused.json`), and every later
+  `land --commit` or `--push` refuses as `refused_commit_in_history` while that commit is
+  reachable from HEAD: with the source already at HEAD, a second `--push` used to have
+  nothing to commit, nothing to check, and published the commit the first had refused. A
+  deletion already staged, as after the `git reset --soft HEAD~1` the refusal recommends,
+  is no longer handed to `git add`, which rejected it. Found by the 2026-09-22 review
+  (CORE-04) and the review of this change. Suite `land`, new.
+- A judging role cannot be given a profile that may write. A reviewer copied from an
+  implementer with `read_only: false` and the writer's vendor was labelled `none` by the
+  resolver, which asked the independence question only of read-only profiles, so it passed
+  `require_independent_vendor: true` and read its own vendor's work; the task's write
+  authority let it past the one other check. `reviewer`, `visual_qa` and `plan_reviewer`
+  profiles with `read_only: false` are now refused as `judge_not_read_only`, pinned or not,
+  and a chain whose judging stage has no other candidate stops before the first dispatch
+  under that name, naming the profile; preparation stops before the planner is paid. Found
+  by the 2026-09-22 review (CFG-04). Suites `role-resolver`, `role runner`, `task loop`,
+  `planner`.
+- `warden roster model` clears a stamp written as a flow mapping. It removed whole lines
+  holding `verified_on`, so `verification: { verified_on: 2026-08-27 }` — the spelling
+  `ConfigTest` itself uses — survived the switch and the new model read as verified. The
+  key is now removed from the `verification` mapping in its block or its flow form, keeping
+  the other entries and a trailing comment, and the profile is parsed before it is written:
+  one that would still read as verified without `--keep-verified` is refused as
+  `verification_not_cleared` and left untouched. Found by the 2026-09-22 review (CFG-01).
+  Suite `roster`.
+- `warden pilot prepare` no longer fails one run in three to ten on Windows. The bundle is
+  published with one directory rename, which Windows refuses with `AccessDeniedException`
+  while a scanner still holds a file in the tree written a moment before; the fallback moved
+  again with `COPY_ATTRIBUTES`, which `Files.move` never supports, so the refusal was final.
+  The rename is now retried while the tree is busy, up to two seconds, and never over an
+  output that exists. The `pilot-prepare` suite, which counted 7, 129 or 136 checks between
+  runs of one build, counted 145 in 25 consecutive runs. Suite `pilot-prepare`.
+- A prompt delivered on stdin (`prompt_delivery: stdin`) can no longer hang the controller
+  past every limit. `ProcessRunner` wrote the whole prompt before it started reading the
+  child's output and before it started the timeout. A vendor that never read a prompt larger
+  than its pipe held that write, and the run, for as long as it lived: no timeout, wall clock
+  or chain deadline applied, and no human gate appeared. One that printed before reading
+  deadlocked for good, because each side waited on the other. Measured on Windows against the
+  old runner: an 8 MB prompt to a child that ignores stdin was still blocked when the test's
+  60 s bound expired (timeout 2 s), and a child that prints 4 MB first never returned. The
+  output readers now start first, and the prompt is written on its own thread under the
+  timeout. On a stop, the process tree is killed, which breaks the pipe and ends the write.
+  The stop signals through `ProcessHandle`, not `Process.destroy`: on Unix the latter closes
+  stdin after the signal, and that close waits for the lock the blocked write holds, so a child
+  that ignored SIGTERM kept the stop inside `destroy` until it exited by itself. Measured in a
+  Linux container with a child that ignores SIGTERM and sleeps 40 s: 40.1 s before, 3.1 s
+  after (killed after the 2 s grace). Suite `runtime`.
 - `warden roster model` switches the model the vendor is asked for, not only the label.
   A direct profile that spells the old model in `args` (every hand-written profile on the
   maintainer's machine passed `--model opus` literally) now has that item rewritten to

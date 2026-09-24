@@ -337,7 +337,7 @@ public final class TaskLoopTest implements Suite {
         check.eq("the commit covers the source the run changed, and only that",
                 List.of("src/result.txt"), planned.report().get("paths"));
         check.contains("the exact commands are printed rather than described",
-                String.valueOf(planned.report().get("would_run")), "git add -- src/result.txt");
+                String.valueOf(planned.report().get("would_run")), "git --literal-pathspecs add -- src/result.txt");
         check.eq("and it says outright that it merges nothing",
                 Boolean.FALSE, planned.report().get("lands"));
 
@@ -372,6 +372,32 @@ public final class TaskLoopTest implements Suite {
         check.eq("the commit holds the source file", "src/result.txt", show.stdout().strip());
         check.that("and none of Warden's own evidence", !show.stdout().contains(".warden"));
 
+        // `--push` is the step `--commit` tells the operator to take next, and it has to know
+        // the tree `--commit` just made. The file this candidate adds was untracked when it was
+        // judged and accepted, so `git diff --raw` had no record for it then and has an `A`
+        // record now. Reproduced 2026-09-23: that record alone made the push refuse the run as
+        // `candidate_changed`, and past it `git commit` had nothing left to commit.
+        ProcessRunner.Result inBase = new ProcessRunner().run(
+                List.of("git", "cat-file", "-e", report.get("diff_base_commit") + ":src/result.txt"),
+                project, Duration.ofSeconds(60));
+        check.that("the accepted candidate adds its file rather than editing one", !inBase.ok());
+        Path bare = sandbox.resolve("land-remote.git");
+        new ProcessRunner().run(List.of("git", "init", "-q", "--bare",
+                bare.toString().replace('\\', '/')), sandbox, Duration.ofSeconds(60));
+        new ProcessRunner().run(List.of("git", "remote", "add", "origin",
+                bare.toString().replace('\\', '/')), project, Duration.ofSeconds(60));
+        dev.warden.run.LandCommand.Outcome pushed = land.run(
+                new dev.warden.run.LandCommand.Options(
+                        runId, true, true, false, null, null, null, null, null), project);
+        check.eq("--push after --commit lands the added file it committed", "pushed", pushed.code());
+        check.that("without committing it a second time",
+                pushed.report().get("already_committed") != null);
+        ProcessRunner.Result remoteHead = new ProcessRunner().run(
+                List.of("git", "--git-dir", bare.toString().replace('\\', '/'),
+                        "rev-parse", "refs/heads/work"), sandbox, Duration.ofSeconds(60));
+        check.eq("and the remote branch holds the commit --commit made",
+                committed.report().get("committed"), remoteHead.stdout().strip());
+
         // A declared chain with no conditional stages: the message must not grow an empty
         // clause about skipping just because the skipped list is present and empty.
         Path noSkip = newProject(sandbox, "land-no-skip");
@@ -397,6 +423,52 @@ public final class TaskLoopTest implements Suite {
         landMessageTellsTheTruth(check, noSkipReport,
                 String.valueOf(noSkipPlanned.report().get("commit_message")),
                 noSkipPlanned.report());
+
+        // The same two steps for a candidate that also deletes, by moving a tracked file on
+        // disk. Past the fingerprint, `--push` ran `git add` over the deleted path again, found
+        // it in neither the index nor the tree, and failed on the commit it did not need.
+        Path moves = newProject(sandbox, "land-moves");
+        Files.writeString(moves.resolve("src/seed.txt"),
+                "a file long enough\nfor git to pair\nits rename\nonce both sides\nare tracked\n");
+        new ProcessRunner().run(List.of("git", "add", "--", "src/seed.txt"), moves, Duration.ofSeconds(60));
+        new ProcessRunner().run(List.of("git", "commit", "-qm", "seed"), moves, Duration.ofSeconds(60));
+        writeProfiles(home, sandbox, "land-moves", 1, 1);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-moves", sandbox.resolve("land-moves-impl.count"), 1);
+        workflowPolicy(home, """
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                """);
+        TaskLoop.Outcome movesRun = loop(moves, home, "lm1");
+        check.that("a candidate that moves a file on disk finishes", movesRun.ok());
+        dev.warden.approval.ApprovalStore movesStore = new dev.warden.approval.ApprovalStore(moves);
+        movesStore.resolve("lm1", movesStore.read("lm1").updatedAt().toString(), "accept", "tester", "");
+        new ProcessRunner().run(List.of("git", "checkout", "-q", "-b", "land-moves"), moves,
+                Duration.ofSeconds(60));
+        Path movesBare = sandbox.resolve("land-moves-remote.git");
+        new ProcessRunner().run(List.of("git", "init", "-q", "--bare",
+                movesBare.toString().replace('\\', '/')), sandbox, Duration.ofSeconds(60));
+        new ProcessRunner().run(List.of("git", "remote", "add", "origin",
+                movesBare.toString().replace('\\', '/')), moves, Duration.ofSeconds(60));
+        dev.warden.run.LandCommand.Outcome movesCommitted = land.run(
+                new dev.warden.run.LandCommand.Options(
+                        "lm1", true, false, false, null, null, null, null, null), moves);
+        check.eq("a candidate that deletes a file commits", "committed", movesCommitted.code());
+        ProcessRunner.Result movedInHead = new ProcessRunner().run(
+                List.of("git", "ls-tree", "-r", "--name-only", "HEAD", "--", "src"), moves,
+                Duration.ofSeconds(60));
+        check.eq("with the file moved rather than copied", "src/renamed.txt\nsrc/result.txt",
+                movedInHead.stdout().strip().replace("\r\n", "\n"));
+        dev.warden.run.LandCommand.Outcome movesPushed = land.run(
+                new dev.warden.run.LandCommand.Options(
+                        "lm1", true, true, false, null, null, null, null, null), moves);
+        check.eq("and --push after --commit lands it", "pushed", movesPushed.code());
+        ProcessRunner.Result movesRemoteHead = new ProcessRunner().run(
+                List.of("git", "--git-dir", movesBare.toString().replace('\\', '/'),
+                        "rev-parse", "refs/heads/land-moves"), sandbox, Duration.ofSeconds(60));
+        check.eq("the remote branch holds that commit",
+                movesCommitted.report().get("committed"), movesRemoteHead.stdout().strip());
     }
 
     /**
@@ -2351,6 +2423,30 @@ public final class TaskLoopTest implements Suite {
                 .run(new ConfigLoader().load(thin, "hello"), UserConfig.load(home), "iu2", true);
         check.eq("a dry run names the same stop", "independent_review_unavailable",
                 previewed.summaryReport().get("would_stop"));
+
+        // The same roster with the reviewer copied from the implementer: `read_only: false`
+        // left in. The write flag used to skip the independence question, the task's write
+        // authority let it past the only other check, and it read its own vendor's work.
+        Path copied = newProject(sandbox, "writable-judge");
+        writeProfile(home, "loop-review", "reviewer", "onevendor", false,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("writable-judge-review.count"), 1);
+        List<String> said = new java.util.ArrayList<>();
+        TaskLoop.Outcome writable = new TaskLoop(new ProcessRunner())
+                .withProgress(said::add)
+                .run(new ConfigLoader().load(copied, "hello"), UserConfig.load(home), "wj1", false);
+        check.eq("a writable judge stops the chain for what it is", "judge_not_read_only", writable.reason());
+        check.eq("before anything was spent", 0L, writable.summaryReport().get("role_runs"));
+        check.contains("naming the profile and saying what to change",
+                String.valueOf(writable.summaryReport().get("resolution")),
+                "profile 'loop-review' declares read_only: false");
+        check.eq("a dry run names the same stop", "judge_not_read_only",
+                new TaskLoop(new ProcessRunner())
+                        .run(new ConfigLoader().load(copied, "hello"), UserConfig.load(home), "wj2", true)
+                        .summaryReport().get("would_stop"));
+        writeProfile(home, "loop-review", "reviewer", "onevendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("roster-too-thin-review.count"), 1);
     }
 
     /**

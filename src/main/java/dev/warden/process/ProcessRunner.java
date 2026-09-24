@@ -3,6 +3,7 @@ package dev.warden.process;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -38,19 +39,27 @@ public final class ProcessRunner {
                       String stdinText) throws IOException, InterruptedException {
         long started = System.nanoTime();
         Process process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start();
-        // No command executed by Warden is interactive. Leaving stdin open makes CLIs that
-        // probe it wait forever for input that can never arrive — so it is always closed,
-        // whether or not something was written to it first.
-        try (var input = process.getOutputStream()) {
-            if (stdinText != null) input.write(stdinText.getBytes(StandardCharsets.UTF_8));
-        } catch (IOException childClosedEarly) {
-            // A vendor that refuses before reading its input is a normal outcome, not a fault
-            // of this runner; the exit code and captured streams still describe what happened.
-        }
         LimitedBuffer stdout = new LimitedBuffer(captureBytes);
         LimitedBuffer stderr = new LimitedBuffer(captureBytes);
+        // The readers start before anything is written. A child that prints before it reads
+        // its input fills its stdout pipe and waits for it to be emptied; if this call were
+        // still writing that child's stdin, each would wait on the other for good.
         Thread outReader = Thread.ofVirtual().start(() -> drain(process.getInputStream(), stdout));
         Thread errReader = Thread.ofVirtual().start(() -> drain(process.getErrorStream(), stderr));
+        // No command executed by Warden is interactive. Leaving stdin open makes CLIs that
+        // probe it wait forever for input that can never arrive — so it is always closed,
+        // whether or not something was written to it first. Closing an empty pipe cannot
+        // block, so with nothing to write it is closed here and now. A prompt is written on
+        // its own thread, so the timeout below bounds it as well: written inline, a prompt
+        // larger than the pipe blocked this call inside write() for as long as the child did
+        // not read it, before any timeout, wall-clock cap or chain deadline could apply.
+        Thread writer = null;
+        if (stdinText == null) {
+            feed(process.getOutputStream(), null);
+        } else {
+            byte[] input = stdinText.getBytes(StandardCharsets.UTF_8);
+            writer = Thread.ofVirtual().start(() -> feed(process.getOutputStream(), input));
+        }
 
         boolean finished;
         try {
@@ -58,12 +67,16 @@ public final class ProcessRunner {
         } catch (InterruptedException interrupted) {
             // Cancellation is not permission to orphan a vendor CLI or its descendants.
             terminateTree(process, Duration.ofSeconds(2));
+            settle(writer);
             Thread.currentThread().interrupt();
             throw interrupted;
         }
         boolean timedOut = !finished;
         if (timedOut) terminateTree(process, Duration.ofSeconds(2));
         int exitCode = process.isAlive() ? -1 : process.exitValue();
+        // The child has exited or been stopped with its descendants, so nothing holds the read
+        // end of its stdin any more and a write still waiting on that pipe fails now.
+        settle(writer);
 
         // A killed descendant may keep an inherited pipe alive. Bound the readers separately.
         outReader.join(2_000);
@@ -76,13 +89,45 @@ public final class ProcessRunner {
                 stdout.text(), stderr.text(), stdout.truncated(), stderr.truncated());
     }
 
+    /**
+     * Signals through {@link ProcessHandle}, never {@link Process#destroy}. On Unix,
+     * {@code Process.destroy} closes the child's stdin right after the signal, and that close
+     * flushes under the lock a prompt write still blocked on a full pipe holds. A child that
+     * ignores SIGTERM and never reads its prompt would hold this call inside {@code destroy},
+     * before the grace wait and the forced kill below could run. The handle only signals; the
+     * stdin stream stays with its writer, which closes it once the pipe breaks.
+     */
     private static void terminateTree(Process process, Duration grace) throws InterruptedException {
+        ProcessHandle child = process.toHandle();
         process.descendants().forEach(ProcessHandle::destroy);
-        process.destroy();
+        child.destroy();
         if (process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS)) return;
         process.descendants().forEach(ProcessHandle::destroyForcibly);
-        process.destroyForcibly();
+        child.destroyForcibly();
         process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** Writes the child's input, if any, and always closes it. */
+    private static void feed(OutputStream stdin, byte[] input) {
+        try (stdin) {
+            if (input != null) stdin.write(input);
+        } catch (IOException childClosedEarly) {
+            // A vendor that refuses before reading its input, or is stopped while this write
+            // waits on its full pipe, is a normal outcome, not a fault of this runner; the exit
+            // code and captured streams still describe what happened.
+        }
+    }
+
+    /**
+     * Waits a bounded time for the stdin writer to finish, which it does as soon as the child
+     * reads its input or the pipe breaks. Only a descendant that escaped the process tree and
+     * still holds the inherited pipe could keep it waiting; it is then interrupted and left,
+     * holding nothing the caller needs, as the output readers are.
+     */
+    private static void settle(Thread writer) throws InterruptedException {
+        if (writer == null) return;
+        writer.join(2_000);
+        if (writer.isAlive()) writer.interrupt();
     }
 
     private static void drain(InputStream input, LimitedBuffer target) {

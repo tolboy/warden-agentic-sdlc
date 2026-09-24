@@ -1155,6 +1155,26 @@ public final class PlannerTest implements Suite {
         check.that("and no implementer ran",
                 !Files.exists(refused.resolve(".warden/runs/do-pr-fail/role-implementer.json")));
 
+        // A second planner that may write could change the contract it is judging. Refused
+        // before the first planner is paid, by name, rather than after.
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
+                sandbox.resolve("plan-review-writable.count"), 1);
+        Path reviewerYaml = home.resolve("profiles/stub-plan-review.yaml");
+        Files.writeString(reviewerYaml, Files.readString(reviewerYaml)
+                .replace("read_only: true", "read_only: false"));
+        Path writable = sandbox.resolve("plan-review-writable");
+        scaffoldProject(writable);
+        DoCommand.Outcome writableJudge = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(writable, GOAL, "app", "low", "hello", "do-pr-writable",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.eq("a writable plan reviewer stops preparation", "judge_not_read_only", writableJudge.code());
+        check.contains("naming it", String.valueOf(writableJudge.report().get("message")),
+                "profile 'stub-plan-review' declares read_only: false");
+        check.eq("before the planner was paid", 0L, writableJudge.report().get("preparation_role_runs"));
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
+                sandbox.resolve("plan-review-writable.count"), 1);
+
         writePolicy(home, "stub-plan");
     }
 

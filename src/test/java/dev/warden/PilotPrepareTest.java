@@ -11,6 +11,7 @@ import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -37,6 +38,7 @@ public final class PilotPrepareTest implements Suite {
             happyPath(check, sandbox, global, globalBefore);
             posixShellInjectionIsNotExecuted(check, sandbox, global, globalBefore);
             refusalCases(check, sandbox, global, globalBefore);
+            publishOutlastsABusyTree(check, sandbox);
         } finally {
             deleteTree(sandbox);
         }
@@ -64,7 +66,7 @@ public final class PilotPrepareTest implements Suite {
         PilotPrepareCommand.Outcome outcome = new PilotPrepareCommand().run(new String[] {
                 "pilot", "prepare", "--spec", specFile.toString(), "--output", output.toString()
         });
-        check.that("prepare succeeds", outcome.ok());
+        check.eq("prepare succeeds", "prepared", outcome.ok() ? "prepared" : outcome.report().get("message"));
         check.eq("code is prepared", PilotPrepareCommand.PREPARED_CODE, outcome.code());
         check.that("bundle directory exists", Files.isDirectory(output));
         check.that("the marker command was not executed", !Files.exists(executed));
@@ -103,9 +105,11 @@ public final class PilotPrepareTest implements Suite {
         Path deadlineFile = sandbox.resolve("deadline-spec.json");
         Files.writeString(deadlineFile, Json.writePretty(deadlineSpec), StandardCharsets.UTF_8);
         Path deadlineOutput = sandbox.resolve("deadline-bundle");
-        check.that("a declared deadline prepares", new PilotPrepareCommand().run(new String[] {
+        PilotPrepareCommand.Outcome deadline = new PilotPrepareCommand().run(new String[] {
                 "pilot", "prepare", "--spec", deadlineFile.toString(), "--output", deadlineOutput.toString()
-        }).ok());
+        });
+        check.eq("a declared deadline prepares", "prepared",
+                deadline.ok() ? "prepared" : deadline.report().get("message"));
         check.eq("and is written into the task", 120L, new ConfigLoader()
                 .load(deadlineOutput.resolve("target"), "pilot-task").resolved().budget().maxElapsedMinutes());
 
@@ -188,15 +192,16 @@ public final class PilotPrepareTest implements Suite {
                         "--output", output.toString()
                 });
         try {
-            boolean published = outcome.ok() && Files.isDirectory(output);
+            // Published, always: a missing executable is an unresolved note, not a refusal. This
+            // used to accept either outcome, and a Windows rename that lost a race with a
+            // scanner took the shorter branch, so the suite's check count moved between runs.
+            check.eq("POSIX-forced prepare publishes with unresolved PATH notes", "prepared",
+                    outcome.ok() ? "prepared" : outcome.report().get("message"));
+            check.that("POSIX-forced bundle exists", Files.isDirectory(output));
+            boolean published = outcome.ok();
             boolean unpublished = !outcome.ok() && !Files.exists(output);
-            check.that("POSIX-forced prepare succeeds with unresolved PATH notes or fails without publishing",
-                    published || unpublished);
             if (published) {
                 check.eq("POSIX-forced code is prepared", PilotPrepareCommand.PREPARED_CODE, outcome.code());
-            } else {
-                check.eq("POSIX-forced failure is not advertised ready", Boolean.FALSE,
-                        outcome.report().get("ready"));
             }
             check.that("shell metacharacters did not create a cwd marker", !Files.exists(cwdMarker));
             check.that("shell metacharacters did not create a target marker", !Files.exists(targetMarker));
@@ -346,6 +351,49 @@ public final class PilotPrepareTest implements Suite {
         check.that("shipped sample keeps baseline and acceptance distinct",
                 !sample.baselineCommands().isEmpty() && !sample.acceptanceCommands().isEmpty()
                         && sample.baselineCommands().stream().noneMatch(sample.acceptanceCommands()::contains));
+    }
+
+    /**
+     * The rename that publishes a bundle, against a filesystem that says "in use" first.
+     * Windows does exactly that to a tree written a moment ago while a scanner holds a
+     * handle in it, and the prepare used to fail on the first refusal one run in three to ten.
+     */
+    private static void publishOutlastsABusyTree(Check check, Path sandbox) throws Exception {
+        Path staging = Files.createDirectories(sandbox.resolve("publish-staging"));
+        Files.writeString(staging.resolve("RUNBOOK.md"), "# runbook\n");
+        Path output = sandbox.resolve("publish-output");
+        int[] calls = {0};
+        PilotPrepareCommand.publish(staging, output, (from, to) -> {
+            if (++calls[0] <= 2) throw new AccessDeniedException(from + " -> " + to);
+            Files.move(from, to);
+        }, 5, Duration.ofMillis(1));
+        check.eq("a busy tree is renamed on the third attempt", 3, calls[0]);
+        check.that("and the bundle is published", Files.isRegularFile(output.resolve("RUNBOOK.md")));
+
+        Path stuck = Files.createDirectories(sandbox.resolve("publish-stuck"));
+        int[] stuckCalls = {0};
+        check.rejects("a tree that stays busy is refused after the last attempt", "publish-stuck",
+                () -> PilotPrepareCommand.publish(stuck, sandbox.resolve("publish-never"), (from, to) -> {
+                    stuckCalls[0]++;
+                    throw new AccessDeniedException(from.toString());
+                }, 4, Duration.ofMillis(1)));
+        check.eq("attempts are bounded", 4, stuckCalls[0]);
+
+        int[] existsCalls = {0};
+        check.rejects("an output that exists is never retried or replaced", "publish-output",
+                () -> PilotPrepareCommand.publish(stuck, output, (from, to) -> {
+                    existsCalls[0]++;
+                    throw new AccessDeniedException(to.toString());
+                }, 4, Duration.ofMillis(1)));
+        check.eq("a denial with the output present is final", 1, existsCalls[0]);
+
+        int[] otherCalls = {0};
+        check.rejects("any other failure is not retried", "disk full",
+                () -> PilotPrepareCommand.publish(stuck, sandbox.resolve("publish-other"), (from, to) -> {
+                    otherCalls[0]++;
+                    throw new java.io.IOException("disk full");
+                }, 4, Duration.ofMillis(1)));
+        check.eq("one attempt for a failure that is not a busy tree", 1, otherCalls[0]);
     }
 
     @SuppressWarnings("unchecked")
