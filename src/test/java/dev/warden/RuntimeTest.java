@@ -263,7 +263,153 @@ public final class RuntimeTest implements Suite {
         } finally {
             deleteTree(repository);
         }
+        committedCandidateChecks(check, runner);
+        untrackedExecutableChecks(check, runner);
     }
+
+    /**
+     * A candidate that adds and moves files, before and after `warden land --commit`.
+     *
+     * The committed-change check above edits a file that was already tracked, which is the
+     * one case the hash stripping reached. A file the candidate adds has no raw record at all
+     * while it is untracked and an `A` record once committed; a file moved on disk is `D old`
+     * plus an untracked `new` until the commit lets git pair them as `R100 old new`. Either one
+     * made `warden land --push` refuse the run `warden land --commit` had just committed.
+     * Reproduced 2026-09-23 on an added file.
+     */
+    private static void committedCandidateChecks(Check check, ProcessRunner runner) throws Exception {
+        Path repository = Files.createTempDirectory("warden-fingerprint-");
+        try {
+            Files.createDirectories(repository.resolve("src"));
+            Files.writeString(repository.resolve("src/kept.txt"),
+                    "a file long enough\nfor git to pair\nits rename\nonce both sides\nare tracked\n");
+            Files.writeString(repository.resolve("src/edited.txt"), "before\n");
+            Files.writeString(repository.resolve("src/removed.txt"), "going\n");
+            command(repository, "git", "init", "-b", "main");
+            // The index's mode, not the file system's, on every platform, so that the
+            // mode-change check below means the same thing on Linux as on Windows.
+            command(repository, "git", "config", "core.fileMode", "false");
+            command(repository, "git", "add", ".");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "base");
+            GitRepository git = new GitRepository(repository, runner);
+            String base = git.mergeBase("HEAD");
+
+            // The candidate as it is judged and accepted: an edit, a deletion, a move made on
+            // disk and a new file, the last two untracked.
+            Files.writeString(repository.resolve("src/edited.txt"), "after\n");
+            Files.delete(repository.resolve("src/removed.txt"));
+            Files.move(repository.resolve("src/kept.txt"), repository.resolve("src/moved.txt"));
+            Files.writeString(repository.resolve("src/added.txt"), "new in this candidate\n");
+            String accepted = git.sourceFingerprint(base);
+            // Pinned, because a decision stores this value and compares it later. It is what the
+            // definition before the fix produced for this tree; a change to it is a change to
+            // every uncommitted candidate a pending or accepted decision was recorded against,
+            // and the CHANGELOG has to say so.
+            check.eq("an uncommitted candidate keeps the fingerprint it was accepted under",
+                    UNCOMMITTED_CANDIDATE, accepted);
+
+            // What `warden land --commit` does with it.
+            command(repository, "git", "add", "--", "src/added.txt", "src/edited.txt",
+                    "src/kept.txt", "src/moved.txt", "src/removed.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "land");
+            check.eq("committing a candidate that adds and moves files leaves its fingerprint alone",
+                    accepted, git.sourceFingerprint(base));
+
+            // Everything the fingerprint is for still moves it once the candidate is committed.
+            Path added = repository.resolve("src/added.txt");
+            Files.writeString(added, "edited after the yes\n");
+            check.that("an edit to the added file moves it", !accepted.equals(git.sourceFingerprint(base)));
+            Files.writeString(added, "new in this candidate\n");
+            Files.delete(added);
+            check.that("so does deleting the added file", !accepted.equals(git.sourceFingerprint(base)));
+            Files.writeString(added, "new in this candidate\n");
+            Path moved = repository.resolve("src/moved.txt");
+            Path movedAgain = repository.resolve("src/moved-again.txt");
+            Files.move(moved, movedAgain);
+            check.that("and renaming it", !accepted.equals(git.sourceFingerprint(base)));
+            Files.move(movedAgain, moved);
+            command(repository, "git", "update-index", "--chmod=+x", "--", "src/edited.txt");
+            check.that("and a mode change on a file the base already had",
+                    !accepted.equals(git.sourceFingerprint(base)));
+            command(repository, "git", "update-index", "--chmod=-x", "--", "src/edited.txt");
+            check.eq("and the same tree brings it back", accepted, git.sourceFingerprint(base));
+
+            // The mode an added file lands with. Its raw record is left out of the shape, and
+            // with it went the one thing that record held beyond the file itself: an added
+            // script committed as 100755 and then as 100644, the same bytes, kept its
+            // fingerprint, so land and acceptance could not tell the two apart.
+            command(repository, "git", "update-index", "--chmod=+x", "--", "src/added.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "executable");
+            String executable = git.sourceFingerprint(base);
+            check.that("an added file committed executable is a different candidate",
+                    !accepted.equals(executable));
+            command(repository, "git", "update-index", "--chmod=-x", "--", "src/added.txt");
+            check.that("and staging it back as a plain file with the same bytes moves it",
+                    !executable.equals(git.sourceFingerprint(base)));
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "plain again");
+            check.that("as does committing that", !executable.equals(git.sourceFingerprint(base)));
+            check.eq("which is the plain candidate that was accepted", accepted, git.sourceFingerprint(base));
+        } finally {
+            deleteTree(repository);
+        }
+    }
+
+    /**
+     * An added executable before and after it is tracked, where the file system has the bit.
+     *
+     * With {@code core.fileMode} on, git takes an added file's mode from its executable bit,
+     * so an untracked script already has the mode it will land with; the fingerprint has to
+     * read it from the file then and from the raw record after, and get the same answer.
+     * With the setting off, git ignores the bit and adds the file as a plain one, and so must
+     * the fingerprint. Windows has no such bit to set, so there is nothing to show there.
+     */
+    private static void untrackedExecutableChecks(Check check, ProcessRunner runner) throws Exception {
+        if (System.getProperty("os.name").toLowerCase().contains("win")) return;
+        Path repository = Files.createTempDirectory("warden-fingerprint-mode-");
+        try {
+            Files.writeString(repository.resolve("base.txt"), "base\n");
+            command(repository, "git", "init", "-b", "main");
+            command(repository, "git", "config", "core.fileMode", "true");
+            command(repository, "git", "add", ".");
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "base");
+            GitRepository git = new GitRepository(repository, runner);
+            String base = git.mergeBase("HEAD");
+
+            Path script = repository.resolve("run.sh");
+            Files.writeString(script, "#!/bin/sh\necho ran\n");
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+            String plain = git.sourceFingerprint(base);
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+            String untracked = git.sourceFingerprint(base);
+            check.that("an untracked script's executable bit is part of the candidate", !plain.equals(untracked));
+            command(repository, "git", "add", "--", "run.sh");
+            check.eq("and staging it does not move the fingerprint", untracked, git.sourceFingerprint(base));
+            command(repository, "git", "-c", "user.name=Warden Tests",
+                    "-c", "user.email=warden@example.invalid", "commit", "-m", "script");
+            check.eq("nor does committing it", untracked, git.sourceFingerprint(base));
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+            check.eq("dropping the bit on the committed script is the plain candidate",
+                    plain, git.sourceFingerprint(base));
+
+            command(repository, "git", "reset", "-q", "--hard", base);
+            Files.writeString(script, "#!/bin/sh\necho ran\n");
+            Files.setPosixFilePermissions(script, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
+            command(repository, "git", "config", "core.fileMode", "false");
+            check.eq("with core.fileMode off an untracked executable is added, and fingerprinted, "
+                    + "as a plain file", plain, git.sourceFingerprint(base));
+        } finally {
+            deleteTree(repository);
+        }
+    }
+
+    /** Computed by the definition as of 1eec6a9, before additions left the shape. */
+    private static final String UNCOMMITTED_CANDIDATE =
+            "216f6b71efd4570167635df7c7f70d0c8f01a96b1dea355c32bc54ede55edd7d";
 
     private static Path fixture() throws Exception {
         Path root = Files.createTempDirectory("warden-runtime-");
