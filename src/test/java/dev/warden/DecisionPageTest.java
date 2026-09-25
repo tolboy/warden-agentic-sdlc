@@ -33,6 +33,7 @@ public final class DecisionPageTest implements Suite {
     @Override public void run(Check check) throws Exception {
         page(check);
         evidenceAPersonCanRead(check);
+        theDecisionComesBeforeTheDetail(check);
         retryOnThePageContinuesTheLoop(check);
         rejectWithANoteGoesBackToTheWriter(check);
         onlyTheLastAttemptIsShown(check);
@@ -433,12 +434,15 @@ public final class DecisionPageTest implements Suite {
             page.start();
             String body = get(page.url()).body();
             check.contains("the first picture says what it is", body, "1280×720 · страница открыта");
-            check.contains("the first press is named and its check shown", body,
-                    "1280×720 · клик №1 по toggle → greeting скрыт ✓");
+            check.contains("the first press is named, with its check in the tooltip", body,
+                    "title='Проверено на снимке:\ngreeting скрыт ✓'><img alt='' src='shot/1'><figcaption>"
+                            + "1280×720 · после 1-го нажатия toggle</figcaption>");
             check.contains("and the second press, which a file name hid", body,
-                    "1280×720 · клик №2 по toggle → greeting виден ✓");
+                    "title='Проверено на снимке:\ngreeting виден ✓'><img alt='' src='shot/2'><figcaption>"
+                            + "1280×720 · после 2-го нажатия toggle</figcaption>");
             check.that("in the order they were taken",
-                    body.indexOf("клик №1") < body.indexOf("клик №2") && body.indexOf("страница открыта") < body.indexOf("клик №1"));
+                    body.indexOf("после 1-го") < body.indexOf("после 2-го")
+                            && body.indexOf("страница открыта") < body.indexOf("после 1-го"));
             check.contains("the scenario reads as a person would say it", body,
                     "клик по toggle ✓ → greeting скрыт ✓ → клик по toggle ✓ → greeting виден ✓");
             check.contains("a finding that did not stop the loop is on the page", body, "Замечания проверяющих (1)");
@@ -449,6 +453,121 @@ public final class DecisionPageTest implements Suite {
                     .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
             check.eq("the try button asks the previewer", "yes", opened[0]);
             check.contains("and says where the candidate is", tried.body(), "http://127.0.0.1:4173/");
+        }
+    }
+
+    /**
+     * The traffic-light run of 2026-09-24 as its operator met it: a contract goal of their own
+     * sentence, six numbered clauses and a deliverable printed as one paragraph; eleven
+     * scenarios of raw selectors; and the buttons seven screens down. The decision now comes
+     * first, and the rest reads as a person would say it or is folded away.
+     */
+    private void theDecisionComesBeforeTheDetail(Check check) throws Exception {
+        String own = "Build a traffic light.\n\nRed first, then green & yellow.";
+        Path root = project(own.replace("\n", "\\n") + "\\n\\n"
+                + "Hooks the harness reads. (1) Lit state: each lamp carries data-lit. "
+                + "(2) Structure: the housing holds <three> lamps. (3) A recorded visual review is part of "
+                + "acceptance; the reviewer records: the housing is dark."
+                + "\\n\\nDeliverable: index.html at the repository root.");
+        Files.createDirectories(root.resolve(".warden/runs/run-0/artifacts"));
+        Files.writeString(root.resolve(".warden/runs/run-0/artifacts/planner.json"),
+                Json.write(Map.of("role", "planner", "operator_goal", own)));
+        Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+        summary.put("chain", Map.of("runs", List.of("run-0", "run-1")));
+        Files.writeString(summaryFile, Json.write(summary));
+        new ApprovalStore(root).createSuccess("run-1", "hello", "every stage that ran passed", summaryFile,
+                "fingerprint-shown");
+
+        Path shots = Files.createDirectories(root.resolve(".warden/runs/run-1--visual-qa-0/screenshots"));
+        for (String name : List.of("1280x720.png", "700x400.png", "700x400-after-click-1.png")) {
+            javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(4, 4,
+                    java.awt.image.BufferedImage.TYPE_INT_RGB), "png", shots.resolve(name).toFile());
+        }
+        Files.writeString(shots.resolve("visual-qa.json"), Json.write(Map.of("ok", false, "scenarios", List.of(
+                Map.of("raw", "1280x720: testid=lamp-red visible -> css=[data-testid=lamp-red][data-lit=true] visible",
+                        "ok", true, "viewport", Map.of("width", 1280, "height", 720, "mobile", false),
+                        "screenshot", shots.resolve("1280x720.png").toString(),
+                        "steps", List.of(
+                                Map.of("matcher", "testid=lamp-red", "assertion", "visible", "ok", true),
+                                Map.of("matcher", "css=[data-testid=lamp-red][data-lit=true]", "assertion", "visible",
+                                        "ok", true),
+                                Map.of("matcher", "text=Don't", "assertion", "visible", "ok", true))),
+                Map.of("raw", "700x400: testid=next click -> css=[data-testid=lamp-green][data-lit=true] visible"
+                                + " -> css=.housing[data-probe-glow=green] visible",
+                        "ok", false, "why", "the green lamp stayed <dim>",
+                        "viewport", Map.of("width", 700, "height", 400, "mobile", false),
+                        "screenshot", shots.resolve("700x400.png").toString(),
+                        "steps", List.of(
+                                Map.of("matcher", "testid=next", "assertion", "click", "ok", true,
+                                        "screenshot_after", shots.resolve("700x400-after-click-1.png").toString()),
+                                Map.of("matcher", "css=[data-testid=lamp-green][data-lit=true]", "assertion", "visible",
+                                        "ok", true),
+                                Map.of("matcher", "css=.housing[data-probe-glow=green]", "assertion", "visible",
+                                        "ok", false))),
+                Map.of("raw", "700x400: no-console-errors", "ok", true,
+                        "viewport", Map.of("width", 700, "height", 400, "mobile", false),
+                        "screenshot", shots.resolve("700x400.png").toString())))));
+
+        try (DecisionPage page = new DecisionPage(root, "run-1", (choice, note, expected) -> Map.of("ok", false))) {
+            page.start();
+            String body = get(page.url()).body();
+            int buttons = body.indexOf("value='accept'");
+            check.that("the stages come before the buttons", body.indexOf("<h2>Этапы</h2>") < buttons);
+            check.that("and so does what the browser found", body.indexOf("<h2>Что проверил браузер</h2>") < buttons);
+            check.that("the goal comes after them", buttons < body.indexOf("<h2>Цель</h2>"));
+            check.that("and the pictures last", body.indexOf("<h2>Цель</h2>") < body.indexOf("<h2 id=shots>"));
+
+            check.contains("the operator's goal reads as they wrote it, blank line and all", body,
+                    "<h2>Цель</h2><p>Build a traffic light.<br><br>Red first, then green &amp; yellow.</p><details>");
+            check.contains("what preparation added is folded away, its clauses a list", body,
+                    "<details><summary>Уточнения к цели и ожидаемый результат</summary><p>Hooks the harness reads.</p>"
+                            + "<ol><li><b>Lit state</b>: each lamp carries data-lit.</li>"
+                            + "<li><b>Structure</b>: the housing holds &lt;three&gt; lamps.</li>"
+                            + "<li>A recorded visual review is part of acceptance; the reviewer records: the housing is dark.</li>"
+                            + "</ol><p><b>Результат:</b> index.html at the repository root.</p></details>");
+
+            check.contains("the browser's verdict is one line", body, "✗ 1 из 3 проверок не прошла");
+            check.contains("naming the sizes it looked at", body, "1280×720, 700×400");
+            int folded = body.indexOf("<summary>Все проверки по шагам</summary>");
+            check.that("the failure is spelled out before the folded list",
+                    body.indexOf("the green lamp stayed &lt;dim&gt;") < folded);
+            check.contains("by the element's test id rather than its selector", body,
+                    "клик по next ✓ → lamp-green (data-lit=true) виден ✓ → .housing (data-probe-glow=green) виден ✗");
+            check.that("no test id is left inside raw CSS", !body.contains("css=[data-testid"));
+            check.contains("every scenario is still there, folded", body.substring(folded),
+                    "✓ 1280×720: lamp-red виден ✓ → lamp-red (data-lit=true) виден ✓ → «Don&#39;t» виден ✓");
+
+            check.contains("a picture's caption says when it was taken", body,
+                    "<figcaption>700×400 · после 1-го нажатия next · ✗ проверка не прошла</figcaption>");
+            check.contains("and what was checked on it is its tooltip, escaped", body,
+                    "title='Проверено на снимке:\nlamp-red виден ✓\nlamp-red (data-lit=true) виден ✓\n«Don&#39;t» виден ✓'");
+            check.contains("a check that failed is there too", body,
+                    "Проверено на снимке:\nlamp-green (data-lit=true) виден ✓\n.housing (data-probe-glow=green) виден ✗'");
+        }
+
+        // A contract nobody prepared, or one edited since: the goal splits at its first blank line.
+        for (String recorded : new String[] {null, "Own wor"}) {
+            Path plain = project("Own words.\\n\\nMore (1) first. (2) second.");
+            Path plainSummary = plain.resolve(".warden/runs/run-1/task-run.json");
+            if (recorded != null) {
+                Files.createDirectories(plain.resolve(".warden/runs/run-0/artifacts"));
+                Files.writeString(plain.resolve(".warden/runs/run-0/artifacts/planner.json"),
+                        Json.write(Map.of("operator_goal", recorded)));
+                Map<String, Object> chained = new LinkedHashMap<>(Json.parseObject(Files.readString(plainSummary)));
+                chained.put("chain", Map.of("runs", List.of("run-0", "run-1")));
+                Files.writeString(plainSummary, Json.write(chained));
+            }
+            new ApprovalStore(plain).createSuccess("run-1", "hello", "every stage that ran passed",
+                    plainSummary, "fingerprint-shown");
+            try (DecisionPage page = new DecisionPage(plain, "run-1", (choice, note, expected) -> Map.of("ok", false))) {
+                page.start();
+                check.contains(recorded == null ? "without a planner the first paragraph is the operator's"
+                                : "a recorded goal the contract no longer starts with, word for word, is not used",
+                        get(page.url()).body(),
+                        "<h2>Цель</h2><p>Own words.</p><details><summary>Подробнее о цели</summary>"
+                                + "<p>More</p><ol><li>first.</li><li>second.</li></ol></details>");
+            }
         }
     }
 
