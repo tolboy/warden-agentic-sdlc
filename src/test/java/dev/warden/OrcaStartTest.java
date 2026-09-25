@@ -71,6 +71,8 @@ public final class OrcaStartTest implements Suite {
             aFirstRunQuestionAtStartIsFencedAtOnce(check, root);
             aFirstRunQuestionWhileWaitingIsFenced(check, root);
             aWorkingAgentsScreenIsItsWork(check, root);
+            aTurnObservedOnTheFirstScreenIsKept(check, root);
+            aQuestionProvesTheTurnBeforeTheNextPoll(check, root);
             aStartThatFailedOutrightIsStillFenced(check, root);
             theBudgetGivesBackOnlyAProvenNonStart(check, root.resolve("budget"));
         } finally {
@@ -190,6 +192,41 @@ public final class OrcaStartTest implements Suite {
                 !result.evidence().containsKey("worker_turn"));
         check.that("and stays charged: nothing proves the agent never took the task",
                 !result.evidence().containsKey("vendor_turn_started"));
+    }
+
+    private void aTurnObservedOnTheFirstScreenIsKept(Check check, Path root) throws Exception {
+        FakeOrca orca = new FakeOrca(root).starting(FakeOrca.Start.TURN_UNOBSERVED)
+                .showing(() -> Map.of("state", "start_unknown", "activity", "working",
+                        "screen", "CHANGELOG.md: Update available! Update now"));
+        orca.answering(args -> FakeOrca.workerDone(orca.lastTask(), orca.lastDispatch(), REVIEW));
+        RoleExecutor.Result result = executor(orca, root).execute(request(root, "working-first"));
+        check.eq("the initial observation of a working agent outranks screen text", "ok", result.code());
+        check.eq("the initial observation records the turn", "agent_working",
+                result.evidence().get("worker_turn_observed_by"));
+        check.eq("a working agent is not stopped at the first screen", 0,
+                orca.calls("orchestration worker-stop").size());
+        check.that("its vendor call is not refunded", !Boolean.FALSE.equals(
+                result.evidence().get("vendor_turn_started")));
+    }
+
+    private void aQuestionProvesTheTurnBeforeTheNextPoll(Check check, Path root) throws Exception {
+        AtomicInteger checks = new AtomicInteger();
+        FakeOrca orca = new FakeOrca(root).starting(FakeOrca.Start.TURN_UNOBSERVED);
+        orca.showing(() -> Map.of("state", "start_unknown", "screen", checks.get() == 0
+                ? QUIET_SCREEN : "CHANGELOG.md: Update available! Update now"));
+        orca.answering(args -> switch (checks.incrementAndGet()) {
+            case 1 -> Map.of("delivery", Map.of("id", "question-delivery", "messages", List.of(Map.of(
+                    "id", "question-message", "type", "question", "taskId", orca.lastTask(),
+                    "dispatchId", orca.lastDispatch(), "payload", Map.of("question", "Which file?")))));
+            case 2 -> null;
+            default -> FakeOrca.workerDone(orca.lastTask(), orca.lastDispatch(), REVIEW);
+        });
+        RoleExecutor.Result result = executor(orca, root).execute(request(root, "question-first"));
+        check.eq("a question proves the turn while the settlement wait is still running", "ok", result.code());
+        check.eq("the question is kept as the first proof", "question",
+                result.evidence().get("worker_turn_observed_by"));
+        check.eq("later screen text cannot fence an agent that asked a question", 0,
+                orca.calls("orchestration worker-stop").size());
     }
 
     /**

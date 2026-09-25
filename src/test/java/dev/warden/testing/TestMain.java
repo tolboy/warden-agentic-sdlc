@@ -27,6 +27,7 @@ public final class TestMain {
                 new dev.warden.LandCommandTest(),
                 new dev.warden.DoCommandTest(),
                 new dev.warden.PlannerTest(),
+                new dev.warden.run.PreparationAccountingTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),
                 new dev.warden.OrcaIsolationTest(),

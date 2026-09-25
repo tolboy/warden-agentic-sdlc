@@ -392,14 +392,16 @@ public final class OrcaExecutor implements RoleExecutor {
                 dev.warden.dashboard.RoleView.update(request.runDirectory(), request.evidenceName(), evidence);
             }
             boolean ready = started.ok() && OrcaSettlement.startReady(started.envelope());
+            boolean unobserved = OrcaSettlement.turnUnobserved(started.envelope());
+            String initialTurn = null;
             if (!ready) {
                 // Read before fencing: once the worker is stopped its tab is gone, and the
                 // screen is the only place that says why the first turn never started.
-                recordAgentScreen(request.projectRoot(), dispatchId, evidence);
+                initialTurn = recordAgentScreen(request.projectRoot(), dispatchId, unobserved, evidence);
             }
             boolean blocked = evidence.get("agent_blocked_on") != null;
             if (!ready && dispatchId != null && !blocked
-                    && OrcaSettlement.turnUnobserved(started.envelope())) {
+                    && unobserved) {
                 // Orca typed the task and submitted it, then watched 30 s for the turn to
                 // begin and did not see it. Measured 2026-09-24 on Orca 1.4.209: a Codex
                 // reviewer once and a Claude look twice, each fenced 47-57 s in on a screen
@@ -408,11 +410,11 @@ public final class OrcaExecutor implements RoleExecutor {
                 // agent reports, so it is waited on within the role's own wall clock. The
                 // screen is read again on every poll until a turn is seen, and a first-run
                 // question showing up there still fences at once.
-                turnPending = true;
+                turnPending = initialTurn == null;
                 evidence.put("worker_start_state", OrcaSettlement.resultOf(started.envelope()).get("state"));
                 evidence.put("worker_start_error",
                         OrcaSettlement.resultOf(started.envelope()).get("lastError"));
-                evidence.put("worker_turn", "unobserved");
+                if (turnPending) evidence.put("worker_turn", "unobserved");
             } else if (!ready) {
                 boolean fenced = dispatchId != null
                         && stopWorker(request.projectRoot(), dispatchId, evidence);
@@ -832,6 +834,12 @@ public final class OrcaExecutor implements RoleExecutor {
                 return last;
             }
             if (last.kind() == OrcaSettlement.Kind.QUESTION) {
+                if (turnPending) {
+                    turnPending = false;
+                    evidence.put("worker_turn", "observed");
+                    evidence.put("worker_turn_observed_by", "question");
+                    evidence.put("worker_turn_observed_at", Instant.now().toString());
+                }
                 // A question is a healthy wait, not an ending: the agent is alive and blocked on
                 // an answer. Take delivery of it and keep watching, so an answer given while
                 // this controller is still running lets the same worker finish here — and so
@@ -1009,15 +1017,24 @@ public final class OrcaExecutor implements RoleExecutor {
      * only `role_orca_start_failed` with Orca's receipt. The question itself was in the
      * worker's `terminal.preview`, and it names the one click that fixes it.
      */
-    private void recordAgentScreen(Path root, String dispatchId, Map<String, Object> evidence) {
-        if (dispatchId == null) return;
+    private String recordAgentScreen(Path root, String dispatchId, boolean watchTurn,
+                                     Map<String, Object> evidence) {
+        if (dispatchId == null) return null;
         try {
             OrcaClient.Rpc shown = orca.invoke(root, PROBE_TIMEOUT,
                     List.of("orchestration", "worker-show", "--dispatch", dispatchId));
+            String seen = watchTurn ? OrcaSettlement.turnObserved(shown.envelope()) : null;
+            if (seen != null) {
+                evidence.put("worker_turn", "observed");
+                evidence.put("worker_turn_observed_by", seen);
+                evidence.put("worker_turn_observed_at", Instant.now().toString());
+                return seen;
+            }
             noteScreen(nestedString(shown.result(), "terminal", "preview"), evidence);
         } catch (Exception unreadable) {
             // The screen is a diagnosis, not a condition of fencing; the stop goes ahead.
         }
+        return null;
     }
 
     /** Keep a start screen's tail and name what it waits on; returns that name, or null. */
