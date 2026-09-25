@@ -559,7 +559,7 @@ public final class Preparation {
         return message.toString();
     }
 
-    private record Spend(int runs, double cost, int unpriced) {
+    record Spend(int runs, double cost, int unpriced) {
         Spend plus(Spend other) {
             return new Spend(runs + other.runs, cost + other.cost, unpriced + other.unpriced);
         }
@@ -570,7 +570,7 @@ public final class Preparation {
      * a report that treated the planner as free is the defect this repository already
      * refuses everywhere else.
      */
-    private static Spend account(RoleRunner.Outcome outcome) {
+    static Spend account(RoleRunner.Outcome outcome) {
         int runs = 0;
         double cost = 0;
         int unpriced = 0;
@@ -578,12 +578,14 @@ public final class Preparation {
         if (attempts instanceof List<?> list && !list.isEmpty()) {
             for (Object item : list) {
                 if (!(item instanceof Map<?, ?> map)) continue;
+                if (Boolean.FALSE.equals(map.get("budget_charged"))) continue;
                 runs++;
                 Object usd = map.get("cost_usd");
                 if (usd instanceof Number number) cost += number.doubleValue();
                 else unpriced++;
             }
         } else if (outcome.details() != null) {
+            if (Boolean.FALSE.equals(outcome.details().get("budget_charged"))) return new Spend(0, 0, 0);
             runs = 1;
             Object usd = outcome.details().get("cost_usd");
             if (usd instanceof Number number) cost += number.doubleValue();
@@ -661,6 +663,10 @@ public final class Preparation {
         public void settleAttempt(Object costUsd, Double declaredBound) {
             chain.settleAttempt(costUsd, declaredBound);
         }
+
+        /** The chain's reservation goes back; this bootstrap's own grant stays spent. */
+        @Override
+        public void release() { chain.release(); }
 
         void grantProtocolRetry() {
             if (protocolRetries <= 0) return;

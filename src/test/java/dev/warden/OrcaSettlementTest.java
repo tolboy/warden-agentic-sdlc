@@ -29,6 +29,51 @@ public final class OrcaSettlementTest implements Suite {
                 dev.warden.execution.orca.OrcaExecutor.blockedOn("Thinking... reading index.html"));
         check.eq("dispatch id is taken from the receipt", "disp_1", OrcaSettlement.dispatchId(ready));
 
+        // Orca 1.4.209's worker-start for a Claude look on 2026-09-24, trimmed: exit 1, but
+        // `ok: true` and a dispatch that is still alive.
+        Map<String, Object> unobserved = Json.parseObject("""
+                {"ok":true,"result":{"taskId":"task_3bf4a8a323dd","dispatchId":"ctx_a5f19fc4fa2e",
+                "state":"outcome_unknown","stage":"turn_start_unobserved","turnStart":"unobserved",
+                "effects":[{"kind":"dispatch_input","role":"agent","state":"accepted"},
+                           {"kind":"dispatch_input","role":"agent","state":"turn_unobserved"}]}}
+                """);
+        check.that("an unobserved turn start is not ready", !OrcaSettlement.startReady(unobserved));
+        check.that("and is recognised as one", OrcaSettlement.turnUnobserved(unobserved));
+        check.that("from the effect alone, too", OrcaSettlement.turnUnobserved(Json.parseObject("""
+                {"ok":true,"result":{"state":"outcome_unknown",
+                "effects":[{"kind":"dispatch_input","state":"turn_unobserved"}]}}
+                """)));
+        check.that("another unknown start outcome is not", !OrcaSettlement.turnUnobserved(Json.parseObject("""
+                {"ok":true,"result":{"state":"outcome_unknown","stage":"remote_attach",
+                "lastError":"provider_write_outcome_unknown"}}
+                """)));
+        check.that("nor is a start that failed", !OrcaSettlement.turnUnobserved(Json.parseObject("""
+                {"ok":true,"result":{"state":"failed","turnStart":"unobserved"}}
+                """)));
+        check.eq("a worker still in start_unknown has shown no turn", null,
+                OrcaSettlement.turnObserved(Json.parseObject("""
+                        {"ok":true,"result":{"dispatch":{"id":"d","status":"dispatched","lastHeartbeatAt":null},
+                        "worker":{"state":"start_unknown"},"projection":{"stage":{"activity":"idle"}}}}
+                        """)));
+        check.eq("a heartbeat is the agent's own word that it runs", "heartbeat",
+                OrcaSettlement.turnObserved(Json.parseObject("""
+                        {"ok":true,"result":{"dispatch":{"lastHeartbeatAt":"2026-09-24T15:46:40Z"},
+                        "worker":{"state":"start_unknown"}}}
+                        """)));
+        check.eq("so is Orca's working status", "agent_working",
+                OrcaSettlement.turnObserved(Json.parseObject("""
+                        {"ok":true,"result":{"worker":{"state":"start_unknown"},
+                        "projection":{"stage":{"worker":"start_unknown","activity":"working"}}}}
+                        """)));
+        check.eq("and a worker Orca moved to ready", "worker_ready",
+                OrcaSettlement.turnObserved(Json.parseObject("""
+                        {"ok":true,"result":{"worker":{"state":"ready"}}}
+                        """)));
+        check.eq("the worker's state is read for a resumed attach", "start_unknown",
+                OrcaSettlement.workerState(Json.parseObject("""
+                        {"ok":true,"result":{"worker":{"state":"start_unknown"}}}
+                        """)));
+
         Map<String, Object> nested = Json.parseObject("""
                 {"ok":true,"result":{"status":"ready","dispatch":{"id":"disp_2"},"task":{"id":"task_2"}}}
                 """);

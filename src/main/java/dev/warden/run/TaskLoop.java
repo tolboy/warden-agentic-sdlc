@@ -654,6 +654,8 @@ public final class TaskLoop {
             @Override public void settleAttempt(Object costUsd, Double declaredBound) {
                 budget.settleAttempt(costUsd, declaredBound);
             }
+
+            @Override public void release() { budget.releaseRoleRun(); }
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
@@ -4109,11 +4111,25 @@ public final class TaskLoop {
          * A reservation is taken at {@link #requireRoleRun} and never given back, including
          * for a dispatch that failed or whose outcome is unknown. That is the conservative
          * direction: a call whose receipt never arrived may still have been served and billed,
-         * and treating it as free would let a restart pay for it twice.
+         * and treating it as free would let a restart pay for it twice. The one exception is
+         * {@link #releaseRoleRun}, for a call proven never to have reached a vendor.
          */
         int remaining() {
             if (maxRuns <= 0) return Integer.MAX_VALUE;
             return (int) Math.max(0, maxRuns - chainRuns());
+        }
+
+        /**
+         * Give back the reservation of a call that provably never reached a vendor, and
+         * charge it nothing — not even an unpriced count. It still counts as settled, so the
+         * role is not charged again when its outcome is recorded.
+         *
+         * Measured 2026-09-24: Orca workers fenced before their first turn were each counted
+         * against {@code max_role_runs} (default 6), beside preparation's calls.
+         */
+        void releaseRoleRun() {
+            runs = Math.max(0, runs - 1);
+            settledInFlight = true;
         }
 
         long maxRuns() { return maxRuns; }
@@ -4251,6 +4267,8 @@ public final class TaskLoop {
             @Override public void settleAttempt(Object costUsd, Double declaredBound) {
                 budget.settleAttempt(costUsd, declaredBound);
             }
+
+            @Override public void release() { budget.releaseRoleRun(); }
         };
     }
 
@@ -5059,9 +5077,16 @@ public final class TaskLoop {
      * failed, and the summary says which. The distinction survives to `next_action` unchanged:
      * both still stop for a human, because Warden does not decide to wait out a quota window.
      */
-    private static String reasonFor(RoleRunner.Outcome step, String genericReason) {
+    public static String reasonFor(RoleRunner.Outcome step, String genericReason) {
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
+        }
+        // Orca never saw this worker's first turn, and its wall clock ran out waiting for one.
+        // `role_timed_out` would say to raise the wall clock; the agent's screen is what to
+        // read. A clock the chain deadline cut is still `budget_exhausted`, decided earlier.
+        if ("role_orca_timeout".equals(step.code()) && step.details() != null
+                && "unobserved".equals(step.details().get("worker_turn"))) {
+            return "orca_worker_not_started";
         }
         if ("role_visual_no_evidence".equals(step.code())) return "visual_qa_no_evidence";
         if ("role_mcp_config_missing".equals(step.code())) return "mcp_config_missing";

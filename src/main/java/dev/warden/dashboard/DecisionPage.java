@@ -59,10 +59,16 @@ public final class DecisionPage implements AutoCloseable {
         String open() throws Exception;
     }
 
-    /** One picture and what it shows, in the order the harness took it. */
-    public record Shot(Path file, String caption) {}
+    /**
+     * One picture and what it shows, in the order the harness took it.
+     *
+     * @param caption when it was taken, short enough to sit under the picture
+     * @param checked what the browser checked on the page it shows, one per line; may be empty
+     */
+    public record Shot(Path file, String caption, String checked) {}
 
-    private static final int MAX_SHOTS = 8;
+    /** Below the buttons since 2026-09-24, so a whole traffic-light pass (nine frames) fits. */
+    private static final int MAX_SHOTS = 12;
     private static final String HTML = "text/html; charset=utf-8";
 
     private final HttpServer server;
@@ -300,7 +306,14 @@ public final class DecisionPage implements AutoCloseable {
         }
     }
 
-    /** The page as it stands now, with the outcome of a button just pressed when there is one. */
+    /**
+     * The page as it stands now, with the outcome of a button just pressed when there is one.
+     *
+     * What the decision is made on comes first and ends at the buttons; the goal, the changed
+     * files and the pictures follow them. Measured on the traffic-light run of 2026-09-24: with
+     * the 5 KB contract goal, eleven scenarios and eight screenshots above them, the buttons
+     * sat 5,588 px down, seven screens of a 960×800 viewport.
+     */
     String render(Map<String, Object> result, String notice) {
         HumanDecision decision = null;
         try {
@@ -332,8 +345,6 @@ public final class DecisionPage implements AutoCloseable {
             }
         }
 
-        String goal = goal(summary);
-        if (goal != null) html.append("<h2>Цель</h2><p>").append(escape(goal)).append("</p>");
         Object reason = decision != null && decision.reason() != null ? decision.reason() : summary.get("reason");
         Object why = summary.get("decision_reason");
         html.append("<h2>Итог прогона</h2><p><b>").append(escape(String.valueOf(reason))).append("</b>");
@@ -345,25 +356,9 @@ public final class DecisionPage implements AutoCloseable {
         html.append(findings(summary));
         html.append(stages(summary));
 
-        List<String> changed = changedFiles(summary);
-        if (!changed.isEmpty()) {
-            html.append("<h2>Изменённые файлы</h2><ul>");
-            for (String file : changed) html.append("<li><code>").append(escape(file)).append("</code></li>");
-            html.append("</ul>");
-        }
-
-        html.append(scenarios());
-
-        List<Shot> shots = shots();
-        if (!shots.isEmpty()) {
-            html.append("<h2>Скриншоты</h2><p class=muted>В том порядке, в каком их снял браузер; "
-                    + "под каждым — что было сделано перед снимком и что после него проверено.</p><div class=shots>");
-            for (int index = 0; index < shots.size(); index++) {
-                html.append("<figure><img alt='' src='shot/").append(index).append("'><figcaption>")
-                        .append(escape(shots.get(index).caption())).append("</figcaption></figure>");
-            }
-            html.append("</div>");
-        }
+        List<Map<String, Object>> scenarios = harnessScenarios();
+        List<Shot> shots = shots(scenarios);
+        html.append(browserChecks(scenarios, !shots.isEmpty()));
 
         if (previewer != null && pending) {
             html.append("<h2>Проверить самому</h2><form method=post action=try>")
@@ -392,6 +387,29 @@ public final class DecisionPage implements AutoCloseable {
                     .append(escape(String.valueOf(decision.updatedAt()))).append("</p>");
         } else {
             html.append("<p class=bad>У этого прогона нет ожидающего решения.</p>");
+        }
+
+        String goal = goal(summary);
+        if (goal != null) html.append(goalSection(goal, operatorGoal(summary, goal)));
+
+        List<String> changed = changedFiles(summary);
+        if (!changed.isEmpty()) {
+            html.append("<h2>Изменённые файлы</h2><ul>");
+            for (String file : changed) html.append("<li><code>").append(escape(file)).append("</code></li>");
+            html.append("</ul>");
+        }
+
+        if (!shots.isEmpty()) {
+            html.append("<h2 id=shots>Скриншоты</h2><p class=muted>В том порядке, в каком их снял браузер. "
+                    + "Что на снимке проверено — во всплывающей подсказке.</p><div class=shots>");
+            for (int index = 0; index < shots.size(); index++) {
+                Shot shot = shots.get(index);
+                html.append("<figure");
+                if (!shot.checked().isEmpty()) html.append(" title='").append(escape(shot.checked())).append("'");
+                html.append("><img alt='' src='shot/").append(index).append("'><figcaption>")
+                        .append(escape(shot.caption())).append("</figcaption></figure>");
+            }
+            html.append("</div>");
         }
         return page("Warden · решение", html.toString());
     }
@@ -504,6 +522,127 @@ public final class DecisionPage implements AutoCloseable {
         }
     }
 
+    /**
+     * The operator's own words, as the planner that prepared this chain recorded them, or null
+     * when no run of the chain was prepared by one.
+     *
+     * The planner's draft is refused unless its `operator_goal` equals the goal Warden handed
+     * it, and the contract goal is that goal with the additions after it; so when the contract
+     * still starts with it, it is exactly where the operator's text ends, blank lines and all.
+     */
+    private String operatorGoal(Map<String, Object> summary, String goal) {
+        if (!(summary.get("chain") instanceof Map<?, ?> chain) || !(chain.get("runs") instanceof List<?> runs)) {
+            return null;
+        }
+        // Re-preparation may extend the operator's text. Prefer the latest compatible draft;
+        // an amendment's unrelated prompt must not hide an earlier matching operator goal.
+        for (int index = runs.size() - 1; index >= 0; index--) {
+            Object run = runs.get(index);
+            try {
+                Path file = runFile(root, String.valueOf(run), "artifacts").resolve("planner.json");
+                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 1024 * 1024) continue;
+                if (Json.parseObject(Files.readString(file)).get("operator_goal") instanceof String said
+                        && startsWithGoal(goal.strip(), said.strip())) {
+                    return said;
+                }
+            } catch (Exception unreadable) {
+                // Not a planner's run, or not a readable one: the goal splits at its first blank line.
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The goal as the operator wrote it, with what preparation added to it folded away.
+     *
+     * With `--prepare auto` the contract goal is the operator's text, the planner's addition
+     * and the deliverable, joined by blank lines. The traffic-light contract of 2026-09-24
+     * came to 5 KB — six numbered clauses of probe thresholds — and the page printed it as one
+     * paragraph; the operator read it as a wall nobody deciding needs to climb.
+     *
+     * @param operatorGoal the operator's recorded text, or null to take the first paragraph
+     */
+    static String goalSection(String goal, String operatorGoal) {
+        String whole = goal.strip();
+        String own;
+        String added;
+        String said = operatorGoal == null ? "" : operatorGoal.strip();
+        if (startsWithGoal(whole, said)) {
+            own = said;
+            added = whole.substring(own.length()).strip();
+        } else {
+            String[] split = whole.split("\\R\\s*\\R", 2);
+            own = split[0].strip();
+            added = split.length > 1 ? split[1].strip() : "";
+        }
+        StringBuilder html = new StringBuilder("<h2>Цель</h2><p>").append(lines(own)).append("</p>");
+        if (added.isEmpty()) return html.toString();
+        List<String> paragraphs = new ArrayList<>();
+        for (String paragraph : added.split("\\R\\s*\\R")) {
+            if (!paragraph.isBlank()) paragraphs.add(paragraph.strip());
+        }
+        boolean deliverable = paragraphs.stream().anyMatch(paragraph -> paragraph.startsWith("Deliverable:"));
+        html.append("<details><summary>")
+                .append(deliverable ? "Уточнения к цели и ожидаемый результат" : "Подробнее о цели")
+                .append("</summary>");
+        for (String paragraph : paragraphs) {
+            if (paragraph.startsWith("Deliverable:")) {
+                html.append("<p><b>Результат:</b> ")
+                        .append(lines(paragraph.substring("Deliverable:".length()).strip())).append("</p>");
+            } else {
+                html.append(clauses(paragraph));
+            }
+        }
+        return html.append("</details>").toString();
+    }
+
+    private static boolean startsWithGoal(String whole, String said) {
+        return !said.isEmpty() && whole.startsWith(said)
+                && (whole.length() == said.length() || Character.isWhitespace(whole.charAt(said.length())));
+    }
+
+    /** A paragraph, with its (1) … (n) clauses as a list when it has at least two, in order. */
+    private static String clauses(String text) {
+        List<int[]> marks = new ArrayList<>();
+        int from = 0;
+        for (int number = 1; number < 100; number++) {
+            String marker = "(" + number + ")";
+            int at = text.indexOf(marker, from);
+            while (at >= 0 && !standsAlone(text, at, marker.length())) at = text.indexOf(marker, at + 1);
+            if (at < 0) break;
+            marks.add(new int[] {at, at + marker.length()});
+            from = at + marker.length();
+        }
+        if (marks.size() < 2) return "<p>" + lines(text) + "</p>";
+        StringBuilder html = new StringBuilder();
+        String lead = text.substring(0, marks.get(0)[0]).strip();
+        if (!lead.isEmpty()) html.append("<p>").append(lines(lead)).append("</p>");
+        html.append("<ol>");
+        for (int index = 0; index < marks.size(); index++) {
+            int end = index + 1 < marks.size() ? marks.get(index + 1)[0] : text.length();
+            String clause = text.substring(marks.get(index)[1], end).strip();
+            // "Lit state: each lamp carries …" — the clause's own short name, when it has one.
+            int colon = clause.indexOf(": ");
+            if (colon > 0 && colon <= 40 && clause.substring(0, colon).indexOf('.') < 0) {
+                html.append("<li><b>").append(escape(clause.substring(0, colon))).append("</b>: ")
+                        .append(lines(clause.substring(colon + 2))).append("</li>");
+            } else {
+                html.append("<li>").append(lines(clause)).append("</li>");
+            }
+        }
+        return html.append("</ol>").toString();
+    }
+
+    private static boolean standsAlone(String text, int at, int length) {
+        return (at == 0 || Character.isWhitespace(text.charAt(at - 1)))
+                && (at + length == text.length() || Character.isWhitespace(text.charAt(at + length)));
+    }
+
+    /** Escaped, with the line breaks the text had. */
+    private static String lines(String text) {
+        return escape(text).replaceAll("\\R", "<br>");
+    }
+
     private List<String> changedFiles(Map<String, Object> summary) {
         if (!(summary.get("diff_base_commit") instanceof String base)) return List.of();
         try {
@@ -525,76 +664,133 @@ public final class DecisionPage implements AutoCloseable {
      * `1280x720-after-click-3.png` beside `1280x720.png`, the two looked the same, and the
      * operator could not tell that the second was the page after the button's second press,
      * checked visible, rather than a duplicate of the first.
+     *
+     * Nor is the list of checks one. Captions that carried every assertion made after the press
+     * ran to a line of selectors under each picture on the traffic-light run (2026-09-24); the
+     * caption now says when the picture was taken, and what was checked on it is the tooltip.
      */
     List<Shot> shots() {
+        return shots(harnessScenarios());
+    }
+
+    private List<Shot> shots(List<Map<String, Object>> scenarios) {
         List<Path> files = pictureFiles();
-        Map<Path, List<String>> captions = new LinkedHashMap<>();
-        for (Map<String, Object> scenario : harnessScenarios()) {
+        Map<Path, Frame> frames = new LinkedHashMap<>();
+        for (Map<String, Object> scenario : scenarios) {
             String viewport = viewport(scenario);
-            List<Map<String, Object>> steps = steps(scenario);
             Path base = inRun(scenario.get("screenshot"), files);
-            List<String> before = new ArrayList<>();
-            int index = 0;
-            for (; index < steps.size() && !"click".equals(steps.get(index).get("assertion")); index++) {
-                before.add(stepText(steps.get(index)));
-            }
-            if (base != null) {
-                List<String> said = captions.computeIfAbsent(base, key -> new ArrayList<>());
-                String opened = viewport + " · страница открыта";
-                // Several scenarios start from the same first frame; a bare "opened" beside one
-                // that already says what was checked on it adds nothing.
-                if (!before.isEmpty() || said.stream().noneMatch(line -> line.startsWith(opened))) {
-                    said.removeIf(opened::equals);
-                    said.add(opened + (before.isEmpty() ? "" : " → " + String.join(", ", before)));
-                }
-            }
+            Frame frame = base == null ? null
+                    : frames.computeIfAbsent(base, key -> new Frame()).taken(viewport + " · страница открыта");
             int clicks = 0;
-            for (; index < steps.size(); index++) {
-                Map<String, Object> step = steps.get(index);
-                if (!"click".equals(step.get("assertion"))) continue;
-                clicks++;
-                List<String> after = new ArrayList<>();
-                for (int next = index + 1; next < steps.size()
-                        && !"click".equals(steps.get(next).get("assertion")); next++) {
-                    after.add(stepText(steps.get(next)));
+            for (Map<String, Object> step : steps(scenario)) {
+                boolean failed = Boolean.FALSE.equals(step.get("ok"));
+                if (!"click".equals(step.get("assertion"))) {
+                    if (frame != null) frame.checked(stepText(step), failed);
+                    continue;
                 }
+                clicks++;
+                // The harness names the file after the step's place in the scenario, not after
+                // the press, so every scenario that presses first at step 1 shares one picture.
                 Path shot = inRun(step.get("screenshot_after"), files);
-                if (shot == null) continue;
-                captions.computeIfAbsent(shot, key -> new ArrayList<>()).add(viewport + " · клик №" + clicks
-                        + " по " + target(step) + (after.isEmpty() ? "" : " → " + String.join(", ", after)));
+                frame = shot == null ? null : frames.computeIfAbsent(shot, key -> new Frame())
+                        .taken(viewport + " · после " + clicks + "-го нажатия " + target(step));
+                if (frame != null && failed) frame.checked(stepText(step), true);
             }
         }
         List<Shot> shots = new ArrayList<>();
-        for (Map.Entry<Path, List<String>> entry : captions.entrySet()) {
+        for (Map.Entry<Path, Frame> entry : frames.entrySet()) {
             if (shots.size() >= MAX_SHOTS) return shots;
-            shots.add(new Shot(entry.getKey(), String.join("; ", new java.util.LinkedHashSet<>(entry.getValue()))));
+            Frame frame = entry.getValue();
+            shots.add(new Shot(entry.getKey(), String.join("; ", frame.taken)
+                    + (frame.failed ? " · ✗ проверка не прошла" : ""),
+                    frame.checked.isEmpty() ? "" : "Проверено на снимке:\n" + String.join("\n", frame.checked)));
         }
         for (Path file : files) {
             if (shots.size() >= MAX_SHOTS) break;
-            if (!captions.containsKey(file)) shots.add(new Shot(file, file.getFileName().toString()));
+            if (!frames.containsKey(file)) shots.add(new Shot(file, file.getFileName().toString(), ""));
         }
         return shots;
     }
 
-    /** What the browser checked, scenario by scenario, as a person would say it. */
-    private String scenarios() {
-        List<Map<String, Object>> scenarios = harnessScenarios();
-        if (scenarios.isEmpty()) return "";
-        StringBuilder html = new StringBuilder("<h2>Что проверил браузер</h2><ul>");
-        for (Map<String, Object> scenario : scenarios) {
-            boolean ok = Boolean.TRUE.equals(scenario.get("ok"));
-            List<String> parts = new ArrayList<>();
-            for (Map<String, Object> step : steps(scenario)) parts.add(stepText(step));
-            String raw = String.valueOf(scenario.get("raw"));
-            if (parts.isEmpty() && raw.contains("no-console-errors")) parts.add("в консоли нет ошибок");
-            html.append("<li>").append(ok ? "✓ " : "✗ ").append(escape(viewport(scenario))).append(": ")
-                    .append(escape(String.join(" → ", parts)));
-            if (!ok && scenario.get("why") != null) {
-                html.append(" <span class=bad-inline>").append(escape(String.valueOf(scenario.get("why")))).append("</span>");
-            }
-            html.append("</li>");
+    /** One picture as the scenarios saw it: when it was taken, and what was checked on it. */
+    private static final class Frame {
+        final Set<String> taken = new java.util.LinkedHashSet<>();
+        final Set<String> checked = new java.util.LinkedHashSet<>();
+        boolean failed;
+
+        Frame taken(String when) {
+            taken.add(when);
+            return this;
         }
-        return html.append("</ul>").toString();
+
+        void checked(String what, boolean failedHere) {
+            checked.add(what);
+            failed |= failedHere;
+        }
+    }
+
+    /**
+     * What the browser checked: one line to read, each failure spelled out, and every step of
+     * every scenario folded away.
+     *
+     * Every scenario used to be its own line of selectors above the buttons. The traffic-light
+     * run's eleven filled a screen with `css=.housing[data-probe-glow=green] виден ✓ → …`, and
+     * the operator read it as detail a person deciding does not need (2026-09-24).
+     */
+    static String browserChecks(List<Map<String, Object>> scenarios, boolean shotsBelow) {
+        if (scenarios.isEmpty()) return "";
+        List<Map<String, Object>> failed = new ArrayList<>();
+        Set<String> viewports = new java.util.LinkedHashSet<>();
+        for (Map<String, Object> scenario : scenarios) {
+            if (!Boolean.TRUE.equals(scenario.get("ok"))) failed.add(scenario);
+            viewports.add(viewport(scenario));
+        }
+        int total = scenarios.size();
+        StringBuilder html = new StringBuilder("<h2>Что проверил браузер</h2><p>");
+        if (failed.isEmpty()) {
+            html.append("<b class=pass>✓ ").append(total).append(' ')
+                    .append(plural(total, "проверка", "проверки", "проверок"))
+                    .append(total == 1 ? ": прошла" : ": все прошли").append("</b>");
+        } else {
+            html.append("<b class=bad-inline>✗ ").append(failed.size()).append(" из ").append(total).append(' ')
+                    .append(plural(total, "проверки", "проверок", "проверок"))
+                    .append(plural(failed.size(), " не прошла", " не прошли", " не прошли")).append("</b>");
+        }
+        html.append(" <span class=muted>· ").append(escape(String.join(", ", viewports)));
+        if (shotsBelow) html.append(" · <a href='#shots'>скриншоты ниже</a>");
+        html.append("</span></p>");
+        if (!failed.isEmpty()) {
+            html.append("<ul>");
+            for (Map<String, Object> scenario : failed) html.append("<li>").append(scenarioLine(scenario)).append("</li>");
+            html.append("</ul>");
+        }
+        html.append("<details><summary>Все проверки по шагам</summary><ul>");
+        for (Map<String, Object> scenario : scenarios) html.append("<li>").append(scenarioLine(scenario)).append("</li>");
+        return html.append("</ul></details>").toString();
+    }
+
+    /** One scenario as a person would say it, with why it failed when it did. */
+    private static String scenarioLine(Map<String, Object> scenario) {
+        boolean ok = Boolean.TRUE.equals(scenario.get("ok"));
+        List<String> parts = new ArrayList<>();
+        for (Map<String, Object> step : steps(scenario)) parts.add(stepText(step));
+        String raw = String.valueOf(scenario.get("raw"));
+        if (parts.isEmpty() && raw.contains("no-console-errors")) parts.add("в консоли нет ошибок");
+        StringBuilder line = new StringBuilder(ok ? "✓ " : "✗ ").append(escape(viewport(scenario))).append(": ")
+                .append(escape(String.join(" → ", parts)));
+        if (!ok && scenario.get("why") != null) {
+            line.append(" <span class=bad-inline>").append(escape(String.valueOf(scenario.get("why")))).append("</span>");
+        }
+        return line.toString();
+    }
+
+    /** The Russian noun form for {@code count}: one, few (2–4) or many. */
+    static String plural(long count, String one, String few, String many) {
+        long tens = count % 100;
+        long units = count % 10;
+        if (tens >= 11 && tens <= 14) return many;
+        if (units == 1) return one;
+        return units >= 2 && units <= 4 ? few : many;
     }
 
     private List<Map<String, Object>> harnessScenarios() {
@@ -646,10 +842,27 @@ public final class DecisionPage implements AutoCloseable {
         return colon > 0 ? raw.substring(0, colon) : raw;
     }
 
-    private static String target(Map<String, Object> step) {
+    /**
+     * The element a step names, by its test id where it has one:
+     * `css=[data-testid=lamp-green][data-lit=true]` reads as `lamp-green (data-lit=true)`.
+     * A selector that says more than which element and which attributes stays as written.
+     */
+    static String target(Map<String, Object> step) {
         String matcher = String.valueOf(step.get("matcher"));
-        return matcher.startsWith("testid=") ? matcher.substring("testid=".length()) : matcher;
+        if (matcher.startsWith("testid=")) return matcher.substring("testid=".length());
+        if (matcher.startsWith("text=")) return "«" + matcher.substring("text=".length()) + "»";
+        if (!matcher.startsWith("css=")) return matcher;
+        java.util.regex.Matcher simple = SIMPLE_SELECTOR.matcher(matcher.substring("css=".length()));
+        if (!simple.matches()) return matcher;
+        String element = simple.group(1) != null ? simple.group(1) : "." + simple.group(2);
+        String filters = simple.group(3);
+        if (filters.isEmpty()) return element;
+        return element + " (" + filters.substring(1, filters.length() - 1).replace("][", ", ") + ")";
     }
+
+    /** `[data-testid=x]` or `.class`, then attribute filters and nothing else. */
+    private static final java.util.regex.Pattern SIMPLE_SELECTOR = java.util.regex.Pattern.compile(
+            "(?:\\[data-testid=['\"]?([\\w-]+)['\"]?]|\\.([\\w-]+))((?:\\[[^\\]\\[]+])*)");
 
     static String stepText(Map<String, Object> step) {
         String assertion = String.valueOf(step.get("assertion"));
@@ -825,7 +1038,9 @@ public final class DecisionPage implements AutoCloseable {
                 + "h2{font-size:18px;margin:26px 0 8px}.muted{color:#9caebd}code{font-size:13px}"
                 + "table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #263541}"
                 + "th{color:#9fb4c6;font-weight:500}.shots{display:flex;flex-wrap:wrap;gap:14px}"
-                + "figure{margin:0;max-width:520px}img{max-width:100%;border:1px solid #30404d;border-radius:8px;background:#fff}"
+                + "figure{margin:0;max-width:440px}img{max-width:100%;border:1px solid #30404d;border-radius:8px;background:#fff}"
+                + "details{margin:8px 0}summary{cursor:pointer;color:#9fb4c6}details>:not(summary){color:#c9d6e2}"
+                + "ol{padding-left:24px}li{margin:4px 0}a{color:#8cc4ff}.pass{color:#8fdcb4}"
                 + "figcaption{color:#9caebd;font-size:12px}textarea{width:100%;background:#19232c;color:inherit;"
                 + "border:1px solid #405363;border-radius:6px;padding:8px;margin-top:6px}label{display:block}"
                 + ".buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}button{background:#233240;color:#e5edf4;"
