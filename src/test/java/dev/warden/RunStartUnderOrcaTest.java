@@ -230,17 +230,19 @@ public final class RunStartUnderOrcaTest implements Suite {
 
     private static Cli warden(Path sandbox, Path cwd, Path home, String... args) throws Exception {
         Path log = Files.createTempFile(sandbox, "orca-calls-", ".json");
+        Path stdout = Files.createTempFile(sandbox, "stdout-", ".txt");
         Path stderr = Files.createTempFile(sandbox, "stderr-", ".txt");
         List<String> command = new ArrayList<>(List.of(javaExecutable(), "-cp", absoluteClassPath(),
                 UnderFakeOrca.class.getName(), log.toString()));
         command.addAll(List.of(args));
         ProcessBuilder builder = new ProcessBuilder(command).directory(cwd.toFile())
+                .redirectOutput(stdout.toFile())
                 .redirectError(stderr.toFile());
         builder.environment().put("WARDEN_CONFIG_HOME", home.toAbsolutePath().normalize().toString());
         Process process = builder.start();
-        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         if (!process.waitFor(180, TimeUnit.SECONDS)) {
             process.destroyForcibly();
+            process.waitFor(10, TimeUnit.SECONDS);
             throw new IllegalStateException("warden " + String.join(" ", args) + " timed out");
         }
         List<List<String>> calls = new ArrayList<>();
@@ -250,7 +252,8 @@ public final class RunStartUnderOrcaTest implements Suite {
                 calls.add(((List<?>) call).stream().map(String::valueOf).toList());
             }
         }
-        return new Cli(process.exitValue(), stdout, Files.readString(stderr), calls);
+        return new Cli(process.exitValue(), Files.readString(stdout, StandardCharsets.UTF_8),
+                Files.readString(stderr), calls);
     }
 
     /**
