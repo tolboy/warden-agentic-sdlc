@@ -583,12 +583,12 @@ public final class DoCommand {
         }
         if (card == null) card = board.at(root);
         Path narration = root.resolve(".warden/runs").resolve(runId).resolve("narration.log");
-        if (watch && !options.dryRun()) card.watch(narration, runId);
         TaskLoop.Outcome loop;
         try {
             loop = new TaskLoop(processes)
                     .withProgress(Progress.tee(progress, Progress.toFile(narration)))
                     .withWorkspace(card)
+                    .withWatch(watch ? narration : null)
                     .withOrcaGate(orcaGate && !options.dryRun())
                     .withPreparation(preparation)
                     .withOverride(override)

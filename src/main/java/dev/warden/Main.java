@@ -445,13 +445,11 @@ public final class Main {
             Carried carried = continuation(loaded.root(), continueFrom);
             dev.warden.run.Workspace card = board(args).at(loaded.root());
             java.nio.file.Path narration = narrationFile(loaded.root(), runId);
-            // Not for a preview. A dry run answers in seconds and dispatches nobody; opening a
-            // window on the operator's board for it is the same overreach as moving its card.
-            if (hasFlag(args, "--watch") && !dryRun) card.watch(narration, runId);
             TaskLoop loop = new TaskLoop(new ProcessRunner())
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
+                    .withWatch(hasFlag(args, "--watch") ? narration : null)
                     .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"))
                     .withOverride(dev.warden.config.RunOverride.fromArgs(args));
             // Conductor's inner `warden run` is a new process and cannot see DoCommand's
@@ -617,11 +615,11 @@ public final class Main {
         try {
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
             java.nio.file.Path narration = narrationFile(root, nextId);
-            if (hasFlag(args, "--watch")) card.watch(narration, nextId);
             TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
+                    .withWatch(hasFlag(args, "--watch") ? narration : null)
                     .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                     .withOverride(dev.warden.config.RunOverride.fromArgs(args))
                     .run(loaded, user, nextId, false, carried.failover(), carried.continuation());

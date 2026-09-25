@@ -143,6 +143,8 @@ public final class TaskLoop {
     private java.util.function.LongSupplier clock = System::nanoTime;
     /** How the loop waits between rate-limit retries; the suite replaces it. */
     private java.util.function.LongConsumer sleeper;
+    /** The narration `--watch` asked the board to follow, or null for no live view. */
+    private Path watchNarration;
 
     public TaskLoop(ProcessRunner processes) {
         this(processes, (VisualCheck) null);
@@ -184,9 +186,22 @@ public final class TaskLoop {
         return copy;
     }
 
+    /**
+     * The same loop, opening a live view of {@code narration} on its board once the run is
+     * reserved. The loop opens it rather than its caller because the board records the tab
+     * in the run's own directory, and a reservation refuses a directory it finds that in.
+     */
+    public TaskLoop withWatch(Path narration) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.watchNarration = narration;
+        return copy;
+    }
+
     private TaskLoop keepClock(TaskLoop copy) {
         copy.clock = clock;
         copy.sleeper = sleeper;
+        copy.watchNarration = watchNarration;
         return copy;
     }
 
@@ -561,15 +576,6 @@ public final class TaskLoop {
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
         if (carried.continuesRun()) {
             ledger.bindParent(EvidenceLedger.runInstanceIdOf(root, carried.fromRunId()));
-            // One chain, one Orca Run: the continuation's stage rows, workers and gate go on
-            // the Run its predecessor used rather than on a new one per attempt.
-            if (!dryRun) {
-                try {
-                    OrcaLifecycle.inheritRun(root, carried.fromRunId(), runId);
-                } catch (Exception notOurProblem) {
-                    // A run without an Orca history is still a run.
-                }
-            }
         }
         // Reservation is the first mutation. A duplicate controller is refused before it can
         // overwrite evidence, spend a token, or start a second Orca worker in the same tree.
@@ -590,6 +596,28 @@ public final class TaskLoop {
             prior = Preparation.fromReservation(ledger.claimPreparedLoop(task.id()));
         } else {
             ledger.reserveWorkflowRun(task.id());
+        }
+        // Only now does this run write into `orca.json`. The chain's Run and the watch tab's
+        // handle both live there, and the reservation refuses a directory that already holds
+        // it. When a chain was given one Orca Run, both were written before the reservation,
+        // and from then on every continuation, every fresh `warden run --watch` and every
+        // `warden do --watch` that prepared nothing was refused as a duplicate of itself with
+        // `run_id_exists` — measured on Orca 1.4.209, where a Retry answered on the decision
+        // page could never start. Written after it, a duplicate that is refused opens no tab
+        // either, so it cannot replace the handle of the run it duplicated.
+        if (!dryRun) {
+            if (carried.continuesRun()) {
+                // One chain, one Orca Run: the continuation's stage rows, workers and gate go
+                // on the Run its predecessor used rather than on a new one per attempt.
+                try {
+                    OrcaLifecycle.inheritRun(root, carried.fromRunId(), runId);
+                } catch (Exception notOurProblem) {
+                    // A run without an Orca history is still a run.
+                }
+            }
+            // Not for a preview. A dry run answers in seconds and dispatches nobody; opening
+            // a window on the operator's board for it is the same overreach as moving its card.
+            if (watchNarration != null) workspace.watch(watchNarration, runId);
         }
         // Both values are selected before any vendor can write. HEAD and the contract files
         // are mutable names/bytes; resolving them inside each later role or gate lets a worker
