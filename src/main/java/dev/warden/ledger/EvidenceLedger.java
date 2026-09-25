@@ -147,8 +147,8 @@ public final class EvidenceLedger {
             throw new RunExistsException("run id already reserved: " + runDirectory.getFileName(), duplicate);
         }
         // The narration is not evidence, and this is the check that has to know it. `--watch`
-        // opens a window following `narration.log` before the loop starts, which means the file
-        // exists before the reservation does — and every watched run then failed its first
+        // opened a window following `narration.log` before the loop started, which meant the
+        // file existed before the reservation did — and every watched run then failed its first
         // attempt with `run_id_exists`. Found by running Warden against Warden, on the first
         // dogfood run, which is the only place it could have been found: no test exercises the
         // flag through `main`, and the file is created by the flag rather than by the loop.
@@ -297,17 +297,11 @@ public final class EvidenceLedger {
     public static final String RUN_OVERRIDE = "run-override.json";
 
     /**
-     * The files a run may find already in its own directory, all of them belonging to `--watch`.
-     *
-     * The narration and the tiny script a terminal follows it with are written before the loop
-     * starts, because the window has to exist before there is anything to show in it. None of
-     * them is evidence, so none of them may make a fresh run look like a used one.
-     */
-    /**
      * Files a reservation may find already in its directory that are not evidence of a
-     * prior controller. Watch files exist before {@code run.json} because {@code --watch}
-     * opens a window first. Instance, journal and corpus-status files exist because the
-     * ledger is constructed before the workflow fence.
+     * prior controller. Watch files can be there before {@code run.json}: until 2026-09-24
+     * {@code --watch} opened its window before the loop reserved, and a directory an attempt
+     * like that left behind still holds them. Instance, journal and corpus-status files
+     * exist because the ledger is constructed before the workflow fence.
      */
     private static final java.util.Set<String> NON_EVIDENCE = java.util.Set.of(
             NARRATION, "follow.ps1", "follow.sh",

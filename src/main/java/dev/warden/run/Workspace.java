@@ -62,6 +62,10 @@ public interface Workspace {
      * is not hosted by the board: closing the window it opened does not touch the loop, and
      * the loop can be started from a shell, a script or a scheduler and still be watched.
      *
+     * The loop calls this once the run id is reserved, never before. A board may write into
+     * the run's directory to remember the view — Orca's records its tab in `orca.json` — and
+     * a reservation refuses a directory that already holds such a file.
+     *
      * Best-effort, like everything else here. A view that could not be opened is a view the
      * operator does not get, not a run that fails.
      */

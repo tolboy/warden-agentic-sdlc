@@ -55,7 +55,8 @@ public final class TestMain {
                 new dev.warden.RosterTest(),
                 new dev.warden.RunOverrideTest(),
                 new dev.warden.OperatorContinuationTest(),
-                new dev.warden.DecisionPageTest()
+                new dev.warden.DecisionPageTest(),
+                new dev.warden.RunStartUnderOrcaTest()
         );
 
         Check check = new Check();

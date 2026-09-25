@@ -11,6 +11,20 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A continuation can start under Orca again. Once a chain was given one Orca Run, the loop
+  wrote `orca.json` into a new run's directory — the inherited Run, and the `--watch` tab's
+  handle — before it reserved that directory, and the reservation refused the file as
+  evidence. In an Orca worktree every `warden run --continue`, every fresh
+  `warden run --watch` and every `warden do --watch --prepare off` stopped at once with
+  `run_id_exists`, and Retry on the decision page with `advance_start_failed`. Nothing was
+  dispatched, so nothing was spent, but no continuation could start. Measured live on
+  2026-09-24 (Orca 1.4.209). The Run is now inherited, and the tab opened, after the
+  reservation (`TaskLoop.withWatch` replaces each caller's own `watch`), so a duplicate that
+  is refused also opens no tab and leaves the recorded handle of the run it duplicated
+  alone. Directories the failed attempts left behind still hold that `orca.json` and are
+  still refused: pass `warden run` a fresh `--run-id`; the decision page already picks an
+  unused one. Suite `run-start-under-orca`, new. It starts the runs through `Main`, which
+  neither `orca-run-identity` nor `decision-page` did.
 - An Orca worker whose first turn Orca could not see is waited on, not fenced. Orca 1.4.209
   answers `worker-start` with exit 1, `state: outcome_unknown` and a `turn_unobserved` effect
   when it typed the task but did not see the agent's turn begin within 30 s, and says that is
