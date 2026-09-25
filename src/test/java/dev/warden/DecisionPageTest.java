@@ -472,9 +472,15 @@ public final class DecisionPageTest implements Suite {
         Files.createDirectories(root.resolve(".warden/runs/run-0/artifacts"));
         Files.writeString(root.resolve(".warden/runs/run-0/artifacts/planner.json"),
                 Json.write(Map.of("role", "planner", "operator_goal", own)));
+        Files.createDirectories(root.resolve(".warden/runs/run-old/artifacts"));
+        Files.writeString(root.resolve(".warden/runs/run-old/artifacts/planner.json"),
+                Json.write(Map.of("operator_goal", "Build a traffic light.")));
+        Files.createDirectories(root.resolve(".warden/runs/run-new/artifacts"));
+        Files.writeString(root.resolve(".warden/runs/run-new/artifacts/planner.json"),
+                Json.write(Map.of("operator_goal", "Amend the browser checks.")));
         Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
         Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
-        summary.put("chain", Map.of("runs", List.of("run-0", "run-1")));
+        summary.put("chain", Map.of("runs", List.of("run-old", "run-0", "run-new", "run-1")));
         Files.writeString(summaryFile, Json.write(summary));
         new ApprovalStore(root).createSuccess("run-1", "hello", "every stage that ran passed", summaryFile,
                 "fingerprint-shown");

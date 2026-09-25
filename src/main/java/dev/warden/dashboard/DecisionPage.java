@@ -390,7 +390,7 @@ public final class DecisionPage implements AutoCloseable {
         }
 
         String goal = goal(summary);
-        if (goal != null) html.append(goalSection(goal, operatorGoal(summary)));
+        if (goal != null) html.append(goalSection(goal, operatorGoal(summary, goal)));
 
         List<String> changed = changedFiles(summary);
         if (!changed.isEmpty()) {
@@ -530,16 +530,19 @@ public final class DecisionPage implements AutoCloseable {
      * it, and the contract goal is that goal with the additions after it; so when the contract
      * still starts with it, it is exactly where the operator's text ends, blank lines and all.
      */
-    private String operatorGoal(Map<String, Object> summary) {
+    private String operatorGoal(Map<String, Object> summary, String goal) {
         if (!(summary.get("chain") instanceof Map<?, ?> chain) || !(chain.get("runs") instanceof List<?> runs)) {
             return null;
         }
-        for (Object run : runs) {
+        // Re-preparation may extend the operator's text. Prefer the latest compatible draft;
+        // an amendment's unrelated prompt must not hide an earlier matching operator goal.
+        for (int index = runs.size() - 1; index >= 0; index--) {
+            Object run = runs.get(index);
             try {
                 Path file = runFile(root, String.valueOf(run), "artifacts").resolve("planner.json");
                 if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 1024 * 1024) continue;
                 if (Json.parseObject(Files.readString(file)).get("operator_goal") instanceof String said
-                        && !said.isBlank()) {
+                        && startsWithGoal(goal.strip(), said.strip())) {
                     return said;
                 }
             } catch (Exception unreadable) {
@@ -564,8 +567,7 @@ public final class DecisionPage implements AutoCloseable {
         String own;
         String added;
         String said = operatorGoal == null ? "" : operatorGoal.strip();
-        if (!said.isEmpty() && whole.startsWith(said)
-                && (whole.length() == said.length() || Character.isWhitespace(whole.charAt(said.length())))) {
+        if (startsWithGoal(whole, said)) {
             own = said;
             added = whole.substring(own.length()).strip();
         } else {
@@ -592,6 +594,11 @@ public final class DecisionPage implements AutoCloseable {
             }
         }
         return html.append("</details>").toString();
+    }
+
+    private static boolean startsWithGoal(String whole, String said) {
+        return !said.isEmpty() && whole.startsWith(said)
+                && (whole.length() == said.length() || Character.isWhitespace(whole.charAt(said.length())));
     }
 
     /** A paragraph, with its (1) … (n) clauses as a list when it has at least two, in order. */
