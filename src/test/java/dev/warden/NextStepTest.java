@@ -70,6 +70,16 @@ public final class NextStepTest implements Suite {
                 "orca_worker_not_started")) {
             check.eq(reason, "retry_infrastructure", kind(reason, summary("run-1", "hello")));
         }
+        Map<String, Object> bare = NextStep.of("vendor_protocol_failed", summary("run-1", "hello"), null);
+        String bareText = String.valueOf(bare.get("summary")) + String.valueOf(bare.get("consequences"));
+        check.that("an infrastructure stop with no reading does not invent a kept verdict",
+                !bareText.contains("already reached"));
+        check.contains("and says the failed stage runs again", bareText, "the failed stage runs again");
+        Map<String, Object> judged = summary("run-1", "hello");
+        judged.put("review_coverage", List.of(Map.of("stage", "review", "ok", true, "blocking_findings", 0L)));
+        check.contains("a reading that passed is still kept",
+                String.valueOf(NextStep.of("vendor_protocol_failed", judged, null).get("summary")),
+                "verdicts already reached");
         check.eq("reproduction passed", "fix_contract",
                 kind("reproduction_passed_before_change", summary("run-1", "hello")));
         check.eq("reproduction inconclusive", "fix_contract",
@@ -79,6 +89,11 @@ public final class NextStepTest implements Suite {
         check.eq("mutated contract", "restore_contract",
                 kind("contract_mutated", summary("run-1", "hello")));
         check.eq("ledger", "restore_ledger", kind("ledger_unavailable", summary("run-1", "hello")));
+        check.eq("a plan review that still objects", "revise_plan",
+                kind("plan_review_findings_remain", summary("run-1", "hello")));
+        check.contains("and does not send a writer",
+                String.valueOf(NextStep.of("plan_review_findings_remain", summary("run-1", "hello"), null)),
+                "No writer was dispatched");
         check.eq("anything else", "read_report",
                 kind("repair_made_no_progress", summary("run-1", "hello")));
 

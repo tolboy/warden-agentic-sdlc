@@ -101,6 +101,7 @@ public final class NextStep {
             case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
                     "prompt_undeliverable", "turn_ceiling_reached", "orca_worker_not_started"
                     -> "retry_infrastructure";
+            case "plan_review_findings_remain" -> "revise_plan";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
             case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
             case "escalation_unavailable", "independent_review_unavailable" -> "wait_or_add_vendor";
@@ -184,9 +185,12 @@ public final class NextStep {
             case "confirm_failover" ->
                     "Confirm the vendor substitution for run " + runId
                             + ", then continue it so the work already done is kept.";
-            case "retry_infrastructure" ->
-                    "Retry the infrastructure failure on run " + runId
-                            + "; the verdicts already reached on this tree are kept.";
+            case "retry_infrastructure" -> verdictsKept(summary)
+                    ? "Retry the infrastructure failure on run " + runId
+                            + "; the verdicts already reached on this tree are kept."
+                    : "Retry the infrastructure failure on run " + runId
+                            + ". No verdict has been reached on this tree, so there is nothing to keep; "
+                            + "the failed stage runs again.";
             case "fix_contract" -> contractSentence(reason, taskFile, acceptance, summary, findings);
             case "resolve_blockers" ->
                     "The open P1s are not the implementer's to close ("
@@ -204,6 +208,10 @@ public final class NextStep {
             case "restore_ledger" ->
                     "Restore write access to the home corpus, then retry run " + runId
                             + "; the verdicts this run reached are kept.";
+            case "revise_plan" ->
+                    "The plan reviewer still objects to the compiled contract. Read `warden report "
+                            + runId + " --text`, address those findings in the contract or the goal, "
+                            + "then start a new run. No writer was dispatched.";
             case "repair_or_retry" ->
                     "Address the open product defect named in the report and start a new run, "
                             + "or retry run " + runId + " if the same tree can still finish.";
@@ -211,6 +219,18 @@ public final class NextStep {
                     "Read `warden report " + runId + " --text`, then either address what it names "
                             + "and start a new run, or retry this one.";
         };
+    }
+
+    /** A reading that passed this tree, so a retry can keep it. */
+    static boolean verdictsKept(Map<String, Object> summary) {
+        if (summary == null || !(summary.get("review_coverage") instanceof List<?> rows)) return false;
+        for (Object row : rows) {
+            if (!(row instanceof Map<?, ?> entry)) continue;
+            if (!Boolean.TRUE.equals(entry.get("ok"))) continue;
+            if (entry.get("blocking_findings") instanceof Number n && n.longValue() > 0) continue;
+            return true;
+        }
+        return false;
     }
 
     private static String contractSentence(String reason, String taskFile, List<String> acceptance,
@@ -344,10 +364,14 @@ public final class NextStep {
                 }
                 yield List.copyOf(rows);
             }
-            case "wait_or_add_vendor", "confirm_failover", "retry_infrastructure",
-                    "restore_ledger" -> List.of(
+            case "wait_or_add_vendor", "confirm_failover", "restore_ledger" -> List.of(
                     "The verdicts this run already reached on this tree are kept: this stop was "
                             + "not a judgement on the work.");
+            case "retry_infrastructure" -> List.of(verdictsKept(summary)
+                    ? "The verdicts this run already reached on this tree are kept: this stop was "
+                            + "not a judgement on the work."
+                    : "No verdict has been reached on this tree, so there is nothing to keep; "
+                            + "the failed stage runs again.");
             case "fix_contract" -> {
                 String hash = text(summary.get("acceptance_sha256"));
                 yield List.of("Editing the acceptance moves acceptance_sha256"
