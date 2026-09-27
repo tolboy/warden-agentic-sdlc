@@ -1074,13 +1074,18 @@ public final class OrcaExecutor implements RoleExecutor {
                     List.of("orchestration", "worker-stop", "--dispatch", dispatchId));
             evidence.put("worker_stop_ok", stopped.ok());
             evidence.put("worker_stop", stopped.result());
-            if (stopped.ok()) return true;
+            if (stopped.ok()) {
+                closeWorkerTab(root, dispatchId, evidence);
+                return true;
+            }
             evidence.put("worker_stop_exit_code", (long) stopped.exitCode());
             evidence.put("worker_stop_timed_out", stopped.timedOut());
             evidence.put("worker_stop_error_code", OrcaSettlement.errorCode(stopped.envelope()));
             evidence.put("worker_stop_stderr", tail(stopped.stderr(), 1000));
             evidence.put("worker_stop_stdout", tail(stopped.stdout(), 1000));
-            return fencedAnyway(root, dispatchId, evidence);
+            boolean fenced = fencedAnyway(root, dispatchId, evidence);
+            if (fenced) closeWorkerTab(root, dispatchId, evidence);
+            return fenced;
         } catch (Exception failure) {
             evidence.put("worker_stop_ok", false);
             evidence.put("worker_stop_error", String.valueOf(failure.getMessage()));
@@ -1121,6 +1126,35 @@ public final class OrcaExecutor implements RoleExecutor {
                     "fenced", false,
                     "error", String.valueOf(unreachable.getMessage())));
             return false;
+        }
+    }
+
+    /**
+     * Close the agent tab a fence just stopped.
+     *
+     * {@code worker-stop} ends the dispatch and leaves the terminal. Measured 2026-09-26
+     * on Orca 1.4.212: a Codex worker fenced on its update screen stayed open as a
+     * {@code pwsh.exe} tab sitting on "Update available". The coordinator tab is closed
+     * separately; this is the worker's own tab.
+     */
+    private void closeWorkerTab(Path root, String dispatchId, Map<String, Object> evidence) {
+        if (dispatchId == null) return;
+        try {
+            OrcaClient.Rpc shown = orca.invoke(root, PROBE_TIMEOUT,
+                    List.of("orchestration", "worker-show", "--dispatch", dispatchId));
+            String handle = OrcaSettlement.agentTerminalHandle(shown.envelope());
+            if (handle == null) {
+                evidence.put("worker_tab_close_ok", false);
+                evidence.put("worker_tab_close_error", "worker-show named no agent terminal");
+                return;
+            }
+            OrcaClient.Rpc closed = orca.invoke(root, Duration.ofSeconds(20),
+                    List.of("terminal", "close", "--terminal", handle, "--tab"));
+            evidence.put("worker_tab_close_ok", closed.ok());
+            evidence.put("worker_tab", handle);
+        } catch (Exception failure) {
+            evidence.put("worker_tab_close_ok", false);
+            evidence.put("worker_tab_close_error", String.valueOf(failure.getMessage()));
         }
     }
 

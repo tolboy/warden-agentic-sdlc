@@ -41,6 +41,10 @@ public final class DecisionPageTest implements Suite {
         anAnswerDoesNotClaimTheNextRunStarted(check);
         oneSupervisorPerRunAcrossProcesses(check);
         anAnswerStartsOneContinuation(check);
+        staleFindingsAreNotLeftOpen(check);
+        thePageSpeaksTheOperatorsLanguage(check);
+        noStartDoesNotHandOutASecondStart(check);
+        theWaiterPrintsTheRunsItFinishedOn(check);
     }
 
     /**
@@ -678,6 +682,92 @@ public final class DecisionPageTest implements Suite {
                 new ApprovalStore(root).read("run-2").actor());
         check.eq("and starts exactly one continuation", 1, starts[0]);
         check.eq("which the supervisor reports", "run-3", result.get("continued_run_id"));
+    }
+
+    /** Plan-3 listed plan-2's findings as open after the tree had already moved. */
+    private void staleFindingsAreNotLeftOpen(Check check) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("run_id", "plan-3");
+        summary.put("candidate_fingerprint", "tree-now");
+        summary.put("steps", List.of(Map.of("step", "implementer", "reused", false)));
+        summary.put("finding_history", List.of(
+                Map.of("stage", "review", "source_run", "plan-2", "candidate_fingerprint", "tree-then",
+                        "findings", List.of(Map.of("id", "R1", "severity", "P1", "status", "open",
+                                "message", "stale", "category", "product_defect")))));
+        check.eq("a previous run's findings are not open after this run wrote", 0,
+                DecisionPage.openFindings(summary).size());
+        summary.put("steps", List.of(Map.of("step", "implementer", "reused", true)));
+        summary.put("finding_history", List.of(
+                Map.of("stage", "review", "source_run", "plan-2", "candidate_fingerprint", "tree-now",
+                        "findings", List.of(Map.of("id", "R2", "severity", "P2", "status", "open",
+                                "message", "kept", "category", "product_defect")))));
+        List<Map<String, Object>> kept = DecisionPage.openFindings(summary);
+        check.eq("the same tree, with the writer reused, still shows them", 1, kept.size());
+        check.eq("and it is that finding", "kept", kept.get(0).get("message"));
+    }
+
+    /** The summary line, a failed reading, and a docs task with nothing to preview. */
+    private void thePageSpeaksTheOperatorsLanguage(Check check) throws Exception {
+        Path root = project("Документ для владельца");
+        Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+        summary.put("steps", List.of(Map.of("step", "reviewer", "stage", "review-second", "ok", true,
+                "code", "ok", "profile", "astra", "vendor", "openai", "blocking_findings", 2L)));
+        Files.writeString(summaryFile, Json.write(summary));
+        new ApprovalStore(root).createSuccess("run-1", "hello",
+                "every stage that ran passed: review", summaryFile, "fingerprint-shown");
+        check.eq("a task with no visual start is not previewable", false,
+                DecisionPage.offersPreview(root, "hello"));
+        try (DecisionPage page = new DecisionPage(root, "run-1", (choice, note, expected) -> Map.of("ok", false))) {
+            page.start();
+            String body = get(page.url()).body();
+            check.contains("the summary line is Russian", body, "все этапы, которые выполнялись, прошли: review");
+            check.that("the English sentence is not what the page says",
+                    !body.contains("every stage that ran passed"));
+            check.contains("a reading with blockers did not pass", body,
+                    "не прошёл · блокирующих замечаний: 2");
+            check.that("and there is no button to open a candidate this task cannot run",
+                    !body.contains("Открыть кандидата"));
+        }
+    }
+
+    /** --no-start while a waiter holds the supervisor lock must not print a second start. */
+    private void noStartDoesNotHandOutASecondStart(Check check) throws Exception {
+        Path root = project("Toggle the greeting");
+        Path summary = root.resolve(".warden/runs/run-1/task-run.json");
+        new ApprovalStore(root).createFailure("run-1", "hello", "vendor_protocol_failed", summary, null);
+        HumanDecision pending = new ApprovalStore(root).read("run-1");
+        Map<String, Object> alone = Main.startAdvance(root, pending, new String[] {"--no-start"}, null);
+        check.eq("without a waiter this command does not start the run", false, alone.get("started"));
+        check.that("and it does print the command", String.valueOf(alone.get("command")).contains("warden run"));
+        check.that("and does not claim a waiter", !Boolean.TRUE.equals(alone.get("waiter")));
+        try (var held = DecisionPage.supervise(root, "run-1")) {
+            check.that("the test holds the waiter", held != null);
+            Map<String, Object> watched = Main.startAdvance(root, pending,
+                    new String[] {"--no-start"}, null);
+            check.eq("with a waiter this command still does not start it", false, watched.get("started"));
+            check.eq("and says the waiter will", true, watched.get("waiter"));
+            check.that("and does not print a command that would start a second run",
+                    !watched.containsKey("command"));
+        }
+    }
+
+    /** The waiter's stdout is the run the chain finished on, and ok matches that run. */
+    private void theWaiterPrintsTheRunsItFinishedOn(Check check) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", false);
+        result.put("reason", "vendor_protocol_failed");
+        result.put("run_id", "plan-2");
+        result.put("continued_run_id", "plan-5");
+        result.put("continued_ok", true);
+        result.put("continued_reason", "ready_for_human");
+        result.put("continued_next_action", "human_gate");
+        result.put("final_decision", "accept");
+        Main.surfaceChain(result);
+        check.eq("ok is the final run's", true, result.get("ok"));
+        check.eq("the run id is the final run's", "plan-5", result.get("run_id"));
+        check.eq("the reason is the final run's", "ready_for_human", result.get("reason"));
+        check.eq("and the decision that closed the chain is on it", "accept", result.get("decision"));
     }
 
     private Path project(String goal) throws Exception {

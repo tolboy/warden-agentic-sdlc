@@ -347,7 +347,7 @@ public final class DecisionPage implements AutoCloseable {
 
         Object reason = decision != null && decision.reason() != null ? decision.reason() : summary.get("reason");
         Object why = summary.get("decision_reason");
-        html.append("<h2>Итог прогона</h2><p><b>").append(escape(String.valueOf(reason))).append("</b>");
+        html.append("<h2>Итог прогона</h2><p><b>").append(escape(outcomeLine(String.valueOf(reason)))).append("</b>");
         if (why != null && !String.valueOf(why).equals(String.valueOf(reason))) {
             html.append("<br><span class=muted>").append(escape(String.valueOf(why))).append("</span>");
         }
@@ -454,6 +454,15 @@ public final class DecisionPage implements AutoCloseable {
         if (summary.get("finding_history") instanceof List<?> history) {
             for (Object item : history) {
                 if (!(item instanceof Map<?, ?> entry) || !(entry.get("findings") instanceof List<?> found)) continue;
+                // A round copied from an earlier run is not open on this candidate when it
+                // judged another tree, or when this run has already written and not re-read.
+                // Advance keeps the history so a repair can see it; the plan-3 stop listed
+                // plan-2's repaired P1s as left open because review never ran. Measured
+                // 2026-09-26. A round this run recorded has no source_run and stays.
+                if (importedRound(summary, entry)) {
+                    latest.put(String.valueOf(entry.get("stage")), List.of());
+                    continue;
+                }
                 List<Map<String, Object>> rows = new ArrayList<>();
                 for (Object raw : found) {
                     if (!(raw instanceof Map<?, ?> map)) continue;
@@ -469,6 +478,35 @@ public final class DecisionPage implements AutoCloseable {
         List<Map<String, Object>> open = new ArrayList<>();
         latest.values().forEach(open::addAll);
         return open;
+    }
+
+    /**
+     * A finding round brought forward from another run, and not a description of the
+     * candidate this run is deciding.
+     *
+     * The summary's {@code candidate_fingerprint} is the tree at the start. A round this
+     * run recorded is about whatever the writer had produced by then, so it is not compared
+     * to that start. An imported round is: it matches only while the tree is still the one
+     * it judged and this run has not written since.
+     */
+    private static boolean importedRound(Map<String, Object> summary, Map<?, ?> entry) {
+        Object source = entry.get("source_run");
+        if (!(source instanceof String from) || from.isBlank()) return false;
+        if (summary.get("run_id") instanceof String self && self.equals(from)) return false;
+        Object judged = entry.get("candidate_fingerprint");
+        Object current = summary.get("candidate_fingerprint");
+        if (current instanceof String fingerprint && judged instanceof String text
+                && !fingerprint.equals(text)) {
+            return true;
+        }
+        if (!(summary.get("steps") instanceof List<?> steps)) return false;
+        for (Object item : steps) {
+            if (item instanceof Map<?, ?> step && "implementer".equals(step.get("step"))
+                    && !Boolean.TRUE.equals(step.get("reused"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String category(Object category) {
@@ -488,12 +526,16 @@ public final class DecisionPage implements AutoCloseable {
             Object stage = step.get("stage") != null ? step.get("stage") : step.get("step");
             String who = step.get("profile") == null ? "—"
                     : step.get("profile") + (step.get("vendor") == null ? "" : " · " + step.get("vendor"));
-            String outcome = Boolean.TRUE.equals(step.get("ok")) ? "ok" : Boolean.FALSE.equals(step.get("ok")) ? "не прошёл" : "—";
-            if (step.get("code") != null && !"ok".equals(step.get("code"))) outcome += " · " + step.get("code");
-            if (step.get("reused_from") != null) outcome += " · взято из " + step.get("reused_from");
-            if (step.get("blocking_findings") instanceof Number count && count.longValue() > 0) {
-                outcome += " · блокирующих замечаний: " + count;
+            long blockers = step.get("blocking_findings") instanceof Number count ? count.longValue() : 0;
+            boolean failedVerdict = "fail".equals(step.get("verdict"));
+            String outcome = blockers > 0 || failedVerdict ? "не прошёл"
+                    : Boolean.TRUE.equals(step.get("ok")) ? "ok"
+                    : Boolean.FALSE.equals(step.get("ok")) ? "не прошёл" : "—";
+            if (step.get("code") != null && !"ok".equals(step.get("code")) && blockers == 0 && !failedVerdict) {
+                outcome += " · " + step.get("code");
             }
+            if (step.get("reused_from") != null) outcome += " · взято из " + step.get("reused_from");
+            if (blockers > 0) outcome += " · блокирующих замечаний: " + blockers;
             rows.append("<tr><td>").append(escape(String.valueOf(stage))).append("</td><td>")
                     .append(escape(who)).append("</td><td>").append(escape(outcome)).append("</td></tr>");
         }
@@ -963,6 +1005,53 @@ public final class DecisionPage implements AutoCloseable {
     private static boolean sameOrigin(HttpExchange exchange, String authority) {
         String origin = exchange.getRequestHeaders().getFirst("Origin");
         return origin == null || origin.equals("http://" + authority);
+    }
+
+    /**
+     * The gate's English sentence, as the Russian page says it.
+     *
+     * The stored reason stays English: gates, reports and older tests compare that text.
+     * The page is the surface a person reads, and "every stage that ran passed" was the
+     * one English line on an otherwise Russian page. Measured 2026-09-26.
+     */
+    static String outcomeLine(String reason) {
+        if (reason == null) return "";
+        String prefix = "every stage that ran passed";
+        if (!reason.startsWith(prefix)) return reason;
+        return "все этапы, которые выполнялись, прошли" + reason.substring(prefix.length())
+                .replace("project baseline reused from ", "базовая проверка проекта взята из ")
+                .replace(" were not re-run: they passed this exact tree on run ",
+                        " не запускались снова: они уже прошли это же дерево в прогоне ")
+                .replace(" and neither the source nor the contract has changed since",
+                        ", исходники и контракт с тех пор не менялись")
+                .replace(". WARNING: ", ". Внимание: ")
+                .replace(" last judged an earlier tree; code changed after that and was not judged again",
+                        " в последний раз судили более раннее дерево; код после этого менялся и заново не судился")
+                .replace(". Review assurance: ", ". Независимость проверки: ")
+                .replace(". The declared workflow did not finish: ", ". Объявленный процесс не закончен: ")
+                .replace(" never completed", " так и не завершились");
+    }
+
+    /**
+     * Whether the decision page should offer to open the candidate.
+     *
+     * A docs task has no server to start. The button used to be offered whenever a page
+     * existed, and pressing it only then said there was nothing to open. Measured 2026-09-26.
+     */
+    public static boolean offersPreview(Path root, Object taskId) {
+        if (!(taskId instanceof String id) || !dev.warden.config.RepoPath.isSlug(id)) return false;
+        Path file = root.resolve(".warden/tasks").resolve(id + ".yaml");
+        try {
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return false;
+            dev.warden.config.TaskSpec.VisualQa visual = dev.warden.config.TaskSpec.parse(
+                    Files.readString(file), file.toString()).visualQa();
+            if (visual == null) return false;
+            if (visual.start() != null && !visual.start().isBlank()) return true;
+            if (visual.url() != null && !visual.url().isBlank()) return true;
+            return dev.warden.config.PreviewServer.detect(root) != null;
+        } catch (Exception unreadable) {
+            return false;
+        }
     }
 
     static String label(String option) {
