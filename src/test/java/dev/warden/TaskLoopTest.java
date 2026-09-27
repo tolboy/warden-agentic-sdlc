@@ -37,6 +37,7 @@ public final class TaskLoopTest implements Suite {
         try {
             Path home = sandbox.resolve("home");
             new UserSetup().run(home);
+            writerPinFollowsAFixAndAnAdvance(check, sandbox, home);
 
             // Clean run: implement, gates pass, review passes, stop for a human.
             Path clean = newProject(sandbox, "clean");
@@ -4621,6 +4622,62 @@ public final class TaskLoopTest implements Suite {
                 }
             }
         }
+    }
+
+    /**
+     * {@code --use implement=} is the writer, including the repair a reviewer sends back.
+     * Advance does not reuse verdicts, and it still carries that pin into a run that did
+     * not retype the flag. An advance note is not narrated as a rejection.
+     */
+    @SuppressWarnings("unchecked")
+    private void writerPinFollowsAFixAndAnAdvance(Check check, Path sandbox, Path home) throws Exception {
+        Path pinned = newProject(sandbox, "pinned-fix");
+        writeProfiles(home, sandbox, "pinned-fix", 1, 2);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("pinned-fix-impl.count"), 1);
+        writeProfile(home, "orca-impl", "implementer", "orcavendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-grows", sandbox.resolve("pinned-fix-orca.count"), 1);
+        policy(home, "loop-review", "loop-impl, orca-impl");
+        TaskLoop.Outcome fixed = new TaskLoop(new ProcessRunner())
+                .withOverride(RunOverride.fromArgs(new String[] {"--use", "implement=orca-impl"}))
+                .run(new ConfigLoader().load(pinned, "hello"), UserConfig.load(home), "pin-1", false);
+        check.eq("a pinned writer still reaches the gate (" + fixed.reason() + ")",
+                "human_gate", fixed.nextAction());
+        List<Map<String, Object>> implSteps = steps(fixed) == null ? List.of() : steps(fixed).stream()
+                .filter(row -> "implementer".equals(row.get("step"))).toList();
+        check.that("the writer ran and was sent back once", implSteps.size() >= 2
+                && implSteps.stream().anyMatch(row -> row.get("fix_for") != null));
+        check.that("every writer dispatch, including the fix, used the pin",
+                implSteps.stream().allMatch(row -> "orca-impl".equals(row.get("profile"))));
+        List<Map<String, Object>> cast = fixed.summaryReport().get("cast") instanceof List<?> rows
+                ? (List<Map<String, Object>>) rows : List.of();
+        Map<String, Object> review = cast.stream()
+                .filter(row -> "review".equals(row.get("stage"))).findFirst().orElse(Map.of());
+        check.eq("the cast names the profile a fix round will use", "orca-impl", review.get("fix_profile"));
+
+        Path advanced = newProject(sandbox, "advance-pin");
+        Path prior = advanced.resolve(".warden/runs/plan-2");
+        Files.createDirectories(prior);
+        Files.writeString(prior.resolve("task-run.json"), Json.write(Map.of(
+                "run_id", "plan-2", "task_id", "hello",
+                "run_override", RunOverride.fromArgs(new String[] {"--use", "implement=orca-impl"}).toMap())));
+        List<String> lines = new java.util.ArrayList<>();
+        TaskLoop.Outcome dry = new TaskLoop(new ProcessRunner())
+                .withProgress(lines::add)
+                .run(new ConfigLoader().load(advanced, "hello"), UserConfig.load(home), "plan-3", true,
+                        Map.of(), new TaskLoop.Continuation("plan-2", "fix the cite", false));
+        check.that("the dry run resolved", dry.summaryReport().get("cast") instanceof List<?>);
+        List<Map<String, Object>> carried = (List<Map<String, Object>>) dry.summaryReport().get("cast");
+        Map<String, Object> implement = carried.stream()
+                .filter(row -> "implement".equals(row.get("stage"))).findFirst().orElse(Map.of());
+        check.eq("advance keeps the previous run's --use without retyping it", "orca-impl",
+                implement.get("profile"));
+        check.that("and the note is narrated as an advance",
+                lines.stream().anyMatch(line -> line.contains("starting from the advance recorded on plan-2")));
+        check.that("not as a rejection",
+                lines.stream().noneMatch(line -> line.contains("starting from the rejection")));
     }
 
     private Path newProject(Path sandbox, String name) throws Exception {
