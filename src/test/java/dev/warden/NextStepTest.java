@@ -91,9 +91,16 @@ public final class NextStepTest implements Suite {
         check.eq("ledger", "restore_ledger", kind("ledger_unavailable", summary("run-1", "hello")));
         check.eq("a plan review that still objects", "revise_plan",
                 kind("plan_review_findings_remain", summary("run-1", "hello")));
-        check.contains("and does not send a writer",
-                String.valueOf(NextStep.of("plan_review_findings_remain", summary("run-1", "hello"), null)),
+        Map<String, Object> revise = NextStep.of("plan_review_findings_remain",
+                summary("run-1", "hello"), null);
+        check.contains("and does not send a writer", String.valueOf(revise),
                 "No writer was dispatched");
+        check.contains("offers replan", String.valueOf(revise.get("commands")),
+                "warden approve run-1 --decision replan");
+        check.contains("offers proceed", String.valueOf(revise.get("commands")),
+                "warden approve run-1 --decision proceed");
+        check.contains("offers abort", String.valueOf(revise.get("commands")),
+                "warden approve run-1 --decision abort");
         check.eq("anything else", "read_report",
                 kind("repair_made_no_progress", summary("run-1", "hello")));
 

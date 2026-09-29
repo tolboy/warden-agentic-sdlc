@@ -209,9 +209,9 @@ public final class NextStep {
                     "Restore write access to the home corpus, then retry run " + runId
                             + "; the verdicts this run reached are kept.";
             case "revise_plan" ->
-                    "The plan reviewer still objects to the compiled contract. Read `warden report "
-                            + runId + " --text`, address those findings in the contract or the goal, "
-                            + "then start a new run. No writer was dispatched.";
+                    "The plan reviewer still objects to the compiled contract. Answer replan to "
+                            + "run preparation again, proceed to accept this contract despite the "
+                            + "objection and run writers, or abort. No writer was dispatched.";
             case "repair_or_retry" ->
                     "Address the open product defect named in the report and start a new run, "
                             + "or retry run " + runId + " if the same tree can still finish.";
@@ -295,6 +295,10 @@ public final class NextStep {
                 commands.addAll(carryOn(runId, taskId));
                 yield List.copyOf(commands);
             }
+            case "revise_plan" -> List.of(
+                    "warden approve " + runId + " --decision replan --note \"<why>\"",
+                    "warden approve " + runId + " --decision proceed --note \"accept despite objection\"",
+                    "warden approve " + runId + " --decision abort");
             default -> List.of("warden report " + runId + " --text");
         };
     }
@@ -391,6 +395,12 @@ public final class NextStep {
                             + "previous tree; a retry of the same tree keeps the verdicts already paid for.",
                     "A retry continues this run's chain: the calls and fix rounds it has used "
                             + "still count against the task's limits.");
+            case "revise_plan" -> List.of(
+                    "replan re-runs preparation (--prepare always); writers are not dispatched "
+                            + "on the objected contract.",
+                    "proceed is the explicit accept of this contract despite the objection, "
+                            + "and then runs writers.",
+                    "No writer was dispatched on this stop.");
             default -> List.of();
         };
     }

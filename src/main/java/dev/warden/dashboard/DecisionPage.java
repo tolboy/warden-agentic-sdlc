@@ -1063,6 +1063,8 @@ public final class DecisionPage implements AutoCloseable {
             case "advance" -> "Дальше";
             case "switch" -> "Переключить вендора";
             case "apply" -> "Применить правку";
+            case "replan" -> "Перепланировать";
+            case "proceed" -> "Продолжить с этим планом";
             default -> option;
         };
     }
@@ -1076,6 +1078,8 @@ public final class DecisionPage implements AutoCloseable {
             case "advance" -> "причина устранена, начать следующий прогон";
             case "switch" -> "перейти на предложенного вендора и продолжить";
             case "apply" -> "применить предложенную правку контракта и продолжить";
+            case "replan" -> "снова запустить планировщика; писатели не получают отклонённый контракт";
+            case "proceed" -> "принять этот контракт несмотря на возражение и запустить писателей";
             default -> "";
         };
     }
@@ -1085,7 +1089,8 @@ public final class DecisionPage implements AutoCloseable {
             return "Warden возвращает работу исполнителю с вашей заметкой; ход виден во вкладке нарратива.";
         }
         return switch (choice) {
-            case "retry", "advance", "switch", "apply" -> "Warden продолжает петлю; ход виден во вкладке нарратива.";
+            case "retry", "advance", "switch", "apply", "replan", "proceed" ->
+                    "Warden продолжает петлю; ход виден во вкладке нарратива.";
             case "accept" -> "Дальше — проверить diff и при желании `warden land`.";
             default -> "Вкладку можно закрыть.";
         };

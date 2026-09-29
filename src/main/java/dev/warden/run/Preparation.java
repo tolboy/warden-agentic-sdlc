@@ -266,6 +266,15 @@ public final class Preparation {
             return fail(RoleResolver.JUDGE_NOT_READ_ONLY, writableJudge, null, spent, reviewRounds);
         }
 
+        // Operator blocks as they stood before this preparation's first compile. Carried on
+        // every write — including the redraft — so a planner-written visual_qa from draft 1
+        // is not frozen as if a person had authored it.
+        Path existingTask = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+        String operatorBlocks = null;
+        if (amendment == null && Files.isRegularFile(existingTask)) {
+            operatorBlocks = Files.readString(existingTask, StandardCharsets.UTF_8);
+        }
+
         while (true) {
             progress.line("prep  planner  one read-only call, no repair"
                     + (redrafts > 0 ? " (redraft " + redrafts + " after the plan review objected)" : ""));
@@ -371,7 +380,8 @@ public final class Preparation {
                     written = new TaskDraft.Written(taskFile, taskId, true);
                     progress.line("      amended " + written.file());
                 } else {
-                    written = PlannerDraft.write(root, taskId, goal, project, granted, artifact);
+                    written = PlannerDraft.write(root, taskId, goal, project, granted, artifact,
+                            operatorBlocks);
                     progress.line("      compiled " + written.file());
                 }
             } catch (TaskDraft.TaskConflict conflict) {
@@ -462,10 +472,11 @@ public final class Preparation {
             }
             // The reviewer objected to the text the planner just compiled. A file that was
             // already on disk is not a reason to skip the redraft: that file's body has
-            // already been replaced, and only the operator's blocks (budgets, timeout, use)
-            // were carried across. Deleting it would drop those blocks, so it stays and the
-            // next compile carries them again. A contract this preparation created has no
-            // such blocks and is discarded so the redraft writes a new one.
+            // already been replaced, and only the operator's blocks from the pre-compile
+            // snapshot (budgets, timeout, use, and visual_qa only when the person wrote it)
+            // are carried across. Deleting it would drop those blocks, so it stays and the
+            // next compile carries from the snapshot again. A contract this preparation
+            // created has no such blocks and is discarded so the redraft writes a new one.
             if (redrafts >= REDRAFTS) {
                 return done(false, REVIEW_REMAINS, reviewMessage(blocking, written),
                         review, written, spent, planReview(reviewRounds));

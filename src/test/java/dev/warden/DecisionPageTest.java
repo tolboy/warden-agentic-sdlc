@@ -763,11 +763,21 @@ public final class DecisionPageTest implements Suite {
         result.put("continued_reason", "ready_for_human");
         result.put("continued_next_action", "human_gate");
         result.put("final_decision", "accept");
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("state", "resolved");
+        record.put("kind", "success");
+        record.put("decision", "accept");
+        record.put("run_id", "plan-5");
+        result.put("final_decision_record", record);
         Main.surfaceChain(result);
         check.eq("ok is the final run's", true, result.get("ok"));
         check.eq("the run id is the final run's", "plan-5", result.get("run_id"));
         check.eq("the reason is the final run's", "ready_for_human", result.get("reason"));
-        check.eq("and the decision that closed the chain is on it", "accept", result.get("decision"));
+        check.eq("final_decision stays the choice string", "accept", result.get("final_decision"));
+        check.that("decision is the full record, matching approve",
+                result.get("decision") instanceof Map<?, ?> decision
+                        && "accept".equals(decision.get("decision"))
+                        && "resolved".equals(decision.get("state")));
     }
 
     private Path project(String goal) throws Exception {

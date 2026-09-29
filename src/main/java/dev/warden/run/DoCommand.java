@@ -885,7 +885,8 @@ public final class DoCommand {
      * The same record a loop stop leaves: a summary a report can read, a pending decision,
      * and — when this command was asked to — an Orca gate and a card that says it stopped.
      */
-    private void recordPreparationStop(Path root, UserConfig user, String taskId, String runId,
+    /** Visible so {@code Main.startAdvance} can re-record a stop when {@code replan} itself stops. */
+    public void recordPreparationStop(Path root, UserConfig user, String taskId, String runId,
                                       Preparation.Outcome prepared, Map<String, Object> report)
             throws Exception {
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
@@ -916,7 +917,7 @@ public final class DoCommand {
         summary.put("safe_next_step", "warden report " + runId + " --text");
         Path file = ledger.writeReport("task-run", summary);
         ApprovalStore store = new ApprovalStore(root);
-        HumanDecision decision = store.createFailure(runId, taskId, prepared.code(), file, null);
+        HumanDecision decision = store.createPreparationStop(runId, taskId, prepared.code(), file, null);
         summary.put("decision_path", root.relativize(store.decisionPath(runId))
                 .toString().replace('\\', '/'));
         summary.put("decision_state", decision.state().jsonValue());

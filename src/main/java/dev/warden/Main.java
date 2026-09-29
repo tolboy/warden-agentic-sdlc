@@ -5,6 +5,7 @@ import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
 import dev.warden.approval.StatusCommand;
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.PlannerDraft;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
 import dev.warden.config.ProjectInitializer;
@@ -537,7 +538,12 @@ public final class Main {
             result.put("next_action", result.get("continued_next_action"));
         }
         if (result.get("continued_summary") != null) result.put("summary", result.get("continued_summary"));
-        if (result.get("final_decision") != null) {
+        // Prefer the full decision record so run/do stdout matches approve's `decision`
+        // shape. `final_decision` stays the choice string for callers that already read it.
+        if (result.get("final_decision_record") instanceof Map<?, ?>) {
+            result.put("decision", result.get("final_decision_record"));
+            result.put("decision_state", "resolved");
+        } else if (result.get("final_decision") != null) {
             result.put("decision", result.get("final_decision"));
             result.put("decision_state", "resolved");
         }
@@ -600,11 +606,17 @@ public final class Main {
     static Map<String, Object> startAdvance(Path root, HumanDecision resolved, String[] args,
                                             ApproveEnv env) {
         String nextId = nextRunId(root, resolved.runId());
+        boolean replan = resolved.kind() == HumanDecision.Kind.PREPARATION
+                && "replan".equals(resolved.decision());
+        // A preparation stop's `proceed` is the explicit "run writers on this contract".
+        // `replan` re-runs preparation; plain failure continuation must not be used for it.
+        String prepareMode = replan ? "always" : "off";
         String command = "warden run " + resolved.taskId() + " --run-id " + nextId
-                + " --continue " + resolved.runId() + " --prepare off";
+                + " --continue " + resolved.runId() + " --prepare " + prepareMode;
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("run_id", nextId);
         report.put("continued_from", resolved.runId());
+        report.put("prepare", prepareMode);
         if (hasFlag(args, "--no-start")) {
             report.put("started", false);
             if (supervisorAlive(root, resolved.runId())) {
@@ -670,6 +682,52 @@ public final class Main {
         try {
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
             java.nio.file.Path narration = narrationFile(root, nextId);
+            TaskLoop.Preparation preparation = TaskLoop.Preparation.NONE;
+            if (replan) {
+                // Re-run preparation so writers never receive the objected contract by default.
+                String scope = loaded.task().scope().entries().isEmpty()
+                        ? null : loaded.task().scope().entries().get(0);
+                Map<String, Object> reservation = new LinkedHashMap<>();
+                reservation.put("prepare", "always");
+                new EvidenceLedger(root, nextId, user.home())
+                        .reserveWorkflowRun(resolved.taskId(), reservation);
+                Preparation.Outcome prepared = new Preparation(new ProcessRunner(),
+                        narration(args)).run(root, loaded.project(), user, resolved.taskId(),
+                        nextId, loaded.task().goal(), scope, loaded.task().risk(),
+                        PlannerDraft.Access.DO_DEFAULT, false);
+                if (!prepared.ok()) {
+                    Map<String, Object> prepReport = new LinkedHashMap<>();
+                    prepReport.put("prepare", "always");
+                    prepReport.put("goal", loaded.task().goal());
+                    prepReport.put("preparation_role_runs", (long) prepared.roleRuns());
+                    prepReport.put("preparation_cost_usd", prepared.costUsd());
+                    prepReport.put("preparation_unpriced", (long) prepared.unpriced());
+                    if (prepared.planReview() != null) {
+                        prepReport.put("plan_review", prepared.planReview());
+                    }
+                    if (prepared.written() != null) {
+                        prepReport.put("task_file", prepared.written().file().toString());
+                    }
+                    new DoCommand(new ProcessRunner(), narration(args))
+                            .recordPreparationStop(root, user, resolved.taskId(), nextId,
+                                    prepared, prepReport);
+                    report.put("started", true);
+                    report.put("ok", false);
+                    report.put("reason", prepared.code());
+                    report.put("next_action", "human_escalation");
+                    report.put("summary_report", prepReport);
+                    report.put("report_path", writeRunReport(root, nextId));
+                    report.put("preparation_replanned", true);
+                    return report;
+                }
+                new EvidenceLedger(root, nextId, user.home())
+                        .markPrepared(prepared.roleRuns(), prepared.costUsd(), prepared.unpriced(),
+                                null);
+                preparation = new TaskLoop.Preparation("always", true, prepared.roleRuns(),
+                        prepared.costUsd(), prepared.unpriced(), true);
+                // Reload: the redraft may have rewritten the contract.
+                loaded = new ConfigLoader().load(root, resolved.taskId());
+            }
             TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
@@ -677,6 +735,7 @@ public final class Main {
                     .withWatch(hasFlag(args, "--watch") ? narration : null)
                     .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                     .withOverride(dev.warden.config.RunOverride.fromArgs(args))
+                    .withPreparation(preparation)
                     .run(loaded, user, nextId, false, carried.failover(), carried.continuation());
             report.put("started", true);
             report.put("ok", outcome.ok());
@@ -685,6 +744,7 @@ public final class Main {
             report.put("summary", outcome.summary() == null ? null : outcome.summary().toString());
             report.put("summary_report", outcome.summaryReport());
             report.put("report_path", writeRunReport(root, nextId));
+            if (replan) report.put("preparation_replanned", true);
         } catch (Exception failed) {
             report.put("started", false);
             report.put("ok", false);
@@ -927,10 +987,18 @@ public final class Main {
             return new Carried(priorSubstitutions,
                     new TaskLoop.Continuation(priorRunId, decision.note(), false));
         }
+        // A preparation stop: replan re-runs the planner; proceed accepts the objected
+        // contract and runs writers. Neither reuses verdicts — there were none.
+        if (decision.kind() == HumanDecision.Kind.PREPARATION
+                && ("replan".equals(decision.decision()) || "proceed".equals(decision.decision()))) {
+            return new Carried(priorSubstitutions,
+                    new TaskLoop.Continuation(priorRunId, decision.note(), false));
+        }
         if (decision.kind() != HumanDecision.Kind.FAILOVER) {
             throw new IllegalArgumentException("--continue " + priorRunId + " names a "
                     + decision.kind().jsonValue() + " decision that is neither a rejection, a "
-                    + "retry, nor an advance; only a failover decision authorises a vendor substitution");
+                    + "retry, an advance, nor a preparation replan/proceed; only a failover "
+                    + "decision authorises a vendor substitution");
         }
         // A failover answered `retry` is the person waiting out the quota window with the
         // same roster: no substitution is authorised, and the spent stop was never about the
@@ -1578,7 +1646,8 @@ public final class Main {
             result.put("summary_projection_updated", summaryProjectionUpdated);
             result.putAll(decisionLedger.corpusVisibility());
             result.put("lands", false);
-            if ("advance".equals(choice) || "apply".equals(choice)) {
+            if ("advance".equals(choice) || "apply".equals(choice)
+                    || "replan".equals(choice) || "proceed".equals(choice)) {
                 Map<String, Object> started = startAdvance(root, resolved, args, env);
                 result.put("next_run", started);
                 if (Boolean.TRUE.equals(started.get("waiter"))) {
@@ -1805,7 +1874,7 @@ public final class Main {
     }
 
     /** Decisions whose answer is "go on": the supervisor starts the continuation itself. */
-    static final List<String> CONTINUING_DECISIONS = List.of("switch", "advance", "apply", "retry");
+    static final List<String> CONTINUING_DECISIONS = List.of("switch", "advance", "apply", "retry", "replan", "proceed");
 
     /**
      * Whether an answer asks the supervisor to start the next run: a continuing decision, or
@@ -1837,7 +1906,8 @@ public final class Main {
     static DecisionWaiter gateOnly(int minutes, ApproveEnv env) {
         return (root, runId, summary) -> {
             String kind = String.valueOf(summary.get("decision_kind"));
-            if (!"failover".equals(kind) && !"failure".equals(kind) && !"contract_change".equals(kind)) {
+            if (!"failover".equals(kind) && !"failure".equals(kind) && !"contract_change".equals(kind)
+                    && !"preparation".equals(kind)) {
                 return Map.of("gate_wait", skippedGateWait("success_is_a_separate_acceptance"));
             }
             return waitForPublishedGate(root, runId, summary, minutes, env);
@@ -2201,6 +2271,7 @@ public final class Main {
                 if (resolved.state() != HumanDecision.State.RESOLVED) break;
                 result.put("final_decision", resolved.decision());
                 result.put("final_decision_run_id", runId);
+                result.put("final_decision_record", resolved.toMap());
                 // A retry answered on the page is the operator saying "go again": leaving it to a
                 // command typed at the machine made the answer from Orca half an answer.
                 if (!continues(resolved)) break;
