@@ -155,6 +155,8 @@ public final class OrcaStartTest implements Suite {
         check.eq("named for the operator", "cli_update_prompt", result.evidence().get("agent_blocked_on"));
         check.eq("on the poll that first saw it", 2, orca.calls("orchestration check").size());
         check.eq("fenced once", 1, orca.calls("orchestration worker-stop").size());
+        check.that("the worker tab is closed, not left on the update screen",
+                orca.calls("terminal close").stream().anyMatch(call -> call.contains("worker")));
         check.eq("not released as if it had settled", 0, orca.calls("orchestration worker-release").size());
         check.eq("not charged", false, result.evidence().get("vendor_turn_started"));
         check.contains("with the screen that says why", String.valueOf(result.evidence().get("agent_screen_tail")),

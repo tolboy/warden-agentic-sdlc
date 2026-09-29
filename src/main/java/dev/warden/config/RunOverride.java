@@ -51,12 +51,20 @@ public final class RunOverride {
     private final Map<String, String> profileByStage;
     private final Map<String, String> effortByStage;
     private final Map<String, String> hostByStage;
+    /** Fix-round stage name to the writer stage whose pin, effort and host it inherits. */
+    private final Map<String, String> fixAlias;
 
     public RunOverride(Map<String, String> profileByStage, Map<String, String> effortByStage,
                        Map<String, String> hostByStage) {
+        this(profileByStage, effortByStage, hostByStage, Map.of());
+    }
+
+    private RunOverride(Map<String, String> profileByStage, Map<String, String> effortByStage,
+                        Map<String, String> hostByStage, Map<String, String> fixAlias) {
         this.profileByStage = Map.copyOf(profileByStage);
         this.effortByStage = Map.copyOf(effortByStage);
         this.hostByStage = Map.copyOf(hostByStage);
+        this.fixAlias = Map.copyOf(fixAlias);
     }
 
     public boolean isEmpty() {
@@ -69,6 +77,45 @@ public final class RunOverride {
         named.addAll(effortByStage.keySet());
         named.addAll(hostByStage.keySet());
         return java.util.Collections.unmodifiableSet(named);
+    }
+
+    /**
+     * A fix round is the writer again. The operator's pin is on the writer stage
+     * ({@code --use implement=...}), and the dispatch is named {@code <stage>/fix}.
+     *
+     * The alias is not itself an overlay stage. Putting {@code review/fix} into the
+     * stage map made the preflight refuse the run: no workflow stage has that name.
+     * {@link #pin}, {@link #adapt} and {@link #problem} consult the alias; {@link #stages}
+     * and {@link #toMap} do not, so a saved run still records only what the operator typed.
+     */
+    public RunOverride withWriterFixes(dev.warden.config.Workflow workflow) {
+        if (workflow == null || isEmpty()) return this;
+        Map<String, String> alias = new LinkedHashMap<>();
+        for (dev.warden.config.Workflow.Stage stage : workflow.stages()) {
+            boolean repairs = "fix".equals(stage.onFail()) || "fix".equals(stage.onFindings());
+            if (!repairs || stage.fixWith() == null) continue;
+            String writer = null;
+            for (dev.warden.config.Workflow.Stage candidate : workflow.stages()) {
+                if (candidate.kind() == dev.warden.config.Workflow.Kind.ROLE
+                        && stage.fixWith().equals(candidate.role())) {
+                    writer = candidate.name();
+                    break;
+                }
+            }
+            if (writer == null) continue;
+            if (!profileByStage.containsKey(writer) && !effortByStage.containsKey(writer)
+                    && !hostByStage.containsKey(writer)) {
+                continue;
+            }
+            alias.put(stage.name() + "/fix", writer);
+        }
+        return alias.isEmpty() ? this : new RunOverride(profileByStage, effortByStage, hostByStage, alias);
+    }
+
+    /** The stage whose pin and effort apply, following a fix-round alias. */
+    private String stageKey(String stage) {
+        if (stage == null) return null;
+        return fixAlias.getOrDefault(stage, stage);
     }
 
     /** {@code other} wins on a colliding stage. */
@@ -97,6 +144,10 @@ public final class RunOverride {
         for (Map.Entry<String, String> pin : profileByStage.entrySet()) {
             roles.pinForRun(pin.getKey(), pin.getValue());
         }
+        for (Map.Entry<String, String> alias : fixAlias.entrySet()) {
+            String profile = profileByStage.get(alias.getValue());
+            if (profile != null) roles.pinForRun(alias.getKey(), profile);
+        }
     }
 
     /**
@@ -110,12 +161,13 @@ public final class RunOverride {
      */
     public Profile adapt(String stage, Profile chosen, Map<String, Profile> roster) {
         if (chosen == null || stage == null) return chosen;
+        String key = stageKey(stage);
         Profile next = chosen;
-        if ("orca".equals(hostByStage.get(stage))) {
+        if ("orca".equals(hostByStage.get(key))) {
             Profile hosted = onOrca(next, roster);
             if (hosted != null) next = hosted;
         }
-        String effort = effortByStage.get(stage);
+        String effort = effortByStage.get(key);
         if (effort != null && !effort.equals(next.effort()) && effortReaches(next, effort)) {
             next = next.withEffort(effort);
         }
@@ -131,15 +183,16 @@ public final class RunOverride {
      */
     public String problem(String stage, Profile chosen, Map<String, Profile> roster) {
         if (chosen == null || stage == null) return null;
+        String key = stageKey(stage);
         Profile next = chosen;
-        if ("orca".equals(hostByStage.get(stage))) {
+        if ("orca".equals(hostByStage.get(key))) {
             Profile hosted = onOrca(next, roster);
-            if (hosted == null) return hostRefusal(stage, next, roster);
+            if (hosted == null) return hostRefusal(key, next, roster);
             next = hosted;
         }
-        String effort = effortByStage.get(stage);
+        String effort = effortByStage.get(key);
         if (effort != null && !effort.equals(next.effort()) && !effortReaches(next, effort)) {
-            return effortRefusal(stage, next, effort);
+            return effortRefusal(key, next, effort);
         }
         return null;
     }

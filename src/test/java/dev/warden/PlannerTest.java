@@ -1,5 +1,11 @@
 package dev.warden;
 
+import dev.warden.approval.HumanDecision;
+
+import dev.warden.approval.ApprovalStore;
+
+import dev.warden.Main;
+
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.PlannerDraft;
 import dev.warden.config.Policy;
@@ -87,6 +93,9 @@ public final class PlannerTest implements Suite {
             failoverThenProtocolKeepsEvidenceNames(check, sandbox, home);
             ledgerCountsPlanner(check, sandbox, home);
             planReviewChecks(check, sandbox, home);
+            prewrittenContractStillRedrafts(check, sandbox, home);
+            preparationStopReplans(check, sandbox, home);
+            redraftDoesNotFreezeFirstDraftVisualQa(check, sandbox, home);
             contractAmendmentChecks(check, sandbox, home);
             reservationMeasuresTheContract(check, sandbox, home);
         } finally {
@@ -1154,6 +1163,23 @@ public final class PlannerTest implements Suite {
         check.eq("after four counted calls", 4L, stopped.report().get("preparation_role_runs"));
         check.that("and no implementer ran",
                 !Files.exists(refused.resolve(".warden/runs/do-pr-fail/role-implementer.json")));
+        check.that("the stop wrote a decision",
+                Files.isRegularFile(refused.resolve(".warden/runs/do-pr-fail/decision.json")));
+        Map<String, Object> stoppedSummary = Json.parseObject(Files.readString(
+                refused.resolve(".warden/runs/do-pr-fail/task-run.json")));
+        check.eq("under the same reason the loop uses for a stop", "plan_review_findings_remain",
+                stoppedSummary.get("reason"));
+        check.eq("and the same next action", "human_escalation", stoppedSummary.get("next_action"));
+        check.eq("pending, so status can find it", "pending", stoppedSummary.get("decision_state"));
+        check.eq("as a preparation decision", "preparation", stoppedSummary.get("decision_kind"));
+        check.eq("with replan|proceed|abort", List.of("replan", "proceed", "abort"),
+                stoppedSummary.get("decision_options"));
+        Map<String, Object> joined = new dev.warden.ledger.RunReport().of(refused, "do-pr-fail");
+        check.eq("the report names the stop", "plan_review_findings_remain", joined.get("reason"));
+        Map<String, Object> totals = (Map<String, Object>) joined.get("totals");
+        check.eq("and counts the preparation calls", 4L, totals.get("role_runs_reported_by_loop"));
+        check.that("including what they cost",
+                totals.get("cost_usd_reported_by_loop") instanceof Number cost && cost.doubleValue() > 0);
 
         // A second planner that may write could change the contract it is judging. Refused
         // before the first planner is paid, by name, rather than after.
@@ -1175,6 +1201,92 @@ public final class PlannerTest implements Suite {
         writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
                 sandbox.resolve("plan-review-writable.count"), 1);
 
+        writePolicy(home, "stub-plan");
+    }
+
+    /**
+     * A file that was already on disk is how an operator sets budgets. The planner replaces
+     * the body and carries those blocks; the plan reviewer then objects to the planner's
+     * text. That file must not cost the one redraft, and the reviewer must be told which
+     * stages will judge the candidate. The planner's own view shows the contract's ceilings,
+     * not a synthetic $1 and 20 minutes.
+     */
+    @SuppressWarnings("unchecked")
+    private void prewrittenContractStillRedrafts(Check check, Path sandbox, Path home) throws Exception {
+        writePlannerProfile(home, "stub-plan", "plan", true);
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-once",
+                sandbox.resolve("prewritten-review.count"), 2);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  planner:
+                    profiles: [stub-plan]
+                    strategy: first
+                    require_independent_vendor: false
+                  plan_reviewer:
+                    profiles: [stub-plan-review]
+                    strategy: first
+                    require_independent_vendor: false
+                  implementer:
+                    profiles: [codex-implement]
+                    strategy: first
+                    require_independent_vendor: false
+                  reviewer:
+                    profiles: [grok-review]
+                    strategy: first
+                    require_independent_vendor: true
+                review:
+                  required_for_risk: [medium, high]
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: fix, fix_with: implementer, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix, fix_with: implementer }
+                """);
+        Path project = sandbox.resolve("prewritten");
+        scaffoldProject(project);
+        Files.writeString(project.resolve(".warden/tasks/hello.yaml"), """
+                version: 1
+                id: hello
+                goal: "%s"
+                risk: low
+                scope: app
+                checks: fast
+                budgets:
+                  max_role_runs: 16
+                  max_cost_usd: 40
+                timeout_minutes: 5
+                """.formatted(GOAL));
+        var projectConfig = dev.warden.config.ProjectConfig.parse(
+                Files.readString(project.resolve(".warden/project.yaml")), "project.yaml");
+        Preparation.PlannerLimits limits = Preparation.plannerLimits(project, projectConfig, "hello");
+        check.eq("the planner is shown the contract's dollar ceiling", 40.0, limits.budget().maxCostUsd());
+        check.eq("and its call ceiling", 16L, limits.budget().maxRoleRuns());
+        check.eq("and its timeout, not the bootstrap's 20 minutes", 5L, limits.timeoutMinutes());
+
+        DoCommand.Outcome redrafted = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-prewritten",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.that("a pre-written contract still gets its redraft", redrafted.ok());
+        Map<String, Object> review = (Map<String, Object>) redrafted.report().get("plan_review");
+        check.eq("the reviewer read the redraft", 2L, review == null ? null : review.get("rounds"));
+        String contract = Files.readString(project.resolve(".warden/tasks/hello.yaml"));
+        check.contains("the operator's call ceiling survived the redraft", contract, "max_role_runs: 16");
+        check.contains("and the dollar ceiling", contract, "max_cost_usd: 40");
+        check.contains("and the timeout", contract, "timeout_minutes: 5");
+        String briefing = Files.readString(project.resolve(".warden/runs/do-prewritten/context/plan-review-1.md"));
+        check.contains("the plan reviewer is told which stage will judge the candidate", briefing,
+                "`review-second` (reviewer) will run");
+        check.that("and is not told the pre-written file was a person's contract",
+                !briefing.contains("a person wrote or accepted it"));
+        Map<String, Object> plannerReport = Json.parseObject(Files.readString(
+                project.resolve(".warden/runs/do-prewritten/role-planner.json")));
+        Map<String, Object> timeout = (Map<String, Object>) ((Map<String, Object>) plannerReport
+                .get("measurement_context")).get("timeout_minutes");
+        check.eq("the planner view records the contract's timeout", 5L, timeout.get("value"));
+        check.eq("and attributes it to the task", "task", timeout.get("source"));
         writePolicy(home, "stub-plan");
     }
 
@@ -1379,7 +1491,112 @@ public final class PlannerTest implements Suite {
         return project;
     }
 
-    private void writeReviewingPolicy(Path home, String planner, String reviewer) throws IOException {
+
+    /**
+     * A preparation stop offers replan|proceed|abort. Answering replan re-runs preparation
+     * rather than dispatching writers on the objected contract.
+     */
+    @SuppressWarnings("unchecked")
+    private void preparationStopReplans(Check check, Path sandbox, Path home) throws Exception {
+        writePlannerProfile(home, "stub-plan", "plan", true);
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-fail",
+                sandbox.resolve("prep-stop-replan.count"), 1);
+        writeReviewingPolicy(home, "stub-plan", "stub-plan-review");
+        Path project = sandbox.resolve("prep-stop-replan");
+        scaffoldProject(project);
+        DoCommand.Outcome stopped = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "prep-stop-1",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.eq("preparation still stops on a second objection", "plan_review_findings_remain",
+                stopped.code());
+        HumanDecision pending = new ApprovalStore(project).read("prep-stop-1");
+        check.eq("as a preparation decision, not a plain failure", "preparation",
+                pending.kind().jsonValue());
+        check.eq("with replan|proceed|abort", List.of("replan", "proceed", "abort"),
+                pending.options());
+        check.that("so retry is not offered", !pending.options().contains("retry"));
+        check.that("and advance is not offered", !pending.options().contains("advance"));
+
+        HumanDecision replanned = new ApprovalStore(project).resolve("prep-stop-1",
+                pending.updatedAt().toString(), "replan", "test", "address findings");
+        // Switch the reviewer to pass so the replan can finish preparation.
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-pass",
+                sandbox.resolve("prep-stop-replan-pass.count"), 1);
+        Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis, millis -> { },
+                (root, gate) -> null, home);
+        Map<String, Object> started = Main.startAdvance(project, replanned,
+                new String[] {"--no-orca-gate", "--no-decision-page"}, env);
+        check.eq("replan names prepare always", "always", started.get("prepare"));
+        check.contains("and the printed command asks for prepare always",
+                String.valueOf(started.get("command")), "--prepare always");
+        check.that("preparation ran again on the next run",
+                Boolean.TRUE.equals(started.get("preparation_replanned"))
+                        || Files.isRegularFile(project.resolve(
+                                ".warden/runs/" + started.get("run_id") + "/role-planner.json")));
+        // proceed would have used prepare off; wrong continuation (retry) is not an option.
+        HumanDecision proceedProbe = new ApprovalStore(project).createPreparationStop(
+                "prep-stop-probe", "hello", "plan_review_findings_remain",
+                project.resolve(".warden/runs/prep-stop-1/task-run.json"), null);
+        check.eq("proceed is among the options", true,
+                proceedProbe.options().contains("proceed"));
+        Map<String, Object> proceedCmd = Main.startAdvance(project,
+                new HumanDecision(proceedProbe.schemaVersion(), proceedProbe.runId(),
+                        proceedProbe.taskId(), HumanDecision.State.RESOLVED, proceedProbe.kind(),
+                        proceedProbe.reason(), proceedProbe.options(), proceedProbe.createdAt(),
+                        proceedProbe.updatedAt(), proceedProbe.summaryPath(),
+                        proceedProbe.candidateFingerprint(), "proceed", "test", "accept anyway",
+                        proceedProbe.expiresAt()),
+                new String[] {"--no-start"}, null);
+        check.eq("proceed names prepare off", "off", proceedCmd.get("prepare"));
+        check.contains("and the command keeps prepare off",
+                String.valueOf(proceedCmd.get("command")), "--prepare off");
+        writePolicy(home, "stub-plan");
+    }
+
+    /**
+     * Person's file has no visual_qa; the two drafts differ in visual_qa; after redraft the
+     * scenarios are the second draft's, not frozen from the first.
+     */
+    @SuppressWarnings("unchecked")
+    private void redraftDoesNotFreezeFirstDraftVisualQa(Check check, Path sandbox, Path home)
+            throws Exception {
+        Path plannerCounter = sandbox.resolve("visual-redraft-planner.count");
+        Files.deleteIfExists(plannerCounter);
+        writePlannerProfile(home, "stub-plan", "plan-visual-redraft", true,
+                yaml("--counter") + ", " + yaml(plannerCounter.toString())
+                        + ", " + yaml("--threshold") + ", " + yaml("99"));
+        writeReviewerProfile(home, "stub-plan-review", "plan-review-once",
+                sandbox.resolve("visual-redraft-review.count"), 2);
+        writeReviewingPolicy(home, "stub-plan", "stub-plan-review");
+        Path project = sandbox.resolve("visual-redraft");
+        scaffoldProject(project);
+        Files.writeString(project.resolve(".warden/tasks/hello.yaml"), """
+                version: 1
+                id: hello
+                goal: "%s"
+                risk: low
+                scope: app
+                checks: fast
+                budgets:
+                  max_role_runs: 16
+                  max_cost_usd: 40
+                timeout_minutes: 5
+                """.formatted(GOAL));
+        DoCommand.Outcome redrafted = new DoCommand(new ProcessRunner()).run(
+                new DoCommand.Options(project, GOAL, "app", "low", "hello", "do-visual-redraft",
+                        "HEAD", true, false, false, false, false, true, null, "always"),
+                UserConfig.load(home));
+        check.that("redraft over a file without visual_qa still completes", redrafted.ok());
+        String contract = Files.readString(project.resolve(".warden/tasks/hello.yaml"));
+        check.contains("the redraft's visual_qa survived", contract, "testid=second-draft");
+        check.that("and the first draft's visual_qa was not frozen",
+                !contract.contains("testid=first-draft"));
+        check.contains("operator budgets still carried", contract, "max_role_runs: 16");
+        writePolicy(home, "stub-plan");
+    }
+
+        private void writeReviewingPolicy(Path home, String planner, String reviewer) throws IOException {
         Files.writeString(home.resolve("policy.yaml"), """
                 version: 1
                 roles:

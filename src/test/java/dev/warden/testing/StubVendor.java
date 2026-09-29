@@ -695,7 +695,7 @@ public final class StubVendor {
                         + "\"total_cost_usd\":0.004}");
             }
             case "plan", "plan-shell", "plan-scope", "plan-goal", "plan-access", "plan-sneaky",
-                    "plan-commit", "plan-stage", "plan-schema", "plan-amend" -> {
+                    "plan-commit", "plan-stage", "plan-schema", "plan-amend", "plan-visual-redraft" -> {
                 String prompt = "";
                 String promptFile = flag(args, "--prompt-file");
                 if (promptFile != null && Files.isRegularFile(Path.of(promptFile))) {
@@ -752,6 +752,17 @@ public final class StubVendor {
                     // An amending planner answering "the acceptance never checks the text".
                     artifact.put("visual_qa", java.util.Map.of("required", true, "scenarios", java.util.List.of(
                             "1280x720: testid=greeting visible -> text=Hello, World visible")));
+                }
+                if (mode.equals("plan-visual-redraft")) {
+                    // Two drafts that differ in visual_qa so a redraft over a person's file
+                    // without visual_qa can prove the first draft's scenarios are not frozen.
+                    succeedsNow(args);
+                    int n = Integer.parseInt(Files.readString(Path.of(flag(args, "--counter"))).trim());
+                    String scenario = n <= 1
+                            ? "1280x720: testid=first-draft visible"
+                            : "1280x720: testid=second-draft visible";
+                    artifact.put("visual_qa", java.util.Map.of("required", true,
+                            "scenarios", java.util.List.of(scenario)));
                 }
                 java.util.Map<String, Object> envelope = new java.util.LinkedHashMap<>();
                 envelope.put("structuredOutput", artifact);

@@ -26,6 +26,7 @@ public final class ApprovalStoreTest implements Suite {
         try {
             pendingSuccessHasStableContract(check, root);
             failureResolvesOnlyOnce(check, root);
+            preparationStopOffersReplan(check, root);
             staleAndUnknownChoicesFailClosed(check, root);
             concurrentStoresStillResolveOnlyOnce(check, root);
             readsAndListsDecisions(check, root);
@@ -91,7 +92,20 @@ public final class ApprovalStoreTest implements Suite {
                         "abort", "another-operator", "changed mind"));
     }
 
-    private void staleAndUnknownChoicesFailClosed(Check check, Path root) throws Exception {
+    private void preparationStopOffersReplan(Check check, Path root) throws Exception {
+        ApprovalStore store = new ApprovalStore(root);
+        HumanDecision pending = store.createPreparationStop("run-prep", "task-prep",
+                "plan_review_findings_remain",
+                Path.of(".warden/runs/run-prep/summary.json"), null);
+        check.eq("preparation choices are replan/proceed/abort",
+                List.of("replan", "proceed", "abort"), pending.options());
+        check.eq("kind is preparation", "preparation", pending.kind().jsonValue());
+        HumanDecision resolved = store.resolve("run-prep", pending.updatedAt().toString(),
+                "replan", "operator", "fix the findings");
+        check.eq("replan resolves", "replan", resolved.decision());
+    }
+
+        private void staleAndUnknownChoicesFailClosed(Check check, Path root) throws Exception {
         ApprovalStore store = store(root, "2026-08-27T12:02:00Z");
         HumanDecision pending = store.createSuccess("run-guarded", "task-3", "review complete",
                 Path.of("summary.json"), "sha256:ghi");
@@ -124,9 +138,9 @@ public final class ApprovalStoreTest implements Suite {
         check.eq("find returns empty for unknown run", false, store.find("missing").isPresent());
         check.eq("read round trips task", "task-1", store.read("run-success").taskId());
         List<HumanDecision> listed = store.list();
-        check.eq("list returns all stored decisions", 4, listed.size());
+        check.eq("list returns all stored decisions", 5, listed.size());
         check.eq("list is stable by run id",
-                List.of("run-concurrent", "run-failure", "run-guarded", "run-success"),
+                List.of("run-concurrent", "run-failure", "run-guarded", "run-prep", "run-success"),
                 listed.stream().map(HumanDecision::runId).toList());
 
         // A listing that answers `ok: true` while silently omitting a decision it could not

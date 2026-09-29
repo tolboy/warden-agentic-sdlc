@@ -410,6 +410,11 @@ public final class DoCommand {
                 report.put("preparation_unpriced", (long) prepared.unpriced());
                 if (prepared.planReview() != null) report.put("plan_review", prepared.planReview());
                 if (prepared.written() != null) report.put("task_file", prepared.written().file().toString());
+                // A preparation that spent money and stopped for a person is a stop, not a
+                // missing run. Measured 2026-09-26 on Berloga-AI: plan_review_findings_remain
+                // left no decision, no gate, no card update and no task-run.json, so
+                // `warden report` and `warden status` both said the run had never happened.
+                if (!options.dryRun()) recordPreparationStop(root, user, taskId, runId, prepared, report);
                 attachCorpusVisibility(report, root, runId, user.home());
                 return new Outcome(false, prepared.code(), requested, root, taskId, report);
             }
@@ -874,6 +879,97 @@ public final class DoCommand {
             report.putIfAbsent("corpus_status", "error");
             report.put("tree_safe_to_delete", false);
         }
+    }
+
+    /**
+     * The same record a loop stop leaves: a summary a report can read, a pending decision,
+     * and — when this command was asked to — an Orca gate and a card that says it stopped.
+     */
+    /** Visible so {@code Main.startAdvance} can re-record a stop when {@code replan} itself stops. */
+    public void recordPreparationStop(Path root, UserConfig user, String taskId, String runId,
+                                      Preparation.Outcome prepared, Map<String, Object> report)
+            throws Exception {
+        EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("run_id", runId);
+        summary.put("task_id", taskId);
+        summary.put("ok", false);
+        summary.put("reason", prepared.code());
+        summary.put("next_action", "human_escalation");
+        summary.put("prepare", report.get("prepare"));
+        summary.put("goal", report.get("goal"));
+        summary.put("dry_run", false);
+        summary.put("role_runs", (long) prepared.roleRuns());
+        summary.put("total_cost_usd", prepared.costUsd());
+        summary.put("unpriced_calls", (long) prepared.unpriced());
+        summary.put("preparation_role_runs", (long) prepared.roleRuns());
+        summary.put("preparation_cost_usd", prepared.costUsd());
+        summary.put("preparation_unpriced", (long) prepared.unpriced());
+        summary.put("steps", prepared.calls());
+        if (prepared.planReview() != null) {
+            summary.put("plan_review", prepared.planReview());
+            summary.put("finding_history", planFindings(prepared.planReview()));
+        }
+        if (prepared.written() != null) summary.put("task_file", prepared.written().file().toString());
+        summary.put("message", prepared.message() == null ? prepared.code() : prepared.message());
+        summary.put("candidate_review_passed", false);
+        summary.put("next_step", NextStep.of(prepared.code(), summary, root));
+        summary.put("safe_next_step", "warden report " + runId + " --text");
+        Path file = ledger.writeReport("task-run", summary);
+        ApprovalStore store = new ApprovalStore(root);
+        HumanDecision decision = store.createPreparationStop(runId, taskId, prepared.code(), file, null);
+        summary.put("decision_path", root.relativize(store.decisionPath(runId))
+                .toString().replace('\\', '/'));
+        summary.put("decision_state", decision.state().jsonValue());
+        summary.put("decision_kind", decision.kind().jsonValue());
+        summary.put("decision_reason", decision.reason());
+        summary.put("decision_options", decision.options());
+        summary.put("decision_updated_at", decision.updatedAt().toString());
+        summary.put("approve_with", "warden approve " + runId
+                + " --decision " + decision.options().get(0)
+                + " --expected-updated-at " + decision.updatedAt());
+        if (!orcaGate) {
+            summary.put("orca_gate", Map.of("published", false, "reason", "disabled"));
+        } else {
+            dev.warden.execution.orca.OrcaDecisionGate.Publication published =
+                    new dev.warden.execution.orca.OrcaDecisionGate(processes)
+                            .publish(root, new dev.warden.execution.orca.OrcaLifecycle(root, runId),
+                                    decision, taskId);
+            summary.put("orca_gate", published.toMap());
+        }
+        ledger.writeReport("task-run", summary);
+        ledger.append("human_decision_pending", Map.of(
+                "run_id", runId, "kind", decision.kind().jsonValue(),
+                "path", summary.get("decision_path")));
+        ledger.append("task_run", summary);
+        ledger.recordCorpusVisibility(summary);
+        ledger.writeReport("task-run", summary);
+        for (String key : List.of("decision_path", "decision_state", "decision_kind",
+                "decision_reason", "decision_options", "decision_updated_at", "approve_with",
+                "orca_gate", "next_step", "safe_next_step")) {
+            report.put(key, summary.get(key));
+        }
+        Workspace card = board.at(root);
+        card.state(Workspace.State.WAITING_FOR_HUMAN);
+        card.note("stopped: " + prepared.code() + " · " + prepared.roleRuns() + " call(s) · "
+                + Progress.money(prepared.costUsd())
+                + " · warden approve " + runId + " --decision "
+                + String.join("|", decision.options()));
+    }
+
+    /** Plan-review rounds in the shape the decision page already reads. */
+    private static List<Map<String, Object>> planFindings(Map<String, Object> planReview) {
+        if (!(planReview.get("history") instanceof List<?> history)) return List.of();
+        List<Map<String, Object>> rounds = new ArrayList<>();
+        for (Object item : history) {
+            if (!(item instanceof Map<?, ?> round)) continue;
+            Map<String, Object> copy = new LinkedHashMap<>();
+            round.forEach((key, value) -> copy.put(String.valueOf(key), value));
+            copy.put("stage", "plan-review");
+            if (!copy.containsKey("attempt")) copy.put("attempt", copy.get("round"));
+            rounds.add(copy);
+        }
+        return rounds;
     }
 
     private Outcome fail(String code, Path project, Path worktree, String taskId, String message) {

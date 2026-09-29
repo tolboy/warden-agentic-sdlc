@@ -11,6 +11,53 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A preparation that stops is a stop. `warden do --prepare always` ending on
+  `plan_review_findings_remain` used to return one JSON object and nothing else: no
+  `decision.json`, no Orca gate, no decision page, no card update, and `warden report`
+  failed with "never reached a summary", so the planner's spend appeared nowhere.
+  Measured 2026-09-26 on Berloga-AI (Orca 1.4.212), run plan-1. The stop now writes
+  `task-run.json` and a pending failure decision, publishes the gate when Orca is on,
+  moves the card to waiting, and the report includes the preparation calls and their
+  cost. Suite `planner`.
+- A contract that was already on disk still gets the one plan-review redraft. The
+  planner replaces the body and carries operator blocks (budgets, timeout, `use`);
+  `written.existed()` then skipped the redraft, so pre-writing a contract to set budgets
+  — the documented way — silently cost it. The file is left in place so the redraft's
+  compile carries those blocks again, and a second objection still stops for a person.
+  The plan reviewer is told which workflow stages will judge the candidate, so a check
+  script is not described as the only acceptance when `review` will run. When a contract
+  already exists, the planner's view shows that contract's budget and timeout instead of
+  a synthetic `$1` and 20 minutes labelled `source: task`. Measured 2026-09-26,
+  Berloga-AI. Suite `planner`.
+- A writer's `--use` pin applies to its fix rounds. `review/fix` was resolved from the
+  roster, so `--use implement=orca-grok-implement` wrote on Orca and repaired with the
+  direct profile, and the cast did not say so. The fix-round dispatch now inherits the
+  writer stage's pin, effort and host, and the cast names `fix_profile`. The alias is
+  not an overlay stage, so preflight does not refuse it as unknown. `advance` keeps
+  that overlay even though it does not reuse verdicts: a later `warden run --continue`,
+  and the decision page's own continuation, no longer drop `--use`/`--host`. An advance
+  note is narrated as an advance, not as a rejection. Measured 2026-09-26, Berloga-AI.
+  Suite `task loop`.
+- `warden approve --decision advance --no-start` no longer prints a command while a
+  waiter holds the run. The waiting `warden run --wait-for-gate` starts the next run
+  itself; the printed command was a second start. The answer now says a waiter will
+  start it and includes no command. Measured 2026-09-26, plan-2. Suite `decision-page`.
+- A process that waited through a chain prints the chain's final run. After plan-5 was
+  accepted, the plan-2 waiter printed plan-2's `vendor_protocol_failed` with `ok: false`
+  and exit 0. `ok`, `reason`, `run_id` and the exit code are now the final run's.
+  Suite `decision-page`.
+- Fencing an Orca worker closes its agent tab. `worker-stop` left the terminal open:
+  a Codex worker fenced on `cli_update_prompt` stayed as a `pwsh.exe` tab on
+  "Update available". The tab is closed after a confirmed fence. Measured 2026-09-26,
+  Orca 1.4.212, plan-3. Suite `orca-start`. Not run live.
+- An infrastructure stop no longer says verdicts are kept when this tree has none.
+  Findings copied forward from an earlier tree are not listed as left open on the
+  candidate this run is deciding. The decision page says "все этапы, которые
+  выполнялись, прошли" instead of the English summary line, a reading with blocking
+  findings is "не прошёл" rather than "ok", and "Открыть кандидата" is not offered
+  for a task with nothing to preview. Measured 2026-09-26, Berloga-AI. Suites
+  `next-step`, `decision-page`.
+
 - A continuation can start under Orca again. Once a chain was given one Orca Run, the loop
   wrote `orca.json` into a new run's directory — the inherited Run, and the `--watch` tab's
   handle — before it reserved that directory, and the reservation refused the file as

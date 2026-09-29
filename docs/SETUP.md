@@ -152,9 +152,12 @@ The same map may live on the task as `use:`, where a replan preserves it and
 `--conductor` carries it into the inner run. Flags win over the task.
 
 A failure gate also offers `advance`: it closes this run and starts the next id of the same
-task after you dealt with the blocker. `--no-start` records the decision and prints the
-command instead. If neither the contract nor the tree has changed since the stop, `advance`
-refuses rather than spending a run id to reach the same wall.
+task after you dealt with the blocker. The next run keeps this run's `--use`, `--effort` and
+`--host` even though it does not keep the verdicts. `--no-start` records the decision and
+prints the command instead, unless a process is already waiting on the gate: that waiter
+starts the next run itself, and the command is not printed. If neither the contract nor the
+tree has changed since the stop, `advance` refuses rather than spending a run id to reach
+the same wall.
 
 Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
 `~/.warden`.
@@ -239,7 +242,11 @@ workflow:
 ```
 
 `warden do <goal> --prepare always` runs the planner, then the plan reviewer over the compiled
-contract; blocking findings send the planner back once. The implementer writes; the first
+contract. The reviewer is told which workflow stages will judge the candidate. Blocking
+findings send the planner back once, including when a contract file was already on disk so
+it could carry budgets: the planner has already replaced that file's body, and the redraft
+keeps the operator's blocks. A second objection stops as `plan_review_findings_remain` with
+a decision, a report and the preparation spend. The implementer writes; the first
 reviewer stage takes the first profile of the rotation and the second stage the second, on
 every run; each reader's blocking findings go back to the implementer under
 `max_fix_attempts`, and `recheck_after_fix` on the first review means a repair made for the

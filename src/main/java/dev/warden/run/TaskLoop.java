@@ -282,14 +282,26 @@ public final class TaskLoop {
      * @param fromRunId    the run whose decision this is, named in the evidence
      * @param rejectionNote what the person said when they rejected that candidate, or null
      */
-    public record Continuation(String fromRunId, String rejectionNote, boolean reuseJudgements) {
-        public static final Continuation NONE = new Continuation(null, null, false);
+    public record Continuation(String fromRunId, String rejectionNote, boolean reuseJudgements,
+                               boolean rejection) {
+        public static final Continuation NONE = new Continuation(null, null, false, false);
 
+        /** A continuation that is not a rejection. Advance carries a note this way. */
+        public Continuation(String fromRunId, String rejectionNote, boolean reuseJudgements) {
+            this(fromRunId, rejectionNote, reuseJudgements, false);
+        }
+
+        /** A rejection: the note is what the person refused, and the next run is told so. */
         public Continuation(String fromRunId, String rejectionNote) {
-            this(fromRunId, rejectionNote, false);
+            this(fromRunId, rejectionNote, false, true);
         }
 
         public boolean carriesRejection() {
+            return rejection && rejectionNote != null && !rejectionNote.isBlank();
+        }
+
+        /** A note the next implementer should read, whether it came from a rejection or an advance. */
+        public boolean carriesNote() {
             return rejectionNote != null && !rejectionNote.isBlank();
         }
 
@@ -674,16 +686,21 @@ public final class TaskLoop {
         // Contract, then whatever the outer command left for this run id, then this
         // process's own flags. Conductor's inner `warden run` has no flags of its own, so
         // the middle term is how `warden do --conductor --use ...` reaches the roster at all.
+        // The overlay is who the operator asked for. Advance does not reuse verdicts —
+        // the tree or the contract may have changed — and it still has to keep the pin.
+        // A fresh `warden run --continue` and the decision page's own continuation do not
+        // retype --use/--host; the previous run's summary is where those choices live.
         RunOverride overlay = loaded.task().use()
-                .merged(carried.reuseJudgements() ? priorOverride(root, carried.fromRunId()) : RunOverride.NONE)
+                .merged(carried.continuesRun() ? priorOverride(root, carried.fromRunId()) : RunOverride.NONE)
                 .merged(handedOver(root, runId))
                 .merged(this.override);
-        overlay.pin(roles);
-        roles.overlay(overlay);
         GateRunner gates = new GateRunner(processes).withHome(user.home());
 
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
         if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
+        overlay = overlay.withWriterFixes(workflow);
+        overlay.pin(roles);
+        roles.overlay(overlay);
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
         boolean reviewRequired = reviewByRisk
                 && user.policy().roles().containsKey("reviewer");
@@ -907,6 +924,10 @@ public final class TaskLoop {
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
                     + "; the implementer is given its reason verbatim");
+            progress.blank();
+        } else if (carried.carriesNote()) {
+            progress.line("note  starting from the advance recorded on " + carried.fromRunId()
+                    + "; the implementer is given that note verbatim");
             progress.blank();
         }
         BaselineReceipt baselineReceipt = !dryRun && !task.baselineCommands().isEmpty()
@@ -1524,6 +1545,11 @@ public final class TaskLoop {
                             overlay.problem(stage.name(), chosen, user.profiles()) == null);
                 }
             }
+            if (stage.fixWith() != null && ("fix".equals(stage.onFail()) || "fix".equals(stage.onFindings()))) {
+                dev.warden.config.Profile fixer = roles.peek(root, user, stage.name() + "/fix",
+                        stage.fixWith(), RoleResolver.Writers.NONE, RoleRunner.UNSTAGED);
+                if (fixer != null) row.put("fix_profile", fixer.name());
+            }
             rows.add(row);
         }
         return rows;
@@ -1551,7 +1577,7 @@ public final class TaskLoop {
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
         if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
-        RunOverride overlay = loaded.task().use();
+        RunOverride overlay = loaded.task().use().withWriterFixes(workflow);
         RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
         overlay.pin(roles);
         roles.overlay(overlay);
@@ -3399,11 +3425,12 @@ public final class TaskLoop {
          * on top of a specific machine failure would bury the specific one.
          */
         private Path rejectionContextFor(String role) throws Exception {
-            if (rejectionDelivered || !"implementer".equals(role) || !carried.carriesRejection()) {
+            if (rejectionDelivered || !"implementer".equals(role) || !carried.carriesNote()) {
                 return null;
             }
             rejectionDelivered = true;
-            String text = """
+            String quoted = carried.rejectionNote().replace("\n", "\n> ");
+            String text = carried.carriesRejection() ? """
                     # A person rejected the previous candidate
 
                     Run `%s` reached the human gate and was **rejected**. This is not a failed
@@ -3417,8 +3444,18 @@ public final class TaskLoop {
                     anything, address this specific objection, and do not restart the task from
                     scratch. If you believe the objection is wrong, say so in your summary with
                     evidence rather than leaving it unaddressed.
-                    """.formatted(carried.fromRunId(),
-                            carried.rejectionNote().replace("\n", "\n> "));
+                    """.formatted(carried.fromRunId(), quoted) : """
+                    # A person advanced the previous run
+
+                    Run `%s` stopped, and a person answered **advance** with this note. This is
+                    not a rejection of a candidate that reached the gate: the previous run did
+                    not finish, and the note is what they want done on this one.
+
+                    > %s
+
+                    Read what is already in the worktree before writing anything, and address
+                    this note. Do not restart the task from scratch.
+                    """.formatted(carried.fromRunId(), quoted);
             // The person decided with the readers' open findings in front of them — the
             // decision page lists every one — so the writer is handed the same list.
             StringBuilder open = new StringBuilder();
@@ -5625,9 +5662,12 @@ public final class TaskLoop {
                 }
             }
         }
+        if (passed.isEmpty()) {
+            return ". This stop is not a judgement on the work, and no stage has passed this "
+                    + "tree, so there is no verdict to reuse; the failed stage runs again.";
+        }
         return ". This stop is not a judgement on the work: "
-                + (passed.isEmpty() ? "any stage that already passed this exact tree"
-                        : String.join(", ", passed))
+                + String.join(", ", passed)
                 + " is reused rather than paid for again, provided the tree, the acceptance and "
                 + "the roster are unchanged; the failed stage runs again.";
     }

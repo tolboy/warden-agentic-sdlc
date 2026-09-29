@@ -45,6 +45,19 @@ public final class PlannerDraft {
     public static TaskDraft.Written write(Path projectRoot, String taskId, String operatorGoal,
                                           ProjectConfig project, Access granted,
                                           Map<String, Object> artifact) throws IOException {
+        return write(projectRoot, taskId, operatorGoal, project, granted, artifact, null);
+    }
+
+    /**
+     * @param operatorBlocksFrom bytes of the person's contract before this preparation's
+     *        first compile, or null to carry from the file currently on disk. A redraft must
+     *        pass the pre-compile snapshot: otherwise the first draft's {@code visual_qa}
+     *        is frozen as if a person had written it.
+     */
+    public static TaskDraft.Written write(Path projectRoot, String taskId, String operatorGoal,
+                                          ProjectConfig project, Access granted,
+                                          Map<String, Object> artifact,
+                                          String operatorBlocksFrom) throws IOException {
         Compiled compiled = compile(taskId, operatorGoal, project, granted, artifact, projectRoot);
         TaskSpec proposed;
         try {
@@ -82,8 +95,14 @@ public final class PlannerDraft {
             // `max_fix_attempts` to TaskSpec's defaults - six calls, where this workflow
             // needs five before a single repair. Those are ceilings a person chose, not
             // something a planner may lower by drafting.
-            String merged = carryOperatorBlocks(compiled.yaml(),
-                    Files.readString(file, StandardCharsets.UTF_8));
+            //
+            // Carry from the pre-compile snapshot when the caller has one. Reading the file
+            // on disk at redraft time would freeze the first draft's visual_qa (which render
+            // always writes) as an "operator" block even when the person never wrote one.
+            String carryFrom = operatorBlocksFrom != null
+                    ? operatorBlocksFrom
+                    : Files.readString(file, StandardCharsets.UTF_8);
+            String merged = carryOperatorBlocks(compiled.yaml(), carryFrom);
             Files.writeString(file, merged, StandardCharsets.UTF_8);
             return new TaskDraft.Written(file, taskId, true);
         }

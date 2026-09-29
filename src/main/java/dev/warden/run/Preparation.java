@@ -8,6 +8,7 @@ import dev.warden.config.TaskDraft;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.UserSetup;
+import dev.warden.config.Workflow;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.json.Schema;
@@ -42,6 +43,11 @@ import java.util.Set;
  * validated again, and the reviewer reads once more. A second objection stops for a person
  * with {@code plan_review_findings_remain}, before any writer is paid. Both readers are
  * read-only, both are one call each, and every call is counted.
+ *
+ * <p>A contract that was already on disk does not skip that redraft. The planner has already
+ * replaced the body by the time the reviewer reads it, carrying only the operator's own
+ * blocks (budgets, timeout, {@code use}). The objection is to the planner's text. The file
+ * is left in place so the redraft's compile carries those blocks again.
  */
 public final class Preparation {
 
@@ -65,11 +71,18 @@ public final class Preparation {
             int roleRuns,
             double costUsd,
             int unpriced,
-            Map<String, Object> planReview) {
+            Map<String, Object> planReview,
+            List<Map<String, Object>> calls) {
+
+        public Outcome(boolean ok, String code, String message, RoleRunner.Outcome role,
+                       TaskDraft.Written written, int roleRuns, double costUsd, int unpriced,
+                       Map<String, Object> planReview) {
+            this(ok, code, message, role, written, roleRuns, costUsd, unpriced, planReview, List.of());
+        }
 
         public Outcome(boolean ok, String code, String message, RoleRunner.Outcome role,
                        TaskDraft.Written written, int roleRuns, double costUsd, int unpriced) {
-            this(ok, code, message, role, written, roleRuns, costUsd, unpriced, null);
+            this(ok, code, message, role, written, roleRuns, costUsd, unpriced, null, List.of());
         }
     }
 
@@ -88,6 +101,8 @@ public final class Preparation {
     private String amendedText;
     /** The ceilings of a chain this preparation spends for; none for a first plan. */
     private RoleRunner.DispatchGate chain = () -> { };
+    /** Every vendor call this preparation made, in order, for the run summary. */
+    private final List<Map<String, Object>> calls = new ArrayList<>();
 
     /**
      * The same preparation, amending the contract on disk instead of drafting one: the
@@ -251,6 +266,15 @@ public final class Preparation {
             return fail(RoleResolver.JUDGE_NOT_READ_ONLY, writableJudge, null, spent, reviewRounds);
         }
 
+        // Operator blocks as they stood before this preparation's first compile. Carried on
+        // every write — including the redraft — so a planner-written visual_qa from draft 1
+        // is not frozen as if a person had authored it.
+        Path existingTask = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+        String operatorBlocks = null;
+        if (amendment == null && Files.isRegularFile(existingTask)) {
+            operatorBlocks = Files.readString(existingTask, StandardCharsets.UTF_8);
+        }
+
         while (true) {
             progress.line("prep  planner  one read-only call, no repair"
                     + (redrafts > 0 ? " (redraft " + redrafts + " after the plan review objected)" : ""));
@@ -270,6 +294,7 @@ public final class Preparation {
                         null, null, spent.runs, spent.cost, spent.unpriced, planReview(reviewRounds));
             }
             spent = spent.plus(account(outcome));
+            noteCall("planner", protocolAttempts + redrafts + 1, outcome);
 
             if (dryRun) {
                 Map<String, Object> preview = null;
@@ -355,7 +380,8 @@ public final class Preparation {
                     written = new TaskDraft.Written(taskFile, taskId, true);
                     progress.line("      amended " + written.file());
                 } else {
-                    written = PlannerDraft.write(root, taskId, goal, project, granted, artifact);
+                    written = PlannerDraft.write(root, taskId, goal, project, granted, artifact,
+                            operatorBlocks);
                     progress.line("      compiled " + written.file());
                 }
             } catch (TaskDraft.TaskConflict conflict) {
@@ -364,8 +390,7 @@ public final class Preparation {
                 return fail(DRAFT_INVALID, invalid.getMessage(), outcome, spent, reviewRounds);
             }
             if (!reviewsPlans(user)) {
-                return new Outcome(true, "ok", null, outcome, written, spent.runs, spent.cost,
-                        spent.unpriced, null);
+                return done(true, "ok", null, outcome, written, spent, null);
             }
 
             // The second planner reads the compiled contract. One call, granted here rather
@@ -373,7 +398,7 @@ public final class Preparation {
             // call it always had.
             gate.grant(1);
             Path reviewContext = writeReviewContext(root, runId, goal, written, artifact,
-                    reviewRounds.size() + 1);
+                    reviewRounds.size() + 1, user, project);
             GitRepository.WorkingTreeSnapshot beforeReview = snapshotOrNull(git);
             progress.line("prep  plan-review  a second planner reads the compiled contract");
             RoleRunner.Outcome review;
@@ -385,10 +410,11 @@ public final class Preparation {
             } catch (dev.warden.ledger.HomeCorpus.UnavailableException unavailable) {
                 return fail("ledger_unavailable", unavailable.getMessage(), null, spent, reviewRounds);
             } catch (IllegalStateException unconfigured) {
-                return new Outcome(false, "role_unresolved", String.valueOf(unconfigured.getMessage()),
-                        null, written, spent.runs, spent.cost, spent.unpriced, planReview(reviewRounds));
+                return done(false, "role_unresolved", String.valueOf(unconfigured.getMessage()),
+                        null, written, spent, planReview(reviewRounds));
             }
             spent = spent.plus(account(review));
+            noteCall("plan_reviewer", reviewRounds.size() + 1, review);
             if (movedSince(git, beforeReview) || "role_violated_read_only".equals(review.code())) {
                 restoreQuietly(git, beforeReview);
                 return fail("plan_reviewer_protocol_violation", "the plan reviewer mutated the "
@@ -423,8 +449,7 @@ public final class Preparation {
             if (blocking.isEmpty() && !"fail".equals(verdict.get("verdict"))) {
                 progress.line("      plan review passed"
                         + (reviewRounds.size() > 1 ? " on the redraft" : ""));
-                return new Outcome(true, "ok", null, outcome, written, spent.runs, spent.cost,
-                        spent.unpriced, planReview(reviewRounds));
+                return done(true, "ok", null, outcome, written, spent, planReview(reviewRounds));
             }
             progress.line("      plan review objected: " + blocking.size()
                     + " blocking finding(s)");
@@ -433,31 +458,35 @@ public final class Preparation {
                 // the objection withdraws it, and the one redraft starts from the old text.
                 withdrawAmendment(written.file());
                 if (redrafts >= REDRAFTS) {
-                    return new Outcome(false, REVIEW_REMAINS, reviewMessage(blocking, written)
+                    return done(false, REVIEW_REMAINS, reviewMessage(blocking, written)
                             + " The amendment was withdrawn; the contract is as it was.",
-                            review, written, spent.runs, spent.cost, spent.unpriced,
-                            planReview(reviewRounds));
+                            review, written, spent, planReview(reviewRounds));
                 }
                 redrafts++;
                 gate.grant(1);
-                plannerContext = writeRedraftContext(root, runId, goal, granted, project, blocking, written);
+                plannerContext = writeRedraftContext(root, runId, goal, granted, project, blocking,
+                        written, false);
                 appendAmendment(plannerContext);
                 progress.line("      sending the objection back to the planner once");
                 continue;
             }
-            // A contract that was already on disk is not this preparation's to discard: the
-            // objection goes to a person, with the contract and the findings both intact.
-            if (written.existed() || redrafts >= REDRAFTS) {
-                return new Outcome(false, REVIEW_REMAINS, reviewMessage(blocking, written),
-                        review, written, spent.runs, spent.cost, spent.unpriced,
-                        planReview(reviewRounds));
+            // The reviewer objected to the text the planner just compiled. A file that was
+            // already on disk is not a reason to skip the redraft: that file's body has
+            // already been replaced, and only the operator's blocks from the pre-compile
+            // snapshot (budgets, timeout, use, and visual_qa only when the person wrote it)
+            // are carried across. Deleting it would drop those blocks, so it stays and the
+            // next compile carries from the snapshot again. A contract this preparation
+            // created has no such blocks and is discarded so the redraft writes a new one.
+            if (redrafts >= REDRAFTS) {
+                return done(false, REVIEW_REMAINS, reviewMessage(blocking, written),
+                        review, written, spent, planReview(reviewRounds));
             }
-            // Send the first planner back once, with the objection as its context, and
-            // discard only the contract this preparation wrote a moment ago.
             redrafts++;
             gate.grant(1);
-            Files.deleteIfExists(written.file());
-            plannerContext = writeRedraftContext(root, runId, goal, granted, project, blocking, written);
+            boolean keepOperatorBlocks = written.existed();
+            if (!keepOperatorBlocks) Files.deleteIfExists(written.file());
+            plannerContext = writeRedraftContext(root, runId, goal, granted, project, blocking,
+                    written, keepOperatorBlocks);
             progress.line("      sending the objection back to the planner once");
         }
     }
@@ -512,10 +541,35 @@ public final class Preparation {
                 + "read-only profile. Nothing was dispatched. Every candidate refused: " + refused;
     }
 
-    private static Outcome fail(String code, String message, RoleRunner.Outcome role, Spend spent,
-                                List<Map<String, Object>> reviewRounds) {
-        return new Outcome(false, code, message, role, null, spent.runs, spent.cost, spent.unpriced,
-                planReview(reviewRounds));
+    private Outcome fail(String code, String message, RoleRunner.Outcome role, Spend spent,
+                         List<Map<String, Object>> reviewRounds) {
+        return done(false, code, message, role, null, spent, planReview(reviewRounds));
+    }
+
+    private Outcome done(boolean ok, String code, String message, RoleRunner.Outcome role,
+                         TaskDraft.Written written, Spend spent, Map<String, Object> planReview) {
+        return new Outcome(ok, code, message, role, written, spent.runs, spent.cost, spent.unpriced,
+                planReview, List.copyOf(calls));
+    }
+
+    /** One row of this preparation, shaped so a run report can join it to the role file. */
+    private void noteCall(String role, int attempt, RoleRunner.Outcome outcome) {
+        if (outcome == null) return;
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("step", role);
+        step.put("attempt", (long) attempt);
+        step.put("ok", outcome.ok());
+        step.put("code", outcome.code());
+        if (outcome.profile() != null) step.put("profile", outcome.profile());
+        if (outcome.vendor() != null) step.put("vendor", outcome.vendor());
+        if (outcome.report() != null) step.put("report", outcome.report().toString());
+        if (outcome.details() != null) {
+            if (outcome.details().get("cost_usd") != null) step.put("cost_usd", outcome.details().get("cost_usd"));
+            if (outcome.details().get("vendor_attempts") != null) {
+                step.put("vendor_attempts", outcome.details().get("vendor_attempts"));
+            }
+        }
+        calls.add(step);
     }
 
     private static Map<String, Object> planReview(List<Map<String, Object>> rounds) {
@@ -544,9 +598,10 @@ public final class Preparation {
 
     private static String reviewMessage(List<Map<String, Object>> blocking, TaskDraft.Written written) {
         StringBuilder message = new StringBuilder("the plan reviewer still objects to the compiled "
-                + "contract at " + written.file() + " after "
-                + (written.existed() ? "reading a contract that already existed"
-                        : "the planner's one redraft")
+                + "contract at " + written.file() + " after the planner's one redraft"
+                + (written.existed()
+                        ? "; operator blocks from the pre-existing contract were kept"
+                        : "")
                 + "; no writer was dispatched. Blocking findings:");
         for (Map<String, Object> finding : blocking) {
             message.append(" [").append(finding.get("category") == null ? "other" : finding.get("category"))
@@ -686,13 +741,42 @@ public final class Preparation {
     }
 
     /**
+     * The ceilings the planner's own view should show.
+     *
+     * A contract already on disk has the numbers a person chose. The bootstrap used to
+     * substitute {@code Budget(1, 1.0)} and 20 minutes and label them {@code source: task},
+     * so a planner that spent $1.89 against a $40 contract looked like it had overrun a
+     * $1 cap nobody set. Measured 2026-09-26 on Berloga-AI: the task said 5 minutes.
+     * Without a contract there is nothing to copy, and the one-call gate is the real bound.
+     */
+    public record PlannerLimits(TaskSpec.Budget budget, long timeoutMinutes) {}
+
+    public static PlannerLimits plannerLimits(Path root, ProjectConfig project, String taskId) {
+        Path contract = root.resolve(".warden/tasks").resolve(taskId + ".yaml");
+        if (Files.isRegularFile(contract)) {
+            try {
+                TaskSpec existing = TaskSpec.parse(
+                        Files.readString(contract, StandardCharsets.UTF_8), contract.toString());
+                TaskSpec.ResolvedTask resolved = existing.resolve(project, contract.toString());
+                return new PlannerLimits(resolved.budget(), resolved.timeoutMinutes());
+            } catch (RuntimeException | java.io.IOException unreadable) {
+                // A contract that does not resolve still has to dispatch the planner.
+                // The loop refuses it on its own if preparation gets that far.
+            }
+        }
+        return new PlannerLimits(new TaskSpec.Budget(1, 1.0), project.defaultTimeoutMinutes());
+    }
+
+    /**
      * A task the planner can be dispatched against without writing a contract. The planner
      * runs before a task exists, so the task cannot bound it: write, network and land are
      * all false, there is no repair, and the profile's wall clock is the limit.
+     * When a contract is already on disk, its budget and timeout are what the view records.
      */
     static ConfigLoader.Loaded bootstrap(Path root, ProjectConfig project, String taskId,
                                          String goal, String scope, String risk) {
         List<String> paths = project.scopes().getOrDefault(scope, List.of());
+        PlannerLimits limits = plannerLimits(root, project, taskId);
         TaskSpec.ResolvedTask resolved = new TaskSpec.ResolvedTask(
                 taskId,
                 goal,
@@ -704,9 +788,9 @@ public final class Preparation {
                 List.of(),
                 new TaskSpec.Authority(false, false, false),
                 new TaskSpec.VisualQa(false, List.of(), null, null),
-                new TaskSpec.Budget(1, 1.0),
+                limits.budget(),
                 0L,
-                20L);
+                limits.timeoutMinutes());
         TaskSpec spec = TaskSpec.parse("version: 1\n"
                 + "id: " + taskId + "\n"
                 + "goal: " + TaskDraft.quote(goal) + "\n"
@@ -789,38 +873,111 @@ public final class Preparation {
 
     /** What the second planner is handed: the compiled contract and the draft it came from. */
     private Path writeReviewContext(Path root, String runId, String goal, TaskDraft.Written written,
-                                    Map<String, Object> draft, int round) throws Exception {
+                                    Map<String, Object> draft, int round, UserConfig user,
+                                    ProjectConfig project) throws Exception {
         Path file = new EvidenceLedger(root, runId).runDirectory()
                 .resolve("context").resolve("plan-review-" + round + ".md");
         Files.createDirectories(file.getParent());
         StringBuilder body = new StringBuilder();
         body.append("# The compiled contract you are judging\n\n");
         body.append("Operator goal (verbatim)\n: ").append(goal).append("\n\n");
-        body.append("Contract file: `").append(written.file()).append("`")
-                .append(written.existed() ? " (it already existed; a person wrote or accepted it)" : "")
-                .append("\n\n```yaml\n")
+        body.append("Contract file: `").append(written.file()).append("`");
+        body.append(written.existed()
+                ? " (compiled by the planner; operator blocks such as budgets were carried from the file that was already there)"
+                : " (compiled by the planner for this preparation)");
+        body.append("\n\n```yaml\n")
                 .append(Files.readString(written.file(), StandardCharsets.UTF_8))
                 .append("\n```\n\n");
         body.append("# The first planner's draft, for context only\n\n```json\n")
                 .append(Json.writePretty(draft)).append("\n```\n\n");
         body.append("Judge the contract, not the draft: Warden compiled the contract from the draft "
                 + "and may have refused parts of it. Round ").append(round).append(" of at most 2.\n");
+        body.append(judgingStages(written, user, project));
         Files.writeString(file, body.toString(), StandardCharsets.UTF_8);
         return file;
+    }
+
+    /**
+     * The stages that will judge the candidate this contract asks for.
+     *
+     * A plan reviewer that is not told this files {@code acceptance_gap} against a check
+     * script when {@code review} and {@code review-second} are about to read the content.
+     * The conditions are the same ones {@link TaskLoop} routes by.
+     */
+    private static String judgingStages(TaskDraft.Written written, UserConfig user, ProjectConfig project) {
+        if (user == null || user.policy() == null) return "";
+        Workflow workflow = user.policy().workflow();
+        String risk = "medium";
+        TaskSpec.ResolvedTask task = null;
+        try {
+            TaskSpec spec = TaskSpec.parse(Files.readString(written.file(), StandardCharsets.UTF_8),
+                    written.file().toString());
+            task = spec.resolve(project, written.file().toString());
+            if (spec.risk() != null) risk = spec.risk();
+        } catch (Exception unreadable) {
+            task = null;
+        }
+        boolean reviewByRisk = user.policy().reviewRequired(risk);
+        StringBuilder body = new StringBuilder();
+        body.append("\n# Stages that will judge the candidate\n\n");
+        body.append("After this contract is accepted, Warden runs the workflow below. ");
+        body.append("A named check is not the only acceptance when a judging stage will run: ");
+        body.append("those stages read the candidate and can object to its content.\n\n");
+        body.append("Risk: ").append(risk).append(reviewByRisk
+                ? " — review is required.\n" : " — review is not required.\n");
+        for (Workflow.Stage stage : workflow.stages()) {
+            if ("implementer".equals(stage.role()) && stage.onFindings() == null
+                    && stage.kind() == Workflow.Kind.ROLE) {
+                continue;
+            }
+            String why = stageWillNotRun(stage, user, task, reviewByRisk, risk);
+            body.append("- `").append(stage.name()).append("`");
+            if (stage.role() != null) body.append(" (").append(stage.role()).append(')');
+            body.append(why == null ? " will run" : " will not run (" + why + ")");
+            if (stage.onFindings() != null) body.append("; findings route to ").append(stage.onFindings());
+            body.append('\n');
+        }
+        return body.toString();
+    }
+
+    /** Same conditions as {@code TaskLoop}: a stage runs only when every one holds. */
+    private static String stageWillNotRun(Workflow.Stage stage, UserConfig user,
+                                          TaskSpec.ResolvedTask task, boolean reviewByRisk, String risk) {
+        if (stage.kind() == Workflow.Kind.ROLE && (user.policy() == null
+                || !user.policy().roles().containsKey(stage.role()))) {
+            return "role " + stage.role() + " is not on the roster";
+        }
+        if (task == null && !stage.when().isEmpty()) return "the contract could not be measured";
+        for (String condition : stage.when()) {
+            boolean holds = switch (condition) {
+                case "review_required" -> reviewByRisk;
+                case "visual_qa_required" -> task != null && task.visualQa().required();
+                case "risk_low" -> "low".equals(risk);
+                case "risk_medium" -> "medium".equals(risk);
+                case "risk_high" -> "high".equals(risk);
+                default -> true;
+            };
+            if (!holds) return "condition " + condition + " is not met";
+        }
+        return null;
     }
 
     /** What the first planner is handed when it is sent back: its bootstrap and the objection. */
     private Path writeRedraftContext(Path root, String runId, String goal, PlannerDraft.Access granted,
                                      ProjectConfig project, List<Map<String, Object>> blocking,
-                                     TaskDraft.Written discarded) throws Exception {
+                                     TaskDraft.Written discarded, boolean keepOperatorBlocks) throws Exception {
         Path file = new EvidenceLedger(root, runId).runDirectory()
                 .resolve("context").resolve("prepare-redraft.md");
         Files.createDirectories(file.getParent());
         StringBuilder body = new StringBuilder(bootstrapContext(goal, granted, project));
         body.append("\n# A second planner objected to your first draft\n\n");
-        body.append("The contract compiled from it was discarded. This is your one redraft; a "
-                + "second objection stops for a person. Address each finding below or say in "
-                + "`summary` why it is wrong.\n\n");
+        body.append(keepOperatorBlocks
+                ? "This is your one redraft. The contract file stays, and the blocks a person wrote "
+                        + "(budgets, timeout, use) are carried into the compile. A second objection "
+                        + "stops for a person. Address each finding below or say in `summary` why it is wrong.\n\n"
+                : "The contract compiled from it was discarded. This is your one redraft; a "
+                        + "second objection stops for a person. Address each finding below or say in "
+                        + "`summary` why it is wrong.\n\n");
         for (Map<String, Object> finding : blocking) {
             body.append("- **").append(finding.get("severity")).append("** [")
                     .append(finding.get("category") == null ? "other" : finding.get("category"))

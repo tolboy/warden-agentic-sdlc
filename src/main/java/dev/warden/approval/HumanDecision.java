@@ -86,7 +86,14 @@ public record HumanDecision(
          * paid the writer again.
          */
         FAILOVER("failover", List.of("abort", "switch", "retry")),
-        CONTRACT_CHANGE("contract_change", List.of("abort", "apply"));
+        CONTRACT_CHANGE("contract_change", List.of("abort", "apply")),
+        /**
+         * The plan reviewer still objects after the one redraft. Distinct from FAILURE
+         * because the next step is not "run the writers on this contract" — it is either
+         * plan again, accept the objected contract explicitly, or stop. Older files that
+         * offered failure options for a preparation stop still parse as FAILURE.
+         */
+        PREPARATION("preparation", List.of("replan", "proceed", "abort"));
 
         private final String jsonValue;
         private final List<String> options;

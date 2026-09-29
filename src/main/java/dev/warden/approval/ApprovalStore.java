@@ -72,6 +72,21 @@ public final class ApprovalStore {
     }
 
     /**
+     * A preparation stop: the plan reviewer still objects. Options are replan / proceed /
+     * abort — not the plain failure set, so answering cannot dispatch writers on the
+     * rejected contract by accident.
+     */
+    public HumanDecision createPreparationStop(
+            String runId,
+            String taskId,
+            String reason,
+            Path summaryPath,
+            String candidateFingerprint) throws IOException {
+        return createPending(runId, taskId, HumanDecision.Kind.PREPARATION, reason,
+                summaryPath, candidateFingerprint);
+    }
+
+    /**
      * A spent subscription with somewhere to go. The candidate is named in {@code reason} so
      * the person deciding is not asked to approve an unnamed substitution.
      */
