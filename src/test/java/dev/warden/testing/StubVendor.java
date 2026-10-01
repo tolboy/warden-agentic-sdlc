@@ -194,6 +194,20 @@ public final class StubVendor {
                         + "\"status\":\"completed\",\"summary\":\"revision " + revision + "\","
                         + "\"files_changed\":[\"src/result.txt\",\"src/rev.txt\"]}}");
             }
+            // An implementer that writes the result and then puts the task contract back the way
+            // a `git checkout -- .warden` would: the shape that stopped a live Living-Horizon
+            // run whose contract the planner had compiled into the worktree.
+            case "impl-reverts-contract" -> {
+                Path src = Path.of("src");
+                Files.createDirectories(src);
+                Files.writeString(src.resolve("result.txt"), "ok", StandardCharsets.UTF_8);
+                Path task = Path.of(".warden", "tasks", "hello.yaml");
+                Files.writeString(task, Files.readString(task) + "# reverted by the writer\n",
+                        StandardCharsets.UTF_8);
+                System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"summary\":\"created\","
+                        + "\"files_changed\":[\"src/result.txt\"]}}");
+            }
             // An implementer that moves a tracked file on disk as well as writing the result, so
             // the candidate adds, deletes and renames at once without telling git about any of
             // it — the shape an agent's file tools leave behind.

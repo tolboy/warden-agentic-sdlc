@@ -11,6 +11,26 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A writer cut off by its turn ceiling or timeout is followed by one that knows it.
+  `retry` or `advance` without a note dispatched the next implementer with an empty
+  `## Previous attempt`, which the prompt calls a first attempt, so it re-read the
+  repository from the top over a tree that already held the change. The continuation
+  now gets `fix-0-interrupted.md`: the stop, the files the previous writer changed, and
+  an instruction to finish rather than restart. Measured 2026-10-01 on Living-Horizon:
+  a 40-turn ceiling, then a 120-turn continuation spent the same way. Suite `task loop`.
+- `advance` waits for the contract edit a contract gap asks for. A stop whose remaining
+  blockers were only `contract_gap` findings, answered `advance` with `.warden` untouched,
+  re-ran the implementer from the top of the plan and was certain to stop on the same
+  gap. It is now refused as `advance_would_repeat`, naming the task file to edit; a
+  product defect is still the writers' and is not refused. Measured 2026-10-01 on
+  Living-Horizon. Suite `decision-page`.
+- A `contract_mutated` stop names the files. The summary records `contract_changes`, and
+  the next step lists one edit per file instead of "a file under .warden changed". The
+  implementer prompt forbids `git checkout`, `git restore`, `git stash`, `git reset` and
+  `git clean` over the worktree: a planner-compiled contract is uncommitted, and a writer's
+  checkout put it back to the committed version. Measured 2026-10-01 on Living-Horizon.
+  Suites `task loop` and `next-step`.
+
 - A preparation that stops is a stop. `warden do --prepare always` ending on
   `plan_review_findings_remain` used to return one JSON object and nothing else: no
   `decision.json`, no Orca gate, no decision page, no card update, and `warden report`

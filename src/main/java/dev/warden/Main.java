@@ -788,8 +788,9 @@ public final class Main {
             return null;
         }
         Object reason = prior.get("reason");
-        if (!(reason instanceof String stopped) || !REPEATS_WITHOUT_AN_EDIT.contains(stopped)) {
-            return null;
+        if (!(reason instanceof String stopped)) return null;
+        if (!REPEATS_WITHOUT_AN_EDIT.contains(stopped)) {
+            return contractGapWouldRepeat(root, resolved, prior, stopped);
         }
         String contractNow;
         String treeNow;
@@ -815,6 +816,51 @@ public final class Main {
                 + "advance again — `warden report " + resolved.runId() + " --text` names what the "
                 + "preflight objected to. To start one anyway, use the printed `warden run` "
                 + "command.";
+    }
+
+    /**
+     * A stop whose remaining blockers are contract gaps, answered `advance` with the contract
+     * untouched.
+     *
+     * Advance starts the next run from its writers, so it re-implements a candidate the readers
+     * had no product defect against and then stops on the same gap: only an edit under
+     * `.warden` can close "the acceptance does not prove the goal". Measured 2026-10-01 on
+     * Living-Horizon: a candidate whose four product findings were all fixed was advanced past
+     * one `contract_gap` (browser scenarios too weak), and the next run dispatched the
+     * implementer again from the top of the plan. A tree edit does not help here either, so
+     * unlike {@link #REPEATS_WITHOUT_AN_EDIT} only the contract is compared.
+     */
+    static String contractGapWouldRepeat(Path root, HumanDecision resolved,
+                                         Map<String, Object> prior, String stopped) {
+        String kind = null;
+        if (prior.get("next_step") instanceof Map<?, ?> step && step.get("kind") != null) {
+            kind = String.valueOf(step.get("kind"));
+        } else {
+            try {
+                kind = String.valueOf(dev.warden.run.NextStep.of(stopped, prior, root).get("kind"));
+            } catch (Exception unclassifiable) {
+                return null;
+            }
+        }
+        if (!"fix_contract".equals(kind)) return null;
+        String contractNow;
+        try {
+            contractNow = dev.warden.config.WardenTree.digest(
+                    dev.warden.config.WardenTree.snapshot(root));
+        } catch (Exception cannotTell) {
+            return null;
+        }
+        Object pinned = prior.get("contract_sha256");
+        if (!(pinned instanceof String before) || !contractNow.equals(before)) return null;
+        String taskFile = resolved.taskId() == null || resolved.taskId().isBlank()
+                ? ".warden/tasks/<task>.yaml" : ".warden/tasks/" + resolved.taskId() + ".yaml";
+        return "advance would re-run the writers and stop on the same contract gap: " + stopped
+                + " left only findings that say the acceptance does not prove the goal, and "
+                + "the contract under .warden has not changed since " + resolved.runId()
+                + " stopped. No implementer can close a contract gap. Add the missing checks or "
+                + "browser scenarios to " + taskFile + " (`warden report " + resolved.runId()
+                + " --text` lists the gaps and any proposed amendment), then answer advance "
+                + "again; or abort and judge the candidate yourself.";
     }
 
     /**

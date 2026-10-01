@@ -310,6 +310,10 @@ public final class TaskLoop {
         }
     }
 
+    /** Stops that cut a writer off mid-change and leave its edits in the worktree. */
+    private static final java.util.Set<String> INTERRUPTED_WRITER = java.util.Set.of(
+            "turn_ceiling_reached", "role_timed_out");
+
     /** A passing run whose readers found the acceptance too weak, sent to the planner. */
     public static final String CONTRACT_AMENDMENT = "contract_amendment_requested";
 
@@ -1067,6 +1071,9 @@ public final class TaskLoop {
         try {
             engine.run();
         } catch (StopException stopped) {
+            if ("contract_mutated".equals(stopped.reason())) {
+                recordContractChanges(loaded, configSnapshot, summary);
+            }
             return stop(ledger, summary, stopped.reason(), steps, engine.attempt(), budget);
         } catch (Budget.ExceededException exceeded) {
             summary.put("budget_stop", exceeded.getMessage());
@@ -1086,6 +1093,7 @@ public final class TaskLoop {
         summary.putIfAbsent("skipped_stages", engine.skipped());
 
         if (!dryRun && !contractMatches(loaded, configSnapshot)) {
+            recordContractChanges(loaded, configSnapshot, summary);
             return stop(ledger, summary, "contract_mutated", steps, attempt, budget);
         }
 
@@ -3425,9 +3433,8 @@ public final class TaskLoop {
          * on top of a specific machine failure would bury the specific one.
          */
         private Path rejectionContextFor(String role) throws Exception {
-            if (rejectionDelivered || !"implementer".equals(role) || !carried.carriesNote()) {
-                return null;
-            }
+            if (rejectionDelivered || !"implementer".equals(role)) return null;
+            if (!carried.carriesNote()) return interruptedWriterContext();
             rejectionDelivered = true;
             String quoted = carried.rejectionNote().replace("\n", "\n> ");
             String text = carried.carriesRejection() ? """
@@ -3484,6 +3491,74 @@ public final class TaskLoop {
                         + "about, and any product defect among them you can.\n\n" + open;
             }
             return writeContext(ledger, 0, "rejection", text);
+        }
+
+        /**
+         * The implementer the previous run cut off, handed to the one that picks up its tree.
+         *
+         * A writer stopped by its turn ceiling or its timeout leaves its edits in the
+         * worktree, and `retry` or `advance` without a note dispatched the next implementer
+         * with an empty `## Previous attempt`. Measured 2026-10-01 on Living-Horizon: the
+         * continuation re-read the repository from the top and spent its whole 120-turn ceiling
+         * the way the first attempt had spent its 40, on a tree that already held the change.
+         * The next writer is told what stopped the last one and which files it left, and to
+         * finish rather than rediscover.
+         */
+        private Path interruptedWriterContext() throws Exception {
+            if (!carried.continuesRun()) return null;
+            Map<String, Object> prior;
+            try {
+                Path file = loaded.root().resolve(".warden/runs").resolve(carried.fromRunId())
+                        .resolve("task-run.json");
+                if (!Files.isRegularFile(file)) return null;
+                prior = Json.parseObject(Files.readString(file));
+            } catch (Exception unreadable) {
+                return null;
+            }
+            String reason = String.valueOf(prior.get("reason"));
+            if (!INTERRUPTED_WRITER.contains(reason)) return null;
+            if (!(prior.get("infrastructure_failure") instanceof Map<?, ?> failure)
+                    || !"implementer".equals(String.valueOf(failure.get("step")))) {
+                return null;
+            }
+            rejectionDelivered = true;
+            List<String> changed;
+            try {
+                changed = new GitRepository(loaded.root(), processes).changedPaths(diffBaseCommit)
+                        .stream().filter(path -> !path.startsWith(WardenTree.DIRECTORY + "/"))
+                        .sorted().toList();
+            } catch (Exception unreadable) {
+                changed = List.of();
+            }
+            StringBuilder text = new StringBuilder("""
+                    # The previous implementer was cut off
+
+                    Run `%s` stopped on `%s` while the implementer was still working. That is
+                    not a verdict on the work: no reader judged it. The worktree still holds
+                    what that implementer wrote.
+                    """.formatted(carried.fromRunId(), reason));
+            if (changed.isEmpty()) {
+                text.append("\nNo source file differs from the base commit yet.\n");
+            } else {
+                text.append("\nFiles it already changed:\n\n");
+                int shown = 0;
+                for (String path : changed) {
+                    if (shown++ == 40) {
+                        text.append("- … and ").append(changed.size() - 40).append(" more\n");
+                        break;
+                    }
+                    text.append("- `").append(path).append("`\n");
+                }
+            }
+            text.append("""
+
+                    Start from those files: read them, finish what is missing, and run the
+                    acceptance checks once at the end. Do not restart the task, do not re-read
+                    the repository from the top, and do not spend turns checking the page by
+                    eye — the readers and the browser stage judge the result after you. The
+                    previous attempt used its whole budget; this one has the same limit.
+                    """);
+            return writeContext(ledger, 0, "interrupted", text.toString());
         }
 
         /**
@@ -5182,6 +5257,24 @@ public final class TaskLoop {
         entry.put("report", String.valueOf(outcome.report()));
         steps.add(entry);
         return outcome;
+    }
+
+    /**
+     * Which files under `.warden` moved, for the person who has to put them back.
+     *
+     * The stop used to say only that "a file under .warden changed". Measured 2026-10-01: the
+     * planner had compiled the task contract into the worktree, the implementer ran a
+     * `git checkout` that restored the committed version, and the operator had to diff the
+     * tree by hand to learn that one task file, and nothing the agent wrote, was the cause.
+     */
+    private static void recordContractChanges(ConfigLoader.Loaded loaded, Map<String, String> pinned,
+                                              Map<String, Object> summary) {
+        try {
+            List<String> changed = WardenTree.changedSince(loaded.root(), pinned);
+            if (!changed.isEmpty()) summary.put("contract_changes", changed);
+        } catch (Exception unreadable) {
+            // The stop stands without the list; the reason is already recorded.
+        }
     }
 
     private static boolean contractMatches(ConfigLoader.Loaded loaded, Map<String, String> pinned) {

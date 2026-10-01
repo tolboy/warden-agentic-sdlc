@@ -44,6 +44,7 @@ public final class DecisionPageTest implements Suite {
         staleFindingsAreNotLeftOpen(check);
         thePageSpeaksTheOperatorsLanguage(check);
         noStartDoesNotHandOutASecondStart(check);
+        advanceWaitsForTheContractAContractGapAsksFor(check);
         theWaiterPrintsTheRunsItFinishedOn(check);
     }
 
@@ -750,6 +751,43 @@ public final class DecisionPageTest implements Suite {
             check.that("and does not print a command that would start a second run",
                     !watched.containsKey("command"));
         }
+    }
+
+    /**
+     * Advance past a contract gap re-ran the writers on the same contract and stopped on the
+     * same gap. Only an edit under `.warden` closes one, so advance waits for that edit.
+     */
+    private void advanceWaitsForTheContractAContractGapAsksFor(Check check) throws Exception {
+        Path root = project("Answer the chapter");
+        Path summaryFile = root.resolve(".warden/runs/run-1/task-run.json");
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+        summary.put("reason", "blocking_findings_remain");
+        summary.put("contract_sha256", dev.warden.config.WardenTree.digest(
+                dev.warden.config.WardenTree.snapshot(root)));
+        summary.put("next_step", Map.of("kind", "fix_contract"));
+        Files.writeString(summaryFile, Json.write(summary));
+        HumanDecision asked = new ApprovalStore(root).createFailure("run-1", "hello",
+                "blocking_findings_remain", summaryFile, null);
+        new ApprovalStore(root).resolve("run-1", asked.updatedAt().toString(), "advance", "operator",
+                "the code is fine, go on to the browser");
+        HumanDecision pending = new ApprovalStore(root).read("run-1");
+
+        String refused = Main.advanceWouldRepeat(root, pending);
+        check.that("advance on an untouched contract gap is refused", refused != null);
+        check.contains("and it names the file to edit", String.valueOf(refused), ".warden/tasks/hello.yaml");
+        Map<String, Object> started = Main.startAdvance(root, pending, new String[] {}, null);
+        check.eq("the approve path does not start the run", "advance_would_repeat", started.get("code"));
+        check.eq("and says it did not", false, started.get("started"));
+
+        Path task = root.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "browser_scenarios: []\n");
+        check.that("once the contract is edited, advance may start", Main.advanceWouldRepeat(root, pending) == null);
+
+        Files.writeString(task, Files.readString(task).replace("browser_scenarios: []\n", ""));
+        summary.put("next_step", Map.of("kind", "repair_or_retry"));
+        Files.writeString(summaryFile, Json.write(summary));
+        check.that("a product defect is the writers' to fix, so advance is not refused there",
+                Main.advanceWouldRepeat(root, pending) == null);
     }
 
     /** The waiter's stdout is the run the chain finished on, and ok matches that run. */

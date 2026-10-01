@@ -725,6 +725,10 @@ public final class UserSetup {
             3. **Run the acceptance commands yourself before you finish.** Every extra fix round
                costs real money and real wall-clock.
             4. Do not commit, push, merge or create branches. Landing is a human decision.
+            5. **Do not discard changes you did not make.** No `git checkout`, `git restore`,
+               `git stash`, `git reset` or `git clean` over the worktree. Files under `.warden`
+               and edits already in the tree can be uncommitted on purpose; reverting one is a
+               contract change and stops the run.
 
             ## Previous attempt
 
