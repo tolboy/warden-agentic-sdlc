@@ -1,0 +1,14 @@
+Look at the image file snap.png in this workspace (Berloga-AI window screenshot). Also read smoke-result.json.
+
+Answer in JSON only:
+{
+  "image_matches_smoke_pass": true|false,
+  "evidence": ["short facts from the image that support or contradict each passed check id"],
+  "visual_only": {
+    "router_indicator_color": "color of the online status indicator next to Router online (not readable from JSON)",
+    "logo_description": "what is depicted on the Berloga logo mark (cave/silhouette/etc., not from JSON)"
+  },
+  "mismatches": []
+}
+
+Do not invent UIA text; use only what you see in the PNG plus the JSON for check ids.

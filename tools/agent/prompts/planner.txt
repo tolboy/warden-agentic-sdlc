@@ -1,0 +1,29 @@
+You are the PLANNER only. Write a smoke-test SPECIFICATION as JSON. Do not write PowerShell.
+
+Context:
+- App: Berloga-AI (process berloga-launcher), dark desktop UI.
+- Screenshot description (facts from vision): left sidebar with logo+title Berloga-AI, Telegram account baratnor, sections CATALOG/SHELL/TOPICS, green Router online + Commands available, Update #25, topic list, Command Center highlighted, Connectors + Settings, main area "Berloga is ready", input placeholder about Enter/Shift+Enter, LOCAL + model gemma4:e4b.
+- Live UIA name inventory is in uia-names.txt (and full tree uia.json). Labels observed in English in this session: CATALOG, SHELL, TOPICS, Router online, Command Center, Settings (not Russian).
+
+Task: specify a smoke test for "Berloga launched successfully" with 5-8 checks, UIA-read-only only (no clicks, typing, network). Example intents: window exists titled Berloga-AI and not minimized; section labels CATALOG/SHELL/TOPICS visible; Router online present; Command Center and Settings buttons present; message input available (Edit/Document or placeholder name).
+
+Output file: write EXACTLY one file `smoke-spec.json` in the current working directory with this shape:
+{
+  "title": "...",
+  "target": {"process": "berloga-launcher", "windowTitle": "Berloga-AI"},
+  "constraints": ["UIA read-only", "no clicks", "no typing", "no network", "PowerShell 5.1"],
+  "checks": [
+    {
+      "id": "window_present",
+      "description": "...",
+      "how": "UIA/Win32 criterion the executor must implement",
+      "pass_if": "..."
+    }
+  ],
+  "output": {
+    "path_param": "Out",
+    "schema": {"overall": "pass|fail", "checks": [{"id":"", "pass": true, "detail": ""}]}
+  }
+}
+
+Use names that actually appear in uia-names.txt. Keep checks implementable with UIAutomation FindFirst/FindAll by Name/ControlType. Under 8 checks.
