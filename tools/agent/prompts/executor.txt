@@ -1,0 +1,15 @@
+You are the EXECUTOR. Implement smoke.ps1 from smoke-spec.json. Do not change the spec.
+
+Write PowerShell 5.1 script `smoke.ps1` in the current working directory with:
+param([Parameter(Mandatory=$true)][string]$Out)
+
+Constraints (hard):
+- UI Automation read-only only: no InvokePattern, no SetFocus for input, no SendKeys, no mouse clicks, no network, no writes except -Out JSON.
+- Target process berloga-launcher, window title exactly Berloga-AI (find top-level HWND by EnumWindows + title; do not rely only on MainWindowHandle because a SIW window can steal it when minimized).
+- Implement EVERY check in smoke-spec.json checks[].
+- Output JSON to -Out matching schema: { "overall": "pass"|"fail", "checks": [ {"id","pass","detail"} ] }. overall=pass iff all checks pass.
+- Prefer FindFirst/FindAll by Name (+ ControlType when specified). For minimized: IsIconic via user32.
+- Under 200 lines. ASCII-safe source preferred; if Cyrillic needed use UTF-8 with BOM.
+- No interactive prompts.
+
+Read smoke-spec.json and uia-names.txt. Create smoke.ps1 only.
