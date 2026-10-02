@@ -22,13 +22,15 @@ that exists in code but has never been run live says so.
   blockers were only `contract_gap` findings, answered `advance` with `.warden` untouched,
   re-ran the implementer from the top of the plan and was certain to stop on the same
   gap. It is now refused as `advance_would_repeat`, naming the task file to edit; a
-  product defect is still the writers' and is not refused. Measured 2026-10-01 on
+  product defect is still the writers' and is not refused, nor is an inconclusive
+  reproduction or a tree that moved since the stop. Measured 2026-10-01 on
   Living-Horizon. Suite `decision-page`.
 - A `contract_mutated` stop names the files. The summary records `contract_changes`, and
   the next step lists one edit per file instead of "a file under .warden changed". The
   implementer prompt forbids `git checkout`, `git restore`, `git stash`, `git reset` and
   `git clean` over the worktree: a planner-compiled contract is uncommitted, and a writer's
-  checkout put it back to the committed version. Measured 2026-10-01 on Living-Horizon.
+  checkout put it back to the committed version. A gate that finds the contract moved now
+  stops as `contract_mutated` too, not `gates_not_satisfied`. Measured 2026-10-01 on Living-Horizon.
   Suites `task loop` and `next-step`.
 
 - A preparation that stops is a stop. `warden do --prepare always` ending on

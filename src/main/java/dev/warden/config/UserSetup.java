@@ -726,9 +726,9 @@ public final class UserSetup {
                costs real money and real wall-clock.
             4. Do not commit, push, merge or create branches. Landing is a human decision.
             5. **Do not discard changes you did not make.** No `git checkout`, `git restore`,
-               `git stash`, `git reset` or `git clean` over the worktree. Files under `.warden`
-               and edits already in the tree can be uncommitted on purpose; reverting one is a
-               contract change and stops the run.
+               `git stash`, `git reset` or `git clean` over the worktree. Edits already in the
+               tree can be uncommitted on purpose, and the files under `.warden` always are
+               part of the contract: reverting one of those stops the run.
 
             ## Previous attempt
 

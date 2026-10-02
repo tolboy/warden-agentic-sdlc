@@ -4052,6 +4052,12 @@ public final class TaskLoop {
                 return "independent_review_unavailable";
             }
             if (outcome instanceof RoleRunner.Outcome role) return reasonFor(role, stage.failureReason());
+            // A gate that found the contract moved is the same stop as a role that moved it, and
+            // the operator needs the same next step: put the files back. Reported as
+            // `gates_not_satisfied` it sent them to repair code that was never the cause.
+            if (outcome instanceof GateRunner.Outcome gate && "contract_mutated".equals(gate.code())) {
+                return "contract_mutated";
+            }
             return stage.failureReason();
         }
 

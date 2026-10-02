@@ -842,7 +842,7 @@ public final class Main {
                 return null;
             }
         }
-        if (!"fix_contract".equals(kind)) return null;
+        if (!"fix_contract".equals(kind) || !CONTRACT_GAP_STOPS.contains(stopped)) return null;
         String contractNow;
         try {
             contractNow = dev.warden.config.WardenTree.digest(
@@ -852,6 +852,18 @@ public final class Main {
         }
         Object pinned = prior.get("contract_sha256");
         if (!(pinned instanceof String before) || !contractNow.equals(before)) return null;
+        // An acceptance command can name a script in the tree, so strengthening it there closes
+        // a gap without touching `.warden`. A moved tree is given its run.
+        try {
+            Object base = prior.get("diff_base_commit");
+            if (base instanceof String commit && resolved.candidateFingerprint() != null) {
+                String treeNow = new dev.warden.git.GitRepository(root, new ProcessRunner())
+                        .sourceFingerprint(commit);
+                if (!resolved.candidateFingerprint().equals(treeNow)) return null;
+            }
+        } catch (Exception cannotTell) {
+            return null;
+        }
         String taskFile = resolved.taskId() == null || resolved.taskId().isBlank()
                 ? ".warden/tasks/<task>.yaml" : ".warden/tasks/" + resolved.taskId() + ".yaml";
         return "advance would re-run the writers and stop on the same contract gap: " + stopped
@@ -862,6 +874,14 @@ public final class Main {
                 + " --text` lists the gaps and any proposed amendment), then answer advance "
                 + "again; or abort and judge the candidate yourself.";
     }
+
+    /**
+     * Stops whose `fix_contract` comes from readers' `contract_gap` findings. A reproduction
+     * that was inconclusive also maps to `fix_contract`, but its resolution is to clear a
+     * timeout or gate error and run again on the same contract, so it is not refused here.
+     */
+    private static final java.util.Set<String> CONTRACT_GAP_STOPS = java.util.Set.of(
+            "blocking_findings_remain", "quality_exhausted");
 
     /**
      * Stops whose cause is outside the loop, so a fresh run over an unchanged contract and

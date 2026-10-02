@@ -784,6 +784,11 @@ public final class DecisionPageTest implements Suite {
         check.that("once the contract is edited, advance may start", Main.advanceWouldRepeat(root, pending) == null);
 
         Files.writeString(task, Files.readString(task).replace("browser_scenarios: []\n", ""));
+        summary.put("reason", "reproduction_inconclusive");
+        Files.writeString(summaryFile, Json.write(summary));
+        check.that("an inconclusive reproduction is rerun on the same contract, so advance is not refused",
+                Main.advanceWouldRepeat(root, pending) == null);
+        summary.put("reason", "blocking_findings_remain");
         summary.put("next_step", Map.of("kind", "repair_or_retry"));
         Files.writeString(summaryFile, Json.write(summary));
         check.that("a product defect is the writers' to fix, so advance is not refused there",
