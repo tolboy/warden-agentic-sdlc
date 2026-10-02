@@ -26,6 +26,22 @@ public final class NextStepTest implements Suite {
         repairOrRetryForAProductDefect(check);
         blockersThatAreNotTheContract(check);
         reportRendersTheBlockAndFallsBack(check);
+        aMutatedContractNamesTheFiles(check);
+    }
+
+    /** The stop named "a file under .warden"; the operator then diffed the tree by hand. */
+    private void aMutatedContractNamesTheFiles(Check check) {
+        Map<String, Object> summary = summary("run-1", "hello");
+        summary.put("contract_changes", List.of(".warden/tasks/hello.yaml (modified)",
+                ".warden/tasks/extra.yaml (added)"));
+        Map<String, Object> step = NextStep.of("contract_mutated", summary, null);
+        String edits = String.valueOf(step.get("edits"));
+        check.contains("the modified task file is named", edits, "file=.warden/tasks/hello.yaml,");
+        check.contains("with what a git revert means for it", edits, "a writer reverted it with git");
+        check.contains("an added file is to be removed", edits, "file=.warden/tasks/extra.yaml, change=remove it");
+        check.contains("without a list the old edit stands", String.valueOf(
+                NextStep.of("contract_mutated", summary("run-1", "hello"), null).get("edits")),
+                "restore the contract files that changed");
     }
 
     private void everyKindFromHandBuiltSummary(Check check) {

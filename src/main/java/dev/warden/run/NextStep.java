@@ -333,8 +333,7 @@ public final class NextStep {
                     "fix the project's own checks, or change the baseline contract deliberately"));
             case "fix_scope" -> List.of(edit(taskFile,
                     "revert, commit, or bring into scope the paths named in preexisting_violations"));
-            case "restore_contract" -> List.of(edit(".warden",
-                    "restore the contract files that changed while the run was in flight"));
+            case "restore_contract" -> contractRestores(summary);
             default -> List.of();
         };
     }
@@ -531,6 +530,31 @@ public final class NextStep {
             if (!categories.contains(category)) categories.add(category);
         }
         return categories.isEmpty() ? List.of("category not recorded") : categories;
+    }
+
+    /**
+     * One edit per contract file that moved, when the run recorded which. A file reported as
+     * modified is often a contract Warden compiled into the worktree and a writer's
+     * `git checkout`, `git stash` or `git reset` put back to its committed version.
+     */
+    private static List<Map<String, Object>> contractRestores(Map<String, Object> summary) {
+        List<Map<String, Object>> edits = new ArrayList<>();
+        for (Object item : list(summary.get("contract_changes"))) {
+            String entry = String.valueOf(item);
+            int status = entry.lastIndexOf(" (");
+            String file = status > 0 ? entry.substring(0, status) : entry;
+            String how = entry.endsWith("(added)") ? "remove it: it did not exist when the run started"
+                    : entry.endsWith("(removed)") ? "put it back as it was when the run started"
+                    : "restore the content the run started with; if it now matches the committed "
+                            + "version, a writer reverted it with git and the compiled contract "
+                            + "has to be re-applied";
+            edits.add(edit(file, how));
+        }
+        if (edits.isEmpty()) {
+            edits.add(edit(".warden",
+                    "restore the contract files that changed while the run was in flight"));
+        }
+        return edits;
     }
 
     private static Map<String, Object> edit(String file, String change) {

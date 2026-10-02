@@ -285,6 +285,7 @@ public final class TaskLoopTest implements Suite {
             provenanceResumeChecks(check, sandbox, home);
             liveRunShapeChecks(check, sandbox, home);
             carriedRejectionChecks(check, sandbox, home);
+            interruptedWriterChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
@@ -4209,6 +4210,68 @@ public final class TaskLoopTest implements Suite {
         check.contains("with the readers' open findings the person saw", carried,
                 "P3 [product_defect] the smoke drifts against the wind");
         check.contains("and what the reader suggested", carried, "flip the smoke sprite");
+    }
+
+    /**
+     * A writer cut off by its turn ceiling leaves its edits behind. The implementer that picks
+     * the tree up used to get an empty `## Previous attempt` and start over.
+     */
+    private void interruptedWriterChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "cut-off-writer");
+        writeProfiles(home, sandbox, "cut-off-writer", 1, 1);
+        TaskLoop.Outcome first = loop(project, home, "tc1");
+        check.that("the first run reaches the human gate", first.ok());
+        Path firstSummary = project.resolve(".warden/runs/tc1/task-run.json");
+        Map<String, Object> cutOff = new java.util.LinkedHashMap<>(
+                dev.warden.json.Json.parseObject(Files.readString(firstSummary)));
+        cutOff.put("reason", "turn_ceiling_reached");
+        cutOff.put("infrastructure_failure", Map.of("cause", "the writer used its turn ceiling",
+                "step", "implementer", "role_code", "role_turns_exhausted"));
+        Files.writeString(firstSummary, dev.warden.json.Json.write(cutOff));
+
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(project, "hello");
+        new TaskLoop(new ProcessRunner()).run(loaded, UserConfig.load(home), "tc2", false, Map.of(),
+                new TaskLoop.Continuation("tc1", null, false));
+        Path context = project.resolve(".warden/runs/tc2/context/fix-0-interrupted.md");
+        check.that("the next implementer is handed what stopped the last one",
+                Files.isRegularFile(context));
+        String handed = Files.isRegularFile(context) ? Files.readString(context) : "";
+        check.contains("it names the run and the stop", handed, "`tc1` stopped on `turn_ceiling_reached`");
+        check.contains("it lists the files the cut-off writer left", handed, "`src/result.txt`");
+        check.contains("and tells it to finish, not restart", handed, "Do not restart the task");
+        check.that("Warden's own files are not offered as the writer's work",
+                !handed.contains(".warden/"));
+
+        // A writer that reverts the contract stops the run, and the stop names the file.
+        Path reverted = newProject(sandbox, "reverted-contract");
+        writeProfiles(home, sandbox, "reverted-contract", 1, 1);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl-reverts-contract", sandbox.resolve("reverted-contract-impl.count"), 1);
+        TaskLoop.Outcome revertedRun = loop(reverted, home, "rv1");
+        check.eq("a writer that moves the contract stops the run", "contract_mutated", revertedRun.reason());
+        check.contains("and the summary names the file it moved",
+                String.valueOf(revertedRun.summaryReport().get("contract_changes")),
+                ".warden/tasks/hello.yaml (modified)");
+        check.contains("which the next step asks the person to restore",
+                String.valueOf(revertedRun.summaryReport().get("next_step")),
+                "file=.warden/tasks/hello.yaml");
+        writeProfiles(home, sandbox, "after-revert", 1, 1);
+
+        // A stop that judged the work is not an interruption: nothing extra is handed over.
+        Path judged = newProject(sandbox, "judged-writer");
+        writeProfiles(home, sandbox, "judged-writer", 1, 1);
+        check.that("a judged first run reaches the gate", loop(judged, home, "tj1").ok());
+        Path judgedSummary = judged.resolve(".warden/runs/tj1/task-run.json");
+        Map<String, Object> blocked = new java.util.LinkedHashMap<>(
+                dev.warden.json.Json.parseObject(Files.readString(judgedSummary)));
+        blocked.put("reason", "blocking_findings_remain");
+        Files.writeString(judgedSummary, dev.warden.json.Json.write(blocked));
+        new TaskLoop(new ProcessRunner()).run(new ConfigLoader().load(judged, "hello"),
+                UserConfig.load(home), "tj2", false, Map.of(),
+                new TaskLoop.Continuation("tj1", null, false));
+        check.that("a judged stop hands the next writer no interruption note",
+                !Files.exists(judged.resolve(".warden/runs/tj2/context/fix-0-interrupted.md")));
     }
 
     private TaskLoop.Outcome loop(Path project, Path home, String runId) throws Exception {
