@@ -637,14 +637,22 @@ public final class StubVendor {
             case "jsonl-then-truncated" -> {
                 count(args);
                 printEarlierReview();
-                int pad = dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES;
-                System.out.print("x".repeat(pad));
-                System.out.println();
-                System.out.println("{\"type\":\"turn.started\",\"marker\":\"later-turn-cut-off\"}");
+                exceedCaptureThenLaterTurn();
                 System.err.println("connect: connection reset by peer");
                 System.out.flush();
                 System.err.flush();
                 System.exit(1);
+            }
+            // The same prefix, then a hang. SIGTERM is answered with exit 0, which is what
+            // a vendor that traps the signal does. The timeout is still the outcome.
+            case "jsonl-then-truncated-timeout" -> {
+                count(args);
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> Runtime.getRuntime().halt(0)));
+                printEarlierReview();
+                exceedCaptureThenLaterTurn();
+                System.out.flush();
+                System.err.flush();
+                Thread.sleep(180_000);
             }
             // Quota named only on turn.failed's error.message. No sibling type:error event.
             case "quota-message-only" -> {
@@ -953,6 +961,14 @@ public final class StubVendor {
                 System.exit(2);
             }
         }
+    }
+
+    /** Pad past the executor's capture cap, then start a turn the prefix cannot see. */
+    private static void exceedCaptureThenLaterTurn() {
+        int pad = dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES;
+        System.out.print("x".repeat(pad));
+        System.out.println();
+        System.out.println("{\"type\":\"turn.started\",\"marker\":\"later-turn-cut-off\"}");
     }
 
     /** One Codex turn whose agent_message is a complete passing review. */

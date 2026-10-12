@@ -56,7 +56,7 @@ public final class MeasurementProjector {
             "lands", "kind",
             "from_profile", "from_vendor", "to_profile", "to_vendor", "cause", "authorized_by",
             "role_code", "policy_setting",
-            "failed_over_from", "exhausted_profiles",
+            "failed_over_from", "exhausted_profiles", "role_failovers",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
             "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
@@ -145,6 +145,15 @@ public final class MeasurementProjector {
 
     private static final Set<String> QUOTA = Set.of("detected_by", "matched_signature");
 
+    /**
+     * One recorded switch. Profile and vendor names, the cause, and who authorised it.
+     * A quota object is not copied: it can carry the vendor's own sentence.
+     */
+    private static final Set<String> FAILOVER = Set.of(
+            "role", "stage", "from_profile", "from_vendor", "to_profile", "to_vendor",
+            "from", "to", "cause", "authorized_by", "policy_setting", "role_code",
+            "role_invocation_id");
+
     private static final Set<String> VISION = Set.of("verified", "delivery");
 
     private static final Set<String> ACCOUNTING = Set.of(
@@ -177,6 +186,7 @@ public final class MeasurementProjector {
             Map.entry("escalation", ESCALATION),
             Map.entry("chain", CHAIN),
             Map.entry("quota", QUOTA),
+            Map.entry("role_failovers", FAILOVER),
             Map.entry("vision_capability", VISION),
             Map.entry("accounting", ACCOUNTING),
             Map.entry("outcomes", OUTCOMES),

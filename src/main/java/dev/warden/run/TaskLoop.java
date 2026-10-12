@@ -703,8 +703,10 @@ public final class TaskLoop {
                     .resolve(carried.fromRunId()).resolve("task-run.json")));
             if (previous.get("failover_pending") instanceof Map<?, ?> pending) {
                 if (vendorFailureSwitch(pending)) {
-                    // Not the process-lifetime exhausted set. The failed profile is skipped
-                    // for this stage's attempt only, and the approved successor is pinned.
+                    // Not the process-lifetime exhausted set. Every profile that already
+                    // failed this stage is skipped for this stage's attempt only, and the
+                    // approved successor is pinned. vendor_failovers is how many
+                    // substitutions that stage has already used.
                     Map<String, Object> copy = new LinkedHashMap<>();
                     pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
                     roles.honourConfirmedVendorFailure(copy);

@@ -211,7 +211,8 @@ public final class DirectCliExecutor implements RoleExecutor {
                 // Codex can answer in one turn and die on the next. The earlier answer is
                 // not the outcome of that later turn, whatever it died of. A capture cut
                 // off at the byte cap can hide the later turn entirely, so a non-zero exit
-                // on a truncated transcript is not success either.
+                // or a timeout on a truncated transcript is not success either. A child
+                // can exit 0 after SIGTERM; the timeout flag is the fact that matters.
                 if (discardCompleteArtifact(process)) {
                     return rejectedStaleArtifact(request, process, duration, evidence);
                 }
@@ -621,13 +622,14 @@ public final class DirectCliExecutor implements RoleExecutor {
      *
      * Two cases. The final turn failed — non-zero exit, a timeout, or {@code turn.failed} —
      * after an earlier turn had already answered. Or stdout was cut off at
-     * {@link #STDOUT_CAPTURE_BYTES} and the process exited non-zero: the prefix can hide
-     * the later {@code turn.started}, so the answer still in it is not evidence the final
-     * turn produced a verdict. A non-zero exit on a complete transcript whose artifact is
-     * from the turn that finished is still that verdict.
+     * {@link #STDOUT_CAPTURE_BYTES} and the process exited non-zero or was killed for time:
+     * the prefix can hide the later {@code turn.started}, so the answer still in it is not
+     * evidence the final turn produced a verdict. A timeout whose child exits 0 is still a
+     * timeout. A non-zero exit on a complete transcript whose artifact is from the turn
+     * that finished is still that verdict.
      */
     private static boolean discardCompleteArtifact(ProcessRunner.Result process) {
-        if (process.stdoutTruncated() && process.exitCode() != 0) return true;
+        if (process.stdoutTruncated() && (process.exitCode() != 0 || process.timedOut())) return true;
         if (!earlierTurnSuperseded(process.stdout())) return false;
         return process.exitCode() != 0 || process.timedOut() || turnFailed(process.stdout());
     }
