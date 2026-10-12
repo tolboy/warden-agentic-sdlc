@@ -349,7 +349,10 @@ public final class LedgerReader {
                 transitions = Math.max(transitions, count.longValue() - 1);
             }
             // A human-confirmed switch on --continue is one attempt plus a role_failover.
-            // Attempt transitions alone count it as zero.
+            // Attempt transitions alone count it as zero. A later automatic quota switch
+            // in that same dispatch is a second recorded row beside the one attempt pair
+            // (B, then C). The larger source is the count, so both are included once the
+            // rows are on the role_run, and a switch that is in both is not counted twice.
             if (event.get("role_failovers") instanceof List<?> recorded && !recorded.isEmpty()) {
                 transitions = Math.max(transitions, recorded.size());
             }

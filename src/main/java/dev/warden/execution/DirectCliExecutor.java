@@ -43,6 +43,13 @@ public final class DirectCliExecutor implements RoleExecutor {
     private static final List<String> ENVELOPE_KEYS = List.of(
             "structuredOutput", "structured_output", "result", "output", "response", "content", "data", "text");
 
+    /**
+     * Vendor stdout retained for classification. The capture is a prefix: once this many
+     * bytes have been kept, later turns are gone, and a non-zero exit cannot be treated as
+     * success on the strength of an answer the prefix still holds.
+     */
+    public static final int STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024;
+
     private final ProcessRunner processes;
     private final GitRepository git;
 
@@ -133,7 +140,7 @@ public final class DirectCliExecutor implements RoleExecutor {
         ProcessRunner.Result process;
         try {
             process = processes.run(command, request.projectRoot(),
-                    Duration.ofMinutes(profile.wallClockMinutes()), 4 * 1024 * 1024, stdinText);
+                    Duration.ofMinutes(profile.wallClockMinutes()), STDOUT_CAPTURE_BYTES, stdinText);
         } catch (IOException cannotStart) {
             // A vendor that will not start is returned as a role outcome rather than thrown,
             // so the run leaves a report behind instead of a stack trace with nothing recorded.
@@ -202,12 +209,11 @@ public final class DirectCliExecutor implements RoleExecutor {
                     ? schemaErrors(profile, request, artifact) : List.of();
             if (missing.isEmpty() && schemaProblems.isEmpty()) {
                 // Codex can answer in one turn and die on the next. The earlier answer is
-                // not the outcome of a later turn that exhausted its quota or its ceiling.
-                if (process.exitCode() != 0 && earlierTurnSuperseded(process.stdout())) {
-                    Result quota = quotaFailure(request, process, duration, evidence);
-                    if (quota != null) return quota;
-                    Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
-                    if (ceiling != null) return ceiling;
+                // not the outcome of that later turn, whatever it died of. A capture cut
+                // off at the byte cap can hide the later turn entirely, so a non-zero exit
+                // on a truncated transcript is not success either.
+                if (discardCompleteArtifact(process)) {
+                    return rejectedStaleArtifact(request, process, duration, evidence);
                 }
                 String semanticFailure = semanticFailure(request.role(), artifact);
                 if (semanticFailure != null) {
@@ -336,15 +342,70 @@ public final class DirectCliExecutor implements RoleExecutor {
     }
 
     public static boolean turnsExhausted(String stdout, String stderr) {
-        String haystack = ((stderr == null ? "" : stderr) + "\n"
-                + (stdout == null ? "" : stdout.length() > 4000
-                        ? stdout.substring(stdout.length() - 4000) : stdout))
-                .toLowerCase();
+        String haystack = ((stderr == null ? "" : stderr) + "\n" + stdoutTail(stdout)).toLowerCase();
         return haystack.contains("max turns reached")
                 || haystack.contains("maximum number of turns")
                 || haystack.contains("max_turns exceeded")
                 // claude -p names it in the envelope rather than in prose.
                 || haystack.contains("error_max_turns");
+    }
+
+    /**
+     * The tail of stdout, with the model's own answer taken out.
+     *
+     * A review that quotes a ceiling phrase is not a ceiling. The phrase counts when the
+     * vendor printed it — on stderr, in loose prose, or in an event other than the
+     * {@code agent_message} text. Only the tail is searched, so a long transcript cannot
+     * hide the line the vendor printed last; removing the answer first keeps a huge
+     * quotation from being that line.
+     */
+    private static String stdoutTail(String stdout) {
+        if (stdout == null || stdout.isEmpty()) return "";
+        String redacted = redactAgentAnswers(stdout);
+        return redacted.length() > 4000 ? redacted.substring(redacted.length() - 4000) : redacted;
+    }
+
+    /** Drops {@code agent_message} text. Every other byte of the transcript stays. */
+    private static String redactAgentAnswers(String stdout) {
+        StringBuilder out = new StringBuilder(stdout.length());
+        int start = 0;
+        for (int index = 0; index < stdout.length(); index++) {
+            char current = stdout.charAt(index);
+            if (current != '\n' && current != '\r') continue;
+            out.append(redactAgentMessageLine(stdout.substring(start, index)));
+            out.append(current);
+            if (current == '\r' && index + 1 < stdout.length() && stdout.charAt(index + 1) == '\n') {
+                out.append('\n');
+                index++;
+            }
+            start = index + 1;
+        }
+        if (start < stdout.length()) out.append(redactAgentMessageLine(stdout.substring(start)));
+        return out.toString();
+    }
+
+    private static String redactAgentMessageLine(String line) {
+        String trimmed = line.strip();
+        if (!trimmed.startsWith("{") || !trimmed.contains("agent_message")) return line;
+        Map<String, Object> event;
+        try {
+            event = Json.parseObject(trimmed);
+        } catch (RuntimeException ignored) {
+            return line;
+        }
+        if (!"item.completed".equals(event.get("type"))) return line;
+        Object item = event.get("item");
+        if (!(item instanceof Map<?, ?> map) || !"agent_message".equals(map.get("type"))) return line;
+        if (!map.containsKey("text")) return line;
+        Map<String, Object> copy = new LinkedHashMap<>(event);
+        Map<String, Object> itemCopy = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (!"text".equals(String.valueOf(entry.getKey()))) {
+                itemCopy.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        copy.put("item", itemCopy);
+        return Json.write(copy);
     }
 
     /** A syntactically valid artifact may still be an honest refusal, not a completed role. */
@@ -524,7 +585,7 @@ public final class DirectCliExecutor implements RoleExecutor {
      * {@code turn.started} superseded without answering.
      *
      * A multi-turn Codex transcript keeps the last JSON answer it saw. That answer is stale
-     * when the next turn then dies on quota or its turn ceiling: the failure is the outcome,
+     * once a later turn has started: if that turn then fails, the failure is the outcome,
      * and returning ok here would hide it.
      */
     static boolean earlierTurnSuperseded(String stdout) {
@@ -556,14 +617,69 @@ public final class DirectCliExecutor implements RoleExecutor {
     }
 
     /**
+     * A complete artifact that must not be returned as success.
+     *
+     * Two cases. The final turn failed — non-zero exit, a timeout, or {@code turn.failed} —
+     * after an earlier turn had already answered. Or stdout was cut off at
+     * {@link #STDOUT_CAPTURE_BYTES} and the process exited non-zero: the prefix can hide
+     * the later {@code turn.started}, so the answer still in it is not evidence the final
+     * turn produced a verdict. A non-zero exit on a complete transcript whose artifact is
+     * from the turn that finished is still that verdict.
+     */
+    private static boolean discardCompleteArtifact(ProcessRunner.Result process) {
+        if (process.stdoutTruncated() && process.exitCode() != 0) return true;
+        if (!earlierTurnSuperseded(process.stdout())) return false;
+        return process.exitCode() != 0 || process.timedOut() || turnFailed(process.stdout());
+    }
+
+    /** The vendor reported a turn as failed, in the Codex event stream. */
+    private static boolean turnFailed(String stdout) {
+        if (stdout == null || stdout.isBlank()) return false;
+        for (String line : stdout.split("\\R")) {
+            String trimmed = line.strip();
+            if (!trimmed.startsWith("{")) continue;
+            Map<String, Object> event;
+            try {
+                event = Json.parseObject(trimmed);
+            } catch (Json.JsonException ignored) {
+                continue;
+            }
+            if ("turn.failed".equals(event.get("type"))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The failure of a turn that superseded an earlier answer. Quota and a turn ceiling
+     * keep their own codes. A wall-clock kill is a timeout. Anything else is a command
+     * that produced no final artifact, including a network error and a generic
+     * {@code turn.failed}.
+     */
+    private static Result rejectedStaleArtifact(Request request, ProcessRunner.Result process,
+                                                Duration duration, Map<String, Object> evidence) {
+        Result quota = quotaFailure(request, process, duration, evidence);
+        if (quota != null) return quota;
+        Result ceiling = turnCeilingFailure(request.profile(), process, duration, evidence);
+        if (ceiling != null) return ceiling;
+        if (process.timedOut()) {
+            evidence.put("failure", "role_timeout");
+            return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
+        }
+        evidence.put("failure", "role_command_failed");
+        evidence.put("stderr_tail", tail(process.stderr(), 2000));
+        evidence.put("stdout_tail", tail(process.stdout(), 2000));
+        return new Result(false, "role_command_failed", duration, process.stdout(), null, evidence);
+    }
+
+    /**
      * Codex {@code exec --json} writes one event per line. The last line is typically
      * {@code turn.completed} with usage; the model's answer, if it printed JSON, is in an
      * {@code item.completed} event of type {@code agent_message}. Recovered from a live
      * gpt-5.4-mini probe, not from documentation.
      *
      * The last usable answer from any turn. A later turn that fails is not applied here;
-     * {@link #earlierTurnSuperseded} is what tells the caller to keep the quota and
-     * turn-ceiling checks.
+     * {@link #discardCompleteArtifact} is what tells the caller to classify that failure
+     * instead of returning the earlier answer.
      */
     public static Map<String, Object> extractJsonlAgentMessage(String stdout) {
         if (stdout == null || stdout.isBlank()) return null;

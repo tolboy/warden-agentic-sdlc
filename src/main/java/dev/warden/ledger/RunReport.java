@@ -500,7 +500,8 @@ public final class RunReport {
     /**
      * The recorded {@code role_failover} events, one row per switch, with the authorisation
      * the ledger wrote. A continuation that pins the approved profile has a single attempt,
-     * so reconstructing the switch from consecutive attempts would drop it.
+     * so reconstructing the switch from consecutive attempts would drop it. An automatic
+     * quota switch in that same continuation is a second recorded row.
      */
     private static List<Map<String, Object>> roleFailovers(List<Map<String, Object>> stages) {
         List<Map<String, Object>> all = new ArrayList<>();

@@ -295,6 +295,11 @@ public final class TaskLoopTest implements Suite {
             nonzeroExitHonoursArtifactChecks(check, sandbox, home);
             timeoutHonoursArtifactChecks(check, sandbox, home);
             staleEarlierTurnChecks(check, sandbox, home);
+            staleLaterTurnFailureChecks(check, sandbox, home);
+            truncatedTranscriptChecks(check, sandbox, home);
+            nestedQuotaMessageChecks(check, sandbox, home);
+            confirmedThenQuotaCountChecks(check, sandbox, home);
+            quotedCeilingIsNotACeilingChecks(check, sandbox, home);
             mixedModeContinueChecks(check, sandbox, home);
             confirmedSwitchReportChecks(check, sandbox, home);
             reportFailoverAuthorisationChecks(check, sandbox, home);
@@ -1261,6 +1266,189 @@ public final class TaskLoopTest implements Suite {
                 "turn_ceiling_reached", capped.reason());
         check.eq("and does not fail over", 0,
                 counted(sandbox.resolve("vendor-stale-ceiling-loop-review-up.count")));
+    }
+
+    /**
+     * An earlier turn printed a usable review. The final turn then failed with a network
+     * error and a non-zero exit. That is a vendor failure, not the earlier answer.
+     */
+    @SuppressWarnings("unchecked")
+    private void staleLaterTurnFailureChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-stale-network");
+        writeVendorRoster(home, sandbox, "vendor-stale-network", "jsonl-then-network", "stop",
+                null, null, null);
+        TaskLoop.Outcome failed = loop(project, home, "sn1");
+        check.that("the run stops", !failed.ok());
+        check.eq("on the vendor failure, not the earlier answer",
+                "vendor_call_failed", failed.reason());
+        check.eq("the successor was not called", 0,
+                counted(sandbox.resolve("vendor-stale-network-loop-review-up.count")));
+        check.eq("the profile that printed the earlier turn ran once", 1,
+                counted(sandbox.resolve("vendor-stale-network-loop-review-down.count")));
+        Map<String, Object> review = steps(failed).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("one attempt", 1, calls.size());
+        check.eq("and it is not ok", "role_command_failed", calls.get(0).get("code"));
+        check.contains("the network error stays on the attempt",
+                String.valueOf(calls.get(0).get("stderr_tail")), "connection reset");
+        check.that("and no failover was recorded",
+                !Files.readString(project.resolve(".warden/runs/sn1--reviewer-0/evidence.jsonl"))
+                        .contains("\"type\":\"role_failover\""));
+    }
+
+    /**
+     * The earlier answer fits in the capture prefix. The later turn is past the 4 MiB cap,
+     * and the process exits non-zero. The prefix must not be returned as success.
+     */
+    @SuppressWarnings("unchecked")
+    private void truncatedTranscriptChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-truncated");
+        writeVendorRoster(home, sandbox, "vendor-truncated", "jsonl-then-truncated", "stop",
+                null, null, null);
+        TaskLoop.Outcome cut = loop(project, home, "tr1");
+        check.that("the run stops", !cut.ok());
+        check.eq("on the vendor failure, not the captured answer",
+                "vendor_call_failed", cut.reason());
+        check.eq("the successor was not called", 0,
+                counted(sandbox.resolve("vendor-truncated-loop-review-up.count")));
+        Map<String, Object> review = steps(cut).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("the attempt is not ok", "role_command_failed", calls.get(0).get("code"));
+        Path raw = project.resolve(".warden/runs/tr1--reviewer-0/raw/reviewer.stdout.txt");
+        String captured = Files.readString(raw);
+        check.that("the earlier answer is in the prefix", captured.contains("earlier turn"));
+        check.that("stdout was kept only up to the capture cap",
+                Files.size(raw) <= dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES);
+        check.that("and the later turn is not in that prefix",
+                !captured.contains("later-turn-cut-off"));
+    }
+
+    /**
+     * Codex can put the quota sentence only on {@code turn.failed}'s {@code error.message},
+     * with no sibling {@code type:error} event. That is still a spent subscription.
+     */
+    @SuppressWarnings("unchecked")
+    private void nestedQuotaMessageChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-quota-message");
+        writeVendorRoster(home, sandbox, "vendor-quota-message", "quota-message-only", "stop",
+                null, null, null);
+        TaskLoop.Outcome spent = loop(project, home, "qm1");
+        check.that("the run stops", !spent.ok());
+        check.eq("on the quota question", "failover_requires_confirmation", spent.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) spent.summaryReport().get("failover_pending");
+        check.eq("the cause is the spent subscription", "role_quota_exhausted", pending.get("cause"));
+        check.eq("the successor was not called", 0,
+                counted(sandbox.resolve("vendor-quota-message-loop-review-up.count")));
+        Map<String, Object> review = steps(spent).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("the attempt is the quota", "role_quota_exhausted", calls.get(0).get("code"));
+        Map<String, Object> quota = (Map<String, Object>) calls.get(0).get("quota");
+        check.eq("detected from the structured event", "structured_error_event",
+                quota.get("detected_by"));
+        check.eq("by the usage-limit phrase", "usage limit", quota.get("matched_signature"));
+    }
+
+    /**
+     * Vendor failure asks, quota switches on its own. Continuation records the confirmed
+     * A→B, then B's quota automatically switches to C. That is two failovers.
+     */
+    @SuppressWarnings("unchecked")
+    private void confirmedThenQuotaCountChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-confirm-then-quota");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-confirm-then-quota-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-confirm-then-quota-a.count"), 1);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("vendor-confirm-then-quota-b.count"), 1);
+        writeProfile(home, "loop-review-c", "reviewer", "cvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-confirm-then-quota-c.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b, loop-review-c], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: auto, on_vendor_failure: confirm }
+                """);
+        TaskLoop.Outcome asked = loop(project, home, "cq1");
+        check.eq("confirm stops for a person", "failover_requires_confirmation", asked.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) asked.summaryReport().get("failover_pending");
+        check.eq("the question names B", "loop-review-b", pending.get("to_profile"));
+        check.eq("after A dropped the connection", "loop-review-a", pending.get("from_profile"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve("cq1", store.read("cq1").updatedAt().toString(), "switch", "operator", "");
+        Main.Carried carried = Main.continuation(project, "cq1");
+        TaskLoop.Outcome after = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "cq2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the continued run finishes", after.ok());
+        check.eq("C is the profile that finished the review", List.of("loop-review-c"),
+                steps(after).stream()
+                        .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                        .map(step -> step.get("profile")).toList());
+        Map<String, Object> review = steps(after).stream()
+                .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                .findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("B ran, then C", List.of("loop-review-b", "loop-review-c"),
+                calls.stream().map(call -> call.get("profile")).toList());
+        List<Map<String, Object>> switches =
+                (List<Map<String, Object>>) review.get("role_failovers");
+        check.eq("the step lists both switches", 2, switches.size());
+        check.eq("the confirmed switch leaves A", "loop-review-a", switches.get(0).get("from"));
+        check.eq("for the profile the person approved", "loop-review-b", switches.get(0).get("to"));
+        check.eq("authorised by the person", "human", switches.get(0).get("authorized_by"));
+        check.eq("under confirm", "confirm", switches.get(0).get("policy_setting"));
+        check.eq("the quota switch leaves B", "loop-review-b", switches.get(1).get("from"));
+        check.eq("for the profile that finished", "loop-review-c", switches.get(1).get("to"));
+        check.eq("authorised by the policy", "policy_auto", switches.get(1).get("authorized_by"));
+        check.eq("because the subscription was spent",
+                "role_quota_exhausted", switches.get(1).get("cause"));
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(project, "cq2");
+        List<Map<String, Object>> listed =
+                (List<Map<String, Object>>) report.get("role_failovers");
+        check.eq("report.json lists both switches", 2, listed.size());
+        check.eq("the report's failover rows are the same two", 2,
+                ((List<?>) report.get("failovers")).size());
+        String rendered = dev.warden.ledger.RunReport.render(report);
+        check.contains("the text names the confirmed switch", rendered, "loop-review-a");
+        check.contains("and the automatic quota switch", rendered, "cause=role_quota_exhausted");
+        Map<String, Object> iterations = iterationsOf(project);
+        check.eq("the failover count is the confirmed switch plus the quota switch",
+                2L, iterations.get("failovers"));
+        check.eq("only the confirmed switch is a vendor-failure failover",
+                1L, iterations.get("vendor_failure_failovers"));
+    }
+
+    /**
+     * An earlier answer that quotes a ceiling phrase, then a network failure. The
+     * quotation is not the ceiling; the network failure is the outcome.
+     */
+    @SuppressWarnings("unchecked")
+    private void quotedCeilingIsNotACeilingChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-quoted-ceiling");
+        writeVendorRoster(home, sandbox, "vendor-quoted-ceiling",
+                "jsonl-quoted-ceiling-then-network", "stop", null, null, null);
+        TaskLoop.Outcome failed = loop(project, home, "qc1");
+        check.that("the run stops", !failed.ok());
+        check.eq("as a vendor failure, not as a turn ceiling",
+                "vendor_call_failed", failed.reason());
+        check.eq("and does not fail over", 0,
+                counted(sandbox.resolve("vendor-quoted-ceiling-loop-review-up.count")));
+        Map<String, Object> review = steps(failed).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("the attempt is the network failure", "role_command_failed", calls.get(0).get("code"));
     }
 
     /**

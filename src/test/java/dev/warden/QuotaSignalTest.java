@@ -107,6 +107,18 @@ public final class QuotaSignalTest implements Suite {
         check.that("an Antigravity individual quota is recognised", agy.matched());
         check.eq("as a spent plan, not a rate limit", "quota_exhausted", agy.kind());
         check.eq("and the phrase that decided it is named", "quota reached", agy.signature());
+
+        // Codex can omit the sibling type:error event and leave the sentence only on
+        // turn.failed's error.message. The nested object has no type of its own.
+        String nestedOnly = """
+                {"type":"turn.failed","error":{"message":"You've hit your usage limit. \
+                Try again at 9:21 PM."}}
+                """;
+        QuotaSignal.Detection nested = QuotaSignal.detect(List.of(), nestedOnly, "");
+        check.that("a quota sentence only on turn.failed error.message is recognised",
+                nested.matched());
+        check.eq("from the nested error object", "structured_error_event", nested.detectedBy());
+        check.eq("as a spent subscription", "quota_exhausted", nested.kind());
         claudeEnvelopeChecks(check);
         turnCeilingChecks(check);
         rateLimitChecks(check, stderrOnly, codex);
@@ -207,5 +219,15 @@ public final class QuotaSignalTest implements Suite {
         check.that("an ordinary failure is not mistaken for one",
                 !DirectCliExecutor.turnsExhausted("Traceback: connection reset", "exit status 1"));
         check.that("nor is silence", !DirectCliExecutor.turnsExhausted("", ""));
+        String quoted = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\","
+                + "\"text\":\"the log says error_max_turns and max turns reached\"}}\n"
+                + "{\"type\":\"turn.started\"}\n";
+        check.that("a ceiling phrase quoted in an earlier answer is not a ceiling",
+                !DirectCliExecutor.turnsExhausted(quoted, ""));
+        check.that("a later ceiling event still is",
+                DirectCliExecutor.turnsExhausted(quoted
+                        + "{\"type\":\"result\",\"subtype\":\"error_max_turns\"}\n", ""));
+        check.that("and stderr still is, beside that quotation",
+                DirectCliExecutor.turnsExhausted(quoted, "Error: max turns reached"));
     }
 }

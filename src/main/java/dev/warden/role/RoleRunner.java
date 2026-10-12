@@ -1031,6 +1031,7 @@ public final class RoleRunner {
                                     + "in force");
                             report.put("vendor_attempts", attempts);
                             report.put("attempts_cost_usd", spent);
+                            rememberFailovers(report, roleFailovers);
                             Path path = ledger.writeReport("role-" + reportStem, report);
                             ledger.append("role_run", report);
                             return new Outcome(false, result.code(), role, profile.name(),
@@ -1038,10 +1039,14 @@ public final class RoleRunner {
                         }
                         // Switching vendors mid-role changes who wrote the work, so it is an
                         // event in its own right rather than a line in a report nobody reads.
+                        // It joins the same list a vendor-failure switch and a confirmed
+                        // switch join, so a continuation that already recorded A→B and then
+                        // switches B→C on quota counts both.
                         Map<String, Object> failover = failoverEvent(role, profile, candidate,
                                 result, preAuthorized ? "human_switch_decision" : "policy_auto");
                         failover.put("role_invocation_id", roleInvocationId);
                         ledger.append("role_failover", failover);
+                        roleFailovers.add(failover);
                         replacements.put(stageName == null ? role : stageName, candidate.name());
                         continue;
                     }
@@ -1066,6 +1071,7 @@ public final class RoleRunner {
                         report.put("failover_pending", pending);
                         report.put("vendor_attempts", attempts);
                         report.put("attempts_cost_usd", spent);
+                        rememberFailovers(report, roleFailovers);
                         report.put("resolution", "policy failover.on_quota_exhausted is 'confirm'. "
                                 + "Record the choice with `warden approve <run-id> --decision switch`, "
                                 + "then re-run with `--continue <run-id>`; or set "

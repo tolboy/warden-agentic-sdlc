@@ -19,12 +19,17 @@ that exists in code but has never been run live says so.
   `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
   it. The same path covers `role_local_endpoint_unreachable` and
   `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
-  tail, and with `start_error` when the process could not be launched. A valid artifact is
-  kept even when the process exits non-zero, and when a wall-clock kill arrives after that
-  artifact is already complete: the exit code or `timed_out` is recorded and there is no
-  failover. A timeout that left no complete artifact is still `role_timeout` and may fail
-  over. A multi-turn Codex transcript whose later turn hits a quota or a turn ceiling is
-  that failure, even when an earlier turn printed a usable answer. A review finding, a gate
+  tail, and with `start_error` when the process could not be launched. A valid artifact from
+  the turn that finished is kept even when the process exits non-zero, and when a wall-clock
+  kill arrives after that artifact is already complete: the exit code or `timed_out` is
+  recorded and there is no failover. A timeout that left no complete artifact is still
+  `role_timeout` and may fail over. A multi-turn transcript whose final turn fails is that
+  failure, even when an earlier turn printed a usable answer, and whatever the failure was:
+  a quota, a turn ceiling, a dropped connection, a timeout, or any other non-zero exit or
+  `turn.failed`. A stdout capture cut off at 4 MiB with a non-zero exit is not read as
+  success, because the prefix can hide the later turn. A quota sentence carried only on
+  `turn.failed`'s `error.message` is still a spent subscription. A ceiling phrase quoted in
+  an earlier answer is not itself a turn ceiling. A review finding, a gate
   failure and a rejection do not take this path. Under `confirm`, `--continue` runs the
   profile the person approved for that stage and writes `role_failover`
   (`authorized_by: human`, `policy_setting: confirm`); the failed profile is skipped for
@@ -32,8 +37,9 @@ that exists in code but has never been run live says so.
   in the same dispatch, the continuation pins the approved profile and also keeps the
   auto-failed profile out of that stage; a quota confirmation on its own is still not a
   pin. The text report and the failover counts include a confirmed switch, including one
-  whose continued run has a single attempt. `report.json` lists the switches under
-  `role_failovers`, including `authorized_by` and `policy_setting`. A role may set its own
+  whose continued run has a single attempt. A confirmed switch followed by an automatic
+  quota switch in that same continuation counts as two, and `report.json` lists both
+  under `role_failovers`, including `authorized_by` and `policy_setting`. A role may set its own
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
 ### Fixed

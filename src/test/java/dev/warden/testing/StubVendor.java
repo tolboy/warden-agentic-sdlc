@@ -610,6 +610,54 @@ public final class StubVendor {
                 System.err.println("Error: max turns reached");
                 System.exit(1);
             }
+            // Turn one prints a usable review. Turn two is a dropped connection, not a
+            // quota and not a ceiling, and exits 1. The earlier answer must not become ok.
+            case "jsonl-then-network" -> {
+                count(args);
+                printEarlierReview();
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":"
+                        + "\"connect: connection reset by peer\"}}");
+                System.err.println("connect: connection reset by peer");
+                System.exit(1);
+            }
+            // The earlier answer quotes a ceiling phrase. The later turn is a network
+            // failure. The quotation must not be classified as the ceiling.
+            case "jsonl-quoted-ceiling-then-network" -> {
+                count(args);
+                printEarlierReview("the log says error_max_turns and max turns reached");
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":"
+                        + "\"connect: connection reset by peer\"}}");
+                System.err.println("connect: connection reset by peer");
+                System.exit(1);
+            }
+            // A usable review, then enough bytes to pass the executor's capture cap, then
+            // a later turn the prefix cannot see. Exit 1. The captured answer is stale.
+            case "jsonl-then-truncated" -> {
+                count(args);
+                printEarlierReview();
+                int pad = dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES;
+                System.out.print("x".repeat(pad));
+                System.out.println();
+                System.out.println("{\"type\":\"turn.started\",\"marker\":\"later-turn-cut-off\"}");
+                System.err.println("connect: connection reset by peer");
+                System.out.flush();
+                System.err.flush();
+                System.exit(1);
+            }
+            // Quota named only on turn.failed's error.message. No sibling type:error event.
+            case "quota-message-only" -> {
+                count(args);
+                String message = "You've hit your usage limit. Upgrade to Pro "
+                        + "(https://example.invalid/pro), visit https://example.invalid/usage to "
+                        + "purchase more credits or try again at 9:21 PM.";
+                System.out.println("{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}");
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":\""
+                        + message + "\"}}");
+                System.exit(1);
+            }
             // The first call is a dropped connection; every later call is a clean pass.
             // Models a profile that failed once and is still usable at a later stage.
             case "network-once" -> {
@@ -909,9 +957,13 @@ public final class StubVendor {
 
     /** One Codex turn whose agent_message is a complete passing review. */
     private static void printEarlierReview() {
+        printEarlierReview("earlier turn");
+    }
+
+    private static void printEarlierReview(String summary) {
         String artifact = dev.warden.json.Json.write(java.util.Map.of(
                 "role", "reviewer", "task_id", "hello", "status", "completed",
-                "verdict", "pass", "summary", "earlier turn", "findings", java.util.List.of()));
+                "verdict", "pass", "summary", summary, "findings", java.util.List.of()));
         System.out.println("{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}");
         System.out.println("{\"type\":\"turn.started\"}");
         System.out.println(dev.warden.json.Json.write(java.util.Map.of(
