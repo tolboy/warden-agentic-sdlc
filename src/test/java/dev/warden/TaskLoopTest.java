@@ -302,6 +302,8 @@ public final class TaskLoopTest implements Suite {
             confirmedThenQuotaCountChecks(check, sandbox, home);
             vendorFailureBoundAfterConfirmChecks(check, sandbox, home);
             vendorFailureCycleChecks(check, sandbox, home);
+            quotaThenVendorConfirmCycleChecks(check, sandbox, home);
+            recheckFailoversAfterConfirmedSwitchChecks(check, sandbox, home);
             quotedCeilingIsNotACeilingChecks(check, sandbox, home);
             mixedModeContinueChecks(check, sandbox, home);
             confirmedSwitchReportChecks(check, sandbox, home);
@@ -1611,6 +1613,201 @@ public final class TaskLoopTest implements Suite {
     }
 
     /**
+     * A spent subscription must survive a vendor-failure confirmation. Roster A, B, C
+     * with quota on auto and vendor failure on confirm: A spends its quota and the
+     * policy switches to B, B produces nothing and a person confirms C. After
+     * {@code --continue}, C's failure must not propose A. {@code max_per_stage} is 3,
+     * so the stop is the spent subscription, not the ceiling. A pending record that
+     * has no {@code quota_exhausted_profiles} is the vendor-failure cycle above: the
+     * missing list is empty and that continuation still loads.
+     */
+    @SuppressWarnings("unchecked")
+    private void quotaThenVendorConfirmCycleChecks(Check check, Path sandbox, Path home)
+            throws Exception {
+        Path project = newProject(sandbox, "quota-vendor-cycle");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("quota-vendor-cycle-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("quota-vendor-cycle-a.count"), 1);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("quota-vendor-cycle-b.count"), 1);
+        writeProfile(home, "loop-review-c", "reviewer", "cvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("quota-vendor-cycle-c.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b, loop-review-c], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: auto, on_vendor_failure: confirm, max_per_stage: 3 }
+                """);
+        TaskLoop.Outcome first = loop(project, home, "qv1");
+        check.eq("B's failure asks before switching", "failover_requires_confirmation", first.reason());
+        Map<String, Object> toC =
+                (Map<String, Object>) first.summaryReport().get("failover_pending");
+        check.eq("the question is the missing artifact, not the quota",
+                "vendor_call_failed", toC.get("cause"));
+        check.eq("and names C", "loop-review-c", toC.get("to_profile"));
+        check.eq("after B produced nothing", "loop-review-b", toC.get("from_profile"));
+        check.eq("the vendor failure remembered is B",
+                List.of("loop-review-b"), toC.get("exhausted_profiles"));
+        check.eq("and the spent subscription is carried separately",
+                List.of("loop-review-a"), toC.get("quota_exhausted_profiles"));
+        check.eq("no vendor-failure substitution is spent yet", 0L, toC.get("vendor_failovers"));
+        Map<String, Object> review = steps(first).stream()
+                .filter(step -> "review".equals(step.get("stage"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("A ran, then B", List.of("loop-review-a", "loop-review-b"),
+                calls.stream().map(call -> call.get("profile")).toList());
+        check.eq("C was not started", 0, counted(sandbox.resolve("quota-vendor-cycle-c.count")));
+        List<Map<String, Object>> switches = ledgerEvents(
+                project.resolve(".warden/runs/qv1--reviewer-0/evidence.jsonl"), "role_failover");
+        check.eq("the quota switch is the only one recorded so far", 1, switches.size());
+        check.eq("it leaves A", "loop-review-a", switches.get(0).get("from"));
+        check.eq("for B", "loop-review-b", switches.get(0).get("to"));
+        check.that("and does not return to A",
+                switches.stream().noneMatch(event -> "loop-review-a".equals(event.get("to"))));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve("qv1", store.read("qv1").updatedAt().toString(), "switch", "operator", "");
+        Main.Carried carried = Main.continuation(project, "qv1");
+        TaskLoop.Outcome after = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "qv2",
+                        false, carried.failover(), carried.continuation());
+        check.that("C's failure stops the run", !after.ok());
+        check.eq("as a vendor failure", "vendor_call_failed", after.reason());
+        check.eq("and does not propose A", null, after.summaryReport().get("failover_pending"));
+        check.eq("the decision is a failure", "failure", after.summaryReport().get("decision_kind"));
+        check.eq("B was not called again", 1, counted(sandbox.resolve("quota-vendor-cycle-b.count")));
+        check.eq("C ran once", 1, counted(sandbox.resolve("quota-vendor-cycle-c.count")));
+        Map<String, Object> continued = steps(after).stream()
+                .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                .findFirst().orElseThrow();
+        List<Map<String, Object>> continuedCalls =
+                (List<Map<String, Object>>) continued.get("vendor_attempts");
+        check.eq("the continuation pays only C", List.of("loop-review-c"),
+                continuedCalls.stream().map(call -> call.get("profile")).toList());
+        Map<String, Object> roleReport = Json.parseObject(Files.readString(
+                project.resolve(".warden/runs/qv2--reviewer-0/role-reviewer.json")));
+        check.eq("the stop is not the bound", null, roleReport.get("failover_bound"));
+        Map<String, Object> rejected = (Map<String, Object>) roleReport.get("failover_rejected");
+        check.eq("A is refused because its quota is spent",
+                "quota_exhausted_this_run", rejected.get("loop-review-a"));
+        check.eq("B is refused because it already failed this stage",
+                "vendor_failed_this_attempt", rejected.get("loop-review-b"));
+        List<Map<String, Object>> confirmed = ledgerEvents(
+                project.resolve(".warden/runs/qv2--reviewer-0/evidence.jsonl"), "role_failover");
+        check.eq("only the confirmed switch was recorded", 1, confirmed.size());
+        check.eq("from B", "loop-review-b", confirmed.get(0).get("from"));
+        check.eq("to C", "loop-review-c", confirmed.get(0).get("to"));
+        check.that("failover never returns to exhausted A",
+                confirmed.stream().noneMatch(event -> "loop-review-a".equals(event.get("to"))
+                        || "loop-review-a".equals(event.get("to_profile"))));
+    }
+
+    /**
+     * A confirmed switch is spent by the dispatch that honours it. A fix round in that
+     * same process re-runs the stage, and that re-run is a new attempt: the profile
+     * that only dropped the connection can be selected again, and {@code max_per_stage}
+     * starts over. With the bound at one, an uncleared carried count would make the
+     * recheck unable to switch.
+     *
+     * A spent subscription is not one of those memories. It was restored into the
+     * process-lifetime exhausted set, and the recheck must still refuse it.
+     */
+    @SuppressWarnings("unchecked")
+    private void recheckFailoversAfterConfirmedSwitchChecks(Check check, Path sandbox, Path home)
+            throws Exception {
+        Path project = newProject(sandbox, "recheck-after-confirm", "medium", 20, true);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("recheck-after-confirm-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network-once", sandbox.resolve("recheck-after-confirm-a.count"), 2);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("recheck-after-confirm-b.count"), 1);
+        writeProfile(home, "loop-review-c", "reviewer", "cvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-then-fails", sandbox.resolve("recheck-after-confirm-c.count"), 2);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b, loop-review-c], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: confirm, on_vendor_failure: auto, max_per_stage: 1 }
+                """);
+        TaskLoop.Outcome asked = loop(project, home, "rf1");
+        check.eq("the spent subscription still asks", "failover_requires_confirmation", asked.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) asked.summaryReport().get("failover_pending");
+        check.eq("the question is the quota, after the automatic vendor switch",
+                "role_quota_exhausted", pending.get("cause"));
+        check.eq("and names C", "loop-review-c", pending.get("to_profile"));
+        check.eq("after B was spent", "loop-review-b", pending.get("from_profile"));
+        check.eq("the dropped connection is remembered for this stage",
+                List.of("loop-review-a"), pending.get("vendor_failed_profiles"));
+        check.eq("and the spent subscription is the quota list",
+                List.of("loop-review-b"), pending.get("exhausted_profiles"));
+        check.eq("the automatic vendor switch already spent the stage's one substitution",
+                1L, pending.get("vendor_failovers"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve("rf1", store.read("rf1").updatedAt().toString(), "switch", "operator", "");
+        Main.Carried carried = Main.continuation(project, "rf1");
+        int[] visualCalls = {0};
+        TaskLoop.Outcome after = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(++visualCalls[0] > 1))
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "rf2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the continued run finishes", after.ok());
+        check.eq("after one fix round", 1L, after.summaryReport().get("attempts_used"));
+        List<Map<String, Object>> reviews = steps(after).stream()
+                .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                .toList();
+        check.eq("the stage runs twice: the confirmed switch, then the recheck", 2, reviews.size());
+        List<Map<String, Object>> continuedCalls =
+                (List<Map<String, Object>>) reviews.get(0).get("vendor_attempts");
+        check.eq("the continued attempt pays only the profile the person approved",
+                List.of("loop-review-c"),
+                continuedCalls.stream().map(call -> call.get("profile")).toList());
+        List<Map<String, Object>> recheckCalls =
+                (List<Map<String, Object>>) reviews.get(1).get("vendor_attempts");
+        check.eq("the recheck's first profile fails, then auto failover still runs",
+                List.of("loop-review-c", "loop-review-a"),
+                recheckCalls.stream().map(call -> call.get("profile")).toList());
+        check.eq("the first of those attempts is the vendor failure",
+                "role_command_failed", recheckCalls.get(0).get("code"));
+        check.eq("and the second is the profile that only dropped the connection",
+                "ok", recheckCalls.get(1).get("code"));
+        check.eq("A ran twice: the original failure, then the recheck's failover", 2,
+                counted(sandbox.resolve("recheck-after-confirm-a.count")));
+        check.eq("C ran twice: the confirmed dispatch, then the recheck's failure", 2,
+                counted(sandbox.resolve("recheck-after-confirm-c.count")));
+        check.that("the spent subscription is not dispatched on the continuation",
+                steps(after).stream().noneMatch(step -> mentionsProfile(step, "loop-review-b")));
+        List<Map<String, Object>> switched = ledgerEvents(
+                project.resolve(".warden/runs/rf2--reviewer-1/evidence.jsonl"), "role_failover");
+        check.eq("the recheck records one automatic switch", 1, switched.size());
+        check.eq("from the profile the recheck started with",
+                "loop-review-c", switched.get(0).get("from"));
+        check.eq("to the profile that had only dropped the connection",
+                "loop-review-a", switched.get(0).get("to"));
+        check.eq("authorised by the policy", "policy_auto", switched.get(0).get("authorized_by"));
+        check.eq("because that call produced nothing",
+                "vendor_call_failed", switched.get(0).get("cause"));
+        check.that("and not back onto the spent subscription",
+                switched.stream().noneMatch(event -> "loop-review-b".equals(event.get("to"))));
+        Map<String, Object> roleReport = Json.parseObject(Files.readString(
+                project.resolve(".warden/runs/rf2--reviewer-1/role-reviewer.json")));
+        check.eq("the recheck is not stopped by the bound", null, roleReport.get("failover_bound"));
+    }
+
+    /**
      * An earlier answer that quotes a ceiling phrase, then a network failure. The
      * quotation is not the ceiling; the network failure is the outcome.
      */
@@ -1899,6 +2096,16 @@ public final class TaskLoopTest implements Suite {
             out.append("    ").append(line.strip()).append('\n');
         }
         return out.toString();
+    }
+
+    /** True when a step dispatched {@code profile}, including a failover attempt. */
+    private static boolean mentionsProfile(Map<String, Object> step, String profile) {
+        if (profile.equals(step.get("profile"))) return true;
+        if (!(step.get("vendor_attempts") instanceof List<?> calls)) return false;
+        for (Object call : calls) {
+            if (call instanceof Map<?, ?> row && profile.equals(row.get("profile"))) return true;
+        }
+        return false;
     }
 
     private static int counted(Path counter) throws IOException {

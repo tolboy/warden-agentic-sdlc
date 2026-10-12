@@ -706,10 +706,20 @@ public final class TaskLoop {
                     // Not the process-lifetime exhausted set. Every profile that already
                     // failed this stage is skipped for this stage's attempt only, and the
                     // approved successor is pinned. vendor_failovers is how many
-                    // substitutions that stage has already used.
+                    // substitutions that stage has already used. A spent subscription is
+                    // the other list: quota_exhausted_profiles is restored for the rest of
+                    // this process. A pending record from before that field existed has no
+                    // list, which is an empty exclusion.
                     Map<String, Object> copy = new LinkedHashMap<>();
                     pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
                     roles.honourConfirmedVendorFailure(copy);
+                    if (pending.get("quota_exhausted_profiles") instanceof List<?> quotaSpent) {
+                        java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                        for (Object name : quotaSpent) {
+                            if (name != null) excluded.add(String.valueOf(name));
+                        }
+                        if (!excluded.isEmpty()) roles.excluding(excluded);
+                    }
                 } else {
                     if (pending.get("exhausted_profiles") instanceof List<?> names) {
                         java.util.Set<String> excluded = new java.util.LinkedHashSet<>();

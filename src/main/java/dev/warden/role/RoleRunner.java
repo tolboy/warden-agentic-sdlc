@@ -62,9 +62,10 @@ import java.util.Set;
  * stops for the same human decision a spent subscription does, and {@code max_per_stage}
  * (default 1) is how many substitutions that stage may make, including a switch confirmed
  * on {@code --continue}. The continuation keeps that count and every profile that already
- * failed the stage. A valid artifact is kept even when
- * the process exits non-zero. A review finding, a gate failure and a rejection never enter
- * this path: those are judgements, and routing around them would hide the defect. The
+ * failed the stage for the dispatch that honours the switch, and that dispatch spends both.
+ * A later re-run of the stage in the same process does not inherit either. A valid artifact is
+ * kept even when the process exits non-zero. A review finding, a gate failure and a rejection
+ * never enter this path: those are judgements, and routing around them would hide the defect. The
  * failed attempt stays in {@code vendor_attempts}, with its code, the tail of what the
  * vendor printed, and {@code start_error} when the process could not be launched.
  */
@@ -231,18 +232,24 @@ public final class RoleRunner {
     private final Map<String, Map<String, Object>> confirmedVendorSwitches = new LinkedHashMap<>();
 
     /**
-     * Profiles a continued stage must not pay again. Scoped to that stage, not to the
-     * process-lifetime {@link #exhausted} set: a network error is not a spent subscription,
-     * and a later stage may still select the profile. The set is every profile that
-     * already failed the stage, not only the last one.
+     * Profiles a continued stage must not pay again, until the first {@link #run} of that
+     * stage. Scoped to that stage, not to the process-lifetime {@link #exhausted} set: a
+     * network error is not a spent subscription, and a later stage may still select the
+     * profile. The set is every profile that already failed the stage, not only the last
+     * one. That first dispatch removes the entry, so a fix round that re-runs the stage
+     * does not keep excluding them.
      */
     private final Map<String, Set<String>> vendorExcludedForStage = new LinkedHashMap<>();
 
     /**
-     * Vendor-failure substitutions a continued stage has already used, keyed by stage.
+     * Vendor-failure substitutions a continued stage has already used, keyed by stage,
+     * until the first {@link #run} of that stage.
      *
-     * A confirmed switch counts when that profile is dispatched. A later stage does not
-     * inherit the count, and neither fact is a spent subscription.
+     * A confirmed switch counts when that profile is dispatched, on top of this number.
+     * That first dispatch removes the entry. A fix round that re-runs the stage starts
+     * the count over; leaving it in place with {@code max_per_stage} at one makes the
+     * re-run unable to switch. A later stage does not inherit the count, and neither
+     * fact is a spent subscription.
      */
     private final Map<String, Integer> vendorFailoversCarried = new LinkedHashMap<>();
 
@@ -286,7 +293,9 @@ public final class RoleRunner {
      *
      * Pins {@code to_profile} for that stage, and remembers every profile that already
      * failed it, plus how many substitutions the stage has already used. Neither fact is
-     * a spent subscription. A later stage in this process starts clean.
+     * a spent subscription. The first {@link #run} of the stage spends both memories; a
+     * later dispatch in this process, including a fix round of the same stage, starts
+     * without them. A spent subscription is not stored here.
      */
     public RoleRunner honourConfirmedVendorFailure(Map<String, Object> pending) {
         if (pending == null || pending.isEmpty()) return this;
@@ -695,12 +704,18 @@ public final class RoleRunner {
         List<Map<String, Object>> rateLimitPauses = new ArrayList<>();
         // This attempt cannot switch more than the policy allows, and cannot select a
         // profile that already failed it. A continuation of the same stage brings both
-        // facts back; a later stage calls run() with neither and starts clean.
+        // facts back for this dispatch only: the first run() removes them. A fix round
+        // re-runs the stage in this same process and must start clean, or a carried
+        // count of one with max_per_stage at one would make that re-run unable to
+        // switch. A later stage never saw the entries. A spent subscription is not
+        // among them. It stays in the process-lifetime exhausted set, which this
+        // removal does not touch: the plan is still spent on the re-run.
         vendorFailedThisDispatch.clear();
         String stageKey = stageName == null ? role : stageName;
-        Set<String> stagedExclusion = vendorExcludedForStage.get(stageKey);
+        Set<String> stagedExclusion = vendorExcludedForStage.remove(stageKey);
         if (stagedExclusion != null) vendorFailedThisDispatch.addAll(stagedExclusion);
         int vendorFailovers = vendorFailoversCarried.getOrDefault(stageKey, 0);
+        vendorFailoversCarried.remove(stageKey);
         List<Map<String, Object>> roleFailovers = new ArrayList<>();
 
         for (int attempt = 1; ; attempt++) {
@@ -1172,6 +1187,15 @@ public final class RoleRunner {
                     // counting the one this question is asking about.
                     pending.put("exhausted_profiles", List.copyOf(vendorFailedThisDispatch));
                     pending.put("vendor_failovers", (long) vendorFailovers);
+                    // A spent subscription is not one of those failures. It lives only in
+                    // the process-lifetime exhausted set, which dies with this process, so
+                    // a continuation would otherwise offer it again (A spends its quota,
+                    // B returns nothing, a person confirms C, C fails, A is proposed).
+                    // The continuation restores the list with excluding(). A record written
+                    // before this field existed has no list, and that means none.
+                    if (!exhausted.isEmpty()) {
+                        pending.put("quota_exhausted_profiles", List.copyOf(exhausted));
+                    }
                     pending.put("to_model", candidate.model());
                     pending.put("to_runner", candidate.runner());
                     pending.put("to_effort", candidate.effort());
