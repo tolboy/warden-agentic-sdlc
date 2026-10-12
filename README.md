@@ -408,10 +408,20 @@ vendor, but **asks first by default**:
 # ~/.warden/policy.yaml
 failover:
   on_quota_exhausted: confirm   # confirm (default) | auto | stop
+  on_vendor_failure: stop       # stop (default) | confirm | auto
+  max_per_stage: 1              # substitutions when a call produced no artifact
 
 budget:
   repair_reserve: full          # full (default) | partial
 ```
+
+`on_vendor_failure` is the same three choices for a call that returned nothing: a dropped
+connection, a timeout, a permission refusal, a missing or invalid artifact. It defaults to
+`stop`, so a policy that never mentions it keeps ending the role. `auto` switches to the next
+profile that still satisfies `require_independent_vendor`, at most `max_per_stage` times in one
+dispatch, and writes `role_failover` with the cause. A review finding, a red gate and a
+rejection are verdicts on the work and never take this path. A role may set its own
+`on_vendor_failure`.
 
 `repair_reserve` decides how much of the remaining chain a fix round has to be affordable
 before it may start. `full` reserves the fix, every judgement it invalidates and every stage

@@ -135,10 +135,10 @@ public final class DirectCliExecutor implements RoleExecutor {
             process = processes.run(command, request.projectRoot(),
                     Duration.ofMinutes(profile.wallClockMinutes()), 4 * 1024 * 1024, stdinText);
         } catch (IOException cannotStart) {
-            // A vendor that will not start is a configuration fault, not a vendor failure, and
-            // deliberately does not fail over: routing around a broken profile would hide it.
-            // It is still returned as a role outcome rather than thrown, so the run leaves a
-            // report behind instead of a stack trace with nothing recorded.
+            // A vendor that will not start is returned as a role outcome rather than thrown,
+            // so the run leaves a report behind instead of a stack trace with nothing recorded.
+            // Whether a missing artifact may be handed to another profile is the policy's
+            // choice (`failover.on_vendor_failure`, default stop), not this adapter's.
             evidence.put("failure", "role_command_failed");
             evidence.put("exit_code", -1L);
             evidence.put("start_error", String.valueOf(cannotStart.getMessage()));

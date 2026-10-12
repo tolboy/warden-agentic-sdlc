@@ -21,11 +21,18 @@ import java.util.Set;
  * `failover.on_quota_exhausted` decides whether a spent subscription may be routed around
  * without asking. It defaults to `confirm`, not `auto`: swapping vendors mid-run changes who
  * wrote the code and can leave one vendor reviewing its own work.
+ *
+ * `failover.on_vendor_failure` is the same choice for a call that produced no artifact at
+ * all — a network error, a timeout, a permission refusal, a missing or invalid artifact.
+ * It defaults to `stop`, so a policy that never mentions it keeps today's behaviour. A
+ * review finding, a gate failure and a rejection are verdicts on the work and never take
+ * this path. {@code max_per_stage} bounds how many times one role dispatch may switch.
  */
 public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                      Workflow workflow, boolean workflowDeclared, String failoverMode,
                      String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry,
-                     Set<String> repairSeverities, String contractGaps) {
+                     Set<String> repairSeverities, String contractGaps,
+                     String vendorFailureMode, int maxVendorFailovers) {
 
     /**
      * What a reader's `contract_gap` finding on a passing candidate leads to.
@@ -38,6 +45,15 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
      * never checked the greeting's text, and nothing but the operator could act on it.
      */
     public static final Set<String> CONTRACT_GAP_ROUTES = Set.of("gate", "plan");
+
+    public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
+                  Workflow workflow, boolean workflowDeclared, String failoverMode,
+                  String repairReserve, Escalation escalation, RateLimitRetry rateLimitRetry,
+                  Set<String> repairSeverities, String contractGaps) {
+        this(roles, reviewRequiredForRisk, workflow, workflowDeclared, failoverMode,
+                repairReserve, escalation, rateLimitRetry, repairSeverities, contractGaps,
+                "stop", 1);
+    }
 
     public Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForRisk,
                   Workflow workflow, boolean workflowDeclared, String failoverMode,
@@ -129,7 +145,13 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     }
 
     public record RoleSpec(String role, List<String> profiles, String strategy,
-                           boolean requireIndependentVendor, PeerPair peer) {
+                           boolean requireIndependentVendor, PeerPair peer,
+                           String vendorFailureMode) {
+        public RoleSpec(String role, List<String> profiles, String strategy,
+                        boolean requireIndependentVendor, PeerPair peer) {
+            this(role, profiles, strategy, requireIndependentVendor, peer, null);
+        }
+
         public RoleSpec(String role, List<String> profiles, String strategy,
                         boolean requireIndependentVendor) {
             this(role, profiles, strategy, requireIndependentVendor, null);
@@ -192,7 +214,8 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     private static final Set<String> RATE_LIMIT_KEYS = Set.of("max_attempts", "backoff_seconds", "note");
     private static final Set<String> ESCALATION_KEYS = Set.of("after_blocking_reviews", "rungs", "note");
     private static final Set<String> RUNG_KEYS = Set.of("implementer", "reviewer");
-    private static final Set<String> FAILOVER_KEYS = Set.of("on_quota_exhausted", "note");
+    private static final Set<String> FAILOVER_KEYS = Set.of(
+            "on_quota_exhausted", "on_vendor_failure", "max_per_stage", "note");
     private static final Set<String> BUDGET_KEYS = Set.of("repair_reserve", "note");
 
     /**
@@ -219,10 +242,15 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
      * on a two-vendor roster it can quietly cost the run its independent reviewer: the last
      * vendor standing would be reviewing its own output. That is a judgement about the value
      * of the result, which is the operator's to make.
+     *
+     * The same three words govern {@code on_vendor_failure}, but the default there is
+     * {@code stop}: a missing artifact used to end the role, and a policy that does not ask
+     * for a switch still does.
      */
     public static final Set<String> FAILOVER_MODES = Set.of("confirm", "auto", "stop");
     private static final Set<String> ROLE_KEYS = Set.of(
-            "profiles", "strategy", "require_independent_vendor", "same_vendor_peer");
+            "profiles", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "on_vendor_failure");
     private static final Set<String> PEER_KEYS = Set.of("implementer", "reviewer");
     private static final Set<String> REVIEW_KEYS =
             Set.of("required_for_risk", "repair_severities", "contract_gaps", "note");
@@ -260,7 +288,10 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
                     peer = new PeerPair(writer, reader);
                 }
             }
-            roles.put(roleName, new RoleSpec(roleName, profiles, strategy, independent, peer));
+            String roleVendorFailure = spec.has("on_vendor_failure")
+                    ? spec.requireEnum("on_vendor_failure", FAILOVER_MODES, "stop") : null;
+            roles.put(roleName, new RoleSpec(roleName, profiles, strategy, independent, peer,
+                    roleVendorFailure));
         }
         if (roles.isEmpty()) {
             root.collector().add("roles must declare at least one role");
@@ -294,6 +325,10 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         // from a default plus overrides is one nobody can read off the file in front of them.
         Values failover = root.optMap("failover").rejectUnknownKeys(FAILOVER_KEYS);
         String failoverMode = failover.requireEnum("on_quota_exhausted", FAILOVER_MODES, "confirm");
+        // Absent means stop: a policy written before this key existed must not start
+        // switching vendors on a network error.
+        String vendorFailureMode = failover.requireEnum("on_vendor_failure", FAILOVER_MODES, "stop");
+        int maxVendorFailovers = (int) failover.optInt("max_per_stage", 1, 0, 8);
 
         Values budget = root.optMap("budget").rejectUnknownKeys(BUDGET_KEYS);
         String repairReserve = budget.requireEnum("repair_reserve", REPAIR_RESERVES, "full");
@@ -343,10 +378,22 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         root.throwIfAny();
         return new Policy(roles, Set.copyOf(requiredForRisk), workflow, workflowDeclared,
                 failoverMode, repairReserve, escalation, rateLimitRetry, Set.copyOf(repairSeverities),
-                contractGaps);
+                contractGaps, vendorFailureMode, maxVendorFailovers);
     }
 
     public boolean reviewRequired(String risk) {
         return reviewRequiredForRisk.contains(risk);
+    }
+
+    /**
+     * How this role treats a vendor call that produced no artifact.
+     *
+     * A role may override the policy. Null on the role means inherit, which is the only
+     * way to tell "this role said stop" from "this role said nothing".
+     */
+    public String vendorFailureModeFor(String role) {
+        RoleSpec spec = roles.get(role);
+        if (spec != null && spec.vendorFailureMode() != null) return spec.vendorFailureMode();
+        return vendorFailureMode;
     }
 }

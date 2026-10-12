@@ -73,6 +73,16 @@ public final class StubVendor {
         return Double.parseDouble(raw);
     }
 
+    /** Increment {@code --counter} when the profile names one, without deciding a verdict. */
+    private static void count(String[] args) throws Exception {
+        String counterPath = flag(args, "--counter");
+        if (counterPath == null) return;
+        Path counter = Path.of(counterPath);
+        int seen = Files.isRegularFile(counter)
+                ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+        Files.writeString(counter, String.valueOf(seen + 1), StandardCharsets.UTF_8);
+    }
+
     private static boolean succeedsNow(String[] args) throws Exception {
         String counterPath = flag(args, "--counter");
         String threshold = flag(args, "--threshold");
@@ -549,6 +559,17 @@ public final class StubVendor {
                     "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
                     + "\"status\":\"completed\",\"verdict\":\"lgtm\",\"summary\":\"looks fine\","
                     + "\"findings\":[]}}");
+            // A call that never reaches the vendor. Counted, then a non-zero exit, so the
+            // role outcome is role_command_failed rather than a verdict. The two wordings
+            // are the ones a live agy failure actually printed: a reset connection, and a
+            // permission refusal.
+            case "network", "permission" -> {
+                count(args);
+                System.err.println("network".equals(mode)
+                        ? "connect: connection reset by peer"
+                        : "HTTP 403 permission denied");
+                System.exit(1);
+            }
             case "quota", "quota-after-edit" -> {
                 if (mode.equals("quota-after-edit")) {
                     Path target = Path.of("src", "result.txt");

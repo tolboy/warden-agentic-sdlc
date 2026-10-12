@@ -9,6 +9,7 @@ import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
 import dev.warden.config.Workflow;
+import dev.warden.execution.Executors;
 import dev.warden.execution.orca.OrcaDecisionGate;
 import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.gate.GateRunner;
@@ -143,6 +144,8 @@ public final class TaskLoop {
     private java.util.function.LongSupplier clock = System::nanoTime;
     /** How the loop waits between rate-limit retries; the suite replaces it. */
     private java.util.function.LongConsumer sleeper;
+    /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
+    private Executors.Factory executors;
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -187,6 +190,20 @@ public final class TaskLoop {
     }
 
     /**
+     * The same loop, dispatching through {@code next} instead of the profile's own runner.
+     *
+     * A wall-clock timeout is at least a minute, because that is the smallest bound a
+     * profile may declare. The suite uses this to return the code a killed process produces
+     * without waiting the minute out. The same reason {@link #withClock} exists.
+     */
+    public TaskLoop withExecutors(Executors.Factory next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.executors = next;
+        return copy;
+    }
+
+    /**
      * The same loop, opening a live view of {@code narration} on its board once the run is
      * reserved. The loop opens it rather than its caller because the board records the tab
      * in the run's own directory, and a reservation refuses a directory it finds that in.
@@ -202,6 +219,7 @@ public final class TaskLoop {
         copy.clock = clock;
         copy.sleeper = sleeper;
         copy.watchNarration = watchNarration;
+        copy.executors = executors;
         return copy;
     }
 
@@ -676,6 +694,7 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
+        if (executors != null) roles.withExecutors(executors);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
@@ -753,6 +772,10 @@ public final class TaskLoop {
         summary.put("acceptance_commands", task.acceptanceCommands());
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
+        summary.put("failover_on_vendor_failure",
+                user.policy() == null ? "stop" : user.policy().vendorFailureMode());
+        summary.put("vendor_failure_max_per_stage",
+                user.policy() == null ? 1L : (long) user.policy().maxVendorFailovers());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
         Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
@@ -5181,6 +5204,9 @@ public final class TaskLoop {
                 entry.put("independence", step.details().get("independence"));
             }
             entry.put("failed_over_from", step.details().get("failed_over_from"));
+            if (step.details().get("role_failovers") != null) {
+                entry.put("role_failovers", step.details().get("role_failovers"));
+            }
             entry.put("artifact_path", step.details().get("artifact_path"));
             if ("role_quota_exhausted".equals(step.code())) {
                 entry.put("quota", step.details().get("quota"));
@@ -5477,8 +5503,9 @@ public final class TaskLoop {
         Object base = summary.get("diff_base_commit");
         String fingerprint = base instanceof String commit
                 ? new GitRepository(root, processes).sourceFingerprint(commit) : null;
-        // A spent subscription with a named successor is a different question from a failure:
-        // nothing is wrong with the work, and what is being asked is who may finish it.
+        // A named successor — a spent subscription, or a vendor call that produced no
+        // artifact when the policy allows a switch — is a different question from a
+        // failure of the work. What is being asked is who may finish the role.
         Map<String, Object> pending = pendingFailover(steps);
         ApprovalStore store = new ApprovalStore(root);
         String runIdentity = String.valueOf(summary.get("run_id"));
@@ -5829,8 +5856,12 @@ public final class TaskLoop {
 
     /** What the human is actually being asked, in one line, with both vendors named. */
     private static String failoverQuestion(Map<String, Object> pending) {
+        String cause = String.valueOf(pending.get("cause"));
+        String what = "role_quota_exhausted".equals(cause)
+                ? "reported a spent subscription"
+                : "produced no artifact (" + cause + ")";
         return "role " + pending.get("role") + ": " + pending.get("from_profile")
-                + " (" + pending.get("from_vendor") + ") reported a spent subscription. "
+                + " (" + pending.get("from_vendor") + ") " + what + ". "
                 + "Switch to " + pending.get("to_profile") + " (" + pending.get("to_vendor")
                 + ")? " + pending.get("independence_after_switch");
     }

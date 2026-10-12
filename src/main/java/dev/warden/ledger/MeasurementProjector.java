@@ -55,6 +55,7 @@ public final class MeasurementProjector {
             "decision", "source", "wait_millis", "created_at", "decided_at", "updated_at",
             "lands", "kind",
             "from_profile", "from_vendor", "to_profile", "to_vendor", "cause", "authorized_by",
+            "role_code", "policy_setting",
             "failed_over_from", "exhausted_profiles",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",

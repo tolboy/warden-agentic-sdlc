@@ -428,12 +428,29 @@ public final class RunReport {
                 one.put("from_profile", before.get("profile"));
                 one.put("from_vendor", before.get("vendor"));
                 one.put("from_code", before.get("code"));
+                one.put("cause", failoverCause(before.get("code")));
                 one.put("to_profile", after.get("profile"));
                 one.put("to_vendor", after.get("vendor"));
                 switches.add(one);
             }
         }
         return List.copyOf(switches);
+    }
+
+    /**
+     * The class of failure a switch was made for. Quota keeps its own code. A missing
+     * artifact is named by what was missing, not by the role outcome that carried it.
+     */
+    private static String failoverCause(Object code) {
+        String value = code == null ? "" : String.valueOf(code);
+        return switch (value) {
+            case "role_command_failed" -> "vendor_call_failed";
+            case "role_timeout" -> "role_timeout";
+            case "role_artifact_unparseable", "role_artifact_incomplete",
+                    "role_artifact_schema_violation" -> "artifact_invalid";
+            case "role_quota_exhausted" -> "role_quota_exhausted";
+            default -> value.isEmpty() ? null : value;
+        };
     }
 
     private static Map<String, Object> visual(List<Map<String, Object>> stages) {
@@ -614,7 +631,9 @@ public final class RunReport {
                         .append(row.get("from_profile")).append(" (").append(row.get("from_vendor"))
                         .append(") ").append(row.get("from_code")).append(" -> ")
                         .append(row.get("to_profile")).append(" (").append(row.get("to_vendor"))
-                        .append(")\n");
+                        .append(")");
+                if (row.get("cause") != null) out.append("  cause=").append(row.get("cause"));
+                out.append('\n');
             }
         }
 

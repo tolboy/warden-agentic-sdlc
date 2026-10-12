@@ -288,6 +288,7 @@ public final class TaskLoopTest implements Suite {
             interruptedWriterChecks(check, sandbox, home);
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
+            vendorFailureFailoverChecks(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             pairedReviewChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
@@ -666,6 +667,352 @@ public final class TaskLoopTest implements Suite {
         TaskLoop.Outcome declined = loop(refused, home, "f4");
         check.eq("failover.on_quota_exhausted: stop never switches",
                 "quota_exhausted", declined.reason());
+    }
+
+    /**
+     * A vendor call that produced no artifact may be handed to the next profile, and only
+     * when the policy asks. The default is to stop, a finding is not a missing artifact,
+     * and one dispatch switches at most once unless the bound says otherwise.
+     */
+    @SuppressWarnings("unchecked")
+    private void vendorFailureFailoverChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path network = newProject(sandbox, "vendor-network");
+        writeVendorRoster(home, sandbox, "vendor-network", "network", "auto", null, null, null);
+        TaskLoop.Outcome routed = loop(network, home, "vf1");
+        check.that("a network failure fails over and the run finishes", routed.ok());
+        check.eq("at the human gate", "human_gate", routed.nextAction());
+        check.eq("the implementer was not run again", 1L,
+                steps(routed).stream().filter(step -> "implementer".equals(step.get("step"))).count());
+        check.eq("and the gates ran once", 1L,
+                steps(routed).stream().filter(step -> "gates".equals(step.get("step"))).count());
+        check.eq("the failed reviewer was called once", 1,
+                counted(sandbox.resolve("vendor-network-loop-review-down.count")));
+        check.eq("and its successor once", 1,
+                counted(sandbox.resolve("vendor-network-loop-review-up.count")));
+        Map<String, Object> review = steps(routed).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        check.eq("the failed attempt stays named on the step",
+                List.of("loop-review-down"), review.get("failed_over_from"));
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("both attempts are on the step", 2, calls.size());
+        check.eq("the first keeps its code", "role_command_failed", calls.get(0).get("code"));
+        check.contains("and the tail of what the vendor printed",
+                String.valueOf(calls.get(0).get("stderr_tail")), "connection reset");
+        List<Map<String, Object>> switches =
+                (List<Map<String, Object>>) review.get("role_failovers");
+        check.eq("the step carries the failover", 1, switches.size());
+        check.eq("caused by the missing artifact", "vendor_call_failed", switches.get(0).get("cause"));
+        check.eq("with the role's own code beside it",
+                "role_command_failed", switches.get(0).get("role_code"));
+        check.eq("from the profile that failed", "loop-review-down", switches.get(0).get("from_profile"));
+        check.eq("to the one that finished", "loop-review-up", switches.get(0).get("to_profile"));
+        check.eq("authorised by the policy", "policy_auto", switches.get(0).get("authorized_by"));
+        check.eq("under the setting that allowed it",
+                "failover.on_vendor_failure", switches.get(0).get("policy_setting"));
+        String evidence = Files.readString(network.resolve(
+                ".warden/runs/vf1--reviewer-0/evidence.jsonl"));
+        check.contains("and the ledger records the same event", evidence, "\"type\":\"role_failover\"");
+        check.contains("with that cause", evidence, "\"cause\":\"vendor_call_failed\"");
+        String rendered = dev.warden.ledger.RunReport.render(
+                new dev.warden.ledger.RunReport().of(network, "vf1"));
+        check.contains("the report names the switch in one line", rendered, "loop-review-down");
+        check.contains("including the cause", rendered, "cause=vendor_call_failed");
+        Map<String, Object> iterations = iterationsOf(network);
+        check.eq("metrics count the transition", 1L, iterations.get("failovers"));
+        check.eq("and count it as a vendor-failure failover",
+                1L, iterations.get("vendor_failure_failovers"));
+        check.eq("the summary records the mode", "auto",
+                routed.summaryReport().get("failover_on_vendor_failure"));
+
+        Path denied = newProject(sandbox, "vendor-permission");
+        writeVendorRoster(home, sandbox, "vendor-permission", "permission", "auto", null, null, null);
+        TaskLoop.Outcome permitted = loop(denied, home, "vf2");
+        check.that("a permission refusal fails over the same way", permitted.ok());
+        Map<String, Object> deniedReview = steps(permitted).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        check.contains("and keeps the 403 on the failed attempt",
+                Json.write(deniedReview.get("vendor_attempts")), "HTTP 403 permission denied");
+
+        // A real timeout is at least a minute: that is the smallest wall clock a profile
+        // may declare, and the suite does not wait one out. The stand-in returns the code
+        // DirectCliExecutor produces when ProcessRunner has killed the process.
+        Path hung = newProject(sandbox, "vendor-timeout");
+        writeVendorRoster(home, sandbox, "vendor-timeout", "review", "auto", null, null, null);
+        writeProfile(home, "loop-review-hang", "reviewer", "hangvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-timeout-loop-review-hang.count"), 99);
+        Files.writeString(home.resolve("policy.yaml"), vendorPolicy(
+                "loop-review-hang, loop-review-up", "auto", null, null, null));
+        TaskLoop.Outcome timed = new TaskLoop(new ProcessRunner()).withExecutors((profile, processes, git) -> {
+            if (!"loop-review-hang".equals(profile.name())) {
+                return dev.warden.execution.Executors.forProfile(profile, processes, git);
+            }
+            return request -> {
+                Map<String, Object> body = new java.util.LinkedHashMap<>();
+                body.put("failure", "role_timeout");
+                body.put("timed_out", true);
+                body.put("exit_code", -1L);
+                body.put("stderr_tail", "killed: wall clock exceeded");
+                return new dev.warden.execution.RoleExecutor.Result(
+                        false, "role_timeout", Duration.ofMillis(5), "", null, body);
+            };
+        }).run(new ConfigLoader().load(hung, "hello"), UserConfig.load(home), "vf3", false);
+        check.that("a timeout fails over and the successor passes", timed.ok());
+        String timeoutEvidence = Files.readString(hung.resolve(
+                ".warden/runs/vf3--reviewer-0/evidence.jsonl"));
+        check.contains("the ledger cause is the timeout", timeoutEvidence, "\"cause\":\"role_timeout\"");
+        check.contains("and the killed process stays on the attempt",
+                timeoutEvidence, "wall clock exceeded");
+        check.eq("the successor still ran", 1,
+                counted(sandbox.resolve("vendor-timeout-loop-review-up.count")));
+
+        Path blocked = newProject(sandbox, "vendor-independence");
+        writeVendorRoster(home, sandbox, "vendor-independence", "network", "auto", null, null, null);
+        writeProfile(home, "loop-review-self", "reviewer", "implvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-independence-loop-review-self.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), vendorPolicy(
+                "loop-review-down, loop-review-self", "auto", null, null, null));
+        TaskLoop.Outcome refused = loop(blocked, home, "vf4");
+        check.that("independence blocks the only successor", !refused.ok());
+        check.eq("and the run stops on the vendor failure", "vendor_call_failed", refused.reason());
+        check.eq("the same-vendor reviewer was not called", 0,
+                counted(sandbox.resolve("vendor-independence-loop-review-self.count")));
+        String blockedEvidence = Files.readString(blocked.resolve(
+                ".warden/runs/vf4--reviewer-0/evidence.jsonl"));
+        check.that("no switch was recorded, because none was made",
+                !blockedEvidence.contains("\"type\":\"role_failover\""));
+        String blockedReport = Files.readString(blocked.resolve(
+                ".warden/runs/vf4--reviewer-0/role-reviewer.json"));
+        check.contains("the resolution names the independence refusal",
+                blockedReport, "same_vendor_as_writer");
+
+        Path unchanged = newProject(sandbox, "vendor-default");
+        writeVendorRoster(home, sandbox, "vendor-default", "network", null, null, null, null);
+        TaskLoop.Outcome stopped = loop(unchanged, home, "vf5");
+        check.that("the default still stops", !stopped.ok());
+        check.eq("on the vendor failure", "vendor_call_failed", stopped.reason());
+        check.eq("without calling the successor", 0,
+                counted(sandbox.resolve("vendor-default-loop-review-up.count")));
+        check.that("and without a failover event",
+                !Files.readString(unchanged.resolve(".warden/runs/vf5--reviewer-0/evidence.jsonl"))
+                        .contains("\"type\":\"role_failover\""));
+        check.eq("the summary says the mode is stop", "stop",
+                stopped.summaryReport().get("failover_on_vendor_failure"));
+        check.eq("and the bound is one", 1L,
+                stopped.summaryReport().get("vendor_failure_max_per_stage"));
+
+        Path bounded = newProject(sandbox, "vendor-bound");
+        writeVendorRoster(home, sandbox, "vendor-bound", "network", "auto", null, null, null);
+        writeProfile(home, "loop-review-third", "reviewer", "thirdvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-bound-loop-review-third.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), vendorPolicy(
+                "loop-review-down, loop-review-mid, loop-review-third", "auto", null, null, null));
+        writeProfile(home, "loop-review-mid", "reviewer", "midvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-bound-loop-review-mid.count"), 1);
+        TaskLoop.Outcome once = loop(bounded, home, "vf6");
+        check.that("the successor's own failure stops the run", !once.ok());
+        check.eq("still as a vendor failure", "vendor_call_failed", once.reason());
+        check.eq("the first reviewer ran", 1,
+                counted(sandbox.resolve("vendor-bound-loop-review-down.count")));
+        check.eq("the second reviewer ran", 1,
+                counted(sandbox.resolve("vendor-bound-loop-review-mid.count")));
+        check.eq("the third was not started", 0,
+                counted(sandbox.resolve("vendor-bound-loop-review-third.count")));
+        Map<String, Object> boundReview = steps(once).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        check.eq("two attempts, one switch", 2,
+                ((List<?>) boundReview.get("vendor_attempts")).size());
+        check.eq("and only that one failover was recorded", 1,
+                ((List<?>) boundReview.get("role_failovers")).size());
+        check.eq("the implementer still ran only once", 1L,
+                steps(once).stream().filter(step -> "implementer".equals(step.get("step"))).count());
+
+        Path raised = newProject(sandbox, "vendor-max-two");
+        writeVendorRoster(home, sandbox, "vendor-max-two", "network", "auto", 2, null, null);
+        writeProfile(home, "loop-review-third", "reviewer", "thirdvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-max-two-loop-review-third.count"), 1);
+        writeProfile(home, "loop-review-mid", "reviewer", "midvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-max-two-loop-review-mid.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), vendorPolicy(
+                "loop-review-down, loop-review-mid, loop-review-third", "auto", 2, null, null));
+        TaskLoop.Outcome twice = loop(raised, home, "vf7");
+        check.that("raising the bound lets the third profile finish the role", twice.ok());
+        check.eq("and that profile ran", 1,
+                counted(sandbox.resolve("vendor-max-two-loop-review-third.count")));
+        check.eq("two switches were recorded", 2, occurrences(Files.readString(
+                raised.resolve(".warden/runs/vf7--reviewer-0/evidence.jsonl")),
+                "\"type\":\"role_failover\""));
+
+        Path findings = newProject(sandbox, "vendor-findings");
+        writeVendorRoster(home, sandbox, "vendor-findings", "review", "auto", null, 99, """
+                - { stage: implement, run: role, role: implementer, on_fail: stop }
+                - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: stop }
+                """);
+        TaskLoop.Outcome objected = loop(findings, home, "vf8");
+        check.that("a review finding stops the run", !objected.ok());
+        check.eq("as a finding, not as a vendor failure",
+                "blocking_findings_remain", objected.reason());
+        check.eq("the successor reviewer was not called", 0,
+                counted(sandbox.resolve("vendor-findings-loop-review-up.count")));
+        check.eq("the implementer was not sent back", 1,
+                counted(sandbox.resolve("vendor-findings-loop-impl.count")));
+        check.that("and no failover was recorded for a verdict",
+                !Files.readString(findings.resolve(".warden/runs/vf8--reviewer-0/evidence.jsonl"))
+                        .contains("\"type\":\"role_failover\""));
+
+        Path ceiling = newProject(sandbox, "vendor-ceiling");
+        writeVendorRoster(home, sandbox, "vendor-ceiling", "turn-ceiling", "auto", null, null, null);
+        TaskLoop.Outcome capped = loop(ceiling, home, "vf9");
+        check.that("a turn ceiling is not a missing artifact", !capped.ok());
+        check.eq("it stops as a ceiling", "turn_ceiling_reached", capped.reason());
+        check.eq("and does not fail over", 0,
+                counted(sandbox.resolve("vendor-ceiling-loop-review-up.count")));
+
+        Path thin = newProject(sandbox, "vendor-thin");
+        writeVendorRoster(home, sandbox, "vendor-thin", "thin", "auto", null, null, null);
+        TaskLoop.Outcome incomplete = loop(thin, home, "vf10");
+        check.that("an incomplete artifact fails over", incomplete.ok());
+        String thinEvidence = Files.readString(thin.resolve(
+                ".warden/runs/vf10--reviewer-0/evidence.jsonl"));
+        check.contains("the cause is the invalid artifact", thinEvidence, "\"cause\":\"artifact_invalid\"");
+        check.contains("and the role code stays specific",
+                thinEvidence, "\"role_code\":\"role_artifact_incomplete\"");
+
+        Path override = newProject(sandbox, "vendor-override");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-override-loop-impl.count"), 1);
+        writeProfile(home, "loop-impl-down", "implementer", "downvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "network", sandbox.resolve("vendor-override-loop-impl-down.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-override-loop-review.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer:
+                    profiles: [loop-impl-down, loop-impl]
+                    strategy: first
+                    require_independent_vendor: false
+                    on_vendor_failure: auto
+                  reviewer:
+                    profiles: [loop-review]
+                    strategy: first
+                    require_independent_vendor: true
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: confirm, on_vendor_failure: stop }
+                """);
+        TaskLoop.Outcome overridden = loop(override, home, "vf11");
+        check.that("a role override switches even when the policy says stop", overridden.ok());
+        check.eq("and the run reaches the gate", "human_gate", overridden.nextAction());
+        String overrideEvidence = Files.readString(override.resolve(
+                ".warden/runs/vf11--implementer-0/evidence.jsonl"));
+        check.contains("the event names the role setting",
+                overrideEvidence, "\"policy_setting\":\"roles.implementer.on_vendor_failure\"");
+        check.eq("the reviewer ran once, against the successor", 1,
+                counted(sandbox.resolve("vendor-override-loop-review.count")));
+
+        Path asked = newProject(sandbox, "vendor-confirm");
+        writeVendorRoster(home, sandbox, "vendor-confirm", "network", "confirm", null, null, null);
+        TaskLoop.Outcome waiting = loop(asked, home, "vf12");
+        check.that("confirm stops for a person", !waiting.ok());
+        check.eq("and says so", "failover_requires_confirmation", waiting.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) waiting.summaryReport().get("failover_pending");
+        check.eq("the cause is the missing artifact", "vendor_call_failed", pending.get("cause"));
+        check.eq("not a spent subscription", "loop-review-down", pending.get("from_profile"));
+        dev.warden.approval.HumanDecision decision =
+                new dev.warden.approval.ApprovalStore(asked).read("vf12");
+        check.contains("the question says there was no artifact",
+                decision.reason(), "produced no artifact");
+        check.that("and does not call it a spent subscription",
+                !decision.reason().contains("spent subscription"));
+        check.contains("and still names what the switch does to independence",
+                decision.reason(), "independence");
+        new dev.warden.approval.ApprovalStore(asked).resolve(
+                "vf12", decision.updatedAt().toString(), "switch", "tester", "");
+        TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner()).run(
+                new ConfigLoader().load(asked, "hello"), UserConfig.load(home), "vf13", false,
+                Map.of("reviewer", "loop-review-up"));
+        check.that("the recorded switch lets the successor finish", resumed.ok());
+        String resumedEvidence = Files.readString(asked.resolve(
+                ".warden/runs/vf13--reviewer-0/evidence.jsonl"));
+        check.contains("and attributes it to the person", resumedEvidence, "human_switch_decision");
+    }
+
+    /** Implementer plus two reviewers. {@code mode} null omits {@code on_vendor_failure}. */
+    private void writeVendorRoster(Path home, Path sandbox, String scenario, String downMode,
+                                   String mode, Integer max, Integer downThreshold, String stages)
+            throws IOException {
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve(scenario + "-loop-impl.count"), 1);
+        writeProfile(home, "loop-review-down", "reviewer", "downvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                downMode, sandbox.resolve(scenario + "-loop-review-down.count"),
+                downThreshold == null ? 1 : downThreshold);
+        writeProfile(home, "loop-review-up", "reviewer", "upvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve(scenario + "-loop-review-up.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), vendorPolicy(
+                "loop-review-down, loop-review-up", mode, max, null, stages));
+    }
+
+    private static String vendorPolicy(String reviewers, String mode, Integer max,
+                                       String roleMode, String stages) {
+        String failover = mode == null && max == null
+                ? ""
+                : "failover: { on_quota_exhausted: confirm"
+                + (mode == null ? "" : ", on_vendor_failure: " + mode)
+                + (max == null ? "" : ", max_per_stage: " + max) + " }\n";
+        String roleLine = roleMode == null ? "" : ", on_vendor_failure: " + roleMode;
+        String workflow = stages == null ? "" : "workflow:\n  stages:\n" + indentYaml(stages);
+        return """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false%s }
+                  reviewer: { profiles: [%s], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                %s%s""".formatted(roleLine, reviewers, failover, workflow);
+    }
+
+    private static String indentYaml(String block) {
+        StringBuilder out = new StringBuilder();
+        for (String line : block.strip().split("\n")) {
+            if (line.isBlank()) continue;
+            out.append("    ").append(line.strip()).append('\n');
+        }
+        return out.toString();
+    }
+
+    private static int counted(Path counter) throws IOException {
+        if (!Files.isRegularFile(counter)) return 0;
+        return Integer.parseInt(Files.readString(counter).strip());
+    }
+
+    private static int occurrences(String text, String token) {
+        int count = 0;
+        for (int from = 0; from <= text.length() - token.length(); ) {
+            int at = text.indexOf(token, from);
+            if (at < 0) break;
+            count++;
+            from = at + token.length();
+        }
+        return count;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> iterationsOf(Path project) throws IOException {
+        Map<String, Object> summary = new dev.warden.ledger.LedgerReader().summarize(project);
+        Map<String, Object> metrics = (Map<String, Object>) summary.get("metrics");
+        return (Map<String, Object>) metrics.get("iterations");
     }
 
     /**

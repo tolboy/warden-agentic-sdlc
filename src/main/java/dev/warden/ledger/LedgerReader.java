@@ -182,6 +182,7 @@ public final class LedgerReader {
         private final IntegerMetric durationMillis = new IntegerMetric();
         private long failovers;
         private long failoverRoleRuns;
+        private long vendorFailureFailovers;
         private long fixRounds;
         private long fixRoundsUnknown;
         private long baselineFailures;
@@ -250,6 +251,10 @@ public final class LedgerReader {
                     visualHarnessFailures++;
                 }
                 if ("task_run".equals(type)) acceptTaskRun(event);
+                if ("role_failover".equals(type)
+                        && !"role_quota_exhausted".equals(text(event.get("cause")))) {
+                    vendorFailureFailovers++;
+                }
                 acceptHumanEvent(event, type);
             }
             // New ledgers have a dedicated event per refusal. This fallback keeps metrics
@@ -435,6 +440,7 @@ public final class LedgerReader {
             Map<String, Object> iterations = new LinkedHashMap<>();
             iterations.put("failovers", failovers);
             iterations.put("failover_role_runs", failoverRoleRuns);
+            iterations.put("vendor_failure_failovers", vendorFailureFailovers);
             iterations.put("fix_rounds", fixRounds);
             iterations.put("fix_rounds_unknown_runs", fixRoundsUnknown);
 

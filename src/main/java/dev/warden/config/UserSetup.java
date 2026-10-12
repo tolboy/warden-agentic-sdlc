@@ -167,6 +167,12 @@ public final class UserSetup {
             # that recorded decision: it names one role and one profile, and nothing else.
             failover:
               on_quota_exhausted: confirm
+              # A call that produced no artifact (network, timeout, permission, missing or
+              # invalid artifact). stop is the default and is today's behaviour. confirm and
+              # auto use the same role_failover event as a spent subscription, at most
+              # max_per_stage times in one role dispatch. A finding is not this.
+              on_vendor_failure: stop
+              max_per_stage: 1
 
             # How much of the remaining chain a repair round has to be affordable before it is
             # allowed to start.

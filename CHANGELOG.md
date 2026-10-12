@@ -9,6 +9,18 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Added
+
+- A role whose vendor returns no artifact can fail over. `failover.on_vendor_failure` is
+  `confirm`, `auto` or `stop`, and the default is `stop`, so a policy that never mentions
+  it still ends the role. `auto` switches to the next profile that satisfies
+  `require_independent_vendor`, at most `failover.max_per_stage` times in one dispatch
+  (default 1), and writes `role_failover` with the cause (`vendor_call_failed`,
+  `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
+  it. The failed attempt stays in `vendor_attempts` with its stderr tail. A review finding,
+  a gate failure and a rejection do not take this path. A role may set its own
+  `on_vendor_failure`. Not yet run live. Suite `task loop`.
+
 ### Fixed
 
 - A writer cut off by its turn ceiling or timeout is followed by one that knows it.
