@@ -60,10 +60,12 @@ import java.util.Set;
  * whether another profile may take the role. It defaults to {@code stop}, so a policy that
  * never mentions it ends the role exactly as before. {@code auto} switches, {@code confirm}
  * stops for the same human decision a spent subscription does, and {@code max_per_stage}
- * (default 1) is how many times one dispatch may switch. A review finding, a gate failure
- * and a rejection never enter this path: those are judgements, and routing around them
- * would hide the defect. The failed attempt stays in {@code vendor_attempts}, with its code
- * and the tail of what the vendor printed.
+ * (default 1) is how many times one dispatch may switch. {@code --continue} after that
+ * decision runs the approved profile for that stage. A valid artifact is kept even when
+ * the process exits non-zero. A review finding, a gate failure and a rejection never enter
+ * this path: those are judgements, and routing around them would hide the defect. The
+ * failed attempt stays in {@code vendor_attempts}, with its code, the tail of what the
+ * vendor printed, and {@code start_error} when the process could not be launched.
  */
 public final class RoleRunner {
 
@@ -219,6 +221,25 @@ public final class RoleRunner {
     private final Set<String> vendorFailedThisDispatch = new LinkedHashSet<>();
 
     /**
+     * A vendor-failure confirmation carried by {@code --continue}, keyed by stage.
+     *
+     * The pending question already named the successor. Rotation is not asked again:
+     * with {@code rotate} and three profiles it would dispatch someone the person
+     * never approved, and the failed call would not be there to emit {@code role_failover}.
+     */
+    private final Map<String, Map<String, Object>> confirmedVendorSwitches = new LinkedHashMap<>();
+
+    /**
+     * Profiles a continued stage must not pay again. Scoped to that stage, not to the
+     * process-lifetime {@link #exhausted} set: a network error is not a spent subscription,
+     * and a later stage may still select the profile.
+     */
+    private final Map<String, Set<String>> vendorExcludedForStage = new LinkedHashMap<>();
+
+    /** Stages whose confirmed switch has already been written, so a recheck does not write it twice. */
+    private final Set<String> confirmedSwitchRecorded = new LinkedHashSet<>();
+
+    /**
      * Assignments a run pinned for the rest of its chain, by role and by stage name.
      *
      * The escalation ladder names them: after the declared number of blocking readings the
@@ -247,6 +268,32 @@ public final class RoleRunner {
 
     public RoleRunner excluding(Set<String> profiles) {
         exhausted.addAll(profiles);
+        return this;
+    }
+
+    /**
+     * Honour a vendor-failure switch a person already approved.
+     *
+     * Pins {@code to_profile} for that stage, and remembers the failed profile only for
+     * that stage's attempt. Neither fact is a spent subscription.
+     */
+    public RoleRunner honourConfirmedVendorFailure(Map<String, Object> pending) {
+        if (pending == null || pending.isEmpty()) return this;
+        String stage = pending.get("stage") == null
+                ? String.valueOf(pending.get("role"))
+                : String.valueOf(pending.get("stage"));
+        confirmedVendorSwitches.put(stage, new LinkedHashMap<>(pending));
+        Object successor = pending.get("to_profile");
+        if (successor != null && !String.valueOf(successor).isBlank()) {
+            replacements.put(stage, String.valueOf(successor));
+        }
+        if (pending.get("exhausted_profiles") instanceof List<?> names) {
+            Set<String> excluded = vendorExcludedForStage.computeIfAbsent(
+                    stage, key -> new LinkedHashSet<>());
+            for (Object name : names) {
+                if (name != null) excluded.add(String.valueOf(name));
+            }
+        }
         return this;
     }
 
@@ -311,9 +358,11 @@ public final class RoleRunner {
         String key = stage == null ? role : stage;
         String named = usable(replacements.get(key));
         if (named != null) return named;
-        // authorizedFailover is not a pin. It authorises the successor after a failure
-        // the policy may route around; rotation still names the failed profile so the
-        // switch is a role_failover event.
+        // A quota authorisation is not a pin. Rotation still names the profile, and the
+        // spent one stays in the exhausted set so the switch is a role_failover when that
+        // call fails again. A vendor-failure confirmation is a pin, applied by
+        // honourConfirmedVendorFailure: the approved profile, not whoever rotation
+        // would pick with the failed name removed.
         if (stage != null && stageAssignments.containsKey(stage)) {
             named = usable(stageAssignments.get(stage));
             if (named != null) return named;
@@ -634,6 +683,9 @@ public final class RoleRunner {
         // transient failure can be tried there; this attempt cannot switch more than the
         // policy allows, and cannot select a profile that already failed inside it.
         vendorFailedThisDispatch.clear();
+        String stageKey = stageName == null ? role : stageName;
+        Set<String> stagedExclusion = vendorExcludedForStage.get(stageKey);
+        if (stagedExclusion != null) vendorFailedThisDispatch.addAll(stagedExclusion);
         int vendorFailovers = 0;
         List<Map<String, Object>> roleFailovers = new ArrayList<>();
 
@@ -885,6 +937,8 @@ public final class RoleRunner {
                     + (attempt > 1 ? "  (vendor attempt " + attempt + ")" : "")
                     + "  dispatching, up to " + profile.wallClockMinutes() + " min");
 
+            recordConfirmedSwitch(ledger, role, roleInvocationId, stageKey, profile, roleFailovers);
+
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
             RoleExecutor executor = executors.forProfile(profile, processes, git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
@@ -1037,7 +1091,6 @@ public final class RoleRunner {
                 Successor next = seekSuccessor(role, user, writers, rotation,
                         vendorFailedThisDispatch);
                 Profile candidate = next.profile();
-                String stageKey = stageName == null ? role : stageName;
                 boolean preAuthorized = candidate != null && (candidate.name().equals(
                         authorizedFailover.get(stageKey))
                         || candidate.name().equals(authorizedFailover.get(role)));
@@ -1163,10 +1216,13 @@ public final class RoleRunner {
      * none can. Asked before continuing so that the last vendor's failure is reported as its
      * own outcome rather than as an unresolvable role, and so that an operator being asked to
      * confirm a switch is told who would take over.
+     *
+     * Profiles that already returned no artifact in this dispatch are excluded. Naming one
+     * of them would record a switch to a profile the next iteration cannot run.
      */
     private Profile failoverCandidate(String role, UserConfig user, RoleResolver.Writers writers,
                                       long rotation) {
-        return seekSuccessor(role, user, writers, rotation, Set.of()).profile();
+        return seekSuccessor(role, user, writers, rotation, vendorFailedThisDispatch).profile();
     }
 
     /**
@@ -1202,7 +1258,9 @@ public final class RoleRunner {
             "role_timeout",
             "role_artifact_unparseable",
             "role_artifact_incomplete",
-            "role_artifact_schema_violation");
+            "role_artifact_schema_violation",
+            "role_local_endpoint_unreachable",
+            "role_local_http_error");
 
     private static boolean vendorFailure(String code) {
         return VENDOR_FAILURE_CODES.contains(code);
@@ -1215,12 +1273,43 @@ public final class RoleRunner {
      */
     private static String vendorFailureCause(String code) {
         return switch (code) {
-            case "role_command_failed" -> "vendor_call_failed";
+            case "role_command_failed", "role_local_endpoint_unreachable",
+                    "role_local_http_error" -> "vendor_call_failed";
             case "role_timeout" -> "role_timeout";
             case "role_artifact_unparseable", "role_artifact_incomplete",
                     "role_artifact_schema_violation" -> "artifact_invalid";
             default -> code;
         };
+    }
+
+    /**
+     * The switch a person approved, written when that profile is the one about to run.
+     *
+     * {@code authorized_by} is {@code human} and {@code policy_setting} is {@code confirm}:
+     * the policy asked, and the continuation is the answer. Rotation is not consulted.
+     */
+    private void recordConfirmedSwitch(EvidenceLedger ledger, String role, String roleInvocationId,
+                                       String stageKey, Profile chosen,
+                                       List<Map<String, Object>> roleFailovers) throws Exception {
+        Map<String, Object> pending = confirmedVendorSwitches.get(stageKey);
+        if (pending == null || confirmedSwitchRecorded.contains(stageKey)) return;
+        if (!chosen.name().equals(String.valueOf(pending.get("to_profile")))) return;
+        confirmedSwitchRecorded.add(stageKey);
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("role", role);
+        event.put("from_profile", pending.get("from_profile"));
+        event.put("from_vendor", pending.get("from_vendor"));
+        event.put("to_profile", pending.get("to_profile"));
+        event.put("to_vendor", pending.get("to_vendor"));
+        event.put("from", pending.get("from_profile"));
+        event.put("to", pending.get("to_profile"));
+        event.put("cause", pending.get("cause"));
+        event.put("authorized_by", "human");
+        event.put("policy_setting", "confirm");
+        if (pending.get("role_code") != null) event.put("role_code", pending.get("role_code"));
+        event.put("role_invocation_id", roleInvocationId);
+        ledger.append("role_failover", event);
+        roleFailovers.add(event);
     }
 
     private static void rememberFailovers(Map<String, Object> report,
@@ -1242,6 +1331,8 @@ public final class RoleRunner {
         event.put("from_vendor", from.vendor());
         event.put("to_profile", to.name());
         event.put("to_vendor", to.vendor());
+        event.put("from", from.name());
+        event.put("to", to.name());
         event.put("cause", cause);
         event.put("authorized_by", authorizedBy);
         if ("role_quota_exhausted".equals(cause)) {
@@ -1361,7 +1452,7 @@ public final class RoleRunner {
         if (quota != null) entry.put("quota", quota);
         // The failed call stays readable after a switch. The home corpus allowlist drops
         // these tails; the local attempt does not.
-        for (String tail : List.of("stderr_tail", "stdout_tail", "exit_code", "timed_out")) {
+        for (String tail : List.of("stderr_tail", "stdout_tail", "exit_code", "timed_out", "start_error")) {
             if (result.evidence().containsKey(tail)) entry.put(tail, result.evidence().get(tail));
         }
         if (inheritsUnfinishedWork) entry.put("inherited_unfinished_work", true);

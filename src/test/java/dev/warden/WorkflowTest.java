@@ -341,7 +341,8 @@ public final class WorkflowTest implements Suite {
         for (String code : List.of("role_timeout", "role_command_failed",
                 "role_artifact_unparseable", "role_artifact_incomplete",
                 "role_artifact_schema_violation", "role_prompt_undeliverable",
-                "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted")) {
+                "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted",
+                "role_local_endpoint_unreachable", "role_local_http_error")) {
             check.eq(code + " is an infrastructure failure", true,
                     dev.warden.run.TaskLoop.isInfrastructureFailure(code));
         }

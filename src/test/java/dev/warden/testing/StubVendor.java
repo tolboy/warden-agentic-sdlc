@@ -559,6 +559,30 @@ public final class StubVendor {
                     "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
                     + "\"status\":\"completed\",\"verdict\":\"lgtm\",\"summary\":\"looks fine\","
                     + "\"findings\":[]}}");
+            // A real review, then exit 1. Reviewers do this after findings. The artifact is
+            // the verdict; the exit code is not a missing call.
+            case "review-findings-exit" -> {
+                count(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"review\","
+                        + "\"findings\":[{\"id\":\"exit-finding\",\"severity\":\"P1\","
+                        + "\"path\":\"src/result.txt\",\"message\":\"not good enough\","
+                        + "\"expected\":\"the final content\",\"actual\":\"an intermediate one\","
+                        + "\"scenario\":\"read src/result.txt after the run\","
+                        + "\"confidence\":\"confirmed\"}]},\"total_cost_usd\":0.004}");
+                System.exit(1);
+            }
+            // The first call is a dropped connection; every later call is a clean pass.
+            // Models a profile that failed once and is still usable at a later stage.
+            case "network-once" -> {
+                if (withinFirst(args)) {
+                    System.err.println("connect: connection reset by peer");
+                    System.exit(1);
+                }
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"pass\",\"summary\":\"review\","
+                        + "\"findings\":[]},\"total_cost_usd\":0.004}");
+            }
             // A call that never reaches the vendor. Counted, then a non-zero exit, so the
             // role outcome is role_command_failed rather than a verdict. The two wordings
             // are the ones a live agy failure actually printed: a reset connection, and a

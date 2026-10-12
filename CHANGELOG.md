@@ -17,11 +17,22 @@ that exists in code but has never been run live says so.
   `require_independent_vendor`, at most `failover.max_per_stage` times in one dispatch
   (default 1), and writes `role_failover` with the cause (`vendor_call_failed`,
   `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
-  it. The failed attempt stays in `vendor_attempts` with its stderr tail. A review finding,
-  a gate failure and a rejection do not take this path. A role may set its own
+  it. The same path covers `role_local_endpoint_unreachable` and
+  `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
+  tail, and with `start_error` when the process could not be launched. A valid artifact is
+  kept even when the process exits non-zero; the exit code is recorded and there is no
+  failover. A review finding, a gate failure and a rejection do not take this path. Under
+  `confirm`, `--continue` runs the profile the person approved for that stage and writes
+  `role_failover` (`authorized_by: human`, `policy_setting: confirm`); the failed profile
+  is skipped for that stage's attempt only. `report.json` lists the switches under
+  `role_failovers`, including `authorized_by` and `policy_setting`. A role may set its own
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
 ### Fixed
+
+- A quota failover in the same dispatch does not name a profile whose vendor call already
+  failed. The ledger records the profile that runs, or the role stops when none can.
+  A confirmed quota swap is still not a pin. Suite `task loop`.
 
 - A writer cut off by its turn ceiling or timeout is followed by one that knows it.
   `retry` or `advance` without a note dispatched the next implementer with an empty

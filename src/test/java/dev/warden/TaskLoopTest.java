@@ -289,6 +289,13 @@ public final class TaskLoopTest implements Suite {
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             vendorFailureFailoverChecks(check, sandbox, home);
+            confirmedVendorFailoverChecks(check, sandbox, home);
+            vendorFailureExclusionScopeChecks(check, sandbox, home);
+            quotaSuccessorSkipsFailedProfiles(check, sandbox, home);
+            nonzeroExitHonoursArtifactChecks(check, sandbox, home);
+            reportFailoverAuthorisationChecks(check, sandbox, home);
+            localVendorFailureFailoverChecks(check, sandbox, home);
+            launchErrorStaysOnTheAttempt(check, sandbox, home);
             declaredWorkflowChecks(check, sandbox, home);
             pairedReviewChecks(check, sandbox, home);
             visualLoopChecks(check, sandbox, home);
@@ -945,6 +952,353 @@ public final class TaskLoopTest implements Suite {
         String resumedEvidence = Files.readString(asked.resolve(
                 ".warden/runs/vf13--reviewer-0/evidence.jsonl"));
         check.contains("and attributes it to the person", resumedEvidence, "human_switch_decision");
+    }
+
+    /**
+     * Confirm mode, then the real {@code --continue} path, with rotation and three profiles.
+     *
+     * The question names one successor. A fresh resolve on the next run, with the failed
+     * profile removed, lands on a different one. The continuation has to run the profile
+     * the person approved and record that switch.
+     */
+    @SuppressWarnings("unchecked")
+    private void confirmedVendorFailoverChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-confirm-pin");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-confirm-pin-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-confirm-pin-a.count"), 1);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-confirm-pin-b.count"), 1);
+        writeProfile(home, "loop-review-c", "reviewer", "cvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-confirm-pin-c.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b, loop-review-c], strategy: rotate, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: confirm, on_vendor_failure: confirm }
+                """);
+        TaskLoop.Outcome asked = loop(project, home, "pin1");
+        check.eq("confirm still stops for a person", "failover_requires_confirmation", asked.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) asked.summaryReport().get("failover_pending");
+        check.eq("the question names the first remaining profile",
+                "loop-review-b", pending.get("to_profile"));
+        check.eq("and the profile that produced nothing", "loop-review-a", pending.get("from_profile"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve("pin1", store.read("pin1").updatedAt().toString(), "switch", "operator", "");
+        Main.Carried carried = Main.continuation(project, "pin1");
+        check.eq("continue carries the stage the person approved",
+                "loop-review-b", carried.failover().get("review"));
+        TaskLoop.Outcome after = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "pin2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the continued run reaches the gate", after.ok());
+        check.eq("and runs the approved profile, not the next rotation", List.of("loop-review-b"),
+                steps(after).stream()
+                        .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                        .map(step -> step.get("profile")).toList());
+        check.eq("the failed profile was not paid again", 1,
+                counted(sandbox.resolve("vendor-confirm-pin-a.count")));
+        check.eq("the approved profile ran once", 1,
+                counted(sandbox.resolve("vendor-confirm-pin-b.count")));
+        check.eq("the profile rotation would have picked was not called", 0,
+                counted(sandbox.resolve("vendor-confirm-pin-c.count")));
+        List<Map<String, Object>> switches = ledgerEvents(
+                project.resolve(".warden/runs/pin2--reviewer-0/evidence.jsonl"), "role_failover");
+        check.eq("the continued run records the switch", 1, switches.size());
+        check.eq("from the profile that failed", "loop-review-a", switches.get(0).get("from"));
+        check.eq("to the profile the person approved", "loop-review-b", switches.get(0).get("to"));
+        check.eq("with the cause of the missing artifact",
+                "vendor_call_failed", switches.get(0).get("cause"));
+        check.eq("authorised by the person", "human", switches.get(0).get("authorized_by"));
+        check.eq("under confirm", "confirm", switches.get(0).get("policy_setting"));
+    }
+
+    /**
+     * The profile a vendor failure removed is out for that stage's attempt only.
+     *
+     * Putting it in the process-lifetime exhausted set made a later stage treat a dropped
+     * connection as a spent subscription.
+     */
+    @SuppressWarnings("unchecked")
+    private void vendorFailureExclusionScopeChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-exclude-stage");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-exclude-stage-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network-once", sandbox.resolve("vendor-exclude-stage-a.count"), 2);
+        writeProfile(home, "loop-review-2", "reviewer", "secondvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-exclude-stage-b.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review, loop-review-2], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: confirm, on_vendor_failure: confirm }
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: review-second, run: role, role: reviewer, on_fail: stop, on_findings: fix }
+                """);
+        TaskLoop.Outcome asked = loop(project, home, "ex1");
+        check.eq("the first stage asks before switching",
+                "failover_requires_confirmation", asked.reason());
+        Map<String, Object> pending =
+                (Map<String, Object>) asked.summaryReport().get("failover_pending");
+        check.eq("the successor is the other reviewer", "loop-review-2", pending.get("to_profile"));
+        dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+        store.resolve("ex1", store.read("ex1").updatedAt().toString(), "switch", "operator", "");
+        Main.Carried carried = Main.continuation(project, "ex1");
+        TaskLoop.Outcome after = new TaskLoop(new ProcessRunner())
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "ex2",
+                        false, carried.failover(), carried.continuation());
+        check.that("the continued run finishes", after.ok());
+        check.eq("the first stage runs the approved successor", List.of("loop-review-2"),
+                steps(after).stream()
+                        .filter(step -> "review".equals(step.get("stage")) && step.get("reused_from") == null)
+                        .map(step -> step.get("profile")).toList());
+        check.eq("a later stage can still select the profile that failed", List.of("loop-review"),
+                steps(after).stream()
+                        .filter(step -> "review-second".equals(step.get("stage")))
+                        .map(step -> step.get("profile")).toList());
+        check.eq("that profile was called twice: the failure, then the later stage", 2,
+                counted(sandbox.resolve("vendor-exclude-stage-a.count")));
+    }
+
+    /**
+     * Quota failover must not record a switch onto a profile this dispatch already failed.
+     *
+     * The ledger line is the claim about who ran. Naming a profile the next iteration
+     * cannot select leaves the evidence pointing at a call that never happened.
+     */
+    @SuppressWarnings("unchecked")
+    private void quotaSuccessorSkipsFailedProfiles(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-then-quota");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-then-quota-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-then-quota-a.count"), 1);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("vendor-then-quota-b.count"), 1);
+        writeProfile(home, "loop-review-c", "reviewer", "cvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-then-quota-c.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b, loop-review-c], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: auto, on_vendor_failure: auto }
+                """);
+        TaskLoop.Outcome ran = loop(project, home, "q3");
+        check.that("the third profile finishes the role", ran.ok());
+        Map<String, Object> review = steps(ran).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        check.eq("and it is the profile the step reports", "loop-review-c", review.get("profile"));
+        check.eq("the third profile ran", 1, counted(sandbox.resolve("vendor-then-quota-c.count")));
+        List<Map<String, Object>> switches = ledgerEvents(
+                project.resolve(".warden/runs/q3--reviewer-0/evidence.jsonl"), "role_failover");
+        check.eq("two switches: the vendor failure, then the quota", 2, switches.size());
+        check.eq("the quota switch's to is the profile that ran",
+                "loop-review-c", switches.get(1).get("to"));
+        check.eq("and its cause is the spent subscription",
+                "role_quota_exhausted", switches.get(1).get("cause"));
+        check.eq("the first switch still names the profile that did run",
+                "loop-review-b", switches.get(0).get("to"));
+
+        Path stopped = newProject(sandbox, "vendor-then-quota-none");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-then-quota-none-impl.count"), 1);
+        writeProfile(home, "loop-review-a", "reviewer", "avendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "network", sandbox.resolve("vendor-then-quota-none-a.count"), 1);
+        writeProfile(home, "loop-review-b", "reviewer", "bvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "quota", sandbox.resolve("vendor-then-quota-none-b.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-a, loop-review-b], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: auto, on_vendor_failure: auto }
+                """);
+        TaskLoop.Outcome none = loop(stopped, home, "q2");
+        check.that("with nobody left, the role stops", !none.ok());
+        check.eq("on the spent subscription", "quota_exhausted", none.reason());
+        List<Map<String, Object>> only = ledgerEvents(
+                stopped.resolve(".warden/runs/q2--reviewer-0/evidence.jsonl"), "role_failover");
+        check.eq("the vendor-failure switch is the only one recorded", 1, only.size());
+        check.eq("and it names the profile that ran", "loop-review-b", only.get(0).get("to"));
+        check.that("it does not record a switch back to the profile that already failed",
+                only.stream().noneMatch(event -> "loop-review-a".equals(event.get("to"))));
+        check.eq("that profile was not called again", 1,
+                counted(sandbox.resolve("vendor-then-quota-none-a.count")));
+    }
+
+    /** Exit 1 after a valid review is the review, not a vendor failure. */
+    @SuppressWarnings("unchecked")
+    private void nonzeroExitHonoursArtifactChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-exit-artifact");
+        writeVendorRoster(home, sandbox, "vendor-exit-artifact", "review-findings-exit", "auto",
+                null, null, """
+                - { stage: implement, run: role, role: implementer, on_fail: stop }
+                - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: stop }
+                """);
+        TaskLoop.Outcome objected = loop(project, home, "vx1");
+        check.that("the run stops", !objected.ok());
+        check.eq("on the finding, not on a vendor failure",
+                "blocking_findings_remain", objected.reason());
+        check.eq("the successor was not called", 0,
+                counted(sandbox.resolve("vendor-exit-artifact-loop-review-up.count")));
+        check.eq("the reviewer that wrote the artifact ran once", 1,
+                counted(sandbox.resolve("vendor-exit-artifact-loop-review-down.count")));
+        check.that("and no failover was recorded",
+                !Files.readString(project.resolve(".warden/runs/vx1--reviewer-0/evidence.jsonl"))
+                        .contains("\"type\":\"role_failover\""));
+        Map<String, Object> review = steps(objected).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("one attempt", 1, calls.size());
+        check.eq("its exit code is kept", 1L, calls.get(0).get("exit_code"));
+        check.eq("and the call itself succeeded", "ok", calls.get(0).get("code"));
+        check.eq("the verdict is the finding", 1L, objected.summaryReport().get("blocking_findings"));
+    }
+
+    /** report.json carries who authorised a failover and which setting allowed it. */
+    @SuppressWarnings("unchecked")
+    private void reportFailoverAuthorisationChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-report");
+        writeVendorRoster(home, sandbox, "vendor-report", "network", "auto", null, null, null);
+        TaskLoop.Outcome routed = loop(project, home, "vr1");
+        check.that("the run fails over and finishes", routed.ok());
+        Map<String, Object> report = new dev.warden.ledger.RunReport().of(project, "vr1");
+        Path file = project.resolve(".warden/runs/vr1/report.json");
+        Files.writeString(file, Json.writePretty(report) + System.lineSeparator());
+        Map<String, Object> read = Json.parseObject(Files.readString(file));
+        List<Map<String, Object>> switches =
+                (List<Map<String, Object>>) read.get("role_failovers");
+        check.eq("report.json lists the switch", 1, switches.size());
+        check.eq("with its cause", "vendor_call_failed", switches.get(0).get("cause"));
+        check.eq("from the profile that failed", "loop-review-down", switches.get(0).get("from"));
+        check.eq("to the profile that finished", "loop-review-up", switches.get(0).get("to"));
+        check.eq("who authorised it", "policy_auto", switches.get(0).get("authorized_by"));
+        check.eq("and the setting that allowed it",
+                "failover.on_vendor_failure", switches.get(0).get("policy_setting"));
+    }
+
+    /** A local model that is down or returns an HTTP error can fail over like any other call. */
+    private void localVendorFailureFailoverChecks(Check check, Path sandbox, Path home) throws Exception {
+        for (String code : List.of("role_local_endpoint_unreachable", "role_local_http_error")) {
+            String scenario = "vendor-local-" + code;
+            Path project = newProject(sandbox, scenario);
+            writeVendorRoster(home, sandbox, scenario, "review", "auto", null, null, null);
+            TaskLoop.Outcome routed = new TaskLoop(new ProcessRunner()).withExecutors((profile, processes, git) -> {
+                if (!"loop-review-down".equals(profile.name())) {
+                    return dev.warden.execution.Executors.forProfile(profile, processes, git);
+                }
+                return request -> {
+                    Map<String, Object> body = new java.util.LinkedHashMap<>();
+                    body.put("failure", code);
+                    body.put("exit_code", -1L);
+                    return new dev.warden.execution.RoleExecutor.Result(
+                            false, code, Duration.ofMillis(5), "", null, body);
+                };
+            }).run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "loc", false);
+            check.that(code + " fails over and the successor passes", routed.ok());
+            check.eq(code + " calls the successor", 1,
+                    counted(sandbox.resolve(scenario + "-loop-review-up.count")));
+            String evidence = Files.readString(project.resolve(
+                    ".warden/runs/loc--reviewer-0/evidence.jsonl"));
+            check.contains(code + " is caused as a vendor call",
+                    evidence, "\"cause\":\"vendor_call_failed\"");
+            check.contains(code + " keeps its own code", evidence, "\"role_code\":\"" + code + "\"");
+        }
+    }
+
+    /** A process that cannot be started keeps the launch error on the attempt. */
+    @SuppressWarnings("unchecked")
+    private void launchErrorStaysOnTheAttempt(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "vendor-launch");
+        // A directory is executable, so the profile is eligible, and starting it is an
+        // IOException rather than a process that exits. A text file is handed to a shell
+        // and comes back as exit 127, which is a different failure.
+        Path bogus = sandbox.resolve("not-a-program");
+        Files.createDirectories(bogus);
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("vendor-launch-impl.count"), 1);
+        writeProfile(home, "loop-review-up", "reviewer", "upvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("vendor-launch-up.count"), 1);
+        Files.writeString(home.resolve("profiles/loop-review-down.yaml"), """
+                version: 1
+                profile: loop-review-down
+                role: reviewer
+                vendor: downvendor
+                command: %s
+                read_only: true
+                args:
+                  - "--unused"
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/reviewer.md
+                json_schema: schemas/reviewer.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  verified_on: "2026-08-26"
+                """.formatted(yaml(bogus.toString())));
+        Files.writeString(home.resolve("policy.yaml"), """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review-down, loop-review-up], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                failover: { on_quota_exhausted: confirm, on_vendor_failure: auto }
+                """);
+        TaskLoop.Outcome routed = loop(project, home, "launch1");
+        check.that("a vendor that cannot start fails over", routed.ok());
+        check.eq("the successor ran", 1, counted(sandbox.resolve("vendor-launch-up.count")));
+        Map<String, Object> review = steps(routed).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> calls = (List<Map<String, Object>>) review.get("vendor_attempts");
+        check.eq("both attempts are recorded", 2, calls.size());
+        check.eq("the first is the launch failure", "role_command_failed", calls.get(0).get("code"));
+        check.that("and it keeps the launch error",
+                calls.get(0).get("start_error") instanceof String text && !text.isBlank());
+        check.contains("which names the program that could not start",
+                String.valueOf(calls.get(0).get("start_error")), "not-a-program");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> ledgerEvents(Path evidence, String type) throws IOException {
+        List<Map<String, Object>> found = new java.util.ArrayList<>();
+        if (!Files.isRegularFile(evidence)) return found;
+        for (String line : Files.readString(evidence).split("\\R")) {
+            if (line.isBlank()) continue;
+            Map<String, Object> event = Json.parseObject(line);
+            if (type.equals(String.valueOf(event.get("type")))) found.add(event);
+        }
+        return found;
     }
 
     /** Implementer plus two reviewers. {@code mode} null omits {@code on_vendor_failure}. */

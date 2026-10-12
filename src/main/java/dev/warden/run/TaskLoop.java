@@ -433,6 +433,8 @@ public final class TaskLoop {
             Map.entry("role_prompt_undeliverable", "prompt_undeliverable"),
             Map.entry("role_rate_limited", "rate_limited"),
             Map.entry("role_quota_exhausted", "quota_exhausted"),
+            Map.entry("role_local_endpoint_unreachable", "vendor_call_failed"),
+            Map.entry("role_local_http_error", "vendor_call_failed"),
             // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
             // opposite of that, and the difference decides both what an operator goes and
             // reads and whether the stages that already passed survive the retry.
@@ -699,11 +701,18 @@ public final class TaskLoop {
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
                     .resolve(carried.fromRunId()).resolve("task-run.json")));
-            if (previous.get("failover_pending") instanceof Map<?, ?> pending
-                    && pending.get("exhausted_profiles") instanceof List<?> names) {
-                java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
-                names.forEach(name -> excluded.add(String.valueOf(name)));
-                roles.excluding(excluded);
+            if (previous.get("failover_pending") instanceof Map<?, ?> pending) {
+                if (vendorFailureSwitch(pending)) {
+                    // Not the process-lifetime exhausted set. The failed profile is skipped
+                    // for this stage's attempt only, and the approved successor is pinned.
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                    roles.honourConfirmedVendorFailure(copy);
+                } else if (pending.get("exhausted_profiles") instanceof List<?> names) {
+                    java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                    names.forEach(name -> excluded.add(String.valueOf(name)));
+                    roles.excluding(excluded);
+                }
             }
         }
         // Contract, then whatever the outer command left for this run id, then this
@@ -5221,6 +5230,18 @@ public final class TaskLoop {
      * failed, and the summary says which. The distinction survives to `next_action` unchanged:
      * both still stop for a human, because Warden does not decide to wait out a quota window.
      */
+    /**
+     * A confirm-mode question about a call that produced no artifact, as opposed to a
+     * spent subscription. The two share a decision kind and must not share an exclusion:
+     * a network error is not a quota.
+     */
+    private static boolean vendorFailureSwitch(Map<?, ?> pending) {
+        String cause = String.valueOf(pending.get("cause"));
+        return "vendor_call_failed".equals(cause)
+                || "role_timeout".equals(cause)
+                || "artifact_invalid".equals(cause);
+    }
+
     public static String reasonFor(RoleRunner.Outcome step, String genericReason) {
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";

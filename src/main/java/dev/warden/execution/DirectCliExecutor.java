@@ -190,6 +190,46 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
 
+        // A non-zero exit is how a reviewer reports findings and then returns 1, and also
+        // how a crash reports that it wrote nothing. The artifact decides. Exit code stays
+        // on the evidence either way; it does not replace a verdict that is already valid.
+        Map<String, Object> artifact = readArtifact(process, envelope);
+        if (artifact != null) {
+            artifact.putIfAbsent("role", request.role());
+            artifact.putIfAbsent("task_id", request.task().id());
+            artifact.putIfAbsent("run_id", request.runId());
+            List<String> missing = missingFields(profile, artifact);
+            List<String> schemaProblems = missing.isEmpty()
+                    ? schemaErrors(profile, request, artifact) : List.of();
+            if (missing.isEmpty() && schemaProblems.isEmpty()) {
+                String semanticFailure = semanticFailure(request.role(), artifact);
+                if (semanticFailure != null) {
+                    evidence.put("failure", semanticFailure);
+                    evidence.put("artifact_status", artifact.get("status"));
+                    return new Result(false, semanticFailure, duration, process.stdout(), artifact, evidence);
+                }
+                evidence.put("verdict", artifact.get("verdict"));
+                return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+            }
+            if (process.exitCode() == 0) {
+                if (!missing.isEmpty()) {
+                    // agy (bakery-agy-3 look) exited 0 with an error envelope: status=ERROR,
+                    // error="Individual quota reached...", no verdict. That used to be
+                    // role_artifact_incomplete, so failover never ran. A spent plan that did
+                    // not produce the artifact is still a spent plan.
+                    Result quota = quotaFailure(request, process, duration, evidence);
+                    if (quota != null) return quota;
+                    evidence.put("failure", "role_artifact_incomplete");
+                    evidence.put("missing_fields", missing);
+                    evidence.put("received_keys", new ArrayList<>(artifact.keySet()));
+                    return new Result(false, "role_artifact_incomplete", duration, process.stdout(), null, evidence);
+                }
+                evidence.put("failure", "role_artifact_schema_violation");
+                evidence.put("schema_errors", schemaProblems.stream().limit(40).toList());
+                return new Result(false, "role_artifact_schema_violation", duration, process.stdout(), null, evidence);
+            }
+        }
+
         if (process.exitCode() != 0) {
             Result quota = quotaFailure(request, process, duration, evidence);
             if (quota != null) return quota;
@@ -208,65 +248,40 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_command_failed", duration, process.stdout(), null, evidence);
         }
 
-        // Codex --json is JSONL: the last object is usually turn.completed (usage), while
-        // the model's answer is an earlier item.completed / agent_message. Prefer that
-        // message when it is itself JSON; otherwise unwrap the last envelope as before.
+        Result quota = quotaFailure(request, process, duration, evidence);
+        if (quota != null) return quota;
+        // A vendor that ran out of turns did not fail at the work; it was interrupted
+        // mid-thought by a ceiling the operator set. `role_command_failed` sends someone
+        // to read a transcript looking for a defect that is not in it — the same reason
+        // a spent subscription is classified apart from an ordinary failure.
+        Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+        if (ceiling != null) return ceiling;
+        evidence.put("failure", "role_artifact_unparseable");
+        evidence.put("stdout_tail", tail(process.stdout(), 2000));
+        return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
+    }
+
+    /**
+     * The model's answer, or null when the transcript has none.
+     *
+     * Codex {@code --json} is JSONL: the last object is usually {@code turn.completed},
+     * while the answer is an earlier {@code agent_message}. Lifecycle events are not answers.
+     */
+    private static Map<String, Object> readArtifact(ProcessRunner.Result process,
+                                                    Map<String, Object> envelope) {
         Map<String, Object> fromJsonl = extractJsonlAgentMessage(process.stdout());
         Map<String, Object> artifact = fromJsonl != null ? unwrap(fromJsonl) : unwrap(envelope);
-        if (artifact == null || isEventEnvelope(artifact)) {
-            artifact = unwrap(envelope);
-        }
-        if (artifact == null || isEventEnvelope(artifact)) {
-            Result quota = quotaFailure(request, process, duration, evidence);
-            if (quota != null) return quota;
-            // A vendor that ran out of turns did not fail at the work; it was interrupted
-            // mid-thought by a ceiling the operator set. `role_command_failed` sends someone
-            // to read a transcript looking for a defect that is not in it — the same reason
-            // a spent subscription is classified apart from an ordinary failure.
-            Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
-            if (ceiling != null) return ceiling;
-            evidence.put("failure", "role_artifact_unparseable");
-            evidence.put("stdout_tail", tail(process.stdout(), 2000));
-            return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
-        }
+        if (artifact == null || isEventEnvelope(artifact)) artifact = unwrap(envelope);
+        if (artifact == null || isEventEnvelope(artifact)) return null;
+        return artifact;
+    }
 
-        artifact.putIfAbsent("role", request.role());
-        artifact.putIfAbsent("task_id", request.task().id());
-        artifact.putIfAbsent("run_id", request.runId());
-
+    private static List<String> missingFields(Profile profile, Map<String, Object> artifact) {
         List<String> missing = new ArrayList<>();
         for (String field : profile.requiredArtifactFields()) {
             if (!artifact.containsKey(field)) missing.add(field);
         }
-        if (!missing.isEmpty()) {
-            // agy (bakery-agy-3 look) exited 0 with an error envelope: status=ERROR,
-            // error="Individual quota reached...", no verdict. That used to be
-            // role_artifact_incomplete, so failover never ran. A spent plan that did
-            // not produce the artifact is still a spent plan.
-            Result quota = quotaFailure(request, process, duration, evidence);
-            if (quota != null) return quota;
-            evidence.put("failure", "role_artifact_incomplete");
-            evidence.put("missing_fields", missing);
-            evidence.put("received_keys", new ArrayList<>(artifact.keySet()));
-            return new Result(false, "role_artifact_incomplete", duration, process.stdout(), null, evidence);
-        }
-
-        List<String> schemaErrors = schemaErrors(profile, request, artifact);
-        if (!schemaErrors.isEmpty()) {
-            evidence.put("failure", "role_artifact_schema_violation");
-            evidence.put("schema_errors", schemaErrors.stream().limit(40).toList());
-            return new Result(false, "role_artifact_schema_violation", duration, process.stdout(), null, evidence);
-        }
-
-        String semanticFailure = semanticFailure(request.role(), artifact);
-        if (semanticFailure != null) {
-            evidence.put("failure", semanticFailure);
-            evidence.put("artifact_status", artifact.get("status"));
-            return new Result(false, semanticFailure, duration, process.stdout(), artifact, evidence);
-        }
-
-        evidence.put("verdict", artifact.get("verdict"));
-        return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+        return missing;
     }
 
     /**
