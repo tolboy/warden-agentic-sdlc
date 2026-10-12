@@ -185,14 +185,13 @@ public final class DirectCliExecutor implements RoleExecutor {
             }
         }
 
-        if (process.timedOut()) {
-            evidence.put("failure", "role_timeout");
-            return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
-        }
-
         // A non-zero exit is how a reviewer reports findings and then returns 1, and also
         // how a crash reports that it wrote nothing. The artifact decides. Exit code stays
         // on the evidence either way; it does not replace a verdict that is already valid.
+        // A wall-clock kill is the same rule: the process can write a complete artifact and
+        // then hang until it is killed. That verdict stands. `timed_out` is already on the
+        // evidence, so the attempt still records the clock. Only a timeout that left no
+        // complete artifact is `role_timeout`, and that one may fail over.
         Map<String, Object> artifact = readArtifact(process, envelope);
         if (artifact != null) {
             artifact.putIfAbsent("role", request.role());
@@ -202,6 +201,14 @@ public final class DirectCliExecutor implements RoleExecutor {
             List<String> schemaProblems = missing.isEmpty()
                     ? schemaErrors(profile, request, artifact) : List.of();
             if (missing.isEmpty() && schemaProblems.isEmpty()) {
+                // Codex can answer in one turn and die on the next. The earlier answer is
+                // not the outcome of a later turn that exhausted its quota or its ceiling.
+                if (process.exitCode() != 0 && earlierTurnSuperseded(process.stdout())) {
+                    Result quota = quotaFailure(request, process, duration, evidence);
+                    if (quota != null) return quota;
+                    Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+                    if (ceiling != null) return ceiling;
+                }
                 String semanticFailure = semanticFailure(request.role(), artifact);
                 if (semanticFailure != null) {
                     evidence.put("failure", semanticFailure);
@@ -210,6 +217,16 @@ public final class DirectCliExecutor implements RoleExecutor {
                 }
                 evidence.put("verdict", artifact.get("verdict"));
                 return new Result(true, "ok", duration, process.stdout(), artifact, evidence);
+            }
+            if (process.timedOut()) {
+                evidence.put("failure", "role_timeout");
+                if (!missing.isEmpty()) {
+                    evidence.put("missing_fields", missing);
+                    evidence.put("received_keys", new ArrayList<>(artifact.keySet()));
+                } else if (!schemaProblems.isEmpty()) {
+                    evidence.put("schema_errors", schemaProblems.stream().limit(40).toList());
+                }
+                return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
             }
             if (process.exitCode() == 0) {
                 if (!missing.isEmpty()) {
@@ -228,6 +245,11 @@ public final class DirectCliExecutor implements RoleExecutor {
                 evidence.put("schema_errors", schemaProblems.stream().limit(40).toList());
                 return new Result(false, "role_artifact_schema_violation", duration, process.stdout(), null, evidence);
             }
+        }
+
+        if (process.timedOut()) {
+            evidence.put("failure", "role_timeout");
+            return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
 
         if (process.exitCode() != 0) {
@@ -498,10 +520,50 @@ public final class DirectCliExecutor implements RoleExecutor {
     }
 
     /**
+     * True when a usable {@code agent_message} belongs to a turn that a later
+     * {@code turn.started} superseded without answering.
+     *
+     * A multi-turn Codex transcript keeps the last JSON answer it saw. That answer is stale
+     * when the next turn then dies on quota or its turn ceiling: the failure is the outcome,
+     * and returning ok here would hide it.
+     */
+    static boolean earlierTurnSuperseded(String stdout) {
+        if (stdout == null || stdout.isBlank()) return false;
+        int turn = 0;
+        int messageTurn = -1;
+        for (String line : stdout.split("\\R")) {
+            String trimmed = line.strip();
+            if (!trimmed.startsWith("{")) continue;
+            Map<String, Object> event;
+            try {
+                event = Json.parseObject(trimmed);
+            } catch (Json.JsonException ignored) {
+                continue;
+            }
+            if ("turn.started".equals(event.get("type"))) {
+                turn++;
+                continue;
+            }
+            if (!"item.completed".equals(event.get("type"))) continue;
+            Object item = event.get("item");
+            if (!(item instanceof Map<?, ?> map)) continue;
+            if (!"agent_message".equals(map.get("type"))) continue;
+            Object text = map.get("text");
+            if (!(text instanceof String body) || body.isBlank()) continue;
+            if (Json.findLastObject(body) != null) messageTurn = turn;
+        }
+        return messageTurn >= 0 && turn > messageTurn;
+    }
+
+    /**
      * Codex {@code exec --json} writes one event per line. The last line is typically
      * {@code turn.completed} with usage; the model's answer, if it printed JSON, is in an
      * {@code item.completed} event of type {@code agent_message}. Recovered from a live
      * gpt-5.4-mini probe, not from documentation.
+     *
+     * The last usable answer from any turn. A later turn that fails is not applied here;
+     * {@link #earlierTurnSuperseded} is what tells the caller to keep the quota and
+     * turn-ceiling checks.
      */
     public static Map<String, Object> extractJsonlAgentMessage(String stdout) {
         if (stdout == null || stdout.isBlank()) return null;

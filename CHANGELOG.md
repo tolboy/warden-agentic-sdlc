@@ -20,11 +20,19 @@ that exists in code but has never been run live says so.
   it. The same path covers `role_local_endpoint_unreachable` and
   `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
   tail, and with `start_error` when the process could not be launched. A valid artifact is
-  kept even when the process exits non-zero; the exit code is recorded and there is no
-  failover. A review finding, a gate failure and a rejection do not take this path. Under
-  `confirm`, `--continue` runs the profile the person approved for that stage and writes
-  `role_failover` (`authorized_by: human`, `policy_setting: confirm`); the failed profile
-  is skipped for that stage's attempt only. `report.json` lists the switches under
+  kept even when the process exits non-zero, and when a wall-clock kill arrives after that
+  artifact is already complete: the exit code or `timed_out` is recorded and there is no
+  failover. A timeout that left no complete artifact is still `role_timeout` and may fail
+  over. A multi-turn Codex transcript whose later turn hits a quota or a turn ceiling is
+  that failure, even when an earlier turn printed a usable answer. A review finding, a gate
+  failure and a rejection do not take this path. Under `confirm`, `--continue` runs the
+  profile the person approved for that stage and writes `role_failover`
+  (`authorized_by: human`, `policy_setting: confirm`); the failed profile is skipped for
+  that stage's attempt only. When that question follows an automatic vendor-failure switch
+  in the same dispatch, the continuation pins the approved profile and also keeps the
+  auto-failed profile out of that stage; a quota confirmation on its own is still not a
+  pin. The text report and the failover counts include a confirmed switch, including one
+  whose continued run has a single attempt. `report.json` lists the switches under
   `role_failovers`, including `authorized_by` and `policy_setting`. A role may set its own
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
@@ -32,7 +40,9 @@ that exists in code but has never been run live says so.
 
 - A quota failover in the same dispatch does not name a profile whose vendor call already
   failed. The ledger records the profile that runs, or the role stops when none can.
-  A confirmed quota swap is still not a pin. Suite `task loop`.
+  A confirmed quota swap is still not a pin by itself. When that question follows an
+  automatic vendor-failure switch, `--continue` pins the approved profile and keeps the
+  auto-failed profile out of that stage only. Suite `task loop`.
 
 - A writer cut off by its turn ceiling or timeout is followed by one that knows it.
   `retry` or `advance` without a note dispatched the next implementer with an empty

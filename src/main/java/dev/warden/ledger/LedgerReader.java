@@ -348,6 +348,11 @@ public final class LedgerReader {
                     && count.longValue() > 1) {
                 transitions = Math.max(transitions, count.longValue() - 1);
             }
+            // A human-confirmed switch on --continue is one attempt plus a role_failover.
+            // Attempt transitions alone count it as zero.
+            if (event.get("role_failovers") instanceof List<?> recorded && !recorded.isEmpty()) {
+                transitions = Math.max(transitions, recorded.size());
+            }
             if (transitions > 0) {
                 failoverRoleRuns++;
                 failovers += transitions;

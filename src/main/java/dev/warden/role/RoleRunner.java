@@ -1052,6 +1052,14 @@ public final class RoleRunner {
                                 independenceNote(candidate, writers));
                         pending.put("stage", stageName == null ? role : stageName);
                         pending.put("exhausted_profiles", List.copyOf(exhausted));
+                        // An automatic vendor-failure switch earlier in this dispatch is not a
+                        // spent subscription, so it is not in exhausted_profiles. The
+                        // continuation still has to keep that profile out of this stage:
+                        // strategy `first` would pay it again, ahead of the profile a person
+                        // is about to approve.
+                        if (!vendorFailedThisDispatch.isEmpty()) {
+                            pending.put("vendor_failed_profiles", List.copyOf(vendorFailedThisDispatch));
+                        }
                         pending.put("to_model", candidate.model());
                         pending.put("to_runner", candidate.runner());
                         pending.put("to_effort", candidate.effort());
@@ -1252,7 +1260,13 @@ public final class RoleRunner {
 
     private record Successor(Profile profile, Map<String, String> rejected) {}
 
-    /** Codes that mean the vendor produced nothing a later stage can believe. */
+    /**
+     * Codes that mean the vendor produced nothing a later stage can believe.
+     *
+     * A timeout that already wrote a valid artifact does not arrive here: the executor
+     * returns ok and leaves {@code timed_out} on the attempt. {@code role_timeout} stays
+     * in this set for the call that left no complete artifact.
+     */
     private static final Set<String> VENDOR_FAILURE_CODES = Set.of(
             "role_command_failed",
             "role_timeout",

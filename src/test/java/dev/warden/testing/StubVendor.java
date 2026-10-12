@@ -572,6 +572,44 @@ public final class StubVendor {
                         + "\"confidence\":\"confirmed\"}]},\"total_cost_usd\":0.004}");
                 System.exit(1);
             }
+            // A valid review, flushed, then a hang past any wall clock the profile may set.
+            // The kill must not throw the verdict away.
+            case "review-then-hang" -> {
+                count(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"review\","
+                        + "\"findings\":[{\"id\":\"hung-finding\",\"severity\":\"P1\","
+                        + "\"path\":\"src/result.txt\",\"message\":\"not good enough\","
+                        + "\"expected\":\"the final content\",\"actual\":\"an intermediate one\","
+                        + "\"scenario\":\"read src/result.txt after the run\","
+                        + "\"confidence\":\"confirmed\"}]},\"total_cost_usd\":0.004}");
+                System.out.flush();
+                Thread.sleep(180_000);
+            }
+            // Turn one prints a usable review. Turn two is a spent subscription and exits 1.
+            // The earlier answer must not become the outcome.
+            case "jsonl-then-quota" -> {
+                count(args);
+                printEarlierReview();
+                String message = "You've hit your usage limit. Upgrade to Pro "
+                        + "(https://example.invalid/pro), visit https://example.invalid/usage to "
+                        + "purchase more credits or try again at 9:21 PM.";
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":\"" + message + "\"}}");
+                System.err.println("ERROR transport: worker quit with fatal: Transport channel closed");
+                System.exit(1);
+            }
+            // The same shape, with the later turn hitting the vendor's own turn ceiling.
+            case "jsonl-then-ceiling" -> {
+                count(args);
+                printEarlierReview();
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"result\",\"subtype\":\"error_max_turns\","
+                        + "\"is_error\":true,\"num_turns\":40,\"total_cost_usd\":1.33}");
+                System.err.println("Error: max turns reached");
+                System.exit(1);
+            }
             // The first call is a dropped connection; every later call is a clean pass.
             // Models a profile that failed once and is still usable at a later stage.
             case "network-once" -> {
@@ -867,6 +905,19 @@ public final class StubVendor {
                 System.exit(2);
             }
         }
+    }
+
+    /** One Codex turn whose agent_message is a complete passing review. */
+    private static void printEarlierReview() {
+        String artifact = dev.warden.json.Json.write(java.util.Map.of(
+                "role", "reviewer", "task_id", "hello", "status", "completed",
+                "verdict", "pass", "summary", "earlier turn", "findings", java.util.List.of()));
+        System.out.println("{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}");
+        System.out.println("{\"type\":\"turn.started\"}");
+        System.out.println(dev.warden.json.Json.write(java.util.Map.of(
+                "type", "item.completed",
+                "item", java.util.Map.of("id", "item-1", "type", "agent_message", "text", artifact))));
+        System.out.println("{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}");
     }
 
     /**

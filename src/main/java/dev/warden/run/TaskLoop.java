@@ -708,10 +708,25 @@ public final class TaskLoop {
                     Map<String, Object> copy = new LinkedHashMap<>();
                     pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
                     roles.honourConfirmedVendorFailure(copy);
-                } else if (pending.get("exhausted_profiles") instanceof List<?> names) {
-                    java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
-                    names.forEach(name -> excluded.add(String.valueOf(name)));
-                    roles.excluding(excluded);
+                } else {
+                    if (pending.get("exhausted_profiles") instanceof List<?> names) {
+                        java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                        names.forEach(name -> excluded.add(String.valueOf(name)));
+                        roles.excluding(excluded);
+                    }
+                    // Quota confirm after an automatic vendor-failure switch. The approved
+                    // profile is pinned, and the profile that already produced nothing stays
+                    // out of this stage only. A spent subscription above stays spent for
+                    // the rest of the process; a dropped connection does not.
+                    if (pending.get("vendor_failed_profiles") instanceof List<?> failed
+                            && !failed.isEmpty()) {
+                        Map<String, Object> copy = new LinkedHashMap<>();
+                        pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                        java.util.List<Object> onlyFailed = new java.util.ArrayList<>();
+                        failed.forEach(onlyFailed::add);
+                        copy.put("exhausted_profiles", onlyFailed);
+                        roles.honourConfirmedVendorFailure(copy);
+                    }
                 }
             }
         }
@@ -5226,11 +5241,6 @@ public final class TaskLoop {
     }
 
     /**
-     * A step that stopped because its vendor ran out is not the same event as a step that
-     * failed, and the summary says which. The distinction survives to `next_action` unchanged:
-     * both still stop for a human, because Warden does not decide to wait out a quota window.
-     */
-    /**
      * A confirm-mode question about a call that produced no artifact, as opposed to a
      * spent subscription. The two share a decision kind and must not share an exclusion:
      * a network error is not a quota.
@@ -5242,6 +5252,11 @@ public final class TaskLoop {
                 || "artifact_invalid".equals(cause);
     }
 
+    /**
+     * A step that stopped because its vendor ran out is not the same event as a step that
+     * failed, and the summary says which. The distinction survives to `next_action` unchanged:
+     * both still stop for a human, because Warden does not decide to wait out a quota window.
+     */
     public static String reasonFor(RoleRunner.Outcome step, String genericReason) {
         if ("role_failover_requires_confirmation".equals(step.code())) {
             return "failover_requires_confirmation";
