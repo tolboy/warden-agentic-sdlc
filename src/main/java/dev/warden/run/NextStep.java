@@ -98,9 +98,9 @@ public final class NextStep {
             };
             case "quota_exhausted", "rate_limited" -> "wait_or_add_vendor";
             case "failover_requires_confirmation" -> "confirm_failover";
-            case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
-                    "prompt_undeliverable", "turn_ceiling_reached", "orca_worker_not_started"
-                    -> "retry_infrastructure";
+            case "role_timed_out", "vendor_call_failed", "vendor_unavailable",
+                    "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached",
+                    "orca_worker_not_started" -> "retry_infrastructure";
             case "plan_review_findings_remain" -> "revise_plan";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
             case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
@@ -185,7 +185,14 @@ public final class NextStep {
             case "confirm_failover" ->
                     "Confirm the vendor substitution for run " + runId
                             + ", then continue it so the work already done is kept.";
-            case "retry_infrastructure" -> verdictsKept(summary)
+            case "retry_infrastructure" -> "vendor_unavailable".equals(reason)
+                    ? "The vendor account cannot be used here (a location or eligibility refusal, "
+                            + "not a verdict). That profile is skipped for the rest of this process. "
+                            + "Add another profile for the role, then retry run " + runId
+                            + (verdictsKept(summary)
+                            ? " so the verdicts already reached are kept."
+                            : ". The failed stage runs again.")
+                    : verdictsKept(summary)
                     ? "Retry the infrastructure failure on run " + runId
                             + "; the verdicts already reached on this tree are kept."
                     : "Retry the infrastructure failure on run " + runId
@@ -340,6 +347,9 @@ public final class NextStep {
 
     private static List<Map<String, Object>> profileEdits(String reason) {
         String change = switch (reason) {
+            case "vendor_unavailable" ->
+                    "add another profile for this role; the one that ran is unavailable for the "
+                            + "rest of this process (a location or eligibility refusal, not a verdict)";
             case "role_timed_out" ->
                     "raise limits.wall_clock_minutes on the profile (the wall clock that bound "
                             + "this call), or narrow the task";

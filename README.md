@@ -417,9 +417,13 @@ budget:
 
 `on_vendor_failure` is the same three choices for a call that returned nothing: a dropped
 connection, a timeout, a permission refusal, a missing or invalid artifact, a local model
-that is not serving, or an HTTP error from one. It defaults to `stop`, so a policy that
-never mentions it keeps ending the role. `auto` switches to the next profile that still
-satisfies `require_independent_vendor`, at most `max_per_stage` times in one dispatch, and
+that is not serving, or an HTTP error from one. A location or eligibility refusal (HTTP 403,
+`PERMISSION_DENIED`, "not eligible", "not available in your location") is cause
+`vendor_unavailable`. That profile is skipped for the rest of the process, and a second
+profile for the role — including a second `visual_qa` profile on the look stage — is what
+`auto` switches to. It defaults to `stop`, so a policy that never mentions it keeps ending
+the role. `auto` switches to the next profile that still satisfies
+`require_independent_vendor`, at most `max_per_stage` times in one dispatch, and
 writes `role_failover` with the cause. A review finding, a red gate and a rejection are
 verdicts on the work and never take this path, including a valid artifact followed by a
 non-zero exit: the exit code is recorded and the verdict stands. Under `confirm`,

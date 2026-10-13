@@ -390,6 +390,7 @@ public final class TaskLoop {
             "independent_review_unavailable",
             "role_timed_out",
             "vendor_call_failed",
+            "vendor_unavailable",
             "vendor_protocol_failed",
             "prompt_undeliverable",
             "orca_worker_not_started",
@@ -412,6 +413,9 @@ public final class TaskLoop {
      *  - a wall clock that ran out bounds the call, not the diff;
      *  - a vendor process that exited non-zero with nothing Warden recognises — a crash, a
      *    refused login, a dropped connection — has said nothing about the work at all;
+     *  - a location or eligibility refusal ({@code role_vendor_unavailable}: HTTP 403,
+     *    {@code PERMISSION_DENIED}, "not eligible", "not available in your location") is
+     *    the same kind of missing call, and that profile is not tried again in this process;
      *  - an answer that is not a readable, complete, schema-valid artifact is an answer Warden
      *    could not read, so whatever verdict it held is unknown rather than negative;
      *  - a prompt that could not be delivered never reached the vendor;
@@ -427,6 +431,7 @@ public final class TaskLoop {
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
             Map.entry("role_command_failed", "vendor_call_failed"),
+            Map.entry("role_vendor_unavailable", "vendor_unavailable"),
             Map.entry("role_artifact_unparseable", "vendor_protocol_failed"),
             Map.entry("role_artifact_incomplete", "vendor_protocol_failed"),
             Map.entry("role_artifact_schema_violation", "vendor_protocol_failed"),
@@ -461,7 +466,8 @@ public final class TaskLoop {
             "rate_limited", "rate_limit",
             "quota_exhausted", "quota",
             "turn_ceiling_reached", "turn_ceiling",
-            "orca_worker_not_started", "orca_start");
+            "orca_worker_not_started", "orca_start",
+            "vendor_unavailable", "unavailable");
 
     /**
      * Whether a call timed out on a wall clock the chain deadline had lowered.
@@ -5261,7 +5267,8 @@ public final class TaskLoop {
         String cause = String.valueOf(pending.get("cause"));
         return "vendor_call_failed".equals(cause)
                 || "role_timeout".equals(cause)
-                || "artifact_invalid".equals(cause);
+                || "artifact_invalid".equals(cause)
+                || "vendor_unavailable".equals(cause);
     }
 
     /**
@@ -5767,6 +5774,12 @@ public final class TaskLoop {
                     + "without a recognised cause (a login, the network, the CLI itself). Read "
                     + "stderr_tail and stdout_tail in its role report, fix what they name, "
                     + "then: " + carryOn + kept(summary);
+            case "vendor_unavailable" -> "the " + failedProfile(summary) + " account cannot use "
+                    + "this vendor here (a location or eligibility refusal, often HTTP 403). "
+                    + "It is not a verdict on the work. That profile is skipped for the rest of "
+                    + "this process; a different profile of the same vendor is not. Add another "
+                    + "profile for the role, or run where the vendor is available, then: "
+                    + carryOn + kept(summary);
             case "vendor_protocol_failed" -> "the " + failedProfile(summary) + " call "
                     + "answered, but not with a readable, complete, schema-valid artifact, so "
                     + "whatever it concluded is unknown. Check the profile's prompt, schema "

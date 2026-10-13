@@ -289,6 +289,7 @@ public final class TaskLoopTest implements Suite {
             workspaceChecks(check, sandbox, home);
             failoverConfirmationChecks(check, sandbox, home);
             vendorFailureFailoverChecks(check, sandbox, home);
+            visualVendorUnavailableChecks(check, sandbox, home);
             confirmedVendorFailoverChecks(check, sandbox, home);
             vendorFailureExclusionScopeChecks(check, sandbox, home);
             quotaSuccessorSkipsFailedProfiles(check, sandbox, home);
@@ -753,6 +754,14 @@ public final class TaskLoopTest implements Suite {
                 .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
         check.contains("and keeps the 403 on the failed attempt",
                 Json.write(deniedReview.get("vendor_attempts")), "HTTP 403 permission denied");
+        List<Map<String, Object>> deniedSwitches =
+                (List<Map<String, Object>>) deniedReview.get("role_failovers");
+        check.eq("a 403 permission refusal is vendor_unavailable",
+                "vendor_unavailable", deniedSwitches.get(0).get("cause"));
+        List<Map<String, Object>> deniedCalls =
+                (List<Map<String, Object>>) deniedReview.get("vendor_attempts");
+        check.eq("and the failed attempt names that code",
+                "role_vendor_unavailable", deniedCalls.get(0).get("code"));
 
         // A real timeout is at least a minute: that is the smallest wall clock a profile
         // may declare, and the suite does not wait one out. The stand-in returns the code
@@ -2051,6 +2060,181 @@ public final class TaskLoopTest implements Suite {
             if (type.equals(String.valueOf(event.get("type")))) found.add(event);
         }
         return found;
+    }
+
+    /**
+     * A visual_qa profile that is refused for location or eligibility is a vendor failure,
+     * so the look stage can fail over to another visual_qa profile. The default still stops.
+     * The refused profile is skipped for a later look in the same process. A same-vendor
+     * profile in between is still refused by independence. Quota outranks the 403.
+     */
+    @SuppressWarnings("unchecked")
+    private void visualVendorUnavailableChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path shots = sandbox.resolve("geo-shots");
+        Files.createDirectories(shots);
+        Path wide = shots.resolve("1280x720.png");
+        Files.writeString(wide, "stands in for a screenshot");
+
+        Path routed = newProject(sandbox, "visual-geo", "medium", 20, true);
+        writeProfiles(home, sandbox, "visual-geo", 1, 1);
+        writeVisualStub(home, sandbox, "visual-geo", "loop-eyes-geo", "geovendor", "geo");
+        writeVisualStub(home, sandbox, "visual-geo", "loop-eyes-self", "implvendor", "eyes");
+        writeVisualStub(home, sandbox, "visual-geo", "loop-eyes", "eyesvendor", "eyes");
+        Files.writeString(home.resolve("policy.yaml"), visualGeoPolicy(true, true));
+        TaskLoop.Outcome looked = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(true, wide)).run(
+                        new ConfigLoader().load(routed, "hello"), UserConfig.load(home), "geo1", false);
+        check.that("a geo 403 on visual_qa fails over and the run finishes", looked.ok());
+        check.eq("the refused profile ran once", 1,
+                counted(sandbox.resolve("visual-geo-loop-eyes-geo.count")));
+        check.eq("the same-vendor visual profile was not called", 0,
+                counted(sandbox.resolve("visual-geo-loop-eyes-self.count")));
+        check.eq("the second visual_qa profile ran for both look stages", 2,
+                counted(sandbox.resolve("visual-geo-loop-eyes.count")));
+        List<Map<String, Object>> looks = steps(looked).stream()
+                .filter(step -> "visual_qa".equals(step.get("step")) && step.get("profile") != null)
+                .toList();
+        check.eq("two look stages ran", 2, looks.size());
+        Map<String, Object> firstLook = looks.get(0);
+        check.eq("the first look finished on the successor", "loop-eyes", firstLook.get("profile"));
+        check.eq("and names the profile it left", List.of("loop-eyes-geo"), firstLook.get("failed_over_from"));
+        List<Map<String, Object>> attempts = (List<Map<String, Object>>) firstLook.get("vendor_attempts");
+        check.eq("the first attempt is the geo refusal", "role_vendor_unavailable", attempts.get(0).get("code"));
+        Map<String, Object> classified = (Map<String, Object>) attempts.get(0).get("vendor_unavailable");
+        check.eq("recorded from stderr", "stderr_text", classified.get("detected_by"));
+        check.eq("by the location phrase", "available in your location", classified.get("matched_signature"));
+        List<Map<String, Object>> switches = (List<Map<String, Object>>) firstLook.get("role_failovers");
+        check.eq("one switch", 1, switches.size());
+        check.eq("caused by vendor_unavailable", "vendor_unavailable", switches.get(0).get("cause"));
+        check.eq("with the role code beside it", "role_vendor_unavailable", switches.get(0).get("role_code"));
+        check.eq("to the independent visual profile", "loop-eyes", switches.get(0).get("to_profile"));
+        Map<String, Object> secondLook = looks.get(1);
+        check.eq("the later look skips the refused profile up front", "loop-eyes", secondLook.get("profile"));
+        check.eq("and does not call it again", 1,
+                ((List<?>) secondLook.get("vendor_attempts")).size());
+        check.eq("the resolver says why", "vendor_unavailable_this_run",
+                ((Map<String, String>) secondLook.get("rejected_profiles")).get("loop-eyes-geo"));
+        check.eq("independence still refuses the same vendor", "same_vendor_as_writer",
+                ((Map<String, String>) secondLook.get("rejected_profiles")).get("loop-eyes-self"));
+        String evidence = Files.readString(routed.resolve(".warden/runs/geo1--visual-role-0/evidence.jsonl"));
+        check.contains("the ledger records the switch", evidence, "\"cause\":\"vendor_unavailable\"");
+        String rendered = dev.warden.ledger.RunReport.render(
+                new dev.warden.ledger.RunReport().of(routed, "geo1"));
+        check.contains("the report names the cause", rendered, "cause=vendor_unavailable");
+
+        Path stopped = newProject(sandbox, "visual-geo-stop", "medium", 20, true);
+        writeProfiles(home, sandbox, "visual-geo-stop", 1, 1);
+        writeVisualStub(home, sandbox, "visual-geo-stop", "loop-eyes-geo", "geovendor", "geo");
+        writeVisualStub(home, sandbox, "visual-geo-stop", "loop-eyes-self", "implvendor", "eyes");
+        writeVisualStub(home, sandbox, "visual-geo-stop", "loop-eyes", "eyesvendor", "eyes");
+        Files.writeString(home.resolve("policy.yaml"), visualGeoPolicy(false, false));
+        TaskLoop.Outcome halted = new TaskLoop(new ProcessRunner(),
+                (loaded, runId) -> stubVisual(true, wide)).run(
+                        new ConfigLoader().load(stopped, "hello"), UserConfig.load(home), "geo2", false);
+        check.that("the default still stops", !halted.ok());
+        check.eq("on vendor_unavailable", "vendor_unavailable", halted.reason());
+        check.eq("which is not a verdict", false,
+                dev.warden.run.TaskLoop.isAboutTheWork(halted.reason()));
+        check.eq("without calling the successor", 0,
+                counted(sandbox.resolve("visual-geo-stop-loop-eyes.count")));
+        check.that("and without a failover event",
+                !Files.readString(stopped.resolve(".warden/runs/geo2--visual-role-0/evidence.jsonl"))
+                        .contains("\"type\":\"role_failover\""));
+        Map<String, Object> infra = (Map<String, Object>) halted.summaryReport().get("infrastructure_failure");
+        check.eq("the summary's one-word cause", "unavailable", infra.get("cause"));
+        check.eq("and it is not a verdict", false, infra.get("verdict_on_the_work"));
+        check.contains("the next step says to add a profile",
+                String.valueOf(halted.summaryReport().get("safe_next_step")), "another profile");
+
+        Path envelope = newProject(sandbox, "visual-geo-envelope");
+        writeVendorRoster(home, sandbox, "visual-geo-envelope", "geo-envelope", "auto", null, null, null);
+        TaskLoop.Outcome enveloped = loop(envelope, home, "geo3");
+        check.that("an exit-0 error envelope fails over the same way", enveloped.ok());
+        Map<String, Object> envelopeReview = steps(enveloped).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> envelopeCalls =
+                (List<Map<String, Object>>) envelopeReview.get("vendor_attempts");
+        check.eq("the envelope is role_vendor_unavailable",
+                "role_vendor_unavailable", envelopeCalls.get(0).get("code"));
+        check.eq("detected from the structured error", "structured_error_event",
+                ((Map<String, Object>) envelopeCalls.get(0).get("vendor_unavailable")).get("detected_by"));
+
+        Path both = newProject(sandbox, "visual-geo-quota");
+        writeVendorRoster(home, sandbox, "visual-geo-quota", "quota-geo", "auto", null, null, null);
+        TaskLoop.Outcome quotaWins = loop(both, home, "geo4");
+        check.eq("a spent plan still outranks the 403",
+                "failover_requires_confirmation", quotaWins.reason());
+        Map<String, Object> quotaReview = steps(quotaWins).stream()
+                .filter(step -> "reviewer".equals(step.get("step"))).findFirst().orElseThrow();
+        List<Map<String, Object>> quotaCalls =
+                (List<Map<String, Object>>) quotaReview.get("vendor_attempts");
+        check.eq("the attempt is quota, not vendor_unavailable",
+                "role_quota_exhausted", quotaCalls.get(0).get("code"));
+        check.eq("the successor was not started", 0,
+                counted(sandbox.resolve("visual-geo-quota-loop-review-up.count")));
+    }
+
+    /** A visual_qa stand-in. {@code mode} is a {@link dev.warden.testing.StubVendor} mode. */
+    private void writeVisualStub(Path home, Path sandbox, String scenario, String name,
+                                 String vendor, String mode) throws IOException {
+        Path counter = sandbox.resolve(scenario + "-" + name + ".count");
+        Files.deleteIfExists(counter);
+        Files.writeString(home.resolve("profiles/" + name + ".yaml"), """
+                version: 1
+                profile: %s
+                role: visual_qa
+                vendor: %s
+                command: %s
+                read_only: true
+                args:
+                  - "-cp"
+                  - %s
+                  - "dev.warden.testing.StubVendor"
+                  - "%s"
+                  - "--counter"
+                  - %s
+                  - "--threshold"
+                  - "1"
+                attachments:
+                  flag: "-i"
+                limits: { wall_clock_minutes: 2 }
+                prompt_template: prompts/visual-qa.md
+                json_schema: schemas/visual-qa.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  verified_on: "2026-08-27"
+                """.formatted(name, vendor, yaml(javaExecutable()), yaml(absoluteClassPath()),
+                mode, yaml(counter.toString())));
+    }
+
+    /**
+     * @param failover whether {@code on_vendor_failure: auto} is set; otherwise the key is absent
+     * @param secondLook a second look stage, to prove the refused profile is skipped up front
+     */
+    private static String visualGeoPolicy(boolean failover, boolean secondLook) {
+        String failoverBlock = failover
+                ? "failover: { on_quota_exhausted: confirm, on_vendor_failure: auto }\n" : "";
+        String lookAgain = secondLook
+                ? "    - { stage: look-again, run: role, role: visual_qa, when: [visual_qa_required], sees: browser, on_fail: stop, on_findings: stop }\n"
+                : "";
+        String workflow = secondLook ? """
+                workflow:
+                  stages:
+                    - { stage: implement, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: fix, recheck_after_fix: true }
+                    - { stage: review, run: role, role: reviewer, when: [review_required], on_fail: stop, on_findings: fix, recheck_after_fix: true }
+                    - { stage: browser, run: visual_harness, when: [visual_qa_required], on_fail: fix, recheck_after_fix: true }
+                    - { stage: look, run: role, role: visual_qa, when: [visual_qa_required], sees: browser, on_fail: stop, on_findings: stop }
+                """ + lookAgain : "";
+        return """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl], strategy: first, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                  visual_qa: { profiles: [loop-eyes-geo, loop-eyes-self, loop-eyes], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                %s%s""".formatted(failoverBlock, workflow);
     }
 
     /** Implementer plus two reviewers. {@code mode} null omits {@code on_vendor_failure}. */

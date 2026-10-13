@@ -355,8 +355,11 @@ A review finding, a gate failure and a rejection are not this.
 
 A stop caused by a vendor's endpoint rather than by its reading of the work has its own reason:
 `quota_exhausted`, `rate_limited`, `role_timed_out`, `vendor_call_failed`,
-`vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
-`failover_requires_confirmation`. The summary carries `infrastructure_failure` (`cause`, the
+`vendor_unavailable`, `vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
+`failover_requires_confirmation`. `vendor_unavailable` is a location or eligibility refusal
+(HTTP 403, `PERMISSION_DENIED`, "not eligible", "not available in your location"). It counts
+as a vendor failure for `on_vendor_failure`, and that profile is skipped for the rest of the
+process. The summary carries `infrastructure_failure` (`cause`, the
 stage and profile, `verdict_on_the_work: false`). A `--continue` after any of them, whether
 answered `retry` or `switch`, reuses the verdicts that still describe the tree.
 

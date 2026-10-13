@@ -547,6 +547,7 @@ public final class RunReport {
         String value = code == null ? "" : String.valueOf(code);
         return switch (value) {
             case "role_command_failed" -> "vendor_call_failed";
+            case "role_vendor_unavailable" -> "vendor_unavailable";
             case "role_timeout" -> "role_timeout";
             case "role_artifact_unparseable", "role_artifact_incomplete",
                     "role_artifact_schema_violation" -> "artifact_invalid";

@@ -18,7 +18,7 @@ that exists in code but has never been run live says so.
   (default 1). A switch a person confirms on `--continue` counts, and the continuation
   keeps both that count and every profile that already failed the stage, so the roster
   cannot cycle back to one. Each switch writes `role_failover` with the cause (`vendor_call_failed`,
-  `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
+  `role_timeout`, `artifact_invalid` or `vendor_unavailable`), the role code, both profiles and who authorised
   it. The same path covers `role_local_endpoint_unreachable` and
   `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
   tail, and with `start_error` when the process could not be launched. A valid artifact from
@@ -48,6 +48,16 @@ that exists in code but has never been run live says so.
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
 ### Fixed
+
+- A location or eligibility refusal is `vendor_unavailable`, not a generic command failure
+  and not a verdict. HTTP 403, `PERMISSION_DENIED`, "not eligible" and "not available in
+  your location" are classified from a structured error or stderr, and only when the call
+  left no usable artifact. Quota still wins when both are present. The cause counts for
+  `failover.on_vendor_failure`, including a `visual_qa` look stage: list a second visual
+  profile and `auto` runs it. The refused profile is skipped for the rest of that process,
+  so a later stage does not dispatch it; a different profile of the same vendor is not
+  skipped, and independence still applies. A new process does not remember the refusal.
+  The default remains `stop`. Not yet run live. Suites `vendor availability` and `task loop`.
 
 - A quota failover in the same dispatch does not name a profile whose vendor call already
   failed. The ledger records the profile that runs, or the role stops when none can.

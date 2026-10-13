@@ -688,6 +688,32 @@ public final class StubVendor {
                         : "HTTP 403 permission denied");
                 System.exit(1);
             }
+            // The live agy geo refusal: PERMISSION_DENIED, code 403, not eligible, not
+            // available in this location. Non-zero, no artifact. Not a spent plan.
+            case "geo" -> {
+                count(args);
+                System.err.println("PERMISSION_DENIED (code 403): Your current account is not eligible "
+                        + "for Gemini Code Assist for individuals because it is not currently "
+                        + "available in your location");
+                System.exit(1);
+            }
+            // The same sentence inside an exit-0 error envelope, which agy has also printed.
+            case "geo-envelope" -> {
+                count(args);
+                System.out.println("{\"status\":\"ERROR\",\"error\":\"PERMISSION_DENIED (code 403): "
+                        + "Your current account is not eligible for Gemini Code Assist for individuals "
+                        + "because it is not currently available in your location\",\"retryable\":false}");
+                System.exit(0);
+            }
+            // Both sentences at once. Quota is the more specific fact and must win.
+            case "quota-geo" -> {
+                count(args);
+                System.out.println("{\"type\":\"error\",\"message\":\"You've hit your usage limit. "
+                        + "Try again at 9:21 PM.\"}");
+                System.err.println("PERMISSION_DENIED (code 403): Your current account is not eligible "
+                        + "because it is not currently available in your location");
+                System.exit(1);
+            }
             case "quota", "quota-after-edit" -> {
                 if (mode.equals("quota-after-edit")) {
                     Path target = Path.of("src", "result.txt");

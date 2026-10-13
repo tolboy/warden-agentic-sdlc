@@ -58,6 +58,7 @@ public final class MeasurementProjector {
             "role_code", "policy_setting",
             "failed_over_from", "exhausted_profiles", "role_failovers",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
+            "vendor_unavailable",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
             "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
             "reservation_matched_contract", "plan_review",
@@ -146,6 +147,14 @@ public final class MeasurementProjector {
     private static final Set<String> QUOTA = Set.of("detected_by", "matched_signature");
 
     /**
+     * A location or eligibility refusal. The vendor's sentence stays local
+     * ({@code vendor_message} is in {@link #NEVER}); the corpus keeps the kind and the
+     * signature that matched.
+     */
+    private static final Set<String> VENDOR_UNAVAILABLE =
+            Set.of("kind", "detected_by", "matched_signature");
+
+    /**
      * One recorded switch. Profile and vendor names, the cause, and who authorised it.
      * A quota object is not copied: it can carry the vendor's own sentence.
      */
@@ -186,6 +195,7 @@ public final class MeasurementProjector {
             Map.entry("escalation", ESCALATION),
             Map.entry("chain", CHAIN),
             Map.entry("quota", QUOTA),
+            Map.entry("vendor_unavailable", VENDOR_UNAVAILABLE),
             Map.entry("role_failovers", FAILOVER),
             Map.entry("vision_capability", VISION),
             Map.entry("accounting", ACCOUNTING),

@@ -167,10 +167,14 @@ public final class UserSetup {
             # that recorded decision: it names one role and one profile, and nothing else.
             failover:
               on_quota_exhausted: confirm
-              # A call that produced no artifact (network, timeout, permission, missing or
-              # invalid artifact). stop is the default and is today's behaviour. confirm and
-              # auto use the same role_failover event as a spent subscription, at most
-              # max_per_stage times in one role dispatch. A finding is not this.
+              # A call that produced no artifact (network, timeout, a location or eligibility
+              # refusal such as HTTP 403, missing or invalid artifact). A location or
+              # eligibility refusal is cause vendor_unavailable: it fails over like any other
+              # missing artifact, and that profile is skipped for the rest of the process.
+              # stop is the default and is today's behaviour. confirm and auto use the same
+              # role_failover event as a spent subscription, at most max_per_stage times in
+              # one role dispatch. A finding is not this. A look stage needs a second
+              # visual_qa profile in the roster before auto has anywhere to switch.
               on_vendor_failure: stop
               max_per_stage: 1
 

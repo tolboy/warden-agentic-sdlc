@@ -202,6 +202,20 @@ public final class QuotaSignal {
      * Pulls the message out of every error-shaped JSON object in a JSONL stream. A vendor that
      * streams events puts the real cause in one of them and then exits with a generic code.
      */
+    /** Structured error sentences in a JSONL stream. Package-visible for {@link VendorAvailability}. */
+    static List<String> structuredErrors(String output) {
+        return structuredErrorMessages(output);
+    }
+
+    /** Stderr lines, as text. Free-form stdout is never passed here. */
+    static List<String> stderrLines(String output) {
+        return lines(output);
+    }
+
+    static String condensed(String text) {
+        return condense(text);
+    }
+
     private static List<String> structuredErrorMessages(String output) {
         List<String> messages = new ArrayList<>();
         if (output == null) return messages;
