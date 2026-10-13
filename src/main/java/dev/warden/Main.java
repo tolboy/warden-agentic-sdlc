@@ -113,8 +113,30 @@ public final class Main {
 
     private static int validate(String[] args) throws Exception {
         if (args.length < 2) throw new IllegalArgumentException("validate requires a task id or YAML path");
-        ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
+        return validate(Path.of("."), args[1]);
+    }
+
+    /**
+     * Load the task and refuse a browser scenario the harness cannot run.
+     *
+     * {@code warden run} and {@code --dry-run} already ask the adapter before the first
+     * vendor is paid. Validate used to print {@code ok} for a step the grammar does not
+     * have, so a typo was discovered only when the browser stage ran. The grammar stays
+     * in the adapter: a missing node is not a failure here, the same as preflight.
+     */
+    static int validate(Path root, String task) throws Exception {
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(root, task);
+        String scenarioProblem = new VisualQaRunner(new ProcessRunner()).contractProblem(loaded);
         Map<String, Object> result = new LinkedHashMap<>();
+        if (scenarioProblem != null) {
+            result.put("ok", false);
+            result.put("code", "visual_qa_contract_invalid");
+            result.put("message", scenarioProblem);
+            result.put("project", loaded.project().project());
+            result.put("task_id", loaded.resolved().id());
+            System.out.println(Json.write(result));
+            return 1;
+        }
         result.put("ok", true);
         result.put("project", loaded.project().project());
         result.put("task_id", loaded.resolved().id());

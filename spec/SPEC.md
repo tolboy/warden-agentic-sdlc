@@ -483,8 +483,9 @@ Properties that are there on purpose:
    machine report, and the text the implementer received when the work came back.
 4. **The tester has eyes, and they come in two layers.** The lower layer is the harness: a real
    headless browser over CDP that locates an element by `text=` / `css=` / `testid=` /
-   `role=`, checks visibility, the reaction to a click and the absence of console errors, and
-   saves a screenshot. It knows nothing about any particular project. The upper layer is the
+   `role=`, checks visibility, focus, the reaction to a click or a named key (`press=KEY`),
+   and the absence of console errors, and saves a screenshot. It knows nothing about any
+   particular project. The upper layer is the
    `visual_qa` role: a model that receives the screenshots as **attachments** rather than
    filenames (`attachments.flag`, `-i` for codex), and answers only what a machine cannot
    measure — clipped text, overlap, a collapsed layout. The role is enabled in the policy and

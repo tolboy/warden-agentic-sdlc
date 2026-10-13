@@ -163,6 +163,49 @@ public final class VisualQaTest implements Suite {
         check.eq("and a console-only contract needs no locator at all", null,
                 new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
                         taskWith(project, "quiet", "1280x720: no-console-errors")));
+
+        check.eq("press= on a testid is a sayable scenario", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "keyed", "1280x720: testid=dialog press=Escape")));
+        check.eq("focused is a sayable assertion", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "focus", "1280x720: testid=field focused")));
+        check.eq("a key with no target is a sayable step", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "barekey", "1280x720: press=Tab", "1280x720: press=a")));
+        String unknown = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "blurry", "1280x720: testid=save blur=true"));
+        check.contains("an unknown step is rejected before a vendor is paid",
+                String.valueOf(unknown), "unknown step");
+        check.contains("and the message names the step", String.valueOf(unknown), "blur=true");
+        String badKey = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "misspelled", "1280x720: press=Esacpe"));
+        check.contains("an unknown key is rejected", String.valueOf(badKey), "Esacpe");
+        String typo = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "typo", "1280x720: typo=save visible"));
+        check.contains("an unknown verb is rejected", String.valueOf(typo), "typo=save");
+
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream previousOut = System.out;
+        int validateExit;
+        System.setOut(new java.io.PrintStream(buffer, true, java.nio.charset.StandardCharsets.UTF_8));
+        try {
+            validateExit = Main.validate(project, "blurry");
+        } finally {
+            System.setOut(previousOut);
+        }
+        check.eq("warden validate rejects the same unknown step dry-run stops on", 1, validateExit);
+        String printed = buffer.toString(java.nio.charset.StandardCharsets.UTF_8);
+        check.contains("and says it is a contract fault", printed, "visual_qa_contract_invalid");
+        check.contains("with the adapter's message", printed, "blur=true");
+        buffer.reset();
+        System.setOut(new java.io.PrintStream(buffer, true, java.nio.charset.StandardCharsets.UTF_8));
+        try {
+            validateExit = Main.validate(project, "keyed");
+        } finally {
+            System.setOut(previousOut);
+        }
+        check.eq("warden validate accepts press= and focused", 0, validateExit);
     }
 
     /**

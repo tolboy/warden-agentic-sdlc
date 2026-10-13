@@ -471,7 +471,7 @@ public final class UserSetup {
             ## What has already been settled without you
 
             If screenshots were handed to you, a headless browser may already have loaded the
-            page at each viewport and asserted visibility, clicks and console silence. Those
+            page at each viewport and asserted visibility, clicks, key presses, focus and console silence. Those
             facts are in the report below. **Do not re-litigate them.** If you took the
             pictures yourself, ignore this section: you are the harness.
 
@@ -605,8 +605,11 @@ public final class UserSetup {
             {{visual_scenarios}}
 
             Those two lists are the whole of the machine acceptance, and the second one is not
-            a plan — a headless browser runs it at the named viewports, clicks what it says to
-            click, and fails the run when an assertion does not hold. So "no command verifies
+            a plan — a headless browser runs it at the named viewports. The grammar is
+            `testid=` / `css=` / `role=` / `text=` with `visible`, `hidden`, `click`,
+            `click@x,y` or `focused`, plus `press=KEY` (Escape, Enter, Tab, Space, an arrow,
+            or one character; a matcher before it focuses that element first) and
+            `wait` / `wait-for`. The browser fails the run when an assertion does not hold. So "no command verifies"
             this change" is a finding only when **neither** list covers it. A live review once
             filed a P1 saying nothing asserted an attribute that the browser scenario on the
             next line asserted by name; the implementer was then sent to add a test for
@@ -856,7 +859,9 @@ public final class UserSetup {
                than granted. The invocation's grants are in the context below.
             6. **Ask for a visual contract when a person will look at the result.** Set
                `visual_qa.required` to true and give `visual_qa.scenarios` the harness already
-               understands (`testid=`, `text=`, `css=`, `no-console-errors`). Do not invent a
+               understands (`testid=`, `css=`, `role=`, `text=` with `visible`, `hidden`, `click`,
+               `focused`, or `press=KEY` for Escape, Enter, Tab, Space, an arrow or one character,
+               plus `wait`, `wait-for` and `no-console-errors`). Do not invent a
                data-testid. If you omit `visual_qa`, Warden applies the same rule a
                `--prepare off` draft uses: a UI goal on a project that serves a preview gets
                the honest default scenarios, so preparation is not weaker than the

@@ -401,8 +401,12 @@ visual_qa:
 ```
 
 Matchers: `text=` (by visible text), `css=`, `testid=`, `role=`. Assertions: `visible`,
-`hidden`, `click`. A bare `click` checks that pressing changes anything in the DOM at all;
-anything more specific is written after `->` rather than guessed.
+`hidden`, `click`, `focused` (`document.activeElement` is that element). `press=KEY`
+sends Escape, Enter, Tab, Space, an arrow or one character; `testid=dialog press=Escape`
+focuses that element first and does not require the DOM to change. A bare `click` checks
+that pressing changes anything in the DOM at all; anything more specific is written after
+`->` rather than guessed. `warden validate` and `run --dry-run` reject a step the grammar
+does not have, before a vendor is paid.
 
 Every scenario that looks at an element has to name one with `testid=`, `role=` or `css=`;
 preflight refuses one that goes by `text=` alone, before a vendor is paid. The copy on a

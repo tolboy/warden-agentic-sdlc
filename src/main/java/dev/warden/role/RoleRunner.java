@@ -1605,7 +1605,10 @@ public final class RoleRunner {
 
                 A headless browser runs these against the app after the acceptance commands.
                 They are part of the definition of done, not a suggestion: a matcher that finds
-                nothing fails the run and comes back to you as a fix round.
+                nothing fails the run and comes back to you as a fix round. The grammar is
+                `testid=` / `css=` / `role=` / `text=` with `visible`, `hidden`, `click`,
+                `click@x,y` or `focused`, plus `press=KEY` (Escape, Enter, Tab, Space, an arrow,
+                or one character; a matcher before it is focused first) and `wait` / `wait-for`.
 
                 """ + scenarios + "\n";
     }

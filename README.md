@@ -147,7 +147,10 @@ visual_qa:
     - "700x400: no-console-errors"
 ```
 
-Matchers `text=` / `css=` / `testid=` / `role=`, assertions `visible` / `hidden` / `click`.
+Matchers `text=` / `css=` / `testid=` / `role=`, assertions `visible` / `hidden` / `click`
+/ `focused`. `press=KEY` sends Escape, Enter, Tab, Space, an arrow or one character
+(`testid=dialog press=Escape` focuses that element first). `warden validate` and
+`run --dry-run` reject a step the grammar does not have.
 A separate `wait N` step holds for N seconds and takes a frame: everything else here judges
 the page 1.2 s after a click and is therefore blind to any interface running on its own clock
 — animations, a deferred scene, a countdown. A pause asserts nothing, it makes evidence, so a

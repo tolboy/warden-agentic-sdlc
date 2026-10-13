@@ -49,6 +49,15 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- The visual harness accepts `press=KEY` and `focused`. `press=Escape` (also Enter, Tab,
+  Space, the arrows, and one character) sends a CDP keyDown then keyUp; a matcher before
+  it (`testid=dialog press=Escape`) focuses that element first. `testid=field focused`
+  asserts `document.activeElement`. A press does not need the DOM to change. `warden
+  validate` and `run --dry-run` reject an unknown step (`blur=true`, `press=Esacpe`) with
+  the adapter's message, the same check the browser stage already used, so a typo is
+  `visual_qa_contract_invalid` before a vendor is paid. Not yet run live against a browser.
+  Suite `visual qa`.
+
 - A location or eligibility refusal is `vendor_unavailable`, not a generic command failure
   and not a verdict. HTTP 403, `PERMISSION_DENIED`, "not eligible" and "not available in
   your location" are classified from a structured error or stderr, and only when the call
