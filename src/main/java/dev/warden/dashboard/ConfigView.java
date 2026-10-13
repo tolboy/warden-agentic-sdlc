@@ -192,6 +192,8 @@ public final class ConfigView {
         if (policy == null) return rows;
         Map<String, Object> raw = raw(user.home().resolve("policy.yaml"));
         limit(rows, raw, "failover.on_quota_exhausted", policy.failoverMode());
+        limit(rows, raw, "failover.on_vendor_failure", policy.vendorFailureMode());
+        limit(rows, raw, "failover.max_per_stage", (long) policy.maxVendorFailovers());
         limit(rows, raw, "review.required_for_risk", List.copyOf(policy.reviewRequiredForRisk()));
         limit(rows, raw, "review.repair_severities", List.copyOf(policy.repairSeverities()));
         limit(rows, raw, "review.contract_gaps", policy.contractGaps());

@@ -9,7 +9,51 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Added
+
+- A role whose vendor returns no artifact can fail over. `failover.on_vendor_failure` is
+  `confirm`, `auto` or `stop`, and the default is `stop`, so a policy that never mentions
+  it still ends the role. `auto` switches to the next profile that satisfies
+  `require_independent_vendor`, at most `failover.max_per_stage` times for that stage
+  (default 1). A switch a person confirms on `--continue` counts, and the continuation
+  keeps both that count and every profile that already failed the stage, so the roster
+  cannot cycle back to one. Each switch writes `role_failover` with the cause (`vendor_call_failed`,
+  `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
+  it. The same path covers `role_local_endpoint_unreachable` and
+  `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
+  tail, and with `start_error` when the process could not be launched. A valid artifact from
+  the turn that finished is kept even when the process exits non-zero, and when a wall-clock
+  kill arrives after that artifact is already complete: the exit code or `timed_out` is
+  recorded and there is no failover. A timeout that left no complete artifact is still
+  `role_timeout` and may fail over. A multi-turn transcript whose final turn fails is that
+  failure, even when an earlier turn printed a usable answer, and whatever the failure was:
+  a quota, a turn ceiling, a dropped connection, a timeout, or any other non-zero exit or
+  `turn.failed`. A stdout capture cut off at 4 MiB is not read as success when the
+  process exits non-zero or is killed for time, including a timeout whose child exits 0,
+  because the prefix can hide the later turn. A quota sentence carried only on
+  `turn.failed`'s `error.message` is still a spent subscription. A ceiling phrase quoted in
+  an earlier answer is not itself a turn ceiling. A review finding, a gate
+  failure and a rejection do not take this path. Under `confirm`, `--continue` runs the
+  profile the person approved for that stage and writes `role_failover`
+  (`authorized_by: human`, `policy_setting: confirm`); every profile that already failed
+  that stage is skipped for that stage's attempt only. When that question follows an automatic vendor-failure switch
+  in the same dispatch, the continuation pins the approved profile and also keeps the
+  auto-failed profile out of that stage; a quota confirmation on its own is still not a
+  pin. The text report and the failover counts include a confirmed switch, including one
+  whose continued run has a single attempt. A confirmed switch followed by an automatic
+  quota switch in that same continuation counts as two, and `report.json` lists both
+  under `role_failovers`, including `authorized_by` and `policy_setting`. The portable
+  corpus projection keeps that list, so the same two switches count as two there as well.
+  A role may set its own
+  `on_vendor_failure`. Not yet run live. Suite `task loop`.
+
 ### Fixed
+
+- A quota failover in the same dispatch does not name a profile whose vendor call already
+  failed. The ledger records the profile that runs, or the role stops when none can.
+  A confirmed quota swap is still not a pin by itself. When that question follows an
+  automatic vendor-failure switch, `--continue` pins the approved profile and keeps the
+  auto-failed profile out of that stage only. Suite `task loop`.
 
 - A writer cut off by its turn ceiling or timeout is followed by one that knows it.
   `retry` or `advance` without a note dispatched the next implementer with an empty

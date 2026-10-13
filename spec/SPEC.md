@@ -349,6 +349,9 @@ section *The chain of model calls*.
 The optional `failover:` block declares what happens when a vendor reports a spent
 subscription: `on_quota_exhausted: confirm` (default) | `auto` | `stop`. A rate limit is not a
 spent subscription: it never fails over, and the run stops with `rate_limited`.
+`on_vendor_failure` is the same three choices for a call that produced no artifact, and it
+defaults to `stop`. `max_per_stage` (default 1) bounds how many times one dispatch may switch.
+A review finding, a gate failure and a rejection are not this.
 
 A stop caused by a vendor's endpoint rather than by its reading of the work has its own reason:
 `quota_exhausted`, `rate_limited`, `role_timed_out`, `vendor_call_failed`,

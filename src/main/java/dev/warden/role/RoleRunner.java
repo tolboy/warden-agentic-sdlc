@@ -52,6 +52,22 @@ import java.util.Set;
  * Failover is not free of consequence for a writing role: an implementer can be cut off after
  * it has already edited the tree. That is recorded rather than smoothed over, and the vendor
  * that inherits the work is told, in its prompt, that it is continuing someone else's.
+ *
+ * <h2>Failing over when the call produced no artifact</h2>
+ *
+ * A network error, a timeout, a permission refusal, or an artifact that is missing or
+ * invalid is also not a verdict on the work. {@code failover.on_vendor_failure} decides
+ * whether another profile may take the role. It defaults to {@code stop}, so a policy that
+ * never mentions it ends the role exactly as before. {@code auto} switches, {@code confirm}
+ * stops for the same human decision a spent subscription does, and {@code max_per_stage}
+ * (default 1) is how many substitutions that stage may make, including a switch confirmed
+ * on {@code --continue}. The continuation keeps that count and every profile that already
+ * failed the stage for the dispatch that honours the switch, and that dispatch spends both.
+ * A later re-run of the stage in the same process does not inherit either. A valid artifact is
+ * kept even when the process exits non-zero. A review finding, a gate failure and a rejection
+ * never enter this path: those are judgements, and routing around them would hide the defect. The
+ * failed attempt stays in {@code vendor_attempts}, with its code, the tail of what the
+ * vendor printed, and {@code start_error} when the process could not be launched.
  */
 public final class RoleRunner {
 
@@ -198,6 +214,49 @@ public final class RoleRunner {
     private final Set<String> exhausted = new LinkedHashSet<>();
 
     /**
+     * Profiles whose vendor call produced no artifact during the current {@link #run}.
+     *
+     * Cleared at the start of each dispatch. A network error is not a spent subscription,
+     * so the next stage may try the same profile again; within this dispatch it must not
+     * be selected twice, or a strategy of {@code first} would loop on it.
+     */
+    private final Set<String> vendorFailedThisDispatch = new LinkedHashSet<>();
+
+    /**
+     * A vendor-failure confirmation carried by {@code --continue}, keyed by stage.
+     *
+     * The pending question already named the successor. Rotation is not asked again:
+     * with {@code rotate} and three profiles it would dispatch someone the person
+     * never approved, and the failed call would not be there to emit {@code role_failover}.
+     */
+    private final Map<String, Map<String, Object>> confirmedVendorSwitches = new LinkedHashMap<>();
+
+    /**
+     * Profiles a continued stage must not pay again, until the first {@link #run} of that
+     * stage. Scoped to that stage, not to the process-lifetime {@link #exhausted} set: a
+     * network error is not a spent subscription, and a later stage may still select the
+     * profile. The set is every profile that already failed the stage, not only the last
+     * one. That first dispatch removes the entry, so a fix round that re-runs the stage
+     * does not keep excluding them.
+     */
+    private final Map<String, Set<String>> vendorExcludedForStage = new LinkedHashMap<>();
+
+    /**
+     * Vendor-failure substitutions a continued stage has already used, keyed by stage,
+     * until the first {@link #run} of that stage.
+     *
+     * A confirmed switch counts when that profile is dispatched, on top of this number.
+     * That first dispatch removes the entry. A fix round that re-runs the stage starts
+     * the count over; leaving it in place with {@code max_per_stage} at one makes the
+     * re-run unable to switch. A later stage does not inherit the count, and neither
+     * fact is a spent subscription.
+     */
+    private final Map<String, Integer> vendorFailoversCarried = new LinkedHashMap<>();
+
+    /** Stages whose confirmed switch has already been written, so a recheck does not write it twice. */
+    private final Set<String> confirmedSwitchRecorded = new LinkedHashSet<>();
+
+    /**
      * Assignments a run pinned for the rest of its chain, by role and by stage name.
      *
      * The escalation ladder names them: after the declared number of blocking readings the
@@ -226,6 +285,38 @@ public final class RoleRunner {
 
     public RoleRunner excluding(Set<String> profiles) {
         exhausted.addAll(profiles);
+        return this;
+    }
+
+    /**
+     * Honour a vendor-failure switch a person already approved.
+     *
+     * Pins {@code to_profile} for that stage, and remembers every profile that already
+     * failed it, plus how many substitutions the stage has already used. Neither fact is
+     * a spent subscription. The first {@link #run} of the stage spends both memories; a
+     * later dispatch in this process, including a fix round of the same stage, starts
+     * without them. A spent subscription is not stored here.
+     */
+    public RoleRunner honourConfirmedVendorFailure(Map<String, Object> pending) {
+        if (pending == null || pending.isEmpty()) return this;
+        String stage = pending.get("stage") == null
+                ? String.valueOf(pending.get("role"))
+                : String.valueOf(pending.get("stage"));
+        confirmedVendorSwitches.put(stage, new LinkedHashMap<>(pending));
+        Object successor = pending.get("to_profile");
+        if (successor != null && !String.valueOf(successor).isBlank()) {
+            replacements.put(stage, String.valueOf(successor));
+        }
+        if (pending.get("exhausted_profiles") instanceof List<?> names) {
+            Set<String> excluded = vendorExcludedForStage.computeIfAbsent(
+                    stage, key -> new LinkedHashSet<>());
+            for (Object name : names) {
+                if (name != null) excluded.add(String.valueOf(name));
+            }
+        }
+        if (pending.get("vendor_failovers") instanceof Number number) {
+            vendorFailoversCarried.put(stage, Math.max(0, number.intValue()));
+        }
         return this;
     }
 
@@ -290,8 +381,11 @@ public final class RoleRunner {
         String key = stage == null ? role : stage;
         String named = usable(replacements.get(key));
         if (named != null) return named;
-        // authorizedFailover is not a pin. It authorises the successor after quota;
-        // rotation still names the spent profile so the switch is a role_failover event.
+        // A quota authorisation is not a pin. Rotation still names the profile, and the
+        // spent one stays in the exhausted set so the switch is a role_failover when that
+        // call fails again. A vendor-failure confirmation is a pin, applied by
+        // honourConfirmedVendorFailure: the approved profile, not whoever rotation
+        // would pick with the failed name removed.
         if (stage != null && stageAssignments.containsKey(stage)) {
             named = usable(stageAssignments.get(stage));
             if (named != null) return named;
@@ -304,7 +398,9 @@ public final class RoleRunner {
     }
 
     private String usable(String profile) {
-        return profile == null || exhausted.contains(profile) ? null : profile;
+        if (profile == null || exhausted.contains(profile)
+                || vendorFailedThisDispatch.contains(profile)) return null;
+        return profile;
     }
 
     /**
@@ -332,6 +428,9 @@ public final class RoleRunner {
             rejected.put(pinned, "vision_capability_unverified");
         } else if (!profile.verified()) rejected.put(pinned, "profile_unverified");
         else if (exhausted.contains(pinned)) rejected.put(pinned, "quota_exhausted_this_run");
+        else if (vendorFailedThisDispatch.contains(pinned)) {
+            rejected.put(pinned, "vendor_failed_this_attempt");
+        }
         else if (!available(profile)) rejected.put(pinned, "executable_not_found");
         if (!rejected.isEmpty()) {
             throw new RoleResolver.Unresolvable("pinned profile cannot fill role " + role + ": "
@@ -603,6 +702,21 @@ public final class RoleRunner {
         double spent = 0;
         int rateLimitRetries = 0;
         List<Map<String, Object>> rateLimitPauses = new ArrayList<>();
+        // This attempt cannot switch more than the policy allows, and cannot select a
+        // profile that already failed it. A continuation of the same stage brings both
+        // facts back for this dispatch only: the first run() removes them. A fix round
+        // re-runs the stage in this same process and must start clean, or a carried
+        // count of one with max_per_stage at one would make that re-run unable to
+        // switch. A later stage never saw the entries. A spent subscription is not
+        // among them. It stays in the process-lifetime exhausted set, which this
+        // removal does not touch: the plan is still spent on the re-run.
+        vendorFailedThisDispatch.clear();
+        String stageKey = stageName == null ? role : stageName;
+        Set<String> stagedExclusion = vendorExcludedForStage.remove(stageKey);
+        if (stagedExclusion != null) vendorFailedThisDispatch.addAll(stagedExclusion);
+        int vendorFailovers = vendorFailoversCarried.getOrDefault(stageKey, 0);
+        vendorFailoversCarried.remove(stageKey);
+        List<Map<String, Object>> roleFailovers = new ArrayList<>();
 
         for (int attempt = 1; ; attempt++) {
             RoleResolver.Resolution resolution;
@@ -611,13 +725,14 @@ public final class RoleRunner {
                 resolution = pinned != null
                         ? resolvePinned(pinned, role, user, writers, pinnedByOperator(stageName, role))
                         : new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                                writers, rotation, this::available, exhausted);
+                                writers, rotation, this::available, exhausted, vendorFailedThisDispatch);
             } catch (RoleResolver.Unresolvable failure) {
-                return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId);
+                return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId,
+                        roleFailovers);
             } catch (RuntimeException failure) {
                 return unresolved(ledger, role, user, attempts,
                         new RoleResolver.Unresolvable(String.valueOf(failure.getMessage()), Map.of()), spent,
-                        roleInvocationId);
+                        roleInvocationId, roleFailovers);
             }
 
             // The servers a role may reach are the operator's file, resolved against the
@@ -625,18 +740,25 @@ public final class RoleRunner {
             // spent, not a vendor that failed to answer, so no failover applies.
             Profile chosen = overlay.adapt(stageName, resolution.selected(), user.profiles());
             String overlayProblem = overlay.problem(stageName, resolution.selected(), user.profiles());
-            if (overlayProblem != null || exhausted.contains(chosen.name())) {
+            if (overlayProblem != null || exhausted.contains(chosen.name())
+                    || vendorFailedThisDispatch.contains(chosen.name())) {
+                String why = overlayProblem != null ? "run_override_unavailable"
+                        : exhausted.contains(chosen.name()) ? "quota_exhausted_this_run"
+                        : "vendor_failed_this_attempt";
+                String message = overlayProblem != null ? overlayProblem
+                        : exhausted.contains(chosen.name())
+                        ? "profile exhausted: " + chosen.name()
+                        : "profile failed this attempt: " + chosen.name();
                 return unresolved(ledger, role, user, attempts,
-                        new RoleResolver.Unresolvable(overlayProblem == null
-                                ? "profile exhausted: " + chosen.name() : overlayProblem,
-                                Map.of(chosen.name(), "run_override_unavailable")), spent, roleInvocationId);
+                        new RoleResolver.Unresolvable(message, Map.of(chosen.name(), why)),
+                        spent, roleInvocationId, roleFailovers);
             }
             if (!available(chosen)) {
                 Map<String, String> rejected = new LinkedHashMap<>(resolution.rejected());
                 rejected.put(chosen.name(), "executable_not_found");
                 return unresolved(ledger, role, user, attempts,
                         new RoleResolver.Unresolvable("no eligible profile for role " + role
-                                + ": " + rejected, rejected), spent, roleInvocationId);
+                                + ": " + rejected, rejected), spent, roleInvocationId, roleFailovers);
             }
             Path mcpFile = chosen.mcpConfig() == null ? null
                     : user.resolve(chosen.mcpConfig());
@@ -844,6 +966,14 @@ public final class RoleRunner {
                     + (attempt > 1 ? "  (vendor attempt " + attempt + ")" : "")
                     + "  dispatching, up to " + profile.wallClockMinutes() + " min");
 
+            if (recordConfirmedSwitch(ledger, role, roleInvocationId, stageKey, profile, roleFailovers)
+                    && countsAsVendorFailover(confirmedVendorSwitches.get(stageKey).get("cause"))) {
+                // The substitution a person approved is one use of the stage's bound.
+                // It is counted when that profile is dispatched, before its result, so a
+                // failure of the successor cannot spend another switch the policy did not allow.
+                vendorFailovers++;
+            }
+
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
             RoleExecutor executor = executors.forProfile(profile, processes, git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
@@ -936,6 +1066,7 @@ public final class RoleRunner {
                                     + "in force");
                             report.put("vendor_attempts", attempts);
                             report.put("attempts_cost_usd", spent);
+                            rememberFailovers(report, roleFailovers);
                             Path path = ledger.writeReport("role-" + reportStem, report);
                             ledger.append("role_run", report);
                             return new Outcome(false, result.code(), role, profile.name(),
@@ -943,10 +1074,14 @@ public final class RoleRunner {
                         }
                         // Switching vendors mid-role changes who wrote the work, so it is an
                         // event in its own right rather than a line in a report nobody reads.
+                        // It joins the same list a vendor-failure switch and a confirmed
+                        // switch join, so a continuation that already recorded A→B and then
+                        // switches B→C on quota counts both.
                         Map<String, Object> failover = failoverEvent(role, profile, candidate,
                                 result, preAuthorized ? "human_switch_decision" : "policy_auto");
                         failover.put("role_invocation_id", roleInvocationId);
                         ledger.append("role_failover", failover);
+                        roleFailovers.add(failover);
                         replacements.put(stageName == null ? role : stageName, candidate.name());
                         continue;
                     }
@@ -957,12 +1092,24 @@ public final class RoleRunner {
                                 independenceNote(candidate, writers));
                         pending.put("stage", stageName == null ? role : stageName);
                         pending.put("exhausted_profiles", List.copyOf(exhausted));
+                        // An automatic vendor-failure switch earlier in this dispatch is not a
+                        // spent subscription, so it is not in exhausted_profiles. The
+                        // continuation still has to keep that profile out of this stage:
+                        // strategy `first` would pay it again, ahead of the profile a person
+                        // is about to approve.
+                        if (!vendorFailedThisDispatch.isEmpty()) {
+                            pending.put("vendor_failed_profiles", List.copyOf(vendorFailedThisDispatch));
+                        }
+                        // Substitutions already used on this stage. The continuation starts
+                        // from this number; the quota switch itself is not one of them.
+                        pending.put("vendor_failovers", (long) vendorFailovers);
                         pending.put("to_model", candidate.model());
                         pending.put("to_runner", candidate.runner());
                         pending.put("to_effort", candidate.effort());
                         report.put("failover_pending", pending);
                         report.put("vendor_attempts", attempts);
                         report.put("attempts_cost_usd", spent);
+                        rememberFailovers(report, roleFailovers);
                         report.put("resolution", "policy failover.on_quota_exhausted is 'confirm'. "
                                 + "Record the choice with `warden approve <run-id> --decision switch`, "
                                 + "then re-run with `--continue <run-id>`; or set "
@@ -985,6 +1132,103 @@ public final class RoleRunner {
                         : "every profile able to fill this role reported a spent subscription; "
                           + "add a profile from another vendor, or wait for the quota window "
                           + "named in the vendor message and re-run");
+            } else if (!result.ok() && vendorFailure(result.code())) {
+                // A finding is a successful call. A gate failure and a human rejection never
+                // enter this method. This branch is only a call that left nothing a later
+                // stage can believe: the vendor did not answer, or the answer was not an artifact.
+                vendorFailedThisDispatch.add(profile.name());
+                int maxSwitches = user.policy().maxVendorFailovers();
+                String mode = user.policy().vendorFailureModeFor(role);
+                boolean bounded = vendorFailovers >= maxSwitches;
+                Successor next = seekSuccessor(role, user, writers, rotation,
+                        vendorFailedThisDispatch);
+                Profile candidate = next.profile();
+                boolean preAuthorized = candidate != null && (candidate.name().equals(
+                        authorizedFailover.get(stageKey))
+                        || candidate.name().equals(authorizedFailover.get(role)));
+                String cause = vendorFailureCause(result.code());
+                String setting = spec.vendorFailureMode() != null
+                        ? "roles." + role + ".on_vendor_failure" : "failover.on_vendor_failure";
+                if (candidate != null && !bounded && ("auto".equals(mode) || preAuthorized)) {
+                    if (!gate.hasRoom()) {
+                        report.put("failover_declined_by_budget", candidate.name());
+                        report.put("resolution", "another profile could fill this role, but "
+                                + "no further vendor dispatch is allowed under the budget "
+                                + "in force");
+                        report.put("vendor_attempts", attempts);
+                        report.put("attempts_cost_usd", spent);
+                        rememberFailovers(report, roleFailovers);
+                        Path path = ledger.writeReport("role-" + reportStem, report);
+                        ledger.append("role_run", report);
+                        return new Outcome(false, result.code(), role, profile.name(),
+                                profile.vendor(), resolution.rejected(), path, report);
+                    }
+                    Map<String, Object> failover = failoverEvent(role, profile, candidate, result,
+                            preAuthorized ? "human_switch_decision" : "policy_auto", cause, setting);
+                    failover.put("role_invocation_id", roleInvocationId);
+                    ledger.append("role_failover", failover);
+                    roleFailovers.add(failover);
+                    replacements.put(stageKey, candidate.name());
+                    vendorFailovers++;
+                    progress.line("      " + profile.name() + " produced no artifact ("
+                            + cause + "); switching to " + candidate.name());
+                    continue;
+                }
+                if (candidate != null && !bounded && "confirm".equals(mode)) {
+                    Map<String, Object> pending = failoverEvent(role, profile, candidate, result,
+                            "pending_human_confirmation", cause, setting);
+                    pending.put("independence_after_switch", independenceNote(candidate, writers));
+                    pending.put("stage", stageKey);
+                    // Every profile that already failed this stage, not only the last one.
+                    // Live --continue excludes the whole set, so the roster cannot cycle
+                    // back to an earlier failure. They are not added to the process-lifetime
+                    // exhausted set: a later stage in this process may still try the profile.
+                    // vendor_failovers is how many substitutions are already spent, not
+                    // counting the one this question is asking about.
+                    pending.put("exhausted_profiles", List.copyOf(vendorFailedThisDispatch));
+                    pending.put("vendor_failovers", (long) vendorFailovers);
+                    // A spent subscription is not one of those failures. It lives only in
+                    // the process-lifetime exhausted set, which dies with this process, so
+                    // a continuation would otherwise offer it again (A spends its quota,
+                    // B returns nothing, a person confirms C, C fails, A is proposed).
+                    // The continuation restores the list with excluding(). A record written
+                    // before this field existed has no list, and that means none.
+                    if (!exhausted.isEmpty()) {
+                        pending.put("quota_exhausted_profiles", List.copyOf(exhausted));
+                    }
+                    pending.put("to_model", candidate.model());
+                    pending.put("to_runner", candidate.runner());
+                    pending.put("to_effort", candidate.effort());
+                    report.put("failover_pending", pending);
+                    report.put("vendor_attempts", attempts);
+                    report.put("attempts_cost_usd", spent);
+                    rememberFailovers(report, roleFailovers);
+                    report.put("resolution", "policy failover.on_vendor_failure is 'confirm'. "
+                            + "Record the choice with `warden approve <run-id> --decision switch`, "
+                            + "then re-run with `--continue <run-id>`; or set "
+                            + "failover.on_vendor_failure: auto to let Warden switch unattended.");
+                    Path pendingPath = ledger.writeReport("role-" + reportStem, report);
+                    ledger.append("role_run", report);
+                    return new Outcome(false, "role_failover_requires_confirmation", role,
+                            profile.name(), profile.vendor(), resolution.rejected(),
+                            pendingPath, report);
+                }
+                if (candidate != null && bounded && !"stop".equals(mode)) {
+                    report.put("failover_bound", candidate.name());
+                    report.put("resolution", "another profile could fill this role, but "
+                            + "failover.max_per_stage (" + maxSwitches + ") already allowed "
+                            + vendorFailovers + " substitution(s) on this attempt");
+                } else if (candidate != null) {
+                    report.put("failover_declined_by_policy", candidate.name());
+                    report.put("resolution", "another profile could fill this role, but "
+                            + setting + " is 'stop'");
+                } else if (!next.rejected().isEmpty()) {
+                    report.put("failover_rejected", next.rejected());
+                    report.put("resolution", "no other profile can fill this role: "
+                            + next.rejected());
+                } else {
+                    report.put("resolution", "no other profile can fill this role");
+                }
             }
 
             if (result.ok() && result.artifact() != null) {
@@ -999,6 +1243,7 @@ public final class RoleRunner {
 
             report.put("vendor_attempts", attempts);
             report.put("attempts_cost_usd", spent);
+            rememberFailovers(report, roleFailovers);
             if (attempts.size() > 1) {
                 report.put("failed_over_from", attempts.stream()
                         .limit(attempts.size() - 1L)
@@ -1036,33 +1281,150 @@ public final class RoleRunner {
      * none can. Asked before continuing so that the last vendor's failure is reported as its
      * own outcome rather than as an unresolvable role, and so that an operator being asked to
      * confirm a switch is told who would take over.
+     *
+     * Profiles that already returned no artifact in this dispatch are excluded. Naming one
+     * of them would record a switch to a profile the next iteration cannot run.
      */
     private Profile failoverCandidate(String role, UserConfig user, RoleResolver.Writers writers,
                                       long rotation) {
+        return seekSuccessor(role, user, writers, rotation, vendorFailedThisDispatch).profile();
+    }
+
+    /**
+     * The next profile that could take this role, and why the others cannot.
+     *
+     * {@code vendorFailed} names profiles that already returned no artifact in this
+     * dispatch. They are skipped with their own reason, not labelled as a spent plan.
+     */
+    private Successor seekSuccessor(String role, UserConfig user, RoleResolver.Writers writers,
+                                    long rotation, Set<String> vendorFailed) {
         try {
             Profile candidate = new RoleResolver().resolve(role, user.policy(), user.profiles(),
                     writers, rotation, profile -> {
                         if (overlay.problem(stageName, profile, user.profiles()) != null) return false;
                         Profile effective = overlay.adapt(stageName, profile, user.profiles());
-                        return !exhausted.contains(effective.name()) && available(effective);
-                    }, exhausted).selected();
-            return overlay.adapt(stageName, candidate, user.profiles());
+                        return !exhausted.contains(effective.name())
+                                && !vendorFailed.contains(effective.name())
+                                && available(effective);
+                    }, exhausted, vendorFailed).selected();
+            return new Successor(overlay.adapt(stageName, candidate, user.profiles()), Map.of());
+        } catch (RoleResolver.Unresolvable none) {
+            return new Successor(null, none.rejected());
         } catch (RuntimeException none) {
-            return null;
+            return new Successor(null, Map.of());
         }
+    }
+
+    private record Successor(Profile profile, Map<String, String> rejected) {}
+
+    /**
+     * Codes that mean the vendor produced nothing a later stage can believe.
+     *
+     * A timeout that already wrote a valid artifact does not arrive here: the executor
+     * returns ok and leaves {@code timed_out} on the attempt. {@code role_timeout} stays
+     * in this set for the call that left no complete artifact.
+     */
+    private static final Set<String> VENDOR_FAILURE_CODES = Set.of(
+            "role_command_failed",
+            "role_timeout",
+            "role_artifact_unparseable",
+            "role_artifact_incomplete",
+            "role_artifact_schema_violation",
+            "role_local_endpoint_unreachable",
+            "role_local_http_error");
+
+    private static boolean vendorFailure(String code) {
+        return VENDOR_FAILURE_CODES.contains(code);
+    }
+
+    /**
+     * The ledger {@code cause} for a missing artifact. The role's own code stays on
+     * {@code role_code}, so a network failure and a schema failure are not collapsed
+     * into one token where the evidence is read.
+     */
+    private static String vendorFailureCause(String code) {
+        return switch (code) {
+            case "role_command_failed", "role_local_endpoint_unreachable",
+                    "role_local_http_error" -> "vendor_call_failed";
+            case "role_timeout" -> "role_timeout";
+            case "role_artifact_unparseable", "role_artifact_incomplete",
+                    "role_artifact_schema_violation" -> "artifact_invalid";
+            default -> code;
+        };
+    }
+
+    /**
+     * The switch a person approved, written when that profile is the one about to run.
+     *
+     * {@code authorized_by} is {@code human} and {@code policy_setting} is {@code confirm}:
+     * the policy asked, and the continuation is the answer. Rotation is not consulted.
+     *
+     * @return whether this call wrote the switch. A repeat dispatch of the stage does not
+     *         write it again. The caller decides whether the cause counts against
+     *         {@code max_per_stage}; a spent subscription does not.
+     */
+    private boolean recordConfirmedSwitch(EvidenceLedger ledger, String role, String roleInvocationId,
+                                       String stageKey, Profile chosen,
+                                       List<Map<String, Object>> roleFailovers) throws Exception {
+        Map<String, Object> pending = confirmedVendorSwitches.get(stageKey);
+        if (pending == null || confirmedSwitchRecorded.contains(stageKey)) return false;
+        if (!chosen.name().equals(String.valueOf(pending.get("to_profile")))) return false;
+        confirmedSwitchRecorded.add(stageKey);
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("role", role);
+        event.put("from_profile", pending.get("from_profile"));
+        event.put("from_vendor", pending.get("from_vendor"));
+        event.put("to_profile", pending.get("to_profile"));
+        event.put("to_vendor", pending.get("to_vendor"));
+        event.put("from", pending.get("from_profile"));
+        event.put("to", pending.get("to_profile"));
+        event.put("cause", pending.get("cause"));
+        event.put("authorized_by", "human");
+        event.put("policy_setting", "confirm");
+        if (pending.get("role_code") != null) event.put("role_code", pending.get("role_code"));
+        event.put("role_invocation_id", roleInvocationId);
+        ledger.append("role_failover", event);
+        roleFailovers.add(event);
+        return true;
+    }
+
+    /** A missing artifact, as opposed to a spent subscription. The bound counts only these. */
+    private static boolean countsAsVendorFailover(Object cause) {
+        String value = cause == null ? "" : String.valueOf(cause);
+        return "vendor_call_failed".equals(value)
+                || "role_timeout".equals(value)
+                || "artifact_invalid".equals(value);
+    }
+
+    private static void rememberFailovers(Map<String, Object> report,
+                                          List<Map<String, Object>> roleFailovers) {
+        if (!roleFailovers.isEmpty()) report.put("role_failovers", List.copyOf(roleFailovers));
     }
 
     private static Map<String, Object> failoverEvent(String role, Profile from, Profile to,
                                                      RoleExecutor.Result result, String authorizedBy) {
+        return failoverEvent(role, from, to, result, authorizedBy, "role_quota_exhausted", null);
+    }
+
+    private static Map<String, Object> failoverEvent(String role, Profile from, Profile to,
+                                                     RoleExecutor.Result result, String authorizedBy,
+                                                     String cause, String policySetting) {
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("role", role);
         event.put("from_profile", from.name());
         event.put("from_vendor", from.vendor());
         event.put("to_profile", to.name());
         event.put("to_vendor", to.vendor());
-        event.put("cause", "role_quota_exhausted");
+        event.put("from", from.name());
+        event.put("to", to.name());
+        event.put("cause", cause);
         event.put("authorized_by", authorizedBy);
-        event.put("quota", result.evidence().getOrDefault("quota", Map.of()));
+        if ("role_quota_exhausted".equals(cause)) {
+            event.put("quota", result.evidence().getOrDefault("quota", Map.of()));
+        } else {
+            event.put("role_code", result.code());
+            if (policySetting != null) event.put("policy_setting", policySetting);
+        }
         return event;
     }
 
@@ -1092,10 +1454,18 @@ public final class RoleRunner {
      */
     private Outcome unresolved(EvidenceLedger ledger, String role, UserConfig user,
                                List<Map<String, Object>> attempts, RoleResolver.Unresolvable failure,
-                               double spent, String roleInvocationId) throws Exception {
-        boolean quota = !attempts.isEmpty()
-                || failure.rejected().containsValue("quota_exhausted_this_run");
-        String code = quota ? "role_quota_exhausted" : "role_unresolved";
+                               double spent, String roleInvocationId,
+                               List<Map<String, Object>> roleFailovers) throws Exception {
+        // Attempts from a missing artifact must not be retold as a spent subscription.
+        // Every other non-empty attempt list keeps the old reading: the role was already
+        // failing over from quota when resolution gave out.
+        boolean sawVendorFailure = attempts.stream()
+                .anyMatch(row -> vendorFailure(String.valueOf(row.get("code"))));
+        boolean quota = !sawVendorFailure && (!attempts.isEmpty()
+                || failure.rejected().containsValue("quota_exhausted_this_run"));
+        String code = quota ? "role_quota_exhausted"
+                : sawVendorFailure ? String.valueOf(attempts.get(attempts.size() - 1).get("code"))
+                : "role_unresolved";
 
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("message", String.valueOf(failure.getMessage()));
@@ -1105,10 +1475,15 @@ public final class RoleRunner {
         if (!attempts.isEmpty()) {
             details.put("vendor_attempts", attempts);
             details.put("attempts_cost_usd", spent);
-            details.put("exhausted_profiles", List.copyOf(exhausted));
-            details.put("resolution", "every profile able to fill this role reported a spent "
-                    + "subscription; add a profile from another vendor, or wait for the quota "
-                    + "window named in the vendor message and re-run");
+            rememberFailovers(details, roleFailovers);
+            if (quota) {
+                details.put("exhausted_profiles", List.copyOf(exhausted));
+                details.put("resolution", "every profile able to fill this role reported a spent "
+                        + "subscription; add a profile from another vendor, or wait for the quota "
+                        + "window named in the vendor message and re-run");
+            } else {
+                details.put("resolution", String.valueOf(failure.getMessage()));
+            }
         }
         Map<String, Object> unresolved = new LinkedHashMap<>();
         unresolved.put("role", role);
@@ -1159,6 +1534,11 @@ public final class RoleRunner {
         if (raw != null) entry.put("raw_stdout", raw);
         Object quota = result.evidence().get("quota");
         if (quota != null) entry.put("quota", quota);
+        // The failed call stays readable after a switch. The home corpus allowlist drops
+        // these tails; the local attempt does not.
+        for (String tail : List.of("stderr_tail", "stdout_tail", "exit_code", "timed_out", "start_error")) {
+            if (result.evidence().containsKey(tail)) entry.put(tail, result.evidence().get(tail));
+        }
         if (inheritsUnfinishedWork) entry.put("inherited_unfinished_work", true);
         return entry;
     }

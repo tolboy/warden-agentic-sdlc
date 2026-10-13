@@ -97,6 +97,7 @@ public final class RunReport {
         report.put("stages", stages);
         report.put("vendors", vendors(stages));
         report.put("failovers", failovers(stages));
+        report.put("role_failovers", roleFailovers(stages));
         report.put("visual", visual(stages));
         // Warden's own contract files are listed apart. They are a real difference in the
         // worktree and stay visible, but reporting "4 files changed" for a one-file fix sends
@@ -164,6 +165,9 @@ public final class RunReport {
                 stage.put("vendor_attempts", step.getOrDefault("vendor_attempts",
                         body.get("vendor_attempts")));
                 stage.put("failed_over_from", step.get("failed_over_from"));
+                Object recordedFailovers = step.get("role_failovers");
+                if (recordedFailovers == null) recordedFailovers = body.get("role_failovers");
+                if (recordedFailovers != null) stage.put("role_failovers", recordedFailovers);
                 stage.put("artifact_path", step.getOrDefault("artifact_path", body.get("artifact_path")));
                 stage.put("rejected_profiles", step.get("rejected_profiles"));
             } else if ("gates".equals(label) || "baseline".equals(label)) {
@@ -418,22 +422,137 @@ public final class RunReport {
         List<Map<String, Object>> switches = new ArrayList<>();
         for (Map<String, Object> stage : stages) {
             List<Map<String, Object>> calls = callsOf(stage);
-            if (calls.size() < 2) continue;
-            for (int index = 1; index < calls.size(); index++) {
-                Map<String, Object> before = calls.get(index - 1);
-                Map<String, Object> after = calls.get(index);
-                Map<String, Object> one = new LinkedHashMap<>();
-                one.put("step", stage.get("step"));
-                one.put("attempt", stage.get("attempt"));
-                one.put("from_profile", before.get("profile"));
-                one.put("from_vendor", before.get("vendor"));
-                one.put("from_code", before.get("code"));
-                one.put("to_profile", after.get("profile"));
-                one.put("to_vendor", after.get("vendor"));
-                switches.add(one);
+            if (calls.size() >= 2) {
+                for (int index = 1; index < calls.size(); index++) {
+                    Map<String, Object> before = calls.get(index - 1);
+                    Map<String, Object> after = calls.get(index);
+                    Map<String, Object> one = new LinkedHashMap<>();
+                    one.put("step", stage.get("step"));
+                    one.put("attempt", stage.get("attempt"));
+                    one.put("from_profile", before.get("profile"));
+                    one.put("from_vendor", before.get("vendor"));
+                    one.put("from_code", before.get("code"));
+                    one.put("cause", failoverCause(before.get("code")));
+                    one.put("to_profile", after.get("profile"));
+                    one.put("to_vendor", after.get("vendor"));
+                    one.put("from", one.get("from_profile"));
+                    one.put("to", one.get("to_profile"));
+                    Map<String, Object> recorded = recordedFailover(stage,
+                            one.get("from_profile"), one.get("to_profile"));
+                    if (recorded != null) {
+                        if (recorded.get("authorized_by") != null) {
+                            one.put("authorized_by", recorded.get("authorized_by"));
+                        }
+                        if (recorded.get("policy_setting") != null) {
+                            one.put("policy_setting", recorded.get("policy_setting"));
+                        }
+                        if (recorded.get("cause") != null) one.put("cause", recorded.get("cause"));
+                    }
+                    switches.add(one);
+                }
             }
+            // A confirmed continuation pins the approved profile and writes role_failover,
+            // then runs that one profile. Consecutive attempts cannot see the switch.
+            addUnseenRecordedFailovers(switches, stage);
         }
         return List.copyOf(switches);
+    }
+
+    /** Recorded switches this stage did not already reconstruct from its attempts. */
+    private static void addUnseenRecordedFailovers(List<Map<String, Object>> switches,
+                                                   Map<String, Object> stage) {
+        Object raw = stage.get("role_failovers");
+        if (!(raw instanceof List<?> rows)) return;
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> map)) continue;
+            Map<String, Object> event = cast(map);
+            Object from = event.get("from_profile") != null ? event.get("from_profile") : event.get("from");
+            Object to = event.get("to_profile") != null ? event.get("to_profile") : event.get("to");
+            boolean seen = false;
+            for (Map<String, Object> one : switches) {
+                if (String.valueOf(one.get("step")).equals(String.valueOf(stage.get("step")))
+                        && String.valueOf(one.get("attempt")).equals(String.valueOf(stage.get("attempt")))
+                        && String.valueOf(one.get("from_profile")).equals(String.valueOf(from))
+                        && String.valueOf(one.get("to_profile")).equals(String.valueOf(to))) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("step", stage.get("step"));
+            one.put("attempt", stage.get("attempt"));
+            one.put("from_profile", from);
+            one.put("from_vendor", event.get("from_vendor"));
+            Object code = event.get("role_code") != null ? event.get("role_code") : event.get("from_code");
+            one.put("from_code", code);
+            one.put("cause", event.get("cause") != null ? event.get("cause") : failoverCause(code));
+            one.put("to_profile", to);
+            one.put("to_vendor", event.get("to_vendor"));
+            one.put("from", from);
+            one.put("to", to);
+            if (event.get("authorized_by") != null) one.put("authorized_by", event.get("authorized_by"));
+            if (event.get("policy_setting") != null) one.put("policy_setting", event.get("policy_setting"));
+            switches.add(one);
+        }
+    }
+
+    /**
+     * The recorded {@code role_failover} events, one row per switch, with the authorisation
+     * the ledger wrote. A continuation that pins the approved profile has a single attempt,
+     * so reconstructing the switch from consecutive attempts would drop it. An automatic
+     * quota switch in that same continuation is a second recorded row.
+     */
+    private static List<Map<String, Object>> roleFailovers(List<Map<String, Object>> stages) {
+        List<Map<String, Object>> all = new ArrayList<>();
+        for (Map<String, Object> stage : stages) {
+            Object raw = stage.get("role_failovers");
+            if (!(raw instanceof List<?> rows)) continue;
+            for (Object item : rows) {
+                if (!(item instanceof Map<?, ?> map)) continue;
+                Map<String, Object> event = new LinkedHashMap<>(cast(map));
+                event.putIfAbsent("step", stage.get("step"));
+                event.putIfAbsent("attempt", stage.get("attempt"));
+                if (event.get("from") == null) event.put("from", event.get("from_profile"));
+                if (event.get("to") == null) event.put("to", event.get("to_profile"));
+                if (event.get("from_profile") == null) event.put("from_profile", event.get("from"));
+                if (event.get("to_profile") == null) event.put("to_profile", event.get("to"));
+                all.add(event);
+            }
+        }
+        return List.copyOf(all);
+    }
+
+    /** The ledger event for this from/to pair, when the stage recorded one. */
+    private static Map<String, Object> recordedFailover(Map<String, Object> stage,
+                                                        Object from, Object to) {
+        Object raw = stage.get("role_failovers");
+        if (!(raw instanceof List<?> rows)) return null;
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> map)) continue;
+            Map<String, Object> event = cast(map);
+            if (String.valueOf(event.get("from_profile")).equals(String.valueOf(from))
+                    && String.valueOf(event.get("to_profile")).equals(String.valueOf(to))) {
+                return event;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The class of failure a switch was made for. Quota keeps its own code. A missing
+     * artifact is named by what was missing, not by the role outcome that carried it.
+     */
+    private static String failoverCause(Object code) {
+        String value = code == null ? "" : String.valueOf(code);
+        return switch (value) {
+            case "role_command_failed" -> "vendor_call_failed";
+            case "role_timeout" -> "role_timeout";
+            case "role_artifact_unparseable", "role_artifact_incomplete",
+                    "role_artifact_schema_violation" -> "artifact_invalid";
+            case "role_quota_exhausted" -> "role_quota_exhausted";
+            default -> value.isEmpty() ? null : value;
+        };
     }
 
     private static Map<String, Object> visual(List<Map<String, Object>> stages) {
@@ -614,7 +733,12 @@ public final class RunReport {
                         .append(row.get("from_profile")).append(" (").append(row.get("from_vendor"))
                         .append(") ").append(row.get("from_code")).append(" -> ")
                         .append(row.get("to_profile")).append(" (").append(row.get("to_vendor"))
-                        .append(")\n");
+                        .append(")");
+                if (row.get("cause") != null) out.append("  cause=").append(row.get("cause"));
+                if (row.get("authorized_by") != null) {
+                    out.append("  authorized_by=").append(row.get("authorized_by"));
+                }
+                out.append('\n');
             }
         }
 

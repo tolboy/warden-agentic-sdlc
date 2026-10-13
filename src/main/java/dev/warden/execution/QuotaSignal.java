@@ -219,8 +219,17 @@ public final class QuotaSignal {
         return messages;
     }
 
-    @SuppressWarnings("unchecked")
     private static void collectErrorMessages(Map<String, Object> object, List<String> into, int depth) {
+        collectErrorMessages(object, into, depth, false);
+    }
+
+    /**
+     * @param errorContext true when {@code object} is itself the value of an {@code error}
+     *                     field. That payload often has no type, only {@code message}.
+     */
+    @SuppressWarnings("unchecked")
+    private static void collectErrorMessages(Map<String, Object> object, List<String> into, int depth,
+                                             boolean errorContext) {
         if (depth > 4) return;
         String type = object.get("type") instanceof String name ? name.toLowerCase(Locale.ROOT) : "";
         // A present-but-null `error` is the shape of a success envelope, not of a failure.
@@ -230,7 +239,7 @@ public final class QuotaSignal {
         // holds the model's own answer whenever the call succeeded, so it is read only when
         // the vendor itself flagged the envelope.
         boolean flaggedByVendor = Boolean.TRUE.equals(object.get("is_error"));
-        boolean errorShaped = flaggedByVendor || object.get("error") != null
+        boolean errorShaped = errorContext || flaggedByVendor || object.get("error") != null
                 || type.contains("error") || type.endsWith("failed");
         if (errorShaped) {
             for (String key : MESSAGE_KEYS) {
@@ -240,7 +249,11 @@ public final class QuotaSignal {
         if (flaggedByVendor && object.get("result") instanceof String text) into.add(text);
         Object nested = object.get("error");
         if (nested instanceof Map<?, ?> map) {
-            collectErrorMessages((Map<String, Object>) map, into, depth + 1);
+            // The object under `error` is the vendor's error payload. Codex puts the
+            // sentence only there (`turn.failed` → `error.message`) and that object has
+            // no type of its own, so the descent keeps the error context. A null `error`
+            // never reaches here: that shape is a success envelope.
+            collectErrorMessages((Map<String, Object>) map, into, depth + 1, true);
         } else if (nested instanceof String text) {
             into.add(text);
         }

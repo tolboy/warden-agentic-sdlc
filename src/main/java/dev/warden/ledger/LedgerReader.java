@@ -182,6 +182,7 @@ public final class LedgerReader {
         private final IntegerMetric durationMillis = new IntegerMetric();
         private long failovers;
         private long failoverRoleRuns;
+        private long vendorFailureFailovers;
         private long fixRounds;
         private long fixRoundsUnknown;
         private long baselineFailures;
@@ -250,6 +251,10 @@ public final class LedgerReader {
                     visualHarnessFailures++;
                 }
                 if ("task_run".equals(type)) acceptTaskRun(event);
+                if ("role_failover".equals(type)
+                        && !"role_quota_exhausted".equals(text(event.get("cause")))) {
+                    vendorFailureFailovers++;
+                }
                 acceptHumanEvent(event, type);
             }
             // New ledgers have a dedicated event per refusal. This fallback keeps metrics
@@ -343,6 +348,14 @@ public final class LedgerReader {
                     && count.longValue() > 1) {
                 transitions = Math.max(transitions, count.longValue() - 1);
             }
+            // A human-confirmed switch on --continue is one attempt plus a role_failover.
+            // Attempt transitions alone count it as zero. A later automatic quota switch
+            // in that same dispatch is a second recorded row beside the one attempt pair
+            // (B, then C). The larger source is the count, so both are included once the
+            // rows are on the role_run, and a switch that is in both is not counted twice.
+            if (event.get("role_failovers") instanceof List<?> recorded && !recorded.isEmpty()) {
+                transitions = Math.max(transitions, recorded.size());
+            }
             if (transitions > 0) {
                 failoverRoleRuns++;
                 failovers += transitions;
@@ -435,6 +448,7 @@ public final class LedgerReader {
             Map<String, Object> iterations = new LinkedHashMap<>();
             iterations.put("failovers", failovers);
             iterations.put("failover_role_runs", failoverRoleRuns);
+            iterations.put("vendor_failure_failovers", vendorFailureFailovers);
             iterations.put("fix_rounds", fixRounds);
             iterations.put("fix_rounds_unknown_runs", fixRoundsUnknown);
 

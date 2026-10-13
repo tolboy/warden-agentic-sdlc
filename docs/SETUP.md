@@ -241,6 +241,14 @@ workflow:
         on_fail: stop, on_findings: fix }
 ```
 
+A call that returns no artifact — a dropped connection, a timeout, a permission refusal, an
+unreadable answer — stops the role unless the policy says otherwise. `failover.on_vendor_failure`
+is `confirm`, `auto` or `stop`, and the default is `stop`. `auto` hands the role to the next
+profile that still satisfies `require_independent_vendor` and records `role_failover`. A finding,
+a red gate and a rejection are verdicts and never take this path. `failover.max_per_stage`
+(default 1) is how many times one dispatch may switch. A role may set its own
+`on_vendor_failure`; omitting it inherits the policy.
+
 `warden do <goal> --prepare always` runs the planner, then the plan reviewer over the compiled
 contract. The reviewer is told which workflow stages will judge the candidate. Blocking
 findings send the planner back once, including when a contract file was already on disk so

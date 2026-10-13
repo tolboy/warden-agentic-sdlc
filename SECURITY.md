@@ -40,7 +40,7 @@ These are properties the code holds, not aspirations. Each has a test.
 | A role cannot silently exceed its declared scope | The worktree's content fingerprint is taken before and after every role. A `read_only` role that wrote gets `role_violated_read_only` and its artifact is discarded whatever it claims |
 | A run cannot rewrite the terms it is judged by | The whole `.warden` tree except `runs/` is snapshotted before the first dispatch and compared after every role and around every gate command. Any change is `contract_mutated`, naming the path |
 | An unvetted vendor profile cannot be dispatched | The resolver refuses any profile without `verification.verified_on`, a date a human stamps after running the probe and reading its output. `--verify` alone never stamps it |
-| A vendor swap cannot happen unasked | `failover.on_quota_exhausted` defaults to `confirm`. Authorisation is a recorded decision carried by `warden run --continue`, permitting exactly one role-to-profile substitution |
+| A vendor swap cannot happen unasked | `failover.on_quota_exhausted` defaults to `confirm`. `failover.on_vendor_failure` defaults to `stop`, so a network error, a timeout or a missing artifact does not swap vendors unless the policy says so. Authorisation is a recorded decision carried by `warden run --continue`, permitting exactly one role-to-profile substitution |
 | Spending cannot run away | `budgets.max_role_runs` is checked before each dispatch and counts vendor calls, not roles. The dollar ceiling is best-effort by construction — see below |
 | Acceptance cannot be applied to a different tree | `accept` is refused when the worktree fingerprint moved after the decision was shown (`candidate_changed`) |
 

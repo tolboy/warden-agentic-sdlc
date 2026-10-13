@@ -148,11 +148,24 @@ public final class RoleResolver {
     public Resolution resolve(String role, Policy policy, Map<String, Profile> profiles,
                               Writers writers, long rotation, Availability availability,
                               Set<String> exhausted) {
+        return resolve(role, policy, profiles, writers, rotation, availability, exhausted, Set.of());
+    }
+
+    /**
+     * @param vendorFailed profiles that already returned no artifact during this one role
+     *                     dispatch. They stay eligible on a later dispatch: a network error
+     *                     is not a spent subscription. Passing them in {@code exhausted}
+     *                     would label the refusal as quota, which it is not.
+     */
+    public Resolution resolve(String role, Policy policy, Map<String, Profile> profiles,
+                              Writers writers, long rotation, Availability availability,
+                              Set<String> exhausted, Set<String> vendorFailed) {
         Policy.RoleSpec roleSpec = policy.roles().get(role);
         Map<String, String> rejected = new LinkedHashMap<>();
         List<Profile> eligible = new ArrayList<>();
         Map<String, String> assurances = new LinkedHashMap<>();
-        for (Candidate candidate : candidates(role, policy, profiles, writers, availability, exhausted)) {
+        for (Candidate candidate : candidates(role, policy, profiles, writers, availability,
+                exhausted, vendorFailed)) {
             if (!candidate.eligible()) { rejected.put(candidate.profile(), candidate.rejected()); continue; }
             eligible.add(profiles.get(candidate.profile()));
             assurances.put(candidate.profile(), candidate.assurance());
@@ -181,9 +194,16 @@ public final class RoleResolver {
      */
     public List<Candidate> candidates(String role, Policy policy, Map<String, Profile> profiles,
                                       Writers writers, Availability availability, Set<String> exhausted) {
+        return candidates(role, policy, profiles, writers, availability, exhausted, Set.of());
+    }
+
+    public List<Candidate> candidates(String role, Policy policy, Map<String, Profile> profiles,
+                                      Writers writers, Availability availability, Set<String> exhausted,
+                                      Set<String> vendorFailed) {
         Policy.RoleSpec roleSpec = policy.roles().get(role);
         if (roleSpec == null) throw new IllegalArgumentException("role is not configured: " + role);
         Writers known = writers == null ? Writers.NONE : writers;
+        Set<String> failed = vendorFailed == null ? Set.of() : vendorFailed;
         List<Candidate> verdicts = new ArrayList<>();
         for (String name : roleSpec.profiles()) {
             Profile profile = profiles.get(name);
@@ -202,6 +222,10 @@ public final class RoleResolver {
             if (!profile.verified()) { verdicts.add(new Candidate(name, "profile_unverified", null)); continue; }
             if (exhausted.contains(name)) {
                 verdicts.add(new Candidate(name, "quota_exhausted_this_run", null));
+                continue;
+            }
+            if (failed.contains(name)) {
+                verdicts.add(new Candidate(name, "vendor_failed_this_attempt", null));
                 continue;
             }
             String assurance = assuranceOf(roleSpec, profile, profiles, known);

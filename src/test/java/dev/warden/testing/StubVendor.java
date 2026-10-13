@@ -73,6 +73,16 @@ public final class StubVendor {
         return Double.parseDouble(raw);
     }
 
+    /** Increment {@code --counter} when the profile names one, without deciding a verdict. */
+    private static void count(String[] args) throws Exception {
+        String counterPath = flag(args, "--counter");
+        if (counterPath == null) return;
+        Path counter = Path.of(counterPath);
+        int seen = Files.isRegularFile(counter)
+                ? Integer.parseInt(Files.readString(counter).strip()) : 0;
+        Files.writeString(counter, String.valueOf(seen + 1), StandardCharsets.UTF_8);
+    }
+
     private static boolean succeedsNow(String[] args) throws Exception {
         String counterPath = flag(args, "--counter");
         String threshold = flag(args, "--threshold");
@@ -549,6 +559,135 @@ public final class StubVendor {
                     "{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
                     + "\"status\":\"completed\",\"verdict\":\"lgtm\",\"summary\":\"looks fine\","
                     + "\"findings\":[]}}");
+            // A real review, then exit 1. Reviewers do this after findings. The artifact is
+            // the verdict; the exit code is not a missing call.
+            case "review-findings-exit" -> {
+                count(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"review\","
+                        + "\"findings\":[{\"id\":\"exit-finding\",\"severity\":\"P1\","
+                        + "\"path\":\"src/result.txt\",\"message\":\"not good enough\","
+                        + "\"expected\":\"the final content\",\"actual\":\"an intermediate one\","
+                        + "\"scenario\":\"read src/result.txt after the run\","
+                        + "\"confidence\":\"confirmed\"}]},\"total_cost_usd\":0.004}");
+                System.exit(1);
+            }
+            // A valid review, flushed, then a hang past any wall clock the profile may set.
+            // The kill must not throw the verdict away.
+            case "review-then-hang" -> {
+                count(args);
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"fail\",\"summary\":\"review\","
+                        + "\"findings\":[{\"id\":\"hung-finding\",\"severity\":\"P1\","
+                        + "\"path\":\"src/result.txt\",\"message\":\"not good enough\","
+                        + "\"expected\":\"the final content\",\"actual\":\"an intermediate one\","
+                        + "\"scenario\":\"read src/result.txt after the run\","
+                        + "\"confidence\":\"confirmed\"}]},\"total_cost_usd\":0.004}");
+                System.out.flush();
+                Thread.sleep(180_000);
+            }
+            // Turn one prints a usable review. Turn two is a spent subscription and exits 1.
+            // The earlier answer must not become the outcome.
+            case "jsonl-then-quota" -> {
+                count(args);
+                printEarlierReview();
+                String message = "You've hit your usage limit. Upgrade to Pro "
+                        + "(https://example.invalid/pro), visit https://example.invalid/usage to "
+                        + "purchase more credits or try again at 9:21 PM.";
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"error\",\"message\":\"" + message + "\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":\"" + message + "\"}}");
+                System.err.println("ERROR transport: worker quit with fatal: Transport channel closed");
+                System.exit(1);
+            }
+            // The same shape, with the later turn hitting the vendor's own turn ceiling.
+            case "jsonl-then-ceiling" -> {
+                count(args);
+                printEarlierReview();
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"result\",\"subtype\":\"error_max_turns\","
+                        + "\"is_error\":true,\"num_turns\":40,\"total_cost_usd\":1.33}");
+                System.err.println("Error: max turns reached");
+                System.exit(1);
+            }
+            // Turn one prints a usable review. Turn two is a dropped connection, not a
+            // quota and not a ceiling, and exits 1. The earlier answer must not become ok.
+            case "jsonl-then-network" -> {
+                count(args);
+                printEarlierReview();
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":"
+                        + "\"connect: connection reset by peer\"}}");
+                System.err.println("connect: connection reset by peer");
+                System.exit(1);
+            }
+            // The earlier answer quotes a ceiling phrase. The later turn is a network
+            // failure. The quotation must not be classified as the ceiling.
+            case "jsonl-quoted-ceiling-then-network" -> {
+                count(args);
+                printEarlierReview("the log says error_max_turns and max turns reached");
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":"
+                        + "\"connect: connection reset by peer\"}}");
+                System.err.println("connect: connection reset by peer");
+                System.exit(1);
+            }
+            // A usable review, then enough bytes to pass the executor's capture cap, then
+            // a later turn the prefix cannot see. Exit 1. The captured answer is stale.
+            case "jsonl-then-truncated" -> {
+                count(args);
+                printEarlierReview();
+                exceedCaptureThenLaterTurn();
+                System.err.println("connect: connection reset by peer");
+                System.out.flush();
+                System.err.flush();
+                System.exit(1);
+            }
+            // The same prefix, then a hang. SIGTERM is answered with exit 0, which is what
+            // a vendor that traps the signal does. The timeout is still the outcome.
+            case "jsonl-then-truncated-timeout" -> {
+                count(args);
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> Runtime.getRuntime().halt(0)));
+                printEarlierReview();
+                exceedCaptureThenLaterTurn();
+                System.out.flush();
+                System.err.flush();
+                Thread.sleep(180_000);
+            }
+            // Quota named only on turn.failed's error.message. No sibling type:error event.
+            case "quota-message-only" -> {
+                count(args);
+                String message = "You've hit your usage limit. Upgrade to Pro "
+                        + "(https://example.invalid/pro), visit https://example.invalid/usage to "
+                        + "purchase more credits or try again at 9:21 PM.";
+                System.out.println("{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}");
+                System.out.println("{\"type\":\"turn.started\"}");
+                System.out.println("{\"type\":\"turn.failed\",\"error\":{\"message\":\""
+                        + message + "\"}}");
+                System.exit(1);
+            }
+            // The first call is a dropped connection; every later call is a clean pass.
+            // Models a profile that failed once and is still usable at a later stage.
+            case "network-once" -> {
+                if (withinFirst(args)) {
+                    System.err.println("connect: connection reset by peer");
+                    System.exit(1);
+                }
+                System.out.println("{\"structuredOutput\":{\"role\":\"reviewer\",\"task_id\":\"hello\","
+                        + "\"status\":\"completed\",\"verdict\":\"pass\",\"summary\":\"review\","
+                        + "\"findings\":[]},\"total_cost_usd\":0.004}");
+            }
+            // A call that never reaches the vendor. Counted, then a non-zero exit, so the
+            // role outcome is role_command_failed rather than a verdict. The two wordings
+            // are the ones a live agy failure actually printed: a reset connection, and a
+            // permission refusal.
+            case "network", "permission" -> {
+                count(args);
+                System.err.println("network".equals(mode)
+                        ? "connect: connection reset by peer"
+                        : "HTTP 403 permission denied");
+                System.exit(1);
+            }
             case "quota", "quota-after-edit" -> {
                 if (mode.equals("quota-after-edit")) {
                     Path target = Path.of("src", "result.txt");
@@ -822,6 +961,31 @@ public final class StubVendor {
                 System.exit(2);
             }
         }
+    }
+
+    /** Pad past the executor's capture cap, then start a turn the prefix cannot see. */
+    private static void exceedCaptureThenLaterTurn() {
+        int pad = dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES;
+        System.out.print("x".repeat(pad));
+        System.out.println();
+        System.out.println("{\"type\":\"turn.started\",\"marker\":\"later-turn-cut-off\"}");
+    }
+
+    /** One Codex turn whose agent_message is a complete passing review. */
+    private static void printEarlierReview() {
+        printEarlierReview("earlier turn");
+    }
+
+    private static void printEarlierReview(String summary) {
+        String artifact = dev.warden.json.Json.write(java.util.Map.of(
+                "role", "reviewer", "task_id", "hello", "status", "completed",
+                "verdict", "pass", "summary", summary, "findings", java.util.List.of()));
+        System.out.println("{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}");
+        System.out.println("{\"type\":\"turn.started\"}");
+        System.out.println(dev.warden.json.Json.write(java.util.Map.of(
+                "type", "item.completed",
+                "item", java.util.Map.of("id", "item-1", "type", "agent_message", "text", artifact))));
+        System.out.println("{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}");
     }
 
     /**

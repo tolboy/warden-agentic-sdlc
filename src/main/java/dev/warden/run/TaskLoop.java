@@ -9,6 +9,7 @@ import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
 import dev.warden.config.Workflow;
+import dev.warden.execution.Executors;
 import dev.warden.execution.orca.OrcaDecisionGate;
 import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.gate.GateRunner;
@@ -143,6 +144,8 @@ public final class TaskLoop {
     private java.util.function.LongSupplier clock = System::nanoTime;
     /** How the loop waits between rate-limit retries; the suite replaces it. */
     private java.util.function.LongConsumer sleeper;
+    /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
+    private Executors.Factory executors;
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -187,6 +190,20 @@ public final class TaskLoop {
     }
 
     /**
+     * The same loop, dispatching through {@code next} instead of the profile's own runner.
+     *
+     * A wall-clock timeout is at least a minute, because that is the smallest bound a
+     * profile may declare. The suite uses this to return the code a killed process produces
+     * without waiting the minute out. The same reason {@link #withClock} exists.
+     */
+    public TaskLoop withExecutors(Executors.Factory next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.executors = next;
+        return copy;
+    }
+
+    /**
      * The same loop, opening a live view of {@code narration} on its board once the run is
      * reserved. The loop opens it rather than its caller because the board records the tab
      * in the run's own directory, and a reservation refuses a directory it finds that in.
@@ -202,6 +219,7 @@ public final class TaskLoop {
         copy.clock = clock;
         copy.sleeper = sleeper;
         copy.watchNarration = watchNarration;
+        copy.executors = executors;
         return copy;
     }
 
@@ -415,6 +433,8 @@ public final class TaskLoop {
             Map.entry("role_prompt_undeliverable", "prompt_undeliverable"),
             Map.entry("role_rate_limited", "rate_limited"),
             Map.entry("role_quota_exhausted", "quota_exhausted"),
+            Map.entry("role_local_endpoint_unreachable", "vendor_call_failed"),
+            Map.entry("role_local_http_error", "vendor_call_failed"),
             // `reviewer_failed` reads as "the reviewer objected"; a spent turn ceiling is the
             // opposite of that, and the difference decides both what an operator goes and
             // reads and whether the stages that already passed survive the retry.
@@ -676,15 +696,50 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
+        if (executors != null) roles.withExecutors(executors);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
                     .resolve(carried.fromRunId()).resolve("task-run.json")));
-            if (previous.get("failover_pending") instanceof Map<?, ?> pending
-                    && pending.get("exhausted_profiles") instanceof List<?> names) {
-                java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
-                names.forEach(name -> excluded.add(String.valueOf(name)));
-                roles.excluding(excluded);
+            if (previous.get("failover_pending") instanceof Map<?, ?> pending) {
+                if (vendorFailureSwitch(pending)) {
+                    // Not the process-lifetime exhausted set. Every profile that already
+                    // failed this stage is skipped for this stage's attempt only, and the
+                    // approved successor is pinned. vendor_failovers is how many
+                    // substitutions that stage has already used. A spent subscription is
+                    // the other list: quota_exhausted_profiles is restored for the rest of
+                    // this process. A pending record from before that field existed has no
+                    // list, which is an empty exclusion.
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                    roles.honourConfirmedVendorFailure(copy);
+                    if (pending.get("quota_exhausted_profiles") instanceof List<?> quotaSpent) {
+                        java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                        for (Object name : quotaSpent) {
+                            if (name != null) excluded.add(String.valueOf(name));
+                        }
+                        if (!excluded.isEmpty()) roles.excluding(excluded);
+                    }
+                } else {
+                    if (pending.get("exhausted_profiles") instanceof List<?> names) {
+                        java.util.Set<String> excluded = new java.util.LinkedHashSet<>();
+                        names.forEach(name -> excluded.add(String.valueOf(name)));
+                        roles.excluding(excluded);
+                    }
+                    // Quota confirm after an automatic vendor-failure switch. The approved
+                    // profile is pinned, and the profile that already produced nothing stays
+                    // out of this stage only. A spent subscription above stays spent for
+                    // the rest of the process; a dropped connection does not.
+                    if (pending.get("vendor_failed_profiles") instanceof List<?> failed
+                            && !failed.isEmpty()) {
+                        Map<String, Object> copy = new LinkedHashMap<>();
+                        pending.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                        java.util.List<Object> onlyFailed = new java.util.ArrayList<>();
+                        failed.forEach(onlyFailed::add);
+                        copy.put("exhausted_profiles", onlyFailed);
+                        roles.honourConfirmedVendorFailure(copy);
+                    }
+                }
             }
         }
         // Contract, then whatever the outer command left for this run id, then this
@@ -753,6 +808,10 @@ public final class TaskLoop {
         summary.put("acceptance_commands", task.acceptanceCommands());
         summary.put("workflow_declared", user.policy() != null && user.policy().workflowDeclared());
         summary.put("failover_mode", user.policy() == null ? "confirm" : user.policy().failoverMode());
+        summary.put("failover_on_vendor_failure",
+                user.policy() == null ? "stop" : user.policy().vendorFailureMode());
+        summary.put("vendor_failure_max_per_stage",
+                user.policy() == null ? 1L : (long) user.policy().maxVendorFailovers());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
         Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
@@ -5181,6 +5240,9 @@ public final class TaskLoop {
                 entry.put("independence", step.details().get("independence"));
             }
             entry.put("failed_over_from", step.details().get("failed_over_from"));
+            if (step.details().get("role_failovers") != null) {
+                entry.put("role_failovers", step.details().get("role_failovers"));
+            }
             entry.put("artifact_path", step.details().get("artifact_path"));
             if ("role_quota_exhausted".equals(step.code())) {
                 entry.put("quota", step.details().get("quota"));
@@ -5188,6 +5250,18 @@ public final class TaskLoop {
             }
         }
         steps.add(entry);
+    }
+
+    /**
+     * A confirm-mode question about a call that produced no artifact, as opposed to a
+     * spent subscription. The two share a decision kind and must not share an exclusion:
+     * a network error is not a quota.
+     */
+    private static boolean vendorFailureSwitch(Map<?, ?> pending) {
+        String cause = String.valueOf(pending.get("cause"));
+        return "vendor_call_failed".equals(cause)
+                || "role_timeout".equals(cause)
+                || "artifact_invalid".equals(cause);
     }
 
     /**
@@ -5477,8 +5551,9 @@ public final class TaskLoop {
         Object base = summary.get("diff_base_commit");
         String fingerprint = base instanceof String commit
                 ? new GitRepository(root, processes).sourceFingerprint(commit) : null;
-        // A spent subscription with a named successor is a different question from a failure:
-        // nothing is wrong with the work, and what is being asked is who may finish it.
+        // A named successor — a spent subscription, or a vendor call that produced no
+        // artifact when the policy allows a switch — is a different question from a
+        // failure of the work. What is being asked is who may finish the role.
         Map<String, Object> pending = pendingFailover(steps);
         ApprovalStore store = new ApprovalStore(root);
         String runIdentity = String.valueOf(summary.get("run_id"));
@@ -5829,8 +5904,12 @@ public final class TaskLoop {
 
     /** What the human is actually being asked, in one line, with both vendors named. */
     private static String failoverQuestion(Map<String, Object> pending) {
+        String cause = String.valueOf(pending.get("cause"));
+        String what = "role_quota_exhausted".equals(cause)
+                ? "reported a spent subscription"
+                : "produced no artifact (" + cause + ")";
         return "role " + pending.get("role") + ": " + pending.get("from_profile")
-                + " (" + pending.get("from_vendor") + ") reported a spent subscription. "
+                + " (" + pending.get("from_vendor") + ") " + what + ". "
                 + "Switch to " + pending.get("to_profile") + " (" + pending.get("to_vendor")
                 + ")? " + pending.get("independence_after_switch");
     }

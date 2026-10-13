@@ -12,6 +12,8 @@ review:
   required_for_risk: [low, medium, high]
 failover:
   on_quota_exhausted: stop
+  on_vendor_failure: stop
+  max_per_stage: 1
 budget:
   repair_reserve: full
 workflow:

@@ -74,6 +74,7 @@ wrong silently.
 |---|---|
 | `failovers` | Vendor-to-vendor transitions, counted per transition |
 | `failover_role_runs` | Role runs that involved at least one, so one run that switched twice is not read as two runs that switched |
+| `vendor_failure_failovers` | `role_failover` events whose cause is not a spent subscription: a call that produced no artifact |
 | `fix_rounds` | Fix attempts consumed, from each task run's `attempts_used` |
 | `fix_rounds_unknown_runs` | Task runs whose attempt count could not be read, kept separate rather than assumed to be 0 |
 
@@ -109,7 +110,7 @@ that fails the contract, once against a tree that passes — and prints this led
  "metrics":{"role_runs":{"total":0,"by_role":{},"by_profile":{},"by_vendor":{},"by_model":{},
                          "by_runner":{},"by_outcome":{}},
             "telemetry":{"cost_usd":{"known_count":0,"unknown_count":0,"total":null}},
-            "iterations":{"failovers":0,"fix_rounds":0,"fix_rounds_unknown_runs":0},
+            "iterations":{"failovers":0,"vendor_failure_failovers":0,"fix_rounds":0,"fix_rounds_unknown_runs":0},
             "failures":{"baseline":0,"machine_gate":1,"visual_qa":0,"quota":0,"configuration":0},
             "human":{"decisions":0,"by_decision":{},"wait_events":0}}}
 ```

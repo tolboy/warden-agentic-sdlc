@@ -35,6 +35,46 @@ public final class WorkflowTest implements Suite {
                 !silent.workflowDeclared());
         check.eq("and gets the documented chain", Workflow.builtIn().toList(),
                 silent.workflow().toList());
+        check.eq("a policy that says nothing about a missing artifact stops",
+                "stop", silent.vendorFailureMode());
+        check.eq("and one substitution is the bound", 1, silent.maxVendorFailovers());
+        check.eq("a role that says nothing inherits", null,
+                silent.roles().get("reviewer").vendorFailureMode());
+        check.eq("so the effective mode is the policy default", "stop",
+                silent.vendorFailureModeFor("reviewer"));
+
+        Policy opted = Policy.parse("""
+                version: 1
+                failover: { on_vendor_failure: auto, max_per_stage: 2 }
+                roles:
+                  implementer: { profiles: [a], strategy: first, on_vendor_failure: confirm }
+                  reviewer: { profiles: [b], strategy: first }
+                """, "policy.yaml");
+        check.eq("on_vendor_failure is read", "auto", opted.vendorFailureMode());
+        check.eq("max_per_stage is read", 2, opted.maxVendorFailovers());
+        check.eq("a role may override it", "confirm", opted.vendorFailureModeFor("implementer"));
+        check.eq("and a role that does not still inherits", "auto",
+                opted.vendorFailureModeFor("reviewer"));
+        check.rejects("an unknown vendor-failure mode is refused", "must be one of",
+                () -> Policy.parse("""
+                        version: 1
+                        failover: { on_vendor_failure: maybe }
+                        roles:
+                          implementer: { profiles: [a], strategy: first }
+                        """, "policy.yaml"));
+        check.rejects("max_per_stage above 8 is refused", "must be between",
+                () -> Policy.parse("""
+                        version: 1
+                        failover: { max_per_stage: 9 }
+                        roles:
+                          implementer: { profiles: [a], strategy: first }
+                        """, "policy.yaml"));
+        check.rejects("an unknown role key is still refused", "unsupported key",
+                () -> Policy.parse("""
+                        version: 1
+                        roles:
+                          implementer: { profiles: [a], strategy: first, on_a_whim: true }
+                        """, "policy.yaml"));
 
         List<Workflow.Stage> builtIn = Workflow.builtIn().stages();
         check.eq("the built-in chain runs five stages", 5, builtIn.size());
@@ -238,6 +278,9 @@ public final class WorkflowTest implements Suite {
         check.that("the policy `warden setup` writes declares a workflow", shipped.workflowDeclared());
         check.eq("and it is exactly the built-in chain, written out",
                 Workflow.builtIn().toList(), shipped.workflow().toList());
+        check.eq("and vendor-failure failover stays stopped", "stop", shipped.vendorFailureMode());
+        check.eq("with one substitution available when a role opts in",
+                1, shipped.maxVendorFailovers());
     }
     private void repairPreviewChecks(Check check) {
         var plan = new dev.warden.run.CallPlan(Workflow.builtIn(), stage -> false);
@@ -298,7 +341,8 @@ public final class WorkflowTest implements Suite {
         for (String code : List.of("role_timeout", "role_command_failed",
                 "role_artifact_unparseable", "role_artifact_incomplete",
                 "role_artifact_schema_violation", "role_prompt_undeliverable",
-                "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted")) {
+                "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted",
+                "role_local_endpoint_unreachable", "role_local_http_error")) {
             check.eq(code + " is an infrastructure failure", true,
                     dev.warden.run.TaskLoop.isInfrastructureFailure(code));
         }
