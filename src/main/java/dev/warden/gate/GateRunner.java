@@ -84,8 +84,9 @@ public final class GateRunner {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId, home);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);
+        // A standalone gate also pins recovery copies when no run snapshot was supplied.
         Map<String, String> config = pinnedConfig != null ? pinnedConfig
-                : WardenTree.snapshot(loaded.root());
+                : WardenTree.snapshot(loaded.root(), runId);
         String contractHash = WardenTree.digest(config);
         String mergeBase;
         try {

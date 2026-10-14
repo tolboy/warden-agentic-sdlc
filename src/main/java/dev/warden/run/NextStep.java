@@ -320,6 +320,9 @@ public final class NextStep {
             case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
                     "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
+                if ("restore_contract".equals(kind)) {
+                    commands.add("warden restore-contract " + runId);
+                }
                 if ("fix_contract".equals(kind) && contractGapStop(reason) && onlyContractGaps(findings)) {
                     String gap = firstContractGapId(findings);
                     if (!gap.isBlank()) {

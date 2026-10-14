@@ -33,9 +33,12 @@ public final class NextStepTest implements Suite {
     private void aMutatedContractNamesTheFiles(Check check) {
         Map<String, Object> summary = summary("run-1", "hello");
         summary.put("contract_changes", List.of(".warden/tasks/hello.yaml (modified)",
-                ".warden/tasks/extra.yaml (added)"));
+                ".warden/tasks/extra.yaml (added)", ".warden/tasks/deleted.yaml (removed)"));
         Map<String, Object> step = NextStep.of("contract_mutated", summary, null);
         String edits = String.valueOf(step.get("edits"));
+        String commands = String.valueOf(step.get("commands"));
+        check.contains("restore uses a cross-platform command", commands, "warden restore-contract run-1");
+        check.that("restore does not suggest deleting files", !commands.contains("rm --"));
         check.contains("the modified task file is named", edits, "file=.warden/tasks/hello.yaml,");
         check.contains("with what a git revert means for it", edits, "a writer reverted it with git");
         check.contains("an added file is to be removed", edits, "file=.warden/tasks/extra.yaml, change=remove it");

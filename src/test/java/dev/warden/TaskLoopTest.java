@@ -6059,6 +6059,9 @@ public final class TaskLoopTest implements Suite {
         writeProfile(home, "loop-impl", "implementer", "implvendor", false,
                 "implementer", "role, task_id, status, summary, files_changed",
                 "impl-reverts-contract", sandbox.resolve("reverted-contract-impl.count"), 1);
+        Path revertedTask = reverted.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(revertedTask, Files.readString(revertedTask) + "# compiled contract: café\r\n");
+        byte[] pinnedBytes = Files.readAllBytes(revertedTask);
         TaskLoop.Outcome revertedRun = loop(reverted, home, "rv1");
         check.eq("a writer that moves the contract stops the run", "contract_mutated", revertedRun.reason());
         check.contains("and the summary names the file it moved",
@@ -6067,6 +6070,25 @@ public final class TaskLoopTest implements Suite {
         check.contains("which the next step asks the person to restore",
                 String.valueOf(revertedRun.summaryReport().get("next_step")),
                 "file=.warden/tasks/hello.yaml");
+        Path savedContract = reverted.resolve(".warden/runs/rv1/contract/.warden/tasks/hello.yaml");
+        check.that("the byte-exact compiled contract survives the writer's git checkout",
+                java.util.Arrays.equals(pinnedBytes, Files.readAllBytes(savedContract)));
+        check.that("checkout actually replaced the compiled bytes",
+                !java.util.Arrays.equals(pinnedBytes, Files.readAllBytes(revertedTask)));
+        check.eq("the project config is also pinned", Files.readString(reverted.resolve(".warden/project.yaml")),
+                Files.readString(reverted.resolve(".warden/runs/rv1/contract/.warden/project.yaml")));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> restoreStep = (Map<String, Object>) revertedRun.summaryReport().get("next_step");
+        String restore = String.valueOf(((List<?>) restoreStep.get("commands")).get(0));
+        check.eq("the first next-step command restores this run", "warden restore-contract rv1", restore);
+        check.eq("restore succeeds", true,
+                new dev.warden.config.RestoreContractCommand().run(reverted, "rv1").get("ok"));
+        check.that("restoring returns the exact compiled bytes",
+                java.util.Arrays.equals(pinnedBytes, Files.readAllBytes(revertedTask)));
+        check.that("the restored configuration matches all pinned hashes",
+                dev.warden.config.WardenTree.changedSince(reverted,
+                        dev.warden.config.WardenTree.snapshot(reverted.resolve(".warden/runs/rv1/contract"))).isEmpty());
+
         writeProfiles(home, sandbox, "after-revert", 1, 1);
 
         // A stop that judged the work is not an interruption: nothing extra is handed over.

@@ -211,9 +211,9 @@ public final class StubVendor {
                 Path src = Path.of("src");
                 Files.createDirectories(src);
                 Files.writeString(src.resolve("result.txt"), "ok", StandardCharsets.UTF_8);
-                Path task = Path.of(".warden", "tasks", "hello.yaml");
-                Files.writeString(task, Files.readString(task) + "# reverted by the writer\n",
-                        StandardCharsets.UTF_8);
+                int restored = new ProcessBuilder("git", "checkout", "--", ".warden")
+                        .inheritIO().start().waitFor();
+                if (restored != 0) throw new IllegalStateException("git checkout failed: " + restored);
                 System.out.println("{\"structuredOutput\":{\"role\":\"implementer\",\"task_id\":\"hello\","
                         + "\"status\":\"completed\",\"summary\":\"created\","
                         + "\"files_changed\":[\"src/result.txt\"]}}");
