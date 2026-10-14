@@ -165,6 +165,20 @@ the same acceptance hash and diff base, and a matching on-disk report checksum; 
 it records `reproduction_status: not_run_candidate_present` and continues. Dry runs list
 the commands that must fail and record a `dry_run` reproduction step without execution.
 
+Optional task `prior_writers: [grok]` names the vendors a person vouches wrote the tree a
+run starts on when it already differs from the diff base (an existing PR branch). They join
+the writer set with `writer_provenance: declared_prior_writers`, so a reader of one of those
+vendors is refused and any other is `independent`. Without it that tree is
+`unknown_preexisting_candidate` and every reading is `unproven`. When non-empty it
+participates in `acceptance_sha256` (sorted, joined by NUL).
+
+A gate command that cannot run on this machine — the shell cannot find it, Node cannot
+resolve a bare package (`Cannot find module 'x'`, `Cannot find package 'x'`), or a child
+cannot be spawned (`spawn x ENOENT`) — is `gate_environment_error`, at the baseline or
+after a writer. It is never a fix round: the run stops with `environment_signal` and
+`environment_command`, next step `fix_environment`. A relative or absolute import is still
+`command_failed`.
+
 Optional task `manual_verification: ["keyboard chord", "hover"]` lists checks a person
 already does by hand. A blank item is rejected, so it cannot match every finding.
 When the list is non-empty it participates

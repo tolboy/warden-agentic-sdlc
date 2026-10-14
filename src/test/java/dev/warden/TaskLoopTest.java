@@ -1,5 +1,6 @@
 package dev.warden;
 
+import dev.warden.gate.GateRunner;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.RunOverride;
 import dev.warden.config.UserConfig;
@@ -257,6 +258,7 @@ public final class TaskLoopTest implements Suite {
 
             reproductionChecks(check, sandbox, home);
             baselineChecks(check, sandbox, home);
+            environmentErrorChecks(check, sandbox, home);
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
@@ -4272,6 +4274,54 @@ public final class TaskLoopTest implements Suite {
                 "unknown_preexisting_candidate", unexplained.summaryReport().get("writer_provenance"));
         check.eq("so nothing read over that tree is called independent", "unproven",
                 unexplained.summaryReport().get("review_assurance"));
+        check.eq("this unit names why and the way out (#46)", true,
+                TaskLoop.unprovenReason(unexplained.summaryReport()).contains("prior_writers")
+                        && TaskLoop.unprovenReason(unexplained.summaryReport()).contains("implvendor"));
+
+        // A declaration on that same tree keeps the vendor Warden measured writing into it.
+        Path strangerTask = stranger.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(strangerTask, Files.readString(strangerTask) + "prior_writers: [othervendor]\n");
+        TaskLoop.Outcome declaredOver = loop(stranger, home, "pv9f");
+        check.that("a declaration does not erase a measured writer",
+                declaredOver.summaryReport().get("writer_vendors") instanceof List<?> vendors
+                        && vendors.contains("implvendor") && vendors.contains("othervendor"));
+        check.eq("and says which run measured it", "pv9",
+                declaredOver.summaryReport().get("measured_writers_from"));
+
+        // A person who knows who wrote the starting tree (an existing PR branch) says so.
+        Path declared = newProject(sandbox, "prov-declared");
+        writeProfiles(home, sandbox, "prov-declared", 1, 1);
+        Files.writeString(declared.resolve("src/stranger.txt"), "written on the PR branch" + System.lineSeparator());
+        Path declaredTask = declared.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(declaredTask, Files.readString(declaredTask) + "prior_writers: [implvendor]\n");
+        TaskLoop.Outcome vouched = loop(declared, home, "pv9b");
+        check.that("a declared starting author still reaches the gate", vouched.ok());
+        check.eq("the claim is labelled as declared, not measured", "declared_prior_writers",
+                vouched.summaryReport().get("writer_provenance"));
+        check.eq("and the declared vendor joins the writer set", List.of("implvendor"),
+                vouched.summaryReport().get("writer_vendors"));
+        check.eq("so a reader from another vendor is independent", "independent",
+                vouched.summaryReport().get("review_assurance"));
+
+        Path declaredReader = newProject(sandbox, "prov-declared-reader");
+        writeProfiles(home, sandbox, "prov-declared-reader", 1, 1);
+        Files.writeString(declaredReader.resolve("src/stranger.txt"), "written by the reviewer's vendor" + System.lineSeparator());
+        Path readerTask = declaredReader.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(readerTask, Files.readString(readerTask) + "prior_writers: [reviewvendor]\n");
+        TaskLoop.Outcome refusedReader = loop(declaredReader, home, "pv9c");
+        check.eq("a declared author's own vendor may not be the independent reader",
+                "independent_review_unavailable", refusedReader.reason());
+
+        // Inheriting writers from an earlier run does not drop a declaration made since.
+        Path redeclared = newProject(sandbox, "prov-redeclared");
+        writeProfiles(home, sandbox, "prov-redeclared", 1, 1);
+        TaskLoop.Outcome firstRecorded = loop(redeclared, home, "pv9d");
+        check.that("the recorded run reaches the gate", firstRecorded.ok());
+        Path redeclaredTask = redeclared.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(redeclaredTask, Files.readString(redeclaredTask) + "prior_writers: [reviewvendor]\n");
+        TaskLoop.Outcome redeclaredRun = loop(redeclared, home, "pv9e");
+        check.eq("the later declaration still refuses its vendor as the reader",
+                "independent_review_unavailable", redeclaredRun.reason());
 
         // The same tree, a new run id and no --continue: the run that left this tree is
         // found by its recorded closing fingerprint, not by being the newest folder.
@@ -6252,6 +6302,97 @@ public final class TaskLoopTest implements Suite {
                 "worktree changed");
         check.eq("and it still spends no new vendor call", 0L,
                 moved.summaryReport().get("role_runs"));
+    }
+
+    /**
+     * A gate that cannot run on this machine stops for a person (#49). Measured 2026-10-13:
+     * `Cannot find module 'playwright'` was sent to a fix round and the implementer started
+     * hunting a pnpm store for it inside a project script.
+     */
+    private void environmentErrorChecks(Check check, Path sandbox, Path home) throws Exception {
+        java.util.function.BiFunction<String, String, ProcessRunner.Result> failed =
+                (stderr, stdout) -> new ProcessRunner.Result(List.of("sh"), 1, false, 5L,
+                        stdout, stderr, false, false);
+        check.eq("a missing bare package is the environment", "module not found: playwright",
+                GateRunner.environmentSignal(failed.apply(
+                        "Error: Cannot find module 'playwright'\nRequire stack:\n- x.mjs", "")));
+        check.eq("a scoped package too", "module not found: @playwright/test",
+                GateRunner.environmentSignal(failed.apply(
+                        "Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@playwright/test' imported from /p/a.mjs", "")));
+        check.eq("a child that cannot be spawned", "executable not found: chromium",
+                GateRunner.environmentSignal(failed.apply("", "Error: spawn chromium ENOENT")));
+        check.eq("a relative import is the implementer's to repair", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module './util'", "")));
+        check.eq("an absolute one too", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module '/app/src/x.js'", "")));
+        check.eq("a Windows drive path is the project's own file", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module 'C:\\project\\src\\missing.js'", "")));
+        check.eq("so is a forward-slash drive path", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module 'C:/project/src/missing.js'", "")));
+        check.eq("and a UNC path", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module '\\\\host\\share\\x.js'", "")));
+        check.eq("a shell not-found names the command", "playwright",
+                GateRunner.missingName(new ProcessRunner.Result(List.of("sh"), 127, false, 5L, "",
+                        "/bin/sh: 1: playwright: not found", false, false)));
+        check.eq("a node signal names the package", "playwright",
+                GateRunner.missingName(failed.apply("Error: Cannot find module 'playwright'", "")));
+        check.eq("an ordinary failure is not", null,
+                GateRunner.environmentSignal(failed.apply("AssertionError: expected 1 to be 2", "")));
+        check.eq("a passing command is never one", null,
+                GateRunner.environmentSignal(new ProcessRunner.Result(List.of("sh"), 0, false, 5L,
+                        "", "Cannot find module 'playwright'", false, false)));
+
+        Path project = newProject(sandbox, "environment-error");
+        String missing = WINDOWS
+                ? "echo Error: Cannot find module 'playwright' 1>&2 & exit /b 1"
+                : "echo \"Error: Cannot find module 'playwright'\" >&2; exit 1";
+        Path task = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "acceptance: [" + yaml(missing) + "]\n");
+        writeProfiles(home, sandbox, "environment-error", 1, 1);
+        TaskLoop.Outcome stopped = loop(project, home, "env-error-1");
+        check.eq("a gate that cannot run here stops for a person", "gate_environment_error",
+                stopped.reason());
+        check.eq("without a fix round paid to work around it", 1L,
+                stopped.summaryReport().get("role_runs"));
+        check.eq("and names what is missing", "module not found: playwright",
+                stopped.summaryReport().get("environment_signal"));
+        check.contains("the next step says to install it, not to repair the code",
+                String.valueOf(stopped.summaryReport().get("safe_next_step")), "could not run on this machine");
+        check.that("the implementer was never sent a gate repair context",
+                !Files.exists(project.resolve(".warden/runs/env-error-1/context/fix-1-gates.md")));
+
+        // A name the candidate itself introduces or touches is the writer's to repair (a
+        // mistyped import, a dropped dependency), so only an untouched name is the machine's.
+        dev.warden.git.GitRepository git = new dev.warden.git.GitRepository(project, new ProcessRunner());
+        String mergeBase = git.mergeBase("HEAD");
+        Files.writeString(project.resolve("src/uses.js"), "require('playwrigth');\n");
+        java.util.Set<String> changed = git.changedPaths(mergeBase);
+        check.that("a missing name the candidate wrote is the implementer's",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "playwrigth"));
+        check.that("a missing name the candidate never touched is the environment's",
+                !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
+        Files.writeString(project.resolve("src/package.json"), "{\"dependencies\": {\"@scope/pkg\": \"1\"}}\n");
+        changed = git.changedPaths(mergeBase);
+        check.that("a scoped subpath is found by its package's name",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "@scope/pkg/sub"));
+        // A deleted project executable is the writer's defect, not the machine's: the path
+        // itself must count even when no content line names it.
+        Path bin = project.resolve("tools/check");
+        Files.createDirectories(bin.getParent());
+        Files.writeString(bin, "#!/bin/sh\nexit 0\n");
+        new ProcessRunner().run(List.of("git", "add", "--", "tools/check"), project, Duration.ofSeconds(10));
+        new ProcessRunner().run(List.of("git", "commit", "-m", "add check"), project, Duration.ofSeconds(20));
+        mergeBase = git.mergeBase("HEAD");
+        Files.delete(bin);
+        changed = git.changedPaths(mergeBase);
+        check.that("a deleted executable path is the implementer's",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "./tools/check"));
+        check.that("so is its basename from spawn ENOENT",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "check"));
+        check.that("an unrelated missing name stays the environment's",
+                !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
+        check.that("pathMatchesMissing strips a leading ./",
+                GateRunner.pathMatchesMissing("tools/check", "./tools/check"));
     }
 
     private void roleFailureRoutingChecks(Check check) {

@@ -1055,6 +1055,12 @@ public final class TaskLoop {
                     progress.line("      ok    " + Progress.elapsed(millis));
                     workspace.note("baseline · project tests · ok · " + Progress.elapsed(millis));
                     progress.blank();
+                } else if ("gate_environment_error".equals(baseline.code())) {
+                    progress.line("      FAILED  " + Progress.elapsed(millis) + "   "
+                            + baseline.code());
+                    workspace.note("baseline · project tests · environment error · no vendor dispatched");
+                    recordEnvironmentError(summary, baseline);
+                    return stop(ledger, summary, "gate_environment_error", steps, 0, budget);
                 } else {
                     progress.line("      FAILED  " + Progress.elapsed(millis) + "   "
                             + baseline.code());
@@ -1296,7 +1302,7 @@ public final class TaskLoop {
                         : "same_vendor_peer".equals(assurance)
                             ? " (a declared same-vendor pair read it; that is not an independent review)"
                             : "unproven".equals(assurance)
-                                ? " (who wrote the candidate is not recorded, so no reading can be called independent)"
+                                ? unprovenReason(summary)
                                 : " (a co-author of the candidate read it)");
         }
         // A chain can reach the human gate with stages still owed — a conditional stage that
@@ -1959,7 +1965,10 @@ public final class TaskLoop {
             "base_ref_unresolvable",
             "contract_mutated",
             "gate_interrupted",
-            "gate_internal_error");
+            "gate_internal_error",
+            // A missing tool or module on this machine. No candidate change fixes it that
+            // is not a workaround for the box the gate happens to run on.
+            "gate_environment_error");
 
     /**
      * Role failures about the endpoint rather than about the work. A model that is not
@@ -2260,7 +2269,8 @@ public final class TaskLoop {
          */
         private RoleResolver.Writers writers() {
             return new RoleResolver.Writers(writerVendors, writerProfiles,
-                    "recorded".equals(writerProvenance) || "derived_from_steps".equals(writerProvenance),
+                    "recorded".equals(writerProvenance) || "derived_from_steps".equals(writerProvenance)
+                            || "declared_prior_writers".equals(writerProvenance),
                     "same_vendor_peer".equals(task.reviewAssurance()));
         }
 
@@ -2330,6 +2340,16 @@ public final class TaskLoop {
          * answer to "who wrote this", not a failure of the loop.
          */
         private boolean inheritWritersFromLatestSameTask() {
+            return inheritWritersFromLatestSameTask(false);
+        }
+
+        /**
+         * @param measuredOnly take the writers a matching run measured even when its own
+         *                     provenance was unknown, and leave this run's provenance alone.
+         *                     A declaration names who wrote the starting tree; it must not
+         *                     erase a vendor Warden itself saw write into it.
+         */
+        private boolean inheritWritersFromLatestSameTask(boolean measuredOnly) {
             Path runs = loaded.root().resolve(".warden/runs");
             if (!Files.isDirectory(runs)) return false;
             Object here = summary.get("candidate_fingerprint");
@@ -2358,8 +2378,8 @@ public final class TaskLoop {
                     if (!(prior.get("writer_vendors") instanceof List<?> vendors) || vendors.isEmpty()) {
                         continue;
                     }
-                    if (!(prior.get("writer_provenance") instanceof String provenance)
-                            || provenance.startsWith("unknown")) {
+                    if (!measuredOnly && (!(prior.get("writer_provenance") instanceof String provenance)
+                            || provenance.startsWith("unknown"))) {
                         continue;
                     }
                     String closed;
@@ -2390,6 +2410,13 @@ public final class TaskLoop {
             if (vendorsFound.isEmpty()) return false;
             writerVendors.addAll(vendorsFound);
             writerProfiles.addAll(profilesFound);
+            if (measuredOnly) {
+                if (match.get("run_id") != null) {
+                    summary.put("measured_writers_from", String.valueOf(match.get("run_id")));
+                }
+                publishWriters();
+                return true;
+            }
             // The prior run's own word for how well it knew its writers, not a better one.
             writerProvenance = String.valueOf(match.get("writer_provenance"));
             if (match.get("run_id") != null) {
@@ -2397,6 +2424,34 @@ public final class TaskLoop {
             }
             publishWriters();
             return true;
+        }
+
+        /**
+         * The task's own word for who wrote the tree this run starts on (#46).
+         *
+         * A run on an existing PR branch starts with a candidate no Warden run wrote, so its
+         * authors are unknown and every reading is `unproven` — even when the reviewer's
+         * vendor wrote nothing anyone can see. A person who knows the branch's authors names
+         * their vendors in `prior_writers`; they join the writer set, so a reviewer of one of
+         * those vendors is refused and any other is independent. The provenance says
+         * `declared_prior_writers`, so the report never passes the claim off as measured.
+         */
+        private boolean declarePriorWriters() {
+            if (task.priorWriters().isEmpty()) return false;
+            inheritWritersFromLatestSameTask(true);
+            writerVendors.addAll(task.priorWriters());
+            writerProvenance = "declared_prior_writers";
+            summary.put("prior_writers", List.copyOf(task.priorWriters()));
+            publishWriters();
+            return true;
+        }
+
+        /** Union the task's declared authors into a writer set known some other way. */
+        private void addDeclaredPriorWriters() {
+            if (task.priorWriters().isEmpty()) return;
+            writerVendors.addAll(task.priorWriters());
+            summary.put("prior_writers", List.copyOf(task.priorWriters()));
+            publishWriters();
         }
 
         private void restoreWriters() {
@@ -2408,8 +2463,14 @@ public final class TaskLoop {
                 candidatePresent = true;
             }
             if (!carried.continuesRun()) {
-                if (candidatePresent && !inheritWritersFromLatestSameTask()) {
-                    writerProvenance = "unknown_preexisting_candidate";
+                if (candidatePresent) {
+                    if (inheritWritersFromLatestSameTask()) {
+                        // A declaration made since that run still counts: a vendor a person
+                        // now names as an author must not read the tree as independent.
+                        addDeclaredPriorWriters();
+                    } else if (!declarePriorWriters()) {
+                        writerProvenance = "unknown_preexisting_candidate";
+                    }
                 }
                 return;
             }
@@ -2441,7 +2502,8 @@ public final class TaskLoop {
                 // the names are of runs that wrote, not of whatever was in the tree before
                 // them, and that gap is exactly what `unknown` is the word for.
                 String recorded = prior.get("writer_provenance") instanceof String text ? text : "recorded";
-                writerProvenance = recorded.startsWith("unknown") ? recorded : "recorded";
+                writerProvenance = recorded.startsWith("unknown") || "declared_prior_writers".equals(recorded)
+                        ? recorded : "recorded";
             } else {
                 boolean anyWriter = false;
                 if (prior.get("steps") instanceof List<?> rows) {
@@ -2470,6 +2532,7 @@ public final class TaskLoop {
             if (candidatePresent && (priorFingerprint == null || !priorFingerprint.equals(now))) {
                 writerProvenance = "unknown_tree_moved";
             }
+            if (candidatePresent) addDeclaredPriorWriters();
         }
 
         /** Keep lifecycle memory on an authorised continuation, even when content needs re-review. */
@@ -4125,6 +4188,10 @@ public final class TaskLoop {
             if (outcome instanceof GateRunner.Outcome gate && "contract_mutated".equals(gate.code())) {
                 return "contract_mutated";
             }
+            if (outcome instanceof GateRunner.Outcome gate && "gate_environment_error".equals(gate.code())) {
+                recordEnvironmentError(summary, gate);
+                return "gate_environment_error";
+            }
             return stage.failureReason();
         }
 
@@ -5324,6 +5391,44 @@ public final class TaskLoop {
         summary.put("infrastructure_failure", failure);
     }
 
+    /**
+     * Why a reading is `unproven`, with what would fix it. The usual cause is a run that
+     * started on a tree that already differed from the diff base (an existing PR branch):
+     * this run's own writers are known, the starting tree's are not (#46).
+     */
+    public static String unprovenReason(Map<String, Object> summary) {
+        String provenance = String.valueOf(summary.get("writer_provenance"));
+        String these = summary.get("writer_vendors") instanceof List<?> vendors && !vendors.isEmpty()
+                ? "; this run's writers were " + String.join(", ", vendors.stream().map(String::valueOf).toList())
+                : "";
+        if ("unknown_preexisting_candidate".equals(provenance)) {
+            return " (the tree already differed from the diff base when the run started, and nobody "
+                    + "recorded who wrote that part" + these + ". If you know its authors, name their "
+                    + "vendors in the task's prior_writers and start a new run)";
+        }
+        if ("unknown_tree_moved".equals(provenance)) {
+            return " (the tree changed outside Warden since the run this one continues" + these + ")";
+        }
+        return " (who wrote the candidate is not recorded, so no reading can be called independent)";
+    }
+
+    /** Name the command and the signal on the run, for the person who has to install it. */
+    private static void recordEnvironmentError(Map<String, Object> summary, GateRunner.Outcome gate) {
+        Map<String, Object> data = gate.data() == null ? Map.of() : gate.data();
+        if (data.get("environment_signal") != null) {
+            summary.put("environment_signal", String.valueOf(data.get("environment_signal")));
+        }
+        if (data.get("environment_command") != null) {
+            summary.put("environment_command", String.valueOf(data.get("environment_command")));
+        }
+        summary.putIfAbsent("resolution", "A gate command could not run on this machine"
+                + (data.get("environment_command") != null
+                    ? " (`" + data.get("environment_command") + "`: " + data.get("environment_signal") + ")"
+                    : "")
+                + ". Install the missing tool or module, or remove the command from the gates, "
+                + "then continue; no implementer was asked to work around the environment.");
+    }
+
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
                                         int attempt, boolean dryRun, List<Map<String, Object>> steps,
                                         Map<String, String> pinnedConfig, String diffBaseCommit)
@@ -5827,6 +5932,11 @@ public final class TaskLoop {
             case "reproduction_inconclusive" -> "the reproduction could not establish a red base. "
                     + "Resolve the timeout or gate error and start a new run on the unchanged tree "
                     + "before paying a vendor.";
+            case "gate_environment_error" -> "a gate command could not run on this machine ("
+                    + summary.getOrDefault("environment_signal", "missing tool or module")
+                    + "), so it says nothing about the candidate and no implementer was asked to "
+                    + "work around it. Install what it names here, or remove the command from the "
+                    + "gates if it cannot run in this environment, then --continue " + runId + ".";
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";

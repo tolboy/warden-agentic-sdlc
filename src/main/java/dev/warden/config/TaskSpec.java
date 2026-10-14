@@ -31,11 +31,23 @@ public record TaskSpec(
         Long timeoutMinutes,
         String reviewAssurance,
         RunOverride use,
-        List<String> manualVerification) {
+        List<String> manualVerification,
+        List<String> priorWriters) {
 
     public TaskSpec {
         if (use == null) use = RunOverride.NONE;
         manualVerification = manualVerification == null ? List.of() : List.copyOf(manualVerification);
+        priorWriters = priorWriters == null ? List.of() : List.copyOf(priorWriters);
+    }
+
+    public TaskSpec(String id, String goal, List<String> nonGoals, String risk,
+                    Values.Selector scope, Values.Selector checks, List<String> acceptance,
+                    List<String> reproduce, Authority authority, VisualQa visualQa, Budget budget,
+                    Long maxFixAttempts, Long timeoutMinutes, String reviewAssurance,
+                    RunOverride use, List<String> manualVerification) {
+        this(id, goal, nonGoals, risk, scope, checks, acceptance, reproduce, authority, visualQa,
+                budget, maxFixAttempts, timeoutMinutes, reviewAssurance, use, manualVerification,
+                List.of());
     }
 
     /**
@@ -99,7 +111,7 @@ public record TaskSpec(
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
             "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes",
-            "review_assurance", "use", "manual_verification");
+            "review_assurance", "use", "manual_verification", "prior_writers");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS =
             Set.of("required", "scenarios", "start", "url", "evidence");
@@ -187,10 +199,18 @@ public record TaskSpec(
             if (item != null && !item.isBlank()) manualVerification.add(item.trim());
         }
 
+        // Vendors a person vouches for as the authors of whatever the tree already holds when
+        // a run starts — an existing PR branch, say. Without it that candidate has no known
+        // author and every reading over it is `unproven`, however independent the reviewer.
+        java.util.Set<String> priorWriters = new java.util.LinkedHashSet<>();
+        for (String item : root.optStringList("prior_writers", List.of())) {
+            if (item != null && !item.isBlank()) priorWriters.add(item.trim());
+        }
+
         root.throwIfAny();
         return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance, reproduce,
                 authority, visualQa, budget, maxFixAttempts, timeoutMinutes, reviewAssurance, use,
-                manualVerification);
+                manualVerification, List.copyOf(priorWriters));
     }
 
     /**
@@ -292,7 +312,8 @@ public record TaskSpec(
                 maxFixAttempts != null ? maxFixAttempts : project.defaultMaxFixAttempts(),
                 timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes(),
                 reviewAssurance == null ? "independent" : reviewAssurance,
-                manualVerification);
+                manualVerification,
+                priorWriters);
     }
 
     private static List<String> resolveCommands(List<String> requested, boolean bareChecks,
@@ -330,10 +351,23 @@ public record TaskSpec(
             long maxFixAttempts,
             long timeoutMinutes,
             String reviewAssurance,
-            List<String> manualVerification) {
+            List<String> manualVerification,
+            List<String> priorWriters) {
 
         public ResolvedTask {
             manualVerification = manualVerification == null ? List.of() : List.copyOf(manualVerification);
+            priorWriters = priorWriters == null ? List.of() : List.copyOf(priorWriters);
+        }
+
+        public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
+                            String baseRef, List<String> scopePaths, List<String> baselineCommands,
+                            List<String> acceptanceCommands, List<String> reproduceCommands,
+                            Authority authority, VisualQa visualQa, Budget budget,
+                            long maxFixAttempts, long timeoutMinutes, String reviewAssurance,
+                            List<String> manualVerification) {
+            this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
+                    acceptanceCommands, reproduceCommands, authority, visualQa, budget,
+                    maxFixAttempts, timeoutMinutes, reviewAssurance, manualVerification, List.of());
         }
 
         public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
@@ -404,6 +438,11 @@ public record TaskSpec(
             // hash it had before the key existed.
             if (!manualVerification.isEmpty()) {
                 fields.put("manual_verification", String.join("\u0000", manualVerification));
+            }
+            // Who a person vouches wrote the starting tree decides whether a reading is
+            // independent, so a change to it cannot keep verdicts. Omitted when empty.
+            if (!priorWriters.isEmpty()) {
+                fields.put("prior_writers", String.join("\u0000", new java.util.TreeSet<>(priorWriters)));
             }
             fields.put("visual_required", String.valueOf(visualQa.required()));
             fields.put("visual_url", String.valueOf(visualQa.url()));
