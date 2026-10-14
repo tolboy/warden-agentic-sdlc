@@ -6423,6 +6423,8 @@ public final class TaskLoopTest implements Suite {
                 GateRunner.pathMatchesMissing("tools/check.cmd", "tools\\check"));
         check.that("and matches by basename plus PATHEXT",
                 GateRunner.pathMatchesMissing("tools/check.cmd", "check"));
+        check.that("Windows matching is case-insensitive for Check.CMD vs check",
+                GateRunner.pathMatchesMissing("tools/Check.CMD", "tools\\check"));
     }
 
     private void roleFailureRoutingChecks(Check check) {

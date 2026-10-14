@@ -411,17 +411,21 @@ public final class GateRunner {
         String pathBase = p.contains("/") ? p.substring(p.lastIndexOf('/') + 1) : p;
         String nameBase = n.contains("/") ? n.substring(n.lastIndexOf('/') + 1) : n;
         if (nameBase.isEmpty()) return false;
-        if (pathBase.equals(nameBase)) return true;
+        if (pathBase.equalsIgnoreCase(nameBase)) return true;
         // cmd.exe resolves an extensionless name through PATHEXT (.cmd, .bat, .exe, .com).
         for (String ext : List.of(".cmd", ".bat", ".exe", ".com")) {
             if (pathEqualsMissing(p, n + ext)) return true;
-            if (pathBase.equals(nameBase + ext)) return true;
+            if (pathBase.equalsIgnoreCase(nameBase + ext)) return true;
         }
         return false;
     }
 
     private static boolean pathEqualsMissing(String path, String name) {
-        return path.equals(name) || path.endsWith("/" + name);
+        if (path.equals(name) || path.endsWith("/" + name)) return true;
+        // Windows resolves executables case-insensitively (Check.CMD vs check).
+        String pl = path.toLowerCase(java.util.Locale.ROOT);
+        String nl = name.toLowerCase(java.util.Locale.ROOT);
+        return pl.equals(nl) || pl.endsWith("/" + nl);
     }
 
     private static List<String> shell(String command) {
