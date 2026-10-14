@@ -11,6 +11,11 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- A gate command that cannot run on this machine (command not found, Node bare package not
+  found, `spawn X ENOENT`) stops as `gate_environment_error` with next step
+  `fix_environment`, at the baseline or after a writer, instead of sending the implementer
+  a fix round to work around the box (#49). Not yet run live. Suites `task loop`, `next step`.
+
 - A role whose vendor returns no artifact can fail over. `failover.on_vendor_failure` is
   `confirm`, `auto` or `stop`, and the default is `stop`, so a policy that never mentions
   it still ends the role. `auto` switches to the next profile that satisfies

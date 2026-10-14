@@ -106,6 +106,7 @@ public final class NextStep {
             case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
             case "escalation_unavailable", "independent_review_unavailable" -> "wait_or_add_vendor";
             case "baseline_failed" -> "fix_baseline";
+            case "gate_environment_error" -> "fix_environment";
             case "preflight_outside_scope" -> "fix_scope";
             case "contract_mutated" -> "restore_contract";
             case "ledger_unavailable" -> "restore_ledger";
@@ -204,6 +205,12 @@ public final class NextStep {
                             + String.join(", ", categoriesOf(findings)) + "): grant the access, "
                             + "restore the provider or tooling, or settle the disagreement each "
                             + "names, then start a new run. The acceptance is not in question.";
+            case "fix_environment" ->
+                    "A gate command could not run on this machine"
+                            + (text(summary.get("environment_signal")).isBlank() ? ""
+                                : " (" + text(summary.get("environment_signal")) + ")")
+                            + "; install it here or remove the command from the gates, then continue "
+                            + "run " + runId + ". The candidate was not judged by that command.";
             case "fix_baseline" ->
                     "The project's own checks were already failing; fix that breakage, or change "
                             + "the baseline contract deliberately, then start a new run.";
@@ -304,7 +311,8 @@ public final class NextStep {
                     "warden approve " + runId + " --decision accept",
                     "warden approve " + runId + " --decision reject");
             case "raise_call_budget", "raise_cost_budget", "raise_time_budget",
-                    "wait_or_add_vendor", "retry_infrastructure", "restore_ledger" ->
+                    "wait_or_add_vendor", "retry_infrastructure", "restore_ledger",
+                    "fix_environment" ->
                     carryOn(runId, taskId);
             case "confirm_failover" -> List.of(
                     "warden approve " + runId + " --decision switch",

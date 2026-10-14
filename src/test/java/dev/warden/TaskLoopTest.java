@@ -1,5 +1,6 @@
 package dev.warden;
 
+import dev.warden.gate.GateRunner;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.RunOverride;
 import dev.warden.config.UserConfig;
@@ -257,6 +258,7 @@ public final class TaskLoopTest implements Suite {
 
             reproductionChecks(check, sandbox, home);
             baselineChecks(check, sandbox, home);
+            environmentErrorChecks(check, sandbox, home);
             roleFailureRoutingChecks(check);
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
@@ -6252,6 +6254,53 @@ public final class TaskLoopTest implements Suite {
                 "worktree changed");
         check.eq("and it still spends no new vendor call", 0L,
                 moved.summaryReport().get("role_runs"));
+    }
+
+    /**
+     * A gate that cannot run on this machine stops for a person (#49). Measured 2026-10-13:
+     * `Cannot find module 'playwright'` was sent to a fix round and the implementer started
+     * hunting a pnpm store for it inside a project script.
+     */
+    private void environmentErrorChecks(Check check, Path sandbox, Path home) throws Exception {
+        java.util.function.BiFunction<String, String, ProcessRunner.Result> failed =
+                (stderr, stdout) -> new ProcessRunner.Result(List.of("sh"), 1, false, 5L,
+                        stdout, stderr, false, false);
+        check.eq("a missing bare package is the environment", "module not found: playwright",
+                GateRunner.environmentSignal(failed.apply(
+                        "Error: Cannot find module 'playwright'\nRequire stack:\n- x.mjs", "")));
+        check.eq("a scoped package too", "module not found: @playwright/test",
+                GateRunner.environmentSignal(failed.apply(
+                        "Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@playwright/test' imported from /p/a.mjs", "")));
+        check.eq("a child that cannot be spawned", "executable not found: chromium",
+                GateRunner.environmentSignal(failed.apply("", "Error: spawn chromium ENOENT")));
+        check.eq("a relative import is the implementer's to repair", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module './util'", "")));
+        check.eq("an absolute one too", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module '/app/src/x.js'", "")));
+        check.eq("an ordinary failure is not", null,
+                GateRunner.environmentSignal(failed.apply("AssertionError: expected 1 to be 2", "")));
+        check.eq("a passing command is never one", null,
+                GateRunner.environmentSignal(new ProcessRunner.Result(List.of("sh"), 0, false, 5L,
+                        "", "Cannot find module 'playwright'", false, false)));
+
+        Path project = newProject(sandbox, "environment-error");
+        String missing = WINDOWS
+                ? "echo Error: Cannot find module 'playwright' 1>&2 & exit /b 1"
+                : "echo \"Error: Cannot find module 'playwright'\" >&2; exit 1";
+        Path task = project.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(task, Files.readString(task) + "acceptance: [" + yaml(missing) + "]\n");
+        writeProfiles(home, sandbox, "environment-error", 1, 1);
+        TaskLoop.Outcome stopped = loop(project, home, "env-error-1");
+        check.eq("a gate that cannot run here stops for a person", "gate_environment_error",
+                stopped.reason());
+        check.eq("without a fix round paid to work around it", 1L,
+                stopped.summaryReport().get("role_runs"));
+        check.eq("and names what is missing", "module not found: playwright",
+                stopped.summaryReport().get("environment_signal"));
+        check.contains("the next step says to install it, not to repair the code",
+                String.valueOf(stopped.summaryReport().get("safe_next_step")), "could not run on this machine");
+        check.that("the implementer was never sent a gate repair context",
+                !Files.exists(project.resolve(".warden/runs/env-error-1/context/fix-1-gates.md")));
     }
 
     private void roleFailureRoutingChecks(Check check) {

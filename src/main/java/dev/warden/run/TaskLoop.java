@@ -1055,6 +1055,12 @@ public final class TaskLoop {
                     progress.line("      ok    " + Progress.elapsed(millis));
                     workspace.note("baseline · project tests · ok · " + Progress.elapsed(millis));
                     progress.blank();
+                } else if ("gate_environment_error".equals(baseline.code())) {
+                    progress.line("      FAILED  " + Progress.elapsed(millis) + "   "
+                            + baseline.code());
+                    workspace.note("baseline · project tests · environment error · no vendor dispatched");
+                    recordEnvironmentError(summary, baseline);
+                    return stop(ledger, summary, "gate_environment_error", steps, 0, budget);
                 } else {
                     progress.line("      FAILED  " + Progress.elapsed(millis) + "   "
                             + baseline.code());
@@ -1959,7 +1965,10 @@ public final class TaskLoop {
             "base_ref_unresolvable",
             "contract_mutated",
             "gate_interrupted",
-            "gate_internal_error");
+            "gate_internal_error",
+            // A missing tool or module on this machine. No candidate change fixes it that
+            // is not a workaround for the box the gate happens to run on.
+            "gate_environment_error");
 
     /**
      * Role failures about the endpoint rather than about the work. A model that is not
@@ -4125,6 +4134,10 @@ public final class TaskLoop {
             if (outcome instanceof GateRunner.Outcome gate && "contract_mutated".equals(gate.code())) {
                 return "contract_mutated";
             }
+            if (outcome instanceof GateRunner.Outcome gate && "gate_environment_error".equals(gate.code())) {
+                recordEnvironmentError(summary, gate);
+                return "gate_environment_error";
+            }
             return stage.failureReason();
         }
 
@@ -5324,6 +5337,23 @@ public final class TaskLoop {
         summary.put("infrastructure_failure", failure);
     }
 
+    /** Name the command and the signal on the run, for the person who has to install it. */
+    private static void recordEnvironmentError(Map<String, Object> summary, GateRunner.Outcome gate) {
+        Map<String, Object> data = gate.data() == null ? Map.of() : gate.data();
+        if (data.get("environment_signal") != null) {
+            summary.put("environment_signal", String.valueOf(data.get("environment_signal")));
+        }
+        if (data.get("environment_command") != null) {
+            summary.put("environment_command", String.valueOf(data.get("environment_command")));
+        }
+        summary.putIfAbsent("resolution", "A gate command could not run on this machine"
+                + (data.get("environment_command") != null
+                    ? " (`" + data.get("environment_command") + "`: " + data.get("environment_signal") + ")"
+                    : "")
+                + ". Install the missing tool or module, or remove the command from the gates, "
+                + "then continue; no implementer was asked to work around the environment.");
+    }
+
     private GateRunner.Outcome runGates(GateRunner gates, ConfigLoader.Loaded loaded, String runId,
                                         int attempt, boolean dryRun, List<Map<String, Object>> steps,
                                         Map<String, String> pinnedConfig, String diffBaseCommit)
@@ -5827,6 +5857,11 @@ public final class TaskLoop {
             case "reproduction_inconclusive" -> "the reproduction could not establish a red base. "
                     + "Resolve the timeout or gate error and start a new run on the unchanged tree "
                     + "before paying a vendor.";
+            case "gate_environment_error" -> "a gate command could not run on this machine ("
+                    + summary.getOrDefault("environment_signal", "missing tool or module")
+                    + "), so it says nothing about the candidate and no implementer was asked to "
+                    + "work around it. Install what it names here, or remove the command from the "
+                    + "gates if it cannot run in this environment, then --continue " + runId + ".";
             case "baseline_failed" -> "the project's own checks were already failing before any "
                     + "vendor ran. Fix that breakage, or change the baseline contract "
                     + "deliberately, then start a new run.";

@@ -184,6 +184,22 @@ public final class GateRunner {
                 report.put("commands", commands);
                 return finish(ledger, kind, false, "reproduction_command_not_found", report);
             }
+            // A gate that cannot run here says nothing about the candidate. Routed to a fix
+            // round it buys a vendor call whose only way to go green is to work around this
+            // machine (measured 2026-10-13: an implementer began searching a pnpm store for
+            // Playwright inside a project script). So it stops for a person instead.
+            if (!kind.equals(REPRODUCTION) && !result.timedOut() && !result.ok()) {
+                String signal = environmentSignal(result);
+                if (signal != null) {
+                    Map<String, Object> report = base(loaded, contractHash, mergeBase,
+                            List.copyOf(afterPaths), List.of(),
+                            "command could not run in this environment: " + signal);
+                    report.put("commands", commands);
+                    report.put("environment_signal", signal);
+                    report.put("environment_command", command);
+                    return finish(ledger, kind, false, "gate_environment_error", report);
+                }
+            }
             if (result.timedOut() || (!kind.equals(REPRODUCTION) && !result.ok())) {
                 Map<String, Object> report = base(loaded, contractHash, mergeBase,
                         List.copyOf(afterPaths), List.of(), result.timedOut() ? "command timed out" : "command failed");
@@ -276,6 +292,32 @@ public final class GateRunner {
         String stderr = result.stderr() == null ? "" : result.stderr();
         return result.exitCode() == 1
                 && stderr.contains("is not recognized as an internal or external command");
+    }
+
+    private static final java.util.regex.Pattern NODE_MISSING_PACKAGE = java.util.regex.Pattern.compile(
+            "Cannot find (?:module|package) '((?:@[^'/\\s]+/)?[^'./\\s][^'\\s]*)'");
+    private static final java.util.regex.Pattern SPAWN_ENOENT = java.util.regex.Pattern.compile(
+            "spawn (\\S+) ENOENT");
+
+    /**
+     * Why a failed gate command is the machine's problem rather than the candidate's, or null.
+     *
+     * Recognised: the shell could not find the command; Node could not resolve a bare package
+     * (`Cannot find module 'playwright'`, `ERR_MODULE_NOT_FOUND ... Cannot find package`); a
+     * child process could not be spawned (`spawn chromium ENOENT`). A relative or absolute
+     * specifier (`'./util'`, `'/abs/x'`) is not recognised: a broken import in the project's
+     * own files is exactly what an implementer is there to repair.
+     */
+    public static String environmentSignal(ProcessRunner.Result result) {
+        if (result.ok() || result.timedOut()) return null;
+        if (commandNotFound(result)) return "command not found (exit " + result.exitCode() + ")";
+        String text = (result.stderr() == null ? "" : result.stderr()) + "\n"
+                + (result.stdout() == null ? "" : result.stdout());
+        java.util.regex.Matcher missing = NODE_MISSING_PACKAGE.matcher(text);
+        if (missing.find()) return "module not found: " + missing.group(1);
+        java.util.regex.Matcher spawn = SPAWN_ENOENT.matcher(text);
+        if (spawn.find()) return "executable not found: " + spawn.group(1);
+        return null;
     }
 
     private static List<String> shell(String command) {

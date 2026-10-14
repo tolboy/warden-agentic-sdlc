@@ -106,6 +106,7 @@ public final class NextStepTest implements Suite {
         check.eq("reproduction inconclusive", "fix_contract",
                 kind("reproduction_inconclusive", summary("run-1", "hello")));
         check.eq("baseline", "fix_baseline", kind("baseline_failed", summary("run-1", "hello")));
+        check.eq("environment", "fix_environment", kind("gate_environment_error", summary("run-1", "hello")));
         check.eq("scope", "fix_scope", kind("preflight_outside_scope", summary("run-1", "hello")));
         check.eq("mutated contract", "restore_contract",
                 kind("contract_mutated", summary("run-1", "hello")));
