@@ -39,7 +39,7 @@ public final class NextStep {
         Map<String, Object> step = new LinkedHashMap<>();
         step.put("kind", kind);
         step.put("summary", sentence(kind, reason, summary, runId, taskId, taskFile, acceptance, findings));
-        step.put("commands", commands(kind, summary, runId, taskId, findings));
+        step.put("commands", commands(kind, reason, summary, runId, taskId, findings));
         step.put("edits", edits(kind, reason, summary, taskFile, acceptance, findings));
         step.put("consequences", consequences(kind, summary));
         step.put("findings", "fix_contract".equals(kind) || "resolve_blockers".equals(kind)
@@ -240,6 +240,16 @@ public final class NextStep {
         return false;
     }
 
+    /**
+     * Stops whose remaining blockers are the contract, the same pair
+     * {@code Main} uses before it will waive. A machine-gate failure and a
+     * reproduction stop are not in it: a continuation may still be carrying an
+     * earlier contract gap, and that gap did not cause this stop.
+     */
+    private static boolean contractGapStop(String reason) {
+        return "blocking_findings_remain".equals(reason) || "quality_exhausted".equals(reason);
+    }
+
     /** Waive closes a stop only when every open P1 is a contract gap. */
     private static boolean onlyContractGaps(List<Map<String, Object>> findings) {
         if (findings.isEmpty()) return false;
@@ -285,7 +295,7 @@ public final class NextStep {
         return sentence.toString();
     }
 
-    private static List<String> commands(String kind, Map<String, Object> summary,
+    private static List<String> commands(String kind, String reason, Map<String, Object> summary,
                                          String runId, String taskId,
                                          List<Map<String, Object>> findings) {
         String newId = newRunId(taskId, runId);
@@ -302,7 +312,7 @@ public final class NextStep {
             case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
                     "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
-                if ("fix_contract".equals(kind) && onlyContractGaps(findings)) {
+                if ("fix_contract".equals(kind) && contractGapStop(reason) && onlyContractGaps(findings)) {
                     String gap = firstContractGapId(findings);
                     if (!gap.isBlank()) {
                         commands.add("warden approve " + runId

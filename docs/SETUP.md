@@ -159,7 +159,8 @@ starts the next run itself, and the command is not printed. If neither the contr
 tree has changed since the stop, `advance` refuses rather than spending a run id to reach
 the same wall.
 
-When every open blocker is a `contract_gap`, the same gate offers `waive`:
+When the stop is `blocking_findings_remain` or `quality_exhausted` and every open
+blocker is a `contract_gap`, the same gate offers `waive`:
 
 ```text
 warden approve <run> --decision waive --finding <id>
@@ -167,10 +168,14 @@ warden approve <run> --decision waive --finding <id>
 
 That closes the stop, writes `contract_gap_waived` on the ledger and `contract_gap_waiver`
 on the report, and lands nothing. It does not start another run. It is refused when the
-named finding is not an open `contract_gap`, when any other open P1 is not one, and when
-`--finding` is omitted. Open P1s are the run-wide finding registry, so a later round that
-reports only a contract gap does not waive a product defect another reviewer left open or
-reopened. A product defect stays blocking.
+stop is not one of those two reasons — a continuation can restore an earlier contract
+gap and then fail machine gates, and that inherited gap does not authorise the waiver —
+when the named finding is not an open `contract_gap`, when any other open P1 is not one,
+and when `--finding` is omitted. Open P1s are the run-wide finding registry, so a later
+round that reports only a contract gap does not waive a product defect another reviewer
+left open or reopened. A shared id does not either: a stage that reuses an id with a
+different category or severity leaves the owner's record in place. A product defect
+stays blocking.
 
 A task may name checks a person already does by hand. A P1 `contract_gap` whose message,
 expected, actual, scenario or suggestion contains one of those items is recorded as P2

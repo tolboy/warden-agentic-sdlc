@@ -55,7 +55,10 @@
  * `testid=save press=Escape` was a testid of "save press=Escape" and validate
  * called that fine. A `verb=` inside a quoted matcher value, or after a
  * backslash, is part of that value: `css=[data-label="x mode=y"]` is a
- * selector, not an unknown step named `mode`.
+ * selector, not an unknown step named `mode`. An apostrophe inside a word
+ * (`text=Don't Save press=Escape`) is part of the label. A quote starts a
+ * span only when it is a delimiter with a matching closer, so that apostrophe
+ * does not swallow the `press=`.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -151,28 +154,31 @@ const ASSERTIONS = new Set(["visible", "hidden", "click", "focused"]);
 const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
 
 /**
- * Keys a scenario may name. Anything else (`press=Esacpe`, `press=ctrl`) is a
- * contract fault, not a key the page will never see. `Esc` and `Return` are
- * the spellings people already write.
+ * Keys a scenario may name. Anything else (`press=Esacpe`, `press=ctrl`,
+ * `press=constructor`) is a contract fault, not a key the page will never see.
+ * A Map, not an object: `constructor` and `__proto__` are inherited properties
+ * of an ordinary object, and looking them up returned a value with no key
+ * fields, which dispatchKeyEvent then sent as a keyless event. `Esc` and
+ * `Return` are the spellings people already write.
  */
-const NAMED_KEYS = {
-  escape: { key: "Escape", code: "Escape", label: "Escape", vk: 27 },
-  esc: { key: "Escape", code: "Escape", label: "Escape", vk: 27 },
-  enter: { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" },
-  return: { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" },
-  tab: { key: "Tab", code: "Tab", label: "Tab", vk: 9 },
-  space: { key: " ", code: "Space", label: "Space", vk: 32, text: " " },
-  arrowup: { key: "ArrowUp", code: "ArrowUp", label: "ArrowUp", vk: 38 },
-  arrowdown: { key: "ArrowDown", code: "ArrowDown", label: "ArrowDown", vk: 40 },
-  arrowleft: { key: "ArrowLeft", code: "ArrowLeft", label: "ArrowLeft", vk: 37 },
-  arrowright: { key: "ArrowRight", code: "ArrowRight", label: "ArrowRight", vk: 39 },
-};
+const NAMED_KEYS = new Map([
+  ["escape", { key: "Escape", code: "Escape", label: "Escape", vk: 27 }],
+  ["esc", { key: "Escape", code: "Escape", label: "Escape", vk: 27 }],
+  ["enter", { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" }],
+  ["return", { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" }],
+  ["tab", { key: "Tab", code: "Tab", label: "Tab", vk: 9 }],
+  ["space", { key: " ", code: "Space", label: "Space", vk: 32, text: " " }],
+  ["arrowup", { key: "ArrowUp", code: "ArrowUp", label: "ArrowUp", vk: 38 }],
+  ["arrowdown", { key: "ArrowDown", code: "ArrowDown", label: "ArrowDown", vk: 40 }],
+  ["arrowleft", { key: "ArrowLeft", code: "ArrowLeft", label: "ArrowLeft", vk: 37 }],
+  ["arrowright", { key: "ArrowRight", code: "ArrowRight", label: "ArrowRight", vk: 39 }],
+]);
 const KNOWN_VERBS = new Set(["text", "css", "testid", "role", "press"]);
 
 function canonicalKey(raw) {
   const name = String(raw ?? "").trim();
   if (!name || /\s/.test(name)) return null;
-  const named = NAMED_KEYS[name.toLowerCase()];
+  const named = NAMED_KEYS.get(name.toLowerCase());
   if (named) {
     return {
       key: named.key,
@@ -206,11 +212,36 @@ function canonicalKey(raw) {
  *
  * A CSS attribute is allowed to contain spaces and `verb=` text,
  * `css=[data-label="x mode=y"]`. Splitting that on whitespace treats `mode=y"]`
- * as a step. A single or double quote binds until its pair, and a backslash
- * escapes the next character, so `\"` does not end the value and `mode\=y` is
- * not a step. The span covers the original text, quotes included, so the
- * selector that is stored is the selector that was written.
+ * as a step. A single or double quote binds until its pair when it is a
+ * delimiter that has a closer, and a backslash escapes the next character, so
+ * `\"` does not end the value and `mode\=y` is not a step. An apostrophe
+ * inside a word (`Don't`, `user's`) is not a delimiter: treating it as one
+ * left the quote unclosed and hid `press=Escape` inside the label. The span
+ * covers the original text, quotes included, so the selector that is stored
+ * is the selector that was written.
  */
+function isWordChar(ch) {
+  return typeof ch === "string" && ch !== "" && /[\p{L}\p{N}_]/u.test(ch);
+}
+
+/** Index of the unescaped `quote` that closes the one at `open`, or -1. */
+function matchingCloser(source, open, quote) {
+  let escaped = false;
+  for (let index = open + 1; index < source.length; index++) {
+    const ch = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === quote) return index;
+  }
+  return -1;
+}
+
 function unquotedTokenSpans(text) {
   const source = String(text);
   const spans = [];
@@ -241,7 +272,12 @@ function unquotedTokenSpans(text) {
       if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    // A quote inside a word is an apostrophe. A quote with no closer is the
+    // same: it must not swallow the rest of the step, including press=.
+    if ((ch === '"' || ch === "'")
+        && !(index > 0 && isWordChar(source[index - 1]))
+        && matchingCloser(source, index, ch) >= 0) {
+      if (start < 0) start = index;
       quote = ch;
       continue;
     }
@@ -1439,10 +1475,33 @@ if (validateOnly) {
   // No browser, no output directory, no page. A distinct code, because "your contract does
   // not say anything" and "this machine has no browser" send an operator to different places.
   const problem = contractProblem(scenarios);
-  console.log(JSON.stringify(problem
+  const report = problem
     ? { ok: false, code: "visual_qa_contract_invalid", message: problem }
-    : { ok: true, code: "scenarios_valid", scenarios: scenarios.length }));
+    : {
+      ok: true,
+      code: "scenarios_valid",
+      scenarios: scenarios.length,
+      // What the grammar made of each scenario. Validation alone accepted
+      // `text=Don't Save press=Escape` while parsing it as a visible label
+      // that included the press token.
+      parsed: scenarios.map(parseScenario).map(describeParsed),
+    };
+  console.log(JSON.stringify(report));
   process.exit(problem ? 2 : 0);
+}
+
+/** The fields a caller can assert without a browser: kind, value, assertion, key. */
+function describeParsed(scenario) {
+  return {
+    raw: scenario.raw,
+    steps: (scenario.steps || []).map((step) => {
+      const view = { kind: step.kind, assertion: step.assertion };
+      if (step.value != null) view.value = step.value;
+      if (step.matcherKind) view.matcher = step.matcherKind;
+      if (step.key) view.key = step.key.label;
+      return view;
+    }),
+  };
 }
 
 if (rankOnly) rankA11yOffline();

@@ -2453,8 +2453,11 @@ public final class Main {
     }
 
     /**
-     * Refuse {@code waive} unless every open P1 is a contract_gap and the named finding is
-     * one of them. The decision stays pending when this throws.
+     * Refuse {@code waive} unless this stop itself is caused by contract-gap findings and
+     * every open P1 is a contract_gap, the named finding among them. A continuation
+     * restores earlier findings, so an inherited gap can still be open when the new run
+     * stops on a machine gate; that history is not this stop. The decision stays pending
+     * when this throws.
      */
     private static ContractGapWaiver waiveContractGap(Path root, HumanDecision pending, String findingId)
             throws java.io.IOException {
@@ -2468,6 +2471,15 @@ public final class Main {
                     "waive requires --finding <ID>, the contract_gap to accept.");
         }
         Map<String, Object> summary = decisionSummary(root, pending);
+        String stop = pending.reason();
+        Object reported = summary.get("reason");
+        if (!CONTRACT_GAP_STOPS.contains(stop)
+                || !(reported instanceof String reportedReason && reportedReason.equals(stop))) {
+            throw new ApprovalException("waive_refused",
+                    "waive refused: run " + pending.runId() + " stopped for " + stop
+                            + ". Waive closes a stop caused solely by contract-gap findings, "
+                            + "not a machine-gate failure or any other reason.");
+        }
         List<Map<String, Object>> open = openBlockingFindings(summary);
         if (open.isEmpty()) {
             throw new ApprovalException("waive_refused",

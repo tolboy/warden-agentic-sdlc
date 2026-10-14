@@ -278,7 +278,8 @@ public final class Findings {
      * silence from a stage that did not file a finding does not close it. A waiver that
      * read only the latest report would accept that stop. Closed records are not blockers.
      * A round that never wrote a registry contributes its own findings, which is all an
-     * older summary has.
+     * older summary has. A later stage that reuses an id with a different category or
+     * severity does not replace the owner's record, so that record is still what is open.
      */
     public static List<Map<String, Object>> openBlockers(List<?> history) {
         List<Map<String, Object>> rounds = new ArrayList<>();
@@ -507,9 +508,20 @@ public final class Findings {
             if (newAfterClosure && !spokeEvidence)
                 unverified.add(finding.id() + ": new blocker after a closure; artifact named no "
                         + "evidence_refs so the evidence invariant could not be checked");
-            if (reopening) value.put("status", "reopened");
+            // The stage that filed the id owns its category and severity. Another stage
+            // may reopen that id, or repeat it, but may not rewrite it into a different
+            // kind of blocker: a recheck that files contract_gap "A1" where review-second
+            // filed product_defect "A1" used to replace the registry record, and waive
+            // then saw only the gap. The owner's record stays. The round is a protocol
+            // failure, the same way a duplicate id is.
             Object priorStage = old != null ? old.get("recorded_at_stage") : null;
-            value.put("recorded_at_stage", priorStage instanceof String s && !s.isBlank() ? s : stage);
+            String owner = priorStage instanceof String s && !s.isBlank() ? s : stage;
+            if (old != null && !owner.equals(stage) && !sameBlockingIdentity(old, value)) {
+                violations.add(finding.id() + ": conflicting cross-stage id owned by " + owner);
+                continue;
+            }
+            if (reopening) value.put("status", "reopened");
+            value.put("recorded_at_stage", owner);
             value.put("seen_evidence_refs", unionEvidence(old, value));
             known.put(finding.id(), value);
         }
@@ -519,6 +531,28 @@ public final class Findings {
                 .map(Map.Entry::getKey).toList());
         row.put("protocol_violations", violations);
         row.put("unverified_invariants", unverified);
+    }
+
+    /**
+     * Category and severity, the two fields that decide whether an open record blocks
+     * and whether a waiver may close it. An absent or unrecognised category is the
+     * default product defect, matching {@link Finding#toMap()}.
+     */
+    private static boolean sameBlockingIdentity(Map<String, Object> recorded,
+                                                Map<String, Object> incoming) {
+        return recordedCategory(recorded).equals(recordedCategory(incoming))
+                && recordedSeverity(recorded).equals(recordedSeverity(incoming));
+    }
+
+    private static String recordedCategory(Map<String, Object> finding) {
+        Object raw = finding.get("category");
+        String category = raw instanceof String text ? text : "";
+        return CATEGORIES.contains(category) ? category : DEFAULT_CATEGORY;
+    }
+
+    private static String recordedSeverity(Map<String, Object> finding) {
+        Object raw = finding.get("severity");
+        return raw instanceof String text ? text : "";
     }
 
     /**

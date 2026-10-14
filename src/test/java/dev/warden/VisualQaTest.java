@@ -207,6 +207,9 @@ public final class VisualQaTest implements Suite {
                         "1280x720: wait-for=css=[data-label=\"x mode=y\"] blur=true"));
         check.contains("and so is one on a wait-for", String.valueOf(quotedWait), "blur=true");
 
+        apostropheDoesNotSwallowAPress(check, project, adapter);
+        inheritedKeyNamesAreRejected(check, project, adapter);
+
         java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
         java.io.PrintStream previousOut = System.out;
         int validateExit;
@@ -228,6 +231,71 @@ public final class VisualQaTest implements Suite {
             System.setOut(previousOut);
         }
         check.eq("warden validate accepts press= and focused", 0, validateExit);
+    }
+
+    /**
+     * `text=Don't Save press=Escape` used to validate and then search for the label
+     * "Don't Save press=Escape". The apostrophe opened a quote that never closed,
+     * so the press token never became a key.
+     */
+    @SuppressWarnings("unchecked")
+    private void apostropheDoesNotSwallowAPress(Check check, Path project, Path adapter) throws Exception {
+        ProcessRunner.Result parsed = new ProcessRunner().run(
+                List.of(nodeExecutable(), adapter.toString(), "--validate-only",
+                        "--scenario", "1280x720: css=.dialog visible -> text=Don't Save press=Escape",
+                        "--scenario", "1280x720: css=.dialog visible -> text=It's the user's file press=Enter",
+                        "--scenario", "1280x720: css=[data-label=\"Don't Save\"] press=Escape",
+                        "--scenario", "1280x720: css=[data-label='x mode=y'] visible"),
+                project, Duration.ofSeconds(20));
+        check.that("apostrophe scenarios validate", parsed.ok());
+        Map<String, Object> body = Json.findLastObject(parsed.stdout());
+        List<Map<String, Object>> scenarios = listOfMaps(body == null ? null : body.get("parsed"));
+        check.eq("four scenarios were parsed", 4, scenarios.size());
+
+        List<Map<String, Object>> dont = stepsOf(scenarios, 0);
+        check.eq("the dialog step is unchanged", "css", dont.get(0).get("kind"));
+        check.eq("and still asserts visible", "visible", dont.get(0).get("assertion"));
+        check.eq("the label keeps the apostrophe", "Don't Save", dont.get(1).get("value"));
+        check.eq("and press is the assertion", "press", dont.get(1).get("assertion"));
+        check.eq("sending Escape", "Escape", dont.get(1).get("key"));
+        check.eq("as a text matcher", "text", dont.get(1).get("kind"));
+
+        List<Map<String, Object>> users = stepsOf(scenarios, 1);
+        check.eq("a second apostrophe stays in the label", "It's the user's file",
+                users.get(1).get("value"));
+        check.eq("and that press is Enter", "Enter", users.get(1).get("key"));
+
+        List<Map<String, Object>> quotedLabel = stepsOf(scenarios, 2);
+        check.eq("an apostrophe inside double quotes stays in the selector",
+                "[data-label=\"Don't Save\"]", quotedLabel.get(0).get("value"));
+        check.eq("and the press after those quotes is still a press", "press",
+                quotedLabel.get(0).get("assertion"));
+        check.eq("of Escape", "Escape", quotedLabel.get(0).get("key"));
+
+        List<Map<String, Object>> explicitQuote = stepsOf(scenarios, 3);
+        check.eq("an explicit quoted span is still one selector",
+                "[data-label='x mode=y']", explicitQuote.get(0).get("value"));
+        check.eq("whose assertion is visible", "visible", explicitQuote.get(0).get("assertion"));
+        check.eq("and not a press that was swallowed", null, explicitQuote.get(0).get("key"));
+    }
+
+    /** `constructor` and `__proto__` are inherited object properties, not keys. */
+    private void inheritedKeyNamesAreRejected(Check check, Path project, Path adapter) throws Exception {
+        for (String key : List.of("constructor", "__proto__", "toString")) {
+            String id = "badkey-" + key.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "");
+            String rejected = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                    taskWith(project, id, "1280x720: press=" + key));
+            check.contains("press=" + key + " is not a key", String.valueOf(rejected), key);
+        }
+        check.eq("a named key is still accepted", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "goodkey", "1280x720: press=Escape")));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> stepsOf(List<Map<String, Object>> scenarios, int index) {
+        if (index >= scenarios.size()) return List.of();
+        return listOfMaps(scenarios.get(index).get("steps"));
     }
 
     /**

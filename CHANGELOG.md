@@ -49,6 +49,24 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A finding id belongs to the stage that filed it. Another stage that reports the
+  same id with a different category or severity does not replace that record; the
+  round is `finding_protocol_failure`. Waive of the shared id is refused while the
+  owner's P1 product defect is still open, and the decision stays pending. A
+  later report of the same category and severity is still the same finding.
+  Suite `findings`, `decision-page`.
+- `warden approve --decision waive` requires the current stop to be
+  `blocking_findings_remain` or `quality_exhausted`, and the report to say the
+  same. A continuation that restores an earlier contract gap and then stops on
+  `gates_not_satisfied` is refused; the decision stays pending. The same gap is
+  still waivable when that gap is the stop. Suite `decision-page`.
+- A visual label may contain an apostrophe. `text=Don't Save press=Escape` keeps
+  the label `Don't Save` and sends Escape. A quote starts a span only when it is
+  a delimiter with a matching closer (`css=[data-label="x mode=y"]`,
+  `css=[data-label='x mode=y']`). `press=constructor`, `press=__proto__` and
+  `press=toString` are unknown keys, not inherited object properties. Suite
+  `visual qa`.
+
 - `warden approve --decision waive` reads the run-wide finding registry. A repair
   rechecks earlier reviewers first; that recheck can report only a `contract_gap`
   while another reviewer's P1 `product_defect` is still open or reopened. Waive is

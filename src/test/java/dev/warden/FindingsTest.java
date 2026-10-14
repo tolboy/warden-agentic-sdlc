@@ -154,6 +154,57 @@ public final class FindingsTest implements Suite {
 
         crossStageLifecycle(c);
         historicalEvidenceAfterReclosure(c);
+        conflictingCrossStageIdentity(c);
+    }
+
+    /**
+     * Two reviewers share an id. The later one must not replace the owner's category
+     * or severity: that replacement is how a product defect became a contract gap and
+     * a waiver closed it.
+     */
+    @SuppressWarnings("unchecked")
+    private void conflictingCrossStageIdentity(Check c) {
+        var defect = Map.of("id", "A1", "severity", "P1", "category", "product_defect",
+                "path", "src/a", "message", "the greeting still does not toggle",
+                "evidence_refs", List.of("receipt-defect"), "supersedes", List.of());
+        var gap = Map.of("id", "A1", "severity", "P1", "category", "contract_gap",
+                "path", "src/a", "message", "no scenario presses Escape",
+                "evidence_refs", List.of("receipt-gap"), "supersedes", List.of());
+        var passed = Findings.roundOf("review", 0, "tree-1",
+                Findings.of(Map.of("findings", List.of())), List.of());
+        var filed = Findings.roundOf("review-second", 0, "tree-1",
+                Findings.of(Map.of("findings", List.of(defect))), List.of(passed));
+        var recheck = Findings.roundOf("review", 1, "tree-2",
+                Findings.of(Map.of("findings", List.of(gap))), List.of(passed, filed));
+        c.contains("a shared id with a different category is a protocol failure",
+                String.valueOf(recheck.get("protocol_violations")),
+                "A1: conflicting cross-stage id owned by review-second");
+        List<Map<String, Object>> registry =
+                (List<Map<String, Object>>) recheck.get("finding_registry");
+        Map<String, Object> kept = registry.stream()
+                .filter(row -> "A1".equals(row.get("id"))).findFirst().orElseThrow();
+        c.eq("the owner's product defect is the record that stays",
+                "product_defect", kept.get("category"));
+        c.eq("and it stays open", "open", kept.get("status"));
+        c.eq("filed by review-second", "review-second", kept.get("recorded_at_stage"));
+        c.eq("so the open blocker is that defect", "product_defect",
+                Findings.openBlockers(List.of(passed, filed, recheck)).get(0).get("category"));
+
+        var repeated = Findings.roundOf("review", 1, "tree-2",
+                Findings.of(Map.of("findings", List.of(defect))), List.of(passed, filed));
+        c.eq("the same id with the same category and severity is not a conflict",
+                List.of(), repeated.get("protocol_violations"));
+
+        var softened = Map.of("id", "A1", "severity", "P2", "category", "product_defect",
+                "path", "src/a", "message", "the greeting still does not toggle",
+                "evidence_refs", List.of("receipt-soft"), "supersedes", List.of());
+        var downgraded = Findings.roundOf("review", 1, "tree-2",
+                Findings.of(Map.of("findings", List.of(softened))), List.of(passed, filed));
+        c.contains("a cross-stage severity change is the same refusal",
+                String.valueOf(downgraded.get("protocol_violations")),
+                "conflicting cross-stage id");
+        c.eq("and the P1 is what stays open", "P1",
+                Findings.openBlockers(List.of(passed, filed, downgraded)).get(0).get("severity"));
     }
 
     /**
