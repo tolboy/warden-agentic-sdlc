@@ -352,10 +352,11 @@ public final class GateRunner {
     }
 
     /**
-     * Whether the candidate touches the missing name: a changed line of a tracked file, or the
-     * content of a changed file (which covers new, untracked ones). For a scoped package the
-     * bare package name is searched too. Unreadable evidence counts as a mention, so doubt
-     * goes to the implementer's fix round, the behaviour before this classification existed.
+     * Whether the candidate touches the missing name: a changed path (including a deleted or
+     * renamed executable), a changed line of a tracked file, or the content of a changed file
+     * (which covers new, untracked ones). For a scoped package the bare package name is
+     * searched too. Unreadable evidence counts as a mention, so doubt goes to the
+     * implementer's fix round, the behaviour before this classification existed.
      */
     public static boolean candidateMentions(GitRepository git, Path root, String mergeBase,
                                      Set<String> changed, String name) {
@@ -370,6 +371,12 @@ public final class GateRunner {
             // command, and a command that names its tool would otherwise always "mention" it.
             List<String> sources = List.copyOf(WardenTree.sourcePaths(changed));
             if (sources.isEmpty()) return false;
+            // A deleted or renamed executable never appears in a content line as its own
+            // path (diff headers are skipped below). Match the missing name against changed
+            // paths first, including deletions and rename sources.
+            for (String path : sources) {
+                if (pathMatchesMissing(path, name)) return true;
+            }
             List<String> args = new ArrayList<>(List.of("diff", "--no-color", "--unified=0", mergeBase, "--"));
             args.addAll(sources);
             ProcessRunner.Result diff = git.git(args);
@@ -390,6 +397,20 @@ public final class GateRunner {
         } catch (Exception unreadable) {
             return true;
         }
+    }
+
+    /**
+     * Whether a changed path is the missing executable (or its basename). Strips a leading
+     * {@code ./} so {@code ./tools/check} matches {@code tools/check}.
+     */
+    public static boolean pathMatchesMissing(String path, String name) {
+        String p = path.replace('\\', '/');
+        String n = name.replace('\\', '/');
+        while (n.startsWith("./")) n = n.substring(2);
+        if (p.equals(n) || p.endsWith("/" + n)) return true;
+        String pathBase = p.contains("/") ? p.substring(p.lastIndexOf('/') + 1) : p;
+        String nameBase = n.contains("/") ? n.substring(n.lastIndexOf('/') + 1) : n;
+        return !nameBase.isEmpty() && pathBase.equals(nameBase);
     }
 
     private static List<String> shell(String command) {

@@ -6375,6 +6375,24 @@ public final class TaskLoopTest implements Suite {
         changed = git.changedPaths(mergeBase);
         check.that("a scoped subpath is found by its package's name",
                 GateRunner.candidateMentions(git, project, mergeBase, changed, "@scope/pkg/sub"));
+        // A deleted project executable is the writer's defect, not the machine's: the path
+        // itself must count even when no content line names it.
+        Path bin = project.resolve("tools/check");
+        Files.createDirectories(bin.getParent());
+        Files.writeString(bin, "#!/bin/sh\nexit 0\n");
+        new ProcessRunner().run(List.of("git", "add", "--", "tools/check"), project, Duration.ofSeconds(10));
+        new ProcessRunner().run(List.of("git", "commit", "-m", "add check"), project, Duration.ofSeconds(20));
+        mergeBase = git.mergeBase("HEAD");
+        Files.delete(bin);
+        changed = git.changedPaths(mergeBase);
+        check.that("a deleted executable path is the implementer's",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "./tools/check"));
+        check.that("so is its basename from spawn ENOENT",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "check"));
+        check.that("an unrelated missing name stays the environment's",
+                !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
+        check.that("pathMatchesMissing strips a leading ./",
+                GateRunner.pathMatchesMissing("tools/check", "./tools/check"));
     }
 
     private void roleFailureRoutingChecks(Check check) {
