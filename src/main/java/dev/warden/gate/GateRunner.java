@@ -7,6 +7,7 @@ import dev.warden.ledger.EvidenceLedger;
 import dev.warden.process.ProcessRunner;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -190,6 +191,17 @@ public final class GateRunner {
             // Playwright inside a project script). So it stops for a person instead.
             if (!kind.equals(REPRODUCTION) && !result.timedOut() && !result.ok()) {
                 String signal = environmentSignal(result);
+                // The signal alone does not prove the machine is at fault: a writer can mistype
+                // an import or a binary, or drop a dependency, and at the baseline the tree may
+                // already hold such a candidate (an existing PR branch). Only a name
+                // the candidate does not mention anywhere it changed is the environment's;
+                // a signal that names nothing is left to the ordinary failure.
+                if (signal != null) {
+                    String name = missingName(result);
+                    if (name == null || candidateMentions(git, loaded.root(), mergeBase, afterPaths, name)) {
+                        signal = null;
+                    }
+                }
                 if (signal != null) {
                     Map<String, Object> report = base(loaded, contractHash, mergeBase,
                             List.copyOf(afterPaths), List.of(),
@@ -294,8 +306,14 @@ public final class GateRunner {
                 && stderr.contains("is not recognized as an internal or external command");
     }
 
+    // A bare specifier: not relative ('./x'), not POSIX-absolute ('/x'), not a Windows drive
+    // ('C:\\x', 'C:/x') or UNC ('\\\\host\\x') path. Those are the project's own files.
     private static final java.util.regex.Pattern NODE_MISSING_PACKAGE = java.util.regex.Pattern.compile(
-            "Cannot find (?:module|package) '((?:@[^'/\\s]+/)?[^'./\\s][^'\\s]*)'");
+            "Cannot find (?:module|package) '(?![A-Za-z]:[\\\\/])((?:@[^'/\\s]+/)?[^'./\\\\\\s][^'\\s]*)'");
+    private static final java.util.regex.Pattern SHELL_NOT_FOUND = java.util.regex.Pattern.compile(
+            "([^\\s:'\"]+): (?:command )?not found");
+    private static final java.util.regex.Pattern CMD_NOT_RECOGNIZED = java.util.regex.Pattern.compile(
+            "'([^']+)' is not recognized as an internal or external command");
     private static final java.util.regex.Pattern SPAWN_ENOENT = java.util.regex.Pattern.compile(
             "spawn (\\S+) ENOENT");
 
@@ -318,6 +336,60 @@ public final class GateRunner {
         java.util.regex.Matcher spawn = SPAWN_ENOENT.matcher(text);
         if (spawn.find()) return "executable not found: " + spawn.group(1);
         return null;
+    }
+
+    /** The module or executable a recognised signal names, or null when it names none. */
+    public static String missingName(ProcessRunner.Result result) {
+        if (environmentSignal(result) == null) return null;
+        String text = (result.stderr() == null ? "" : result.stderr()) + "\n"
+                + (result.stdout() == null ? "" : result.stdout());
+        for (java.util.regex.Pattern pattern : List.of(NODE_MISSING_PACKAGE, SPAWN_ENOENT,
+                SHELL_NOT_FOUND, CMD_NOT_RECOGNIZED)) {
+            java.util.regex.Matcher matcher = pattern.matcher(text);
+            if (matcher.find()) return matcher.group(1);
+        }
+        return null;
+    }
+
+    /**
+     * Whether the candidate touches the missing name: a changed line of a tracked file, or the
+     * content of a changed file (which covers new, untracked ones). For a scoped package the
+     * bare package name is searched too. Unreadable evidence counts as a mention, so doubt
+     * goes to the implementer's fix round, the behaviour before this classification existed.
+     */
+    public static boolean candidateMentions(GitRepository git, Path root, String mergeBase,
+                                     Set<String> changed, String name) {
+        java.util.List<String> needles = new java.util.ArrayList<>(List.of(name));
+        // The package a subpath belongs to: `lodash/fp` -> `lodash`, `@scope/pkg/sub` ->
+        // `@scope/pkg`, so a dependency dropped from a manifest is found by its own name.
+        String[] parts = name.split("/");
+        if (name.startsWith("@") && parts.length > 2) needles.add(parts[0] + "/" + parts[1]);
+        else if (!name.startsWith("@") && parts.length > 1 && !parts[0].isEmpty()) needles.add(parts[0]);
+        try {
+            // Only the candidate's own files: the contract under .warden names the gate
+            // command, and a command that names its tool would otherwise always "mention" it.
+            List<String> sources = List.copyOf(WardenTree.sourcePaths(changed));
+            if (sources.isEmpty()) return false;
+            List<String> args = new ArrayList<>(List.of("diff", "--no-color", "--unified=0", mergeBase, "--"));
+            args.addAll(sources);
+            ProcessRunner.Result diff = git.git(args);
+            if (!diff.ok() || diff.stdoutTruncated()) return true;
+            for (String line : diff.stdout().split("\n")) {
+                if (!(line.startsWith("+") || line.startsWith("-"))
+                        || line.startsWith("+++") || line.startsWith("---")) continue;
+                for (String needle : needles) if (line.contains(needle)) return true;
+            }
+            for (String path : sources) {
+                Path file = root.resolve(path);
+                if (!Files.isRegularFile(file)) continue;
+                if (Files.size(file) > 2_000_000L) return true;
+                String content = Files.readString(file, java.nio.charset.StandardCharsets.ISO_8859_1);
+                for (String needle : needles) if (content.contains(needle)) return true;
+            }
+            return false;
+        } catch (Exception unreadable) {
+            return true;
+        }
     }
 
     private static List<String> shell(String command) {

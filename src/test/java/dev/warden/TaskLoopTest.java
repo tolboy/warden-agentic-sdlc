@@ -4278,6 +4278,16 @@ public final class TaskLoopTest implements Suite {
                 TaskLoop.unprovenReason(unexplained.summaryReport()).contains("prior_writers")
                         && TaskLoop.unprovenReason(unexplained.summaryReport()).contains("implvendor"));
 
+        // A declaration on that same tree keeps the vendor Warden measured writing into it.
+        Path strangerTask = stranger.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(strangerTask, Files.readString(strangerTask) + "prior_writers: [othervendor]\n");
+        TaskLoop.Outcome declaredOver = loop(stranger, home, "pv9f");
+        check.that("a declaration does not erase a measured writer",
+                declaredOver.summaryReport().get("writer_vendors") instanceof List<?> vendors
+                        && vendors.contains("implvendor") && vendors.contains("othervendor"));
+        check.eq("and says which run measured it", "pv9",
+                declaredOver.summaryReport().get("measured_writers_from"));
+
         // A person who knows who wrote the starting tree (an existing PR branch) says so.
         Path declared = newProject(sandbox, "prov-declared");
         writeProfiles(home, sandbox, "prov-declared", 1, 1);
@@ -4301,6 +4311,17 @@ public final class TaskLoopTest implements Suite {
         TaskLoop.Outcome refusedReader = loop(declaredReader, home, "pv9c");
         check.eq("a declared author's own vendor may not be the independent reader",
                 "independent_review_unavailable", refusedReader.reason());
+
+        // Inheriting writers from an earlier run does not drop a declaration made since.
+        Path redeclared = newProject(sandbox, "prov-redeclared");
+        writeProfiles(home, sandbox, "prov-redeclared", 1, 1);
+        TaskLoop.Outcome firstRecorded = loop(redeclared, home, "pv9d");
+        check.that("the recorded run reaches the gate", firstRecorded.ok());
+        Path redeclaredTask = redeclared.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(redeclaredTask, Files.readString(redeclaredTask) + "prior_writers: [reviewvendor]\n");
+        TaskLoop.Outcome redeclaredRun = loop(redeclared, home, "pv9e");
+        check.eq("the later declaration still refuses its vendor as the reader",
+                "independent_review_unavailable", redeclaredRun.reason());
 
         // The same tree, a new run id and no --continue: the run that left this tree is
         // found by its recorded closing fingerprint, not by being the newest folder.
@@ -6304,6 +6325,17 @@ public final class TaskLoopTest implements Suite {
                 GateRunner.environmentSignal(failed.apply("Error: Cannot find module './util'", "")));
         check.eq("an absolute one too", null,
                 GateRunner.environmentSignal(failed.apply("Error: Cannot find module '/app/src/x.js'", "")));
+        check.eq("a Windows drive path is the project's own file", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module 'C:\\project\\src\\missing.js'", "")));
+        check.eq("so is a forward-slash drive path", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module 'C:/project/src/missing.js'", "")));
+        check.eq("and a UNC path", null,
+                GateRunner.environmentSignal(failed.apply("Error: Cannot find module '\\\\host\\share\\x.js'", "")));
+        check.eq("a shell not-found names the command", "playwright",
+                GateRunner.missingName(new ProcessRunner.Result(List.of("sh"), 127, false, 5L, "",
+                        "/bin/sh: 1: playwright: not found", false, false)));
+        check.eq("a node signal names the package", "playwright",
+                GateRunner.missingName(failed.apply("Error: Cannot find module 'playwright'", "")));
         check.eq("an ordinary failure is not", null,
                 GateRunner.environmentSignal(failed.apply("AssertionError: expected 1 to be 2", "")));
         check.eq("a passing command is never one", null,
@@ -6328,6 +6360,21 @@ public final class TaskLoopTest implements Suite {
                 String.valueOf(stopped.summaryReport().get("safe_next_step")), "could not run on this machine");
         check.that("the implementer was never sent a gate repair context",
                 !Files.exists(project.resolve(".warden/runs/env-error-1/context/fix-1-gates.md")));
+
+        // A name the candidate itself introduces or touches is the writer's to repair (a
+        // mistyped import, a dropped dependency), so only an untouched name is the machine's.
+        dev.warden.git.GitRepository git = new dev.warden.git.GitRepository(project, new ProcessRunner());
+        String mergeBase = git.mergeBase("HEAD");
+        Files.writeString(project.resolve("src/uses.js"), "require('playwrigth');\n");
+        java.util.Set<String> changed = git.changedPaths(mergeBase);
+        check.that("a missing name the candidate wrote is the implementer's",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "playwrigth"));
+        check.that("a missing name the candidate never touched is the environment's",
+                !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
+        Files.writeString(project.resolve("src/package.json"), "{\"dependencies\": {\"@scope/pkg\": \"1\"}}\n");
+        changed = git.changedPaths(mergeBase);
+        check.that("a scoped subpath is found by its package's name",
+                GateRunner.candidateMentions(git, project, mergeBase, changed, "@scope/pkg/sub"));
     }
 
     private void roleFailureRoutingChecks(Check check) {

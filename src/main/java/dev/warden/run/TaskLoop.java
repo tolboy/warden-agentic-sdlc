@@ -2340,6 +2340,16 @@ public final class TaskLoop {
          * answer to "who wrote this", not a failure of the loop.
          */
         private boolean inheritWritersFromLatestSameTask() {
+            return inheritWritersFromLatestSameTask(false);
+        }
+
+        /**
+         * @param measuredOnly take the writers a matching run measured even when its own
+         *                     provenance was unknown, and leave this run's provenance alone.
+         *                     A declaration names who wrote the starting tree; it must not
+         *                     erase a vendor Warden itself saw write into it.
+         */
+        private boolean inheritWritersFromLatestSameTask(boolean measuredOnly) {
             Path runs = loaded.root().resolve(".warden/runs");
             if (!Files.isDirectory(runs)) return false;
             Object here = summary.get("candidate_fingerprint");
@@ -2368,8 +2378,8 @@ public final class TaskLoop {
                     if (!(prior.get("writer_vendors") instanceof List<?> vendors) || vendors.isEmpty()) {
                         continue;
                     }
-                    if (!(prior.get("writer_provenance") instanceof String provenance)
-                            || provenance.startsWith("unknown")) {
+                    if (!measuredOnly && (!(prior.get("writer_provenance") instanceof String provenance)
+                            || provenance.startsWith("unknown"))) {
                         continue;
                     }
                     String closed;
@@ -2400,6 +2410,13 @@ public final class TaskLoop {
             if (vendorsFound.isEmpty()) return false;
             writerVendors.addAll(vendorsFound);
             writerProfiles.addAll(profilesFound);
+            if (measuredOnly) {
+                if (match.get("run_id") != null) {
+                    summary.put("measured_writers_from", String.valueOf(match.get("run_id")));
+                }
+                publishWriters();
+                return true;
+            }
             // The prior run's own word for how well it knew its writers, not a better one.
             writerProvenance = String.valueOf(match.get("writer_provenance"));
             if (match.get("run_id") != null) {
@@ -2421,11 +2438,20 @@ public final class TaskLoop {
          */
         private boolean declarePriorWriters() {
             if (task.priorWriters().isEmpty()) return false;
+            inheritWritersFromLatestSameTask(true);
             writerVendors.addAll(task.priorWriters());
             writerProvenance = "declared_prior_writers";
             summary.put("prior_writers", List.copyOf(task.priorWriters()));
             publishWriters();
             return true;
+        }
+
+        /** Union the task's declared authors into a writer set known some other way. */
+        private void addDeclaredPriorWriters() {
+            if (task.priorWriters().isEmpty()) return;
+            writerVendors.addAll(task.priorWriters());
+            summary.put("prior_writers", List.copyOf(task.priorWriters()));
+            publishWriters();
         }
 
         private void restoreWriters() {
@@ -2437,8 +2463,14 @@ public final class TaskLoop {
                 candidatePresent = true;
             }
             if (!carried.continuesRun()) {
-                if (candidatePresent && !inheritWritersFromLatestSameTask()) {
-                    if (!declarePriorWriters()) writerProvenance = "unknown_preexisting_candidate";
+                if (candidatePresent) {
+                    if (inheritWritersFromLatestSameTask()) {
+                        // A declaration made since that run still counts: a vendor a person
+                        // now names as an author must not read the tree as independent.
+                        addDeclaredPriorWriters();
+                    } else if (!declarePriorWriters()) {
+                        writerProvenance = "unknown_preexisting_candidate";
+                    }
                 }
                 return;
             }
@@ -2500,6 +2532,7 @@ public final class TaskLoop {
             if (candidatePresent && (priorFingerprint == null || !priorFingerprint.equals(now))) {
                 writerProvenance = "unknown_tree_moved";
             }
+            if (candidatePresent) addDeclaredPriorWriters();
         }
 
         /** Keep lifecycle memory on an authorised continuation, even when content needs re-review. */
