@@ -4288,6 +4288,32 @@ public final class TaskLoopTest implements Suite {
         check.eq("and says which run measured it", "pv9",
                 declaredOver.summaryReport().get("measured_writers_from"));
 
+        // Undeclared fresh runs must still keep measured writers from an unknown prior, or a
+        // later declaration can launder the first vendor into an independent reader.
+        Path chain = newProject(sandbox, "prov-measured-chain");
+        writeProfiles(home, sandbox, "prov-measured-chain", 1, 1);
+        Files.writeString(chain.resolve("src/stranger.txt"), "preexisting" + System.lineSeparator());
+        TaskLoop.Outcome chainA = loop(chain, home, "pv9g");
+        check.that("run A still reaches the gate", chainA.ok());
+        check.eq("run A stays unknown", "unknown_preexisting_candidate",
+                chainA.summaryReport().get("writer_provenance"));
+        TaskLoop.Outcome chainB = loop(chain, home, "pv9h");
+        check.that("run B without a declaration keeps A's measured writer",
+                chainB.summaryReport().get("writer_vendors") instanceof List<?> bVendors
+                        && bVendors.contains("implvendor"));
+        check.eq("and does not promote assurance", "unknown_preexisting_candidate",
+                chainB.summaryReport().get("writer_provenance"));
+        Path chainTask = chain.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(chainTask, Files.readString(chainTask) + "prior_writers: [othervendor]\n");
+        TaskLoop.Outcome chainC = loop(chain, home, "pv9i");
+        check.that("run C still carries A through B",
+                chainC.summaryReport().get("writer_vendors") instanceof List<?> cVendors
+                        && cVendors.contains("implvendor") && cVendors.contains("othervendor"));
+        // Swap the reviewer profile's vendor to implvendor would refuse; assert the set blocks it.
+        check.that("A remains in the writer set so it cannot read as independent",
+                chainC.summaryReport().get("writer_vendors") instanceof List<?> still
+                        && still.contains("implvendor"));
+
         // A person who knows who wrote the starting tree (an existing PR branch) says so.
         Path declared = newProject(sandbox, "prov-declared");
         writeProfiles(home, sandbox, "prov-declared", 1, 1);
@@ -6393,6 +6419,10 @@ public final class TaskLoopTest implements Suite {
                 !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
         check.that("pathMatchesMissing strips a leading ./",
                 GateRunner.pathMatchesMissing("tools/check", "./tools/check"));
+        check.that("an extensionless Windows invocation matches a deleted .cmd",
+                GateRunner.pathMatchesMissing("tools/check.cmd", "tools\\check"));
+        check.that("and matches by basename plus PATHEXT",
+                GateRunner.pathMatchesMissing("tools/check.cmd", "check"));
     }
 
     private void roleFailureRoutingChecks(Check check) {

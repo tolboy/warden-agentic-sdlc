@@ -2469,7 +2469,11 @@ public final class TaskLoop {
                         // now names as an author must not read the tree as independent.
                         addDeclaredPriorWriters();
                     } else if (!declarePriorWriters()) {
+                        // Keep writers a matching earlier run measured even when its own
+                        // provenance was unknown; do not promote assurance - stay unknown.
+                        inheritWritersFromLatestSameTask(true);
                         writerProvenance = "unknown_preexisting_candidate";
+                        publishWriters();
                     }
                 }
                 return;
