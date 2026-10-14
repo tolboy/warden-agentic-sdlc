@@ -49,6 +49,22 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- `warden approve --decision waive` reads the run-wide finding registry. A repair
+  rechecks earlier reviewers first; that recheck can report only a `contract_gap`
+  while another reviewer's P1 `product_defect` is still open or reopened. Waive is
+  refused and the decision stays pending. A defect that reviewer has closed does
+  not block the waiver. Suite `decision-page`.
+- A vendor error envelope is a location refusal when its `code` is 403 or its
+  `status` is `PERMISSION_DENIED`, even if the message text does not say so.
+  `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Request had insufficient authentication scopes."}}`
+  is `vendor_unavailable`. A bare `403` in stderr text is still not one. Quota
+  still wins when the message is a spent plan, and a usable review artifact that
+  mentions the code is not reclassified. Suite `vendor availability`.
+- Visual scenario preflight treats `verb=` inside a quoted or backslash-escaped
+  matcher value as part of the selector. `css=[data-label="x mode=y"] visible`
+  and the same selector as `wait-for` validate. An unknown step outside the
+  quotes (`blur=true`) is still `visual_qa_contract_invalid`. Suite `visual qa`.
+
 - A contract gap the harness cannot express no longer dead-ends the run. The reviewer
   prompt states the browser grammar and says a check it cannot say — a chord, a hover, a
   drag — is a P2 `contract_gap` that names manual verification, rather than a P1. A task

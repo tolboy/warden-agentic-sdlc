@@ -516,21 +516,17 @@ public final class NextStep {
     }
 
     /**
-     * Open P1s as {@code warden report} already has them: the last {@code finding_history}
-     * round, not a re-derivation from stage artifacts.
+     * Open P1s as the run-wide finding registry has them, not the latest round's own
+     * report. A recheck can be that latest round and name only a contract gap while
+     * another reviewer's product defect is still open or reopened. A downgraded
+     * advisory is already P2. Closed records are not blockers.
      */
     private static List<Map<String, Object>> openBlockingFindings(Map<String, Object> summary) {
-        List<Map<String, Object>> result = new ArrayList<>();
-        if (!(summary.get("finding_history") instanceof List<?> rounds) || rounds.isEmpty()) {
-            return result;
+        if (summary == null || !(summary.get("finding_history") instanceof List<?> rounds)) {
+            return List.of();
         }
-        Map<?, ?> last = null;
-        for (Object row : rounds) if (row instanceof Map<?, ?> map) last = map;
-        if (last == null || !(last.get("findings") instanceof List<?> findings)) return result;
-        for (Object item : findings) {
-            if (!(item instanceof Map<?, ?> finding)) continue;
-            if (!"P1".equals(String.valueOf(finding.get("severity")))) continue;
-            if ("closed".equals(String.valueOf(finding.get("status")))) continue;
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> finding : Findings.openBlockers(rounds)) {
             result.add(projectFinding(finding));
         }
         return result;

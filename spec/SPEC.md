@@ -446,7 +446,9 @@ warden approve <run-id>     record a decision; never lands changes.
                             whose open P1s are all contract_gap. Records
                             contract_gap_waived and contract_gap_waiver, lands
                             nothing, starts nothing. Refused for a product
-                            defect, for a stop that still has one, and when
+                            defect, for a stop that still has one (the run-wide
+                            finding registry, including an open or reopened P1
+                            another reviewer filed), and when
                             --finding is omitted; the decision stays pending
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing

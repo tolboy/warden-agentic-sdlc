@@ -1,5 +1,6 @@
 package dev.warden;
 
+import dev.warden.execution.QuotaSignal;
 import dev.warden.execution.VendorAvailability;
 import dev.warden.json.Json;
 import dev.warden.ledger.MeasurementProjector;
@@ -7,6 +8,7 @@ import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -77,5 +79,47 @@ public final class VendorAvailabilityTest implements Suite {
         check.that("and drops the vendor sentence", !projected.contains("PERMISSION_DENIED"));
         check.that("and drops the words not eligible from that sentence",
                 !projected.contains("Gemini"));
+
+        // The message does not contain a refusal phrase. The refusal is the fields.
+        String scopes = "Request had insufficient authentication scopes.";
+        String bothFields = "{\"error\":{\"code\":403,\"status\":\"PERMISSION_DENIED\",\"message\":\""
+                + scopes + "\"}}";
+        VendorAvailability.Detection fields = VendorAvailability.detect(bothFields, "");
+        check.that("a structured 403 with PERMISSION_DENIED matches on empty stderr", fields.matched());
+        check.eq("from the error envelope, not from prose", "structured_error_event", fields.detectedBy());
+        check.eq("the status field is the signature when both are present",
+                "permission_denied", fields.signature());
+        check.eq("and the message is kept as the vendor sentence", scopes, fields.evidence());
+
+        String codeOnly = "{\"error\":{\"code\":403,\"message\":\"" + scopes + "\"}}";
+        VendorAvailability.Detection code = VendorAvailability.detect(codeOnly, "");
+        check.that("numeric code 403 matches without a refusal sentence", code.matched());
+        check.eq("the signature is the code field", "code 403", code.signature());
+        check.eq("still a structured event", "structured_error_event", code.detectedBy());
+
+        String statusOnly = "{\"error\":{\"status\":\"PERMISSION_DENIED\",\"message\":\"" + scopes + "\"}}";
+        VendorAvailability.Detection status = VendorAvailability.detect(statusOnly, "");
+        check.that("status PERMISSION_DENIED matches without a refusal sentence", status.matched());
+        check.eq("the signature is permission_denied", "permission_denied", status.signature());
+
+        check.that("a string code 403 is the same field",
+                VendorAvailability.detect(
+                        "{\"error\":{\"code\":\"403\",\"message\":\"" + scopes + "\"}}", "").matched());
+        check.that("code 404 is not this refusal",
+                !VendorAvailability.detect(
+                        "{\"error\":{\"code\":404,\"message\":\"missing\"}}", "").matched());
+        check.that("a review artifact that carries code 403 is not reclassified",
+                !VendorAvailability.detect("""
+                        {"role":"reviewer","task_id":"hello","status":"completed","verdict":"fail",
+                        "summary":"the log mentioned code 403","code":403,
+                        "findings":[{"message":"status was PERMISSION_DENIED"}]}
+                        """, "").matched());
+
+        String spent = "{\"error\":{\"code\":403,\"status\":\"PERMISSION_DENIED\","
+                + "\"message\":\"You've hit your usage limit.\"}}";
+        check.eq("a 403 whose message is a spent plan stays a quota",
+                "quota_exhausted", QuotaSignal.detect(List.of(), spent, "").kind());
+        check.that("and is not also reported as a location refusal",
+                !VendorAvailability.detect(spent, "").matched());
     }
 }

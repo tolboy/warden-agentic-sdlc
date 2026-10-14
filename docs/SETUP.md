@@ -168,7 +168,9 @@ warden approve <run> --decision waive --finding <id>
 That closes the stop, writes `contract_gap_waived` on the ledger and `contract_gap_waiver`
 on the report, and lands nothing. It does not start another run. It is refused when the
 named finding is not an open `contract_gap`, when any other open P1 is not one, and when
-`--finding` is omitted. A product defect stays blocking.
+`--finding` is omitted. Open P1s are the run-wide finding registry, so a later round that
+reports only a contract gap does not waive a product defect another reviewer left open or
+reopened. A product defect stays blocking.
 
 A task may name checks a person already does by hand. A P1 `contract_gap` whose message,
 expected, actual, scenario or suggestion contains one of those items is recorded as P2

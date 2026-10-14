@@ -4,6 +4,8 @@ import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
 import dev.warden.dashboard.DecisionPage;
 import dev.warden.json.Json;
+import dev.warden.ledger.Findings;
+import dev.warden.run.NextStep;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
@@ -46,6 +48,7 @@ public final class DecisionPageTest implements Suite {
         noStartDoesNotHandOutASecondStart(check);
         advanceWaitsForTheContractAContractGapAsksFor(check);
         waiveClosesAContractGapStopAndRefusesADefect(check);
+        waiveReadsTheRunWideRegistry(check);
         theWaiterPrintsTheRunsItFinishedOn(check);
     }
 
@@ -937,6 +940,160 @@ public final class DecisionPageTest implements Suite {
                 "--finding");
         check.eq("and that decision stays pending", "pending",
                 new ApprovalStore(unnamed).read("run-1").state().jsonValue());
+    }
+
+    /**
+     * A repair rechecks the earlier reviewer before it re-reads the one whose defect
+     * prompted the repair. That recheck can report only a contract gap. The other
+     * reviewer's P1 stays open in the registry, and waive must leave the decision pending.
+     * A defect that reviewer later closed does not, and one they reopened does again.
+     */
+    private void waiveReadsTheRunWideRegistry(Check check) throws Exception {
+        Map<String, Object> passed = Findings.roundOf("review", 0, "tree-1",
+                Findings.of(Map.of("findings", List.of())), List.of());
+        Map<String, Object> filed = Findings.roundOf("review-second", 0, "tree-1",
+                Findings.of(Map.of("findings", List.of(blocker(
+                        "still-broken", "product_defect", "the greeting still does not toggle",
+                        "receipt-defect")))),
+                List.of(passed));
+        Map<String, Object> recheck = Findings.roundOf("review", 1, "tree-2",
+                Findings.of(Map.of("findings", List.of(blocker(
+                        "keyboard-chord", "contract_gap", "no scenario presses Escape",
+                        "receipt-gap")))),
+                List.of(passed, filed));
+        check.eq("the recheck reports only the contract gap",
+                List.of("keyboard-chord"), findingIds(recheck.get("findings")));
+        check.eq("the other reviewer's defect stays open in the registry",
+                "open", registryStatus(recheck, "still-broken"));
+
+        Map<String, Object> advice = new LinkedHashMap<>();
+        advice.put("run_id", "run-1");
+        advice.put("task_id", "hello");
+        advice.put("finding_history", List.of(passed, filed, recheck));
+        Map<String, Object> step = NextStep.of("blocking_findings_remain", advice, null);
+        check.eq("the next step is a repair while that defect is open",
+                "repair_or_retry", step.get("kind"));
+        check.that("and does not offer waive",
+                !String.valueOf(step.get("commands")).contains("waive"));
+
+        Path openRoot = project("Toggle the greeting");
+        HumanDecision openPending = failureWithRounds(openRoot, "run-1",
+                List.of(passed, filed, recheck));
+        Map<String, Object> refused = waive(openRoot, "run-1", openPending.updatedAt().toString(),
+                "keyboard-chord", "the recheck only named a gap");
+        check.eq("waive is refused", false, refused.get("ok"));
+        check.eq("with waive_refused", "waive_refused", refused.get("code"));
+        check.contains("and names the defect the registry still holds",
+                String.valueOf(refused.get("message")), "still-broken");
+        check.contains("as something other than a contract gap",
+                String.valueOf(refused.get("message")), "not a contract_gap");
+        check.eq("the decision stays pending", "pending",
+                new ApprovalStore(openRoot).read("run-1").state().jsonValue());
+        check.that("and no waiver was written",
+                !Files.exists(openRoot.resolve(".warden/runs/run-1/evidence.jsonl")));
+
+        Map<String, Object> closed = Findings.roundOf("review-second", 1, "tree-2",
+                Findings.of(Map.of("findings", List.of())), List.of(passed, filed));
+        Map<String, Object> gapAfterClose = Findings.roundOf("review", 1, "tree-3",
+                Findings.of(Map.of("findings", List.of(blocker(
+                        "keyboard-chord", "contract_gap", "no scenario presses Escape",
+                        "receipt-gap")))),
+                List.of(passed, filed, closed));
+        check.eq("a defect the owner closed is closed",
+                "closed", registryStatus(gapAfterClose, "still-broken"));
+        Path closedRoot = project("Toggle the greeting");
+        HumanDecision closedPending = failureWithRounds(closedRoot, "run-1",
+                List.of(passed, filed, closed, gapAfterClose));
+        Map<String, Object> accepted = waive(closedRoot, "run-1",
+                closedPending.updatedAt().toString(), "keyboard-chord", "the defect was closed");
+        check.eq("waive of the gap is accepted once the defect is closed", true, accepted.get("ok"));
+        check.eq("and the decision is recorded", "decision_recorded", accepted.get("code"));
+        check.eq("the store resolved it", "resolved",
+                new ApprovalStore(closedRoot).read("run-1").state().jsonValue());
+        check.eq("the closed defect is not in the waiver",
+                List.of("keyboard-chord"), waiverIds(closedRoot));
+
+        Map<String, Object> again = Findings.roundOf("review-second", 2, "tree-4",
+                Findings.of(Map.of("findings", List.of(blocker(
+                        "still-broken", "product_defect", "the greeting still does not toggle",
+                        "receipt-reopen")))),
+                List.of(passed, filed, closed));
+        Map<String, Object> recheckReopened = Findings.roundOf("review", 2, "tree-5",
+                Findings.of(Map.of("findings", List.of(blocker(
+                        "keyboard-chord", "contract_gap", "no scenario presses Escape",
+                        "receipt-gap-2")))),
+                List.of(passed, filed, closed, again));
+        check.eq("the defect is reopened, not gone",
+                "reopened", registryStatus(recheckReopened, "still-broken"));
+        check.eq("the latest report is still only the gap",
+                List.of("keyboard-chord"), findingIds(recheckReopened.get("findings")));
+        Path reopenedRoot = project("Toggle the greeting");
+        HumanDecision reopenedPending = failureWithRounds(reopenedRoot, "run-1",
+                List.of(passed, filed, closed, again, recheckReopened));
+        Map<String, Object> reopenedRefused = waive(reopenedRoot, "run-1",
+                reopenedPending.updatedAt().toString(), "keyboard-chord", "");
+        check.eq("waive is refused for a reopened defect", false, reopenedRefused.get("ok"));
+        check.eq("with the same code", "waive_refused", reopenedRefused.get("code"));
+        check.contains("and names that defect",
+                String.valueOf(reopenedRefused.get("message")), "still-broken");
+        check.eq("that decision stays pending", "pending",
+                new ApprovalStore(reopenedRoot).read("run-1").state().jsonValue());
+        check.that("and still no waiver was written",
+                !Files.exists(reopenedRoot.resolve(".warden/runs/run-1/evidence.jsonl")));
+    }
+
+    private HumanDecision failureWithRounds(Path root, String runId, List<Map<String, Object>> rounds)
+            throws Exception {
+        Path summaryFile = root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+        Map<String, Object> summary = new LinkedHashMap<>(Json.parseObject(Files.readString(summaryFile)));
+        summary.put("run_id", runId);
+        summary.put("reason", "blocking_findings_remain");
+        summary.put("finding_history", rounds);
+        Files.writeString(summaryFile, Json.write(summary));
+        return new ApprovalStore(root).createFailure(runId, "hello",
+                "blocking_findings_remain", summaryFile, null);
+    }
+
+    private static Map<String, Object> blocker(String id, String category, String message,
+                                               String evidence) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", id);
+        row.put("severity", "P1");
+        row.put("category", category);
+        row.put("path", "src/Toggle.java");
+        row.put("message", message);
+        row.put("evidence_refs", List.of(evidence));
+        row.put("supersedes", List.of());
+        row.put("confidence", "confirmed");
+        return row;
+    }
+
+    private static List<String> findingIds(Object findings) {
+        List<String> ids = new java.util.ArrayList<>();
+        if (findings instanceof List<?> rows) {
+            for (Object row : rows) {
+                if (row instanceof Map<?, ?> map && map.get("id") != null) {
+                    ids.add(String.valueOf(map.get("id")));
+                }
+            }
+        }
+        return ids;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object registryStatus(Map<String, Object> round, String id) {
+        if (!(round.get("finding_registry") instanceof List<?> rows)) return null;
+        for (Object row : rows) {
+            if (row instanceof Map<?, ?> map && id.equals(map.get("id"))) return map.get("status");
+        }
+        return null;
+    }
+
+    private static Object waiverIds(Path root) throws Exception {
+        Map<String, Object> summary = Json.parseObject(Files.readString(
+                root.resolve(".warden/runs/run-1/task-run.json")));
+        if (!(summary.get("contract_gap_waiver") instanceof Map<?, ?> waiver)) return null;
+        return waiver.get("waived_findings");
     }
 
     private HumanDecision failureWith(Path root, String runId, List<Map<String, Object>> findings)

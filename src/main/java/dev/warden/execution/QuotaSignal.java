@@ -207,6 +207,28 @@ public final class QuotaSignal {
         return structuredErrorMessages(output);
     }
 
+    /**
+     * Error-shaped objects in a JSONL stream, including a nested {@code error} payload.
+     * Package-visible so {@link VendorAvailability} can read {@code code} and {@code status},
+     * which are not message text. A success envelope with a null {@code error} is not one.
+     */
+    static List<Map<String, Object>> structuredErrorObjects(String output) {
+        List<Map<String, Object>> objects = new ArrayList<>();
+        if (output == null) return objects;
+        for (String line : output.split("\\R")) {
+            String candidate = line.strip();
+            if (!candidate.startsWith("{")) continue;
+            Map<String, Object> parsed;
+            try {
+                parsed = Json.parseObject(candidate);
+            } catch (RuntimeException notJson) {
+                continue;
+            }
+            collectStructured(parsed, null, objects, 0, false);
+        }
+        return objects;
+    }
+
     /** Stderr lines, as text. Free-form stdout is never passed here. */
     static List<String> stderrLines(String output) {
         return lines(output);
@@ -228,23 +250,22 @@ public final class QuotaSignal {
             } catch (RuntimeException notJson) {
                 continue;
             }
-            collectErrorMessages(parsed, messages, 0);
+            collectStructured(parsed, messages, null, 0, false);
         }
         return messages;
-    }
-
-    private static void collectErrorMessages(Map<String, Object> object, List<String> into, int depth) {
-        collectErrorMessages(object, into, depth, false);
     }
 
     /**
      * @param errorContext true when {@code object} is itself the value of an {@code error}
      *                     field. That payload often has no type, only {@code message}.
+     * @param messages     sentences, or null when the caller only wants the objects
+     * @param objects      error-shaped maps, or null when the caller only wants sentences
      */
     @SuppressWarnings("unchecked")
-    private static void collectErrorMessages(Map<String, Object> object, List<String> into, int depth,
-                                             boolean errorContext) {
-        if (depth > 4) return;
+    private static void collectStructured(Map<String, Object> object, List<String> messages,
+                                          List<Map<String, Object>> objects, int depth,
+                                          boolean errorContext) {
+        if (object == null || depth > 4) return;
         String type = object.get("type") instanceof String name ? name.toLowerCase(Locale.ROOT) : "";
         // A present-but-null `error` is the shape of a success envelope, not of a failure.
         // Treating it as error-shaped would hand the model's own answer to the matcher.
@@ -256,20 +277,25 @@ public final class QuotaSignal {
         boolean errorShaped = errorContext || flaggedByVendor || object.get("error") != null
                 || type.contains("error") || type.endsWith("failed");
         if (errorShaped) {
-            for (String key : MESSAGE_KEYS) {
-                if (object.get(key) instanceof String text) into.add(text);
+            if (objects != null) objects.add(object);
+            if (messages != null) {
+                for (String key : MESSAGE_KEYS) {
+                    if (object.get(key) instanceof String text) messages.add(text);
+                }
             }
         }
-        if (flaggedByVendor && object.get("result") instanceof String text) into.add(text);
+        if (messages != null && flaggedByVendor && object.get("result") instanceof String text) {
+            messages.add(text);
+        }
         Object nested = object.get("error");
         if (nested instanceof Map<?, ?> map) {
             // The object under `error` is the vendor's error payload. Codex puts the
             // sentence only there (`turn.failed` → `error.message`) and that object has
             // no type of its own, so the descent keeps the error context. A null `error`
             // never reaches here: that shape is a success envelope.
-            collectErrorMessages((Map<String, Object>) map, into, depth + 1, true);
-        } else if (nested instanceof String text) {
-            into.add(text);
+            collectStructured((Map<String, Object>) map, messages, objects, depth + 1, true);
+        } else if (messages != null && nested instanceof String text) {
+            messages.add(text);
         }
     }
 

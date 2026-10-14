@@ -2522,28 +2522,16 @@ public final class Main {
     }
 
     /**
-     * Open P1s on the last finding round, the same round {@link dev.warden.run.NextStep}
-     * routes by. A downgraded advisory is already P2 and is not among them.
+     * Open P1s across the run's finding registry, the same set
+     * {@link dev.warden.run.NextStep} routes by. A downgraded advisory is already P2.
+     * A closed record is not a blocker; an open or reopened one is, including a product
+     * defect another reviewer filed and a later recheck did not mention.
      */
     private static List<Map<String, Object>> openBlockingFindings(Map<String, Object> summary) {
-        List<Map<String, Object>> open = new ArrayList<>();
-        if (summary == null || !(summary.get("finding_history") instanceof List<?> rounds)
-                || rounds.isEmpty()) {
-            return open;
+        if (summary == null || !(summary.get("finding_history") instanceof List<?> rounds)) {
+            return List.of();
         }
-        Object last = rounds.get(rounds.size() - 1);
-        if (!(last instanceof Map<?, ?> round) || !(round.get("findings") instanceof List<?> findings)) {
-            return open;
-        }
-        for (Object item : findings) {
-            if (!(item instanceof Map<?, ?> finding)) continue;
-            if (!"P1".equals(String.valueOf(finding.get("severity")))) continue;
-            if ("closed".equals(String.valueOf(finding.get("status")))) continue;
-            Map<String, Object> copy = new LinkedHashMap<>();
-            finding.forEach((key, value) -> copy.put(String.valueOf(key), value));
-            open.add(copy);
-        }
-        return open;
+        return dev.warden.ledger.Findings.openBlockers(rounds);
     }
 
     /** Absent or unrecognised category is a product defect, matching {@link dev.warden.ledger.Findings}. */

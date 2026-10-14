@@ -269,6 +269,36 @@ public final class Findings {
         return "f-" + HexFormat.of().formatHex(digest.digest()).substring(0, 12);
     }
 
+    /**
+     * Open P1s for the whole run, from the finding registry rather than one round's report.
+     *
+     * A repair rechecks earlier reviewers before it re-reads the reviewer whose defect
+     * prompted it. That recheck can be the latest round and name only a {@code contract_gap},
+     * while another reviewer's P1 stays {@code open} or {@code reopened} in the registry:
+     * silence from a stage that did not file a finding does not close it. A waiver that
+     * read only the latest report would accept that stop. Closed records are not blockers.
+     * A round that never wrote a registry contributes its own findings, which is all an
+     * older summary has.
+     */
+    public static List<Map<String, Object>> openBlockers(List<?> history) {
+        List<Map<String, Object>> rounds = new ArrayList<>();
+        if (history != null) {
+            for (Object row : history) {
+                if (!(row instanceof Map<?, ?> map)) continue;
+                Map<String, Object> copy = new LinkedHashMap<>();
+                map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                rounds.add(copy);
+            }
+        }
+        List<Map<String, Object>> open = new ArrayList<>();
+        for (Map<String, Object> finding : registryOf(rounds)) {
+            if (!"P1".equals(String.valueOf(finding.get("severity")))) continue;
+            if ("closed".equals(finding.get("status"))) continue;
+            open.add(finding);
+        }
+        return open;
+    }
+
     /** The ids of the findings that block acceptance, in report order. */
     public static List<String> blockingIds(List<Finding> findings) {
         List<String> ids = new ArrayList<>();

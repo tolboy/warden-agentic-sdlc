@@ -132,7 +132,8 @@ against the roster before the first paid call, and the run header prints the res
 next run of the task once you have dealt with the blocker, and refuses when nothing has
 changed since the stop. The same gate offers `waive` when every open blocker is a
 `contract_gap`: `warden approve <run> --decision waive --finding <id>` records the waiver,
-closes the stop, and lands nothing. It is refused when any open P1 is a product defect.
+closes the stop, and lands nothing. It is refused when any open P1 is a product defect,
+including one another reviewer left open in the finding registry.
 A task may list checks a person already does by hand under `manual_verification:`; a
 contract gap whose text contains one of those items is recorded as advisory and the run
 continues to the human gate.

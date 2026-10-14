@@ -185,6 +185,28 @@ public final class VisualQaTest implements Suite {
                 taskWith(project, "typo", "1280x720: typo=save visible"));
         check.contains("an unknown verb is rejected", String.valueOf(typo), "typo=save");
 
+        // A CSS attribute may quote a space and a `verb=`. Splitting the whole step on
+        // whitespace used to read `mode=y"]` as an unknown step and fail preflight.
+        check.eq("a quoted css attribute is a selector, not an unknown step", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        quotedScenarios(project, "quoted-css",
+                                "1280x720: css=[data-label=\"x mode=y\"] visible",
+                                "1280x720: css=[data-label='x mode=y'] visible",
+                                "1280x720: css=[data-label=\"x \\\"mode=y\\\" z\"] visible",
+                                "1280x720: css=.panel mode\\=y visible",
+                                "1280x720: wait-for=css=[data-label=\"x mode=y\"]",
+                                "1280x720: wait-for=css=[data-label=\"x mode=y\"] visible",
+                                "1280x720: testid=stage click -> wait-for=css=[data-label=\"x mode=y\"] visible")));
+        String quotedUnknown = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                quotedScenarios(project, "quoted-blur",
+                        "1280x720: css=[data-label=\"x mode=y\"] blur=true"));
+        check.contains("an unknown step outside the quotes is still rejected",
+                String.valueOf(quotedUnknown), "blur=true");
+        String quotedWait = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                quotedScenarios(project, "quoted-wait",
+                        "1280x720: wait-for=css=[data-label=\"x mode=y\"] blur=true"));
+        check.contains("and so is one on a wait-for", String.valueOf(quotedWait), "blur=true");
+
         java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
         java.io.PrintStream previousOut = System.out;
         int validateExit;
@@ -326,6 +348,28 @@ public final class VisualQaTest implements Suite {
             if (item instanceof Map<?, ?> map) out.add((Map<String, Object>) map);
         }
         return out;
+    }
+
+    /**
+     * Like {@link #taskWith}, but the scenario is a YAML single-quoted scalar.
+     * A double-quoted scalar would eat the quotes and backslashes a CSS attribute needs.
+     */
+    private static ConfigLoader.Loaded quotedScenarios(Path project, String id, String... scenarios)
+            throws Exception {
+        StringBuilder yaml = new StringBuilder("""
+                version: 1
+                id: %s
+                goal: Fix the Create button
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios:
+                """.formatted(id));
+        for (String scenario : scenarios) {
+            yaml.append("    - '").append(scenario.replace("'", "''")).append("'\n");
+        }
+        Files.writeString(project.resolve(".warden/tasks/" + id + ".yaml"), yaml.toString());
+        return new ConfigLoader().load(project, id);
     }
 
     /** A task whose only interesting part is its scenarios. */

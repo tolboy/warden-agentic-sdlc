@@ -53,7 +53,9 @@
  * A word shaped like `verb=` that is not one of those verbs is an unknown step
  * and is refused. It used to be swallowed into the matcher value, so
  * `testid=save press=Escape` was a testid of "save press=Escape" and validate
- * called that fine.
+ * called that fine. A `verb=` inside a quoted matcher value, or after a
+ * backslash, is part of that value: `css=[data-label="x mode=y"]` is a
+ * selector, not an unknown step named `mode`.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -200,16 +202,83 @@ function canonicalKey(raw) {
 }
 
 /**
+ * Tokens a step verb can occupy: runs of non-space outside quotes.
+ *
+ * A CSS attribute is allowed to contain spaces and `verb=` text,
+ * `css=[data-label="x mode=y"]`. Splitting that on whitespace treats `mode=y"]`
+ * as a step. A single or double quote binds until its pair, and a backslash
+ * escapes the next character, so `\"` does not end the value and `mode\=y` is
+ * not a step. The span covers the original text, quotes included, so the
+ * selector that is stored is the selector that was written.
+ */
+function unquotedTokenSpans(text) {
+  const source = String(text);
+  const spans = [];
+  let start = -1;
+  let quote = null;
+  let escaped = false;
+  let tokenEscaped = false;
+  const flush = (end) => {
+    if (start >= 0 && end > start) spans.push({ start, end, escaped: tokenEscaped });
+    start = -1;
+    tokenEscaped = false;
+  };
+  for (let index = 0; index < source.length; index++) {
+    const ch = source[index];
+    if (escaped) {
+      if (!quote) {
+        if (start < 0) start = index;
+        tokenEscaped = true;
+      }
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush(index);
+      continue;
+    }
+    if (start < 0) start = index;
+  }
+  flush(source.length);
+  return spans;
+}
+
+function spanText(text, span) {
+  return String(text).slice(span.start, span.end);
+}
+
+/** The `verb=value` at the start of a token, before any quoted tail. */
+function leadingVerb(word) {
+  const verb = String(word).match(/^([a-z][a-z0-9_-]*=\S*)/i);
+  return verb ? verb[1] : null;
+}
+
+/**
  * A token that looks like a step verb but is not one. `testid=save blur=true`
  * used to become a testid whose value was the whole remainder, and preflight
- * then said the scenario was fine.
+ * then said the scenario was fine. Quoted and escaped matcher text is not a token.
  */
 function rejectUnknownVerbs(text) {
-  for (const word of String(text).split(/\s+/)) {
+  for (const span of unquotedTokenSpans(text)) {
+    if (span.escaped) continue;
+    const word = spanText(text, span);
     const verb = word.match(/^([a-z][a-z0-9_-]*)=/i);
     if (!verb) continue;
     if (KNOWN_VERBS.has(verb[1].toLowerCase())) continue;
-    throw new Error(`scenario "${text}": unknown step "${word}". `
+    const shown = leadingVerb(word) || word;
+    throw new Error(`scenario "${text}": unknown step "${shown}". `
       + `A step is a matcher (text=, css=, testid=, role=) with visible, hidden, click, `
       + `click@x,y or focused, or press=KEY (Escape, Enter, Tab, Space, an arrow, or one `
       + `character), or wait N, or wait-for=MATCHER.`);
@@ -287,10 +356,12 @@ function parseStep(raw, fallbackAssertion = "visible") {
       throw new Error(`scenario "${text}": wait-for needs a typed matcher `
         + `(wait-for=css=.ready, wait-for=testid=hearth), not "${body}"`);
     }
-    const valueWords = typed[2].trim().split(/\s+/);
-    for (const extra of valueWords.slice(1)) {
-      if (/^[a-z][a-z0-9_-]*=/i.test(extra)) {
-        throw new Error(`scenario "${text}": unknown step "${extra}". `
+    const valueSpans = unquotedTokenSpans(typed[2]);
+    for (const extraSpan of valueSpans.slice(1)) {
+      if (extraSpan.escaped) continue;
+      const shown = leadingVerb(spanText(typed[2], extraSpan));
+      if (shown) {
+        throw new Error(`scenario "${text}": unknown step "${shown}". `
           + `wait-for takes one matcher. Say press= or another assertion as the next step after ->.`);
       }
     }
@@ -311,18 +382,23 @@ function parseStep(raw, fallbackAssertion = "visible") {
   // swallowed into the matcher value, so validate accepted `testid=save press=Escape`
   // as a testid whose value was the whole remainder.
   rejectUnknownVerbs(text);
-  if (/(?:^|\s)press\s*=/i.test(text)) {
-    const trailingPress = text.match(/^(.*?)(?:^|\s)press\s*=\s*(\S+)\s*$/i);
+  const stepSpans = unquotedTokenSpans(text);
+  const lastSpan = stepSpans.length ? stepSpans[stepSpans.length - 1] : null;
+  const pressSpan = [...stepSpans].reverse().find((span) =>
+    !span.escaped && /^press\s*=/i.test(spanText(text, span)));
+  if (pressSpan) {
+    const pressText = spanText(text, pressSpan);
+    const trailingPress = pressSpan === lastSpan ? pressText.match(/^press\s*=\s*(\S+)$/i) : null;
     if (!trailingPress) {
       throw new Error(`scenario "${text}": press=KEY is its own step or the last word of one. `
         + `Write "press=Escape" or "testid=dialog press=Escape".`);
     }
-    const key = canonicalKey(trailingPress[2]);
+    const key = canonicalKey(trailingPress[1]);
     if (!key) {
-      throw new Error(`scenario "${text}": press= does not know the key "${trailingPress[2]}". `
+      throw new Error(`scenario "${text}": press= does not know the key "${trailingPress[1]}". `
         + `Say Escape, Enter, Tab, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, or one character.`);
     }
-    const target = trailingPress[1].trim();
+    const target = text.slice(0, pressSpan.start).trim();
     if (!target) {
       return { kind: "press", value: key.label, key, assertion: "press", at: null, raw: text };
     }
