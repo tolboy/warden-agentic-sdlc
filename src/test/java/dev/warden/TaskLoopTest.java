@@ -4288,6 +4288,32 @@ public final class TaskLoopTest implements Suite {
         check.eq("and says which run measured it", "pv9",
                 declaredOver.summaryReport().get("measured_writers_from"));
 
+        // Undeclared fresh runs must still keep measured writers from an unknown prior, or a
+        // later declaration can launder the first vendor into an independent reader.
+        Path chain = newProject(sandbox, "prov-measured-chain");
+        writeProfiles(home, sandbox, "prov-measured-chain", 1, 1);
+        Files.writeString(chain.resolve("src/stranger.txt"), "preexisting" + System.lineSeparator());
+        TaskLoop.Outcome chainA = loop(chain, home, "pv9g");
+        check.that("run A still reaches the gate", chainA.ok());
+        check.eq("run A stays unknown", "unknown_preexisting_candidate",
+                chainA.summaryReport().get("writer_provenance"));
+        TaskLoop.Outcome chainB = loop(chain, home, "pv9h");
+        check.that("run B without a declaration keeps A's measured writer",
+                chainB.summaryReport().get("writer_vendors") instanceof List<?> bVendors
+                        && bVendors.contains("implvendor"));
+        check.eq("and does not promote assurance", "unknown_preexisting_candidate",
+                chainB.summaryReport().get("writer_provenance"));
+        Path chainTask = chain.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(chainTask, Files.readString(chainTask) + "prior_writers: [othervendor]\n");
+        TaskLoop.Outcome chainC = loop(chain, home, "pv9i");
+        check.that("run C still carries A through B",
+                chainC.summaryReport().get("writer_vendors") instanceof List<?> cVendors
+                        && cVendors.contains("implvendor") && cVendors.contains("othervendor"));
+        // Swap the reviewer profile's vendor to implvendor would refuse; assert the set blocks it.
+        check.that("A remains in the writer set so it cannot read as independent",
+                chainC.summaryReport().get("writer_vendors") instanceof List<?> still
+                        && still.contains("implvendor"));
+
         // A person who knows who wrote the starting tree (an existing PR branch) says so.
         Path declared = newProject(sandbox, "prov-declared");
         writeProfiles(home, sandbox, "prov-declared", 1, 1);
@@ -6415,6 +6441,35 @@ public final class TaskLoopTest implements Suite {
                 !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
         check.that("pathMatchesMissing strips a leading ./",
                 GateRunner.pathMatchesMissing("tools/check", "./tools/check"));
+        check.eq("the default matcher uses the host platform for PATHEXT", WINDOWS,
+                GateRunner.pathMatchesMissing("tools/check.cmd", "check"));
+        check.eq("the default matcher uses the host platform for case sensitivity", WINDOWS,
+                GateRunner.pathMatchesMissing("tools/Check", "check"));
+        for (boolean windows : List.of(false, true)) {
+            check.that("leading ./ matches on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check", "./tools/check", windows));
+            check.that("exact basenames match on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check", "other/check", windows));
+            check.that("explicit extensions match on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check.cmd", "check.cmd", windows));
+            check.that("unrelated names do not match on windows=" + windows,
+                    !GateRunner.pathMatchesMissing("tools/check", "other", windows));
+            check.eq("full path case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("tools/Check", "tools/check", windows));
+            check.eq("suffix path case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("project/tools/Check", "tools/check", windows));
+            check.eq("basename case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("tools/Check", "other/check", windows));
+            for (String ext : List.of(".cmd", ".bat", ".exe", ".com")) {
+                check.eq("full path PATHEXT requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/check" + ext, "tools\\check", windows));
+                check.eq("basename PATHEXT requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/check" + ext, "check", windows));
+                check.eq("PATHEXT with case folding requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/Check" + ext.toUpperCase(java.util.Locale.ROOT),
+                                "tools\\check", windows));
+            }
+        }
     }
 
     private void roleFailureRoutingChecks(Check check) {
