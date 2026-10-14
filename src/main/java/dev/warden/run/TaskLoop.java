@@ -1302,7 +1302,7 @@ public final class TaskLoop {
                         : "same_vendor_peer".equals(assurance)
                             ? " (a declared same-vendor pair read it; that is not an independent review)"
                             : "unproven".equals(assurance)
-                                ? " (who wrote the candidate is not recorded, so no reading can be called independent)"
+                                ? unprovenReason(summary)
                                 : " (a co-author of the candidate read it)");
         }
         // A chain can reach the human gate with stages still owed — a conditional stage that
@@ -2269,7 +2269,8 @@ public final class TaskLoop {
          */
         private RoleResolver.Writers writers() {
             return new RoleResolver.Writers(writerVendors, writerProfiles,
-                    "recorded".equals(writerProvenance) || "derived_from_steps".equals(writerProvenance),
+                    "recorded".equals(writerProvenance) || "derived_from_steps".equals(writerProvenance)
+                            || "declared_prior_writers".equals(writerProvenance),
                     "same_vendor_peer".equals(task.reviewAssurance()));
         }
 
@@ -2408,6 +2409,25 @@ public final class TaskLoop {
             return true;
         }
 
+        /**
+         * The task's own word for who wrote the tree this run starts on (#46).
+         *
+         * A run on an existing PR branch starts with a candidate no Warden run wrote, so its
+         * authors are unknown and every reading is `unproven` — even when the reviewer's
+         * vendor wrote nothing anyone can see. A person who knows the branch's authors names
+         * their vendors in `prior_writers`; they join the writer set, so a reviewer of one of
+         * those vendors is refused and any other is independent. The provenance says
+         * `declared_prior_writers`, so the report never passes the claim off as measured.
+         */
+        private boolean declarePriorWriters() {
+            if (task.priorWriters().isEmpty()) return false;
+            writerVendors.addAll(task.priorWriters());
+            writerProvenance = "declared_prior_writers";
+            summary.put("prior_writers", List.copyOf(task.priorWriters()));
+            publishWriters();
+            return true;
+        }
+
         private void restoreWriters() {
             boolean candidatePresent;
             try {
@@ -2418,7 +2438,7 @@ public final class TaskLoop {
             }
             if (!carried.continuesRun()) {
                 if (candidatePresent && !inheritWritersFromLatestSameTask()) {
-                    writerProvenance = "unknown_preexisting_candidate";
+                    if (!declarePriorWriters()) writerProvenance = "unknown_preexisting_candidate";
                 }
                 return;
             }
@@ -2450,7 +2470,8 @@ public final class TaskLoop {
                 // the names are of runs that wrote, not of whatever was in the tree before
                 // them, and that gap is exactly what `unknown` is the word for.
                 String recorded = prior.get("writer_provenance") instanceof String text ? text : "recorded";
-                writerProvenance = recorded.startsWith("unknown") ? recorded : "recorded";
+                writerProvenance = recorded.startsWith("unknown") || "declared_prior_writers".equals(recorded)
+                        ? recorded : "recorded";
             } else {
                 boolean anyWriter = false;
                 if (prior.get("steps") instanceof List<?> rows) {
@@ -5335,6 +5356,27 @@ public final class TaskLoop {
         failure.put("on_continue", "stages that already passed this exact tree under the same "
                 + "contract and roster are reused; the failed stage is dispatched again");
         summary.put("infrastructure_failure", failure);
+    }
+
+    /**
+     * Why a reading is `unproven`, with what would fix it. The usual cause is a run that
+     * started on a tree that already differed from the diff base (an existing PR branch):
+     * this run's own writers are known, the starting tree's are not (#46).
+     */
+    public static String unprovenReason(Map<String, Object> summary) {
+        String provenance = String.valueOf(summary.get("writer_provenance"));
+        String these = summary.get("writer_vendors") instanceof List<?> vendors && !vendors.isEmpty()
+                ? "; this run's writers were " + String.join(", ", vendors.stream().map(String::valueOf).toList())
+                : "";
+        if ("unknown_preexisting_candidate".equals(provenance)) {
+            return " (the tree already differed from the diff base when the run started, and nobody "
+                    + "recorded who wrote that part" + these + ". If you know its authors, name their "
+                    + "vendors in the task's prior_writers and start a new run)";
+        }
+        if ("unknown_tree_moved".equals(provenance)) {
+            return " (the tree changed outside Warden since the run this one continues" + these + ")";
+        }
+        return " (who wrote the candidate is not recorded, so no reading can be called independent)";
     }
 
     /** Name the command and the signal on the run, for the person who has to install it. */

@@ -4274,6 +4274,33 @@ public final class TaskLoopTest implements Suite {
                 "unknown_preexisting_candidate", unexplained.summaryReport().get("writer_provenance"));
         check.eq("so nothing read over that tree is called independent", "unproven",
                 unexplained.summaryReport().get("review_assurance"));
+        check.eq("this unit names why and the way out (#46)", true,
+                TaskLoop.unprovenReason(unexplained.summaryReport()).contains("prior_writers")
+                        && TaskLoop.unprovenReason(unexplained.summaryReport()).contains("implvendor"));
+
+        // A person who knows who wrote the starting tree (an existing PR branch) says so.
+        Path declared = newProject(sandbox, "prov-declared");
+        writeProfiles(home, sandbox, "prov-declared", 1, 1);
+        Files.writeString(declared.resolve("src/stranger.txt"), "written on the PR branch" + System.lineSeparator());
+        Path declaredTask = declared.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(declaredTask, Files.readString(declaredTask) + "prior_writers: [implvendor]\n");
+        TaskLoop.Outcome vouched = loop(declared, home, "pv9b");
+        check.that("a declared starting author still reaches the gate", vouched.ok());
+        check.eq("the claim is labelled as declared, not measured", "declared_prior_writers",
+                vouched.summaryReport().get("writer_provenance"));
+        check.eq("and the declared vendor joins the writer set", List.of("implvendor"),
+                vouched.summaryReport().get("writer_vendors"));
+        check.eq("so a reader from another vendor is independent", "independent",
+                vouched.summaryReport().get("review_assurance"));
+
+        Path declaredReader = newProject(sandbox, "prov-declared-reader");
+        writeProfiles(home, sandbox, "prov-declared-reader", 1, 1);
+        Files.writeString(declaredReader.resolve("src/stranger.txt"), "written by the reviewer's vendor" + System.lineSeparator());
+        Path readerTask = declaredReader.resolve(".warden/tasks/hello.yaml");
+        Files.writeString(readerTask, Files.readString(readerTask) + "prior_writers: [reviewvendor]\n");
+        TaskLoop.Outcome refusedReader = loop(declaredReader, home, "pv9c");
+        check.eq("a declared author's own vendor may not be the independent reader",
+                "independent_review_unavailable", refusedReader.reason());
 
         // The same tree, a new run id and no --continue: the run that left this tree is
         // found by its recorded closing fingerprint, not by being the newest folder.

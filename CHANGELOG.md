@@ -11,6 +11,11 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Task `prior_writers: [vendor, ...]` vouches for who wrote a starting tree that already
+  differs from the diff base (an existing PR branch). Those vendors join the writer set as
+  `declared_prior_writers`, so a cross-vendor reader is `independent` instead of `unproven`;
+  a reader of a declared vendor is refused. An `unproven` verdict now says why and names
+  this key (#46). Not yet run live. Suite `task loop`.
 - A gate command that cannot run on this machine (command not found, Node bare package not
   found, `spawn X ENOENT`) stops as `gate_environment_error` with next step
   `fix_environment`, at the baseline or after a writer, instead of sending the implementer
