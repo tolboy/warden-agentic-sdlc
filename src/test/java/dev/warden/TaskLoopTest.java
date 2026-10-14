@@ -6419,12 +6419,35 @@ public final class TaskLoopTest implements Suite {
                 !GateRunner.candidateMentions(git, project, mergeBase, changed, "left-pad"));
         check.that("pathMatchesMissing strips a leading ./",
                 GateRunner.pathMatchesMissing("tools/check", "./tools/check"));
-        check.that("an extensionless Windows invocation matches a deleted .cmd",
-                GateRunner.pathMatchesMissing("tools/check.cmd", "tools\\check"));
-        check.that("and matches by basename plus PATHEXT",
+        check.eq("the default matcher uses the host platform for PATHEXT", WINDOWS,
                 GateRunner.pathMatchesMissing("tools/check.cmd", "check"));
-        check.that("Windows matching is case-insensitive for Check.CMD vs check",
-                GateRunner.pathMatchesMissing("tools/Check.CMD", "tools\\check"));
+        check.eq("the default matcher uses the host platform for case sensitivity", WINDOWS,
+                GateRunner.pathMatchesMissing("tools/Check", "check"));
+        for (boolean windows : List.of(false, true)) {
+            check.that("leading ./ matches on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check", "./tools/check", windows));
+            check.that("exact basenames match on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check", "other/check", windows));
+            check.that("explicit extensions match on windows=" + windows,
+                    GateRunner.pathMatchesMissing("tools/check.cmd", "check.cmd", windows));
+            check.that("unrelated names do not match on windows=" + windows,
+                    !GateRunner.pathMatchesMissing("tools/check", "other", windows));
+            check.eq("full path case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("tools/Check", "tools/check", windows));
+            check.eq("suffix path case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("project/tools/Check", "tools/check", windows));
+            check.eq("basename case folding requires Windows", windows,
+                    GateRunner.pathMatchesMissing("tools/Check", "other/check", windows));
+            for (String ext : List.of(".cmd", ".bat", ".exe", ".com")) {
+                check.eq("full path PATHEXT requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/check" + ext, "tools\\check", windows));
+                check.eq("basename PATHEXT requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/check" + ext, "check", windows));
+                check.eq("PATHEXT with case folding requires Windows: " + ext, windows,
+                        GateRunner.pathMatchesMissing("tools/Check" + ext.toUpperCase(java.util.Locale.ROOT),
+                                "tools\\check", windows));
+            }
+        }
     }
 
     private void roleFailureRoutingChecks(Check check) {
