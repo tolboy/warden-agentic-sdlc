@@ -390,6 +390,7 @@ public final class TaskLoop {
             "independent_review_unavailable",
             "role_timed_out",
             "vendor_call_failed",
+            "vendor_unavailable",
             "vendor_protocol_failed",
             "prompt_undeliverable",
             "orca_worker_not_started",
@@ -412,6 +413,9 @@ public final class TaskLoop {
      *  - a wall clock that ran out bounds the call, not the diff;
      *  - a vendor process that exited non-zero with nothing Warden recognises — a crash, a
      *    refused login, a dropped connection — has said nothing about the work at all;
+     *  - a location or eligibility refusal ({@code role_vendor_unavailable}: HTTP 403,
+     *    {@code PERMISSION_DENIED}, "not eligible", "not available in your location") is
+     *    the same kind of missing call, and that profile is not tried again in this process;
      *  - an answer that is not a readable, complete, schema-valid artifact is an answer Warden
      *    could not read, so whatever verdict it held is unknown rather than negative;
      *  - a prompt that could not be delivered never reached the vendor;
@@ -427,6 +431,7 @@ public final class TaskLoop {
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
             Map.entry("role_command_failed", "vendor_call_failed"),
+            Map.entry("role_vendor_unavailable", "vendor_unavailable"),
             Map.entry("role_artifact_unparseable", "vendor_protocol_failed"),
             Map.entry("role_artifact_incomplete", "vendor_protocol_failed"),
             Map.entry("role_artifact_schema_violation", "vendor_protocol_failed"),
@@ -461,7 +466,8 @@ public final class TaskLoop {
             "rate_limited", "rate_limit",
             "quota_exhausted", "quota",
             "turn_ceiling_reached", "turn_ceiling",
-            "orca_worker_not_started", "orca_start");
+            "orca_worker_not_started", "orca_start",
+            "vendor_unavailable", "unavailable");
 
     /**
      * Whether a call timed out on a wall clock the chain deadline had lowered.
@@ -2552,7 +2558,8 @@ public final class TaskLoop {
                 // the ladder this is a no-op; on it, the next rung's pair is pinned or the
                 // run stops for a reason that names the rung.
                 maybeEscalate(stage, index);
-                fixRound(stage, index, reviewContext(loaded.root(), reviewed, repairSeverities()));
+                fixRound(stage, index, reviewContext(loaded.root(), reviewed, repairSeverities(),
+                        task.manualVerification()));
                 outcome = execute(stage);
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
                 reviewed = (RoleRunner.Outcome) outcome;
@@ -3883,7 +3890,8 @@ public final class TaskLoop {
          */
         private void recordFindingRound(Workflow.Stage stage, RoleRunner.Outcome outcome)
                 throws Exception {
-            List<Findings.Finding> found = Findings.of(readArtifact(loaded.root(), outcome));
+            List<Findings.Finding> found = acknowledgedFindings(
+                    loaded.root(), outcome, task.manualVerification());
             // The run's whole history, not this stage's last round. The deltas below are still
             // this stage against itself; the lifecycle the evidence rules are checked against
             // belongs to the run, so a stage rechecked after another stage closed something
@@ -3949,7 +3957,7 @@ public final class TaskLoop {
         }
 
         private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
-            long blocking = blockingFindings(loaded.root(), outcome);
+            long blocking = blockingFindings(loaded.root(), outcome, task.manualVerification());
             recordFindingRound(stage, outcome);
             // Kept: an operator's greps, the report reader and the reuse rules for a
             // single-stage role all read this. It is keyed by role, so a chain with two review
@@ -4124,7 +4132,7 @@ public final class TaskLoop {
             if (outcome instanceof GateRunner.Outcome gate) return gateContext(gate);
             if (outcome instanceof VisualQaRunner.Outcome visual) return visualContext(visual);
             if (outcome instanceof RoleRunner.Outcome role) {
-                return reviewContext(loaded.root(), role, repairSeverities());
+                return reviewContext(loaded.root(), role, repairSeverities(), task.manualVerification());
             }
             return "# " + stage.name() + " failed\n";
         }
@@ -5261,7 +5269,8 @@ public final class TaskLoop {
         String cause = String.valueOf(pending.get("cause"));
         return "vendor_call_failed".equals(cause)
                 || "role_timeout".equals(cause)
-                || "artifact_invalid".equals(cause);
+                || "artifact_invalid".equals(cause)
+                || "vendor_unavailable".equals(cause);
     }
 
     /**
@@ -5767,6 +5776,12 @@ public final class TaskLoop {
                     + "without a recognised cause (a login, the network, the CLI itself). Read "
                     + "stderr_tail and stdout_tail in its role report, fix what they name, "
                     + "then: " + carryOn + kept(summary);
+            case "vendor_unavailable" -> "the " + failedProfile(summary) + " account cannot use "
+                    + "this vendor here (a location or eligibility refusal, often HTTP 403). "
+                    + "It is not a verdict on the work. That profile is skipped for the rest of "
+                    + "this process; a different profile of the same vendor is not. Add another "
+                    + "profile for the role, or run where the vendor is available, then: "
+                    + carryOn + kept(summary);
             case "vendor_protocol_failed" -> "the " + failedProfile(summary) + " call "
                     + "answered, but not with a readable, complete, schema-valid artifact, so "
                     + "whatever it concluded is unknown. Check the profile's prompt, schema "
@@ -6076,22 +6091,31 @@ public final class TaskLoop {
         return body.toString();
     }
 
-    private long blockingFindings(Path root, RoleRunner.Outcome review) throws Exception {
-        Map<String, Object> artifact = readArtifact(root, review);
-        if (artifact == null) return 0;
-        if (!(artifact.get("findings") instanceof List<?> list)) return 0;
-        return list.stream()
-                .filter(item -> item instanceof Map<?, ?> map && "P1".equals(map.get("severity")))
-                .count();
+    private long blockingFindings(Path root, RoleRunner.Outcome review, List<String> manual)
+            throws Exception {
+        return acknowledgedFindings(root, review, manual).stream()
+                .filter(Findings.Finding::blocking).count();
     }
 
-    private String reviewContext(Path root, RoleRunner.Outcome review, java.util.Set<String> severities)
+    /**
+     * The reviewer's findings after a task's {@code manual_verification} list has been applied.
+     * The file the vendor wrote is left as they wrote it.
+     */
+    private List<Findings.Finding> acknowledgedFindings(Path root, RoleRunner.Outcome review,
+                                                        List<String> manual) throws Exception {
+        Map<String, Object> artifact = readArtifact(root, review);
+        if (artifact == null) return List.of();
+        return Findings.acknowledging(Findings.of(artifact), manual);
+    }
+
+    private String reviewContext(Path root, RoleRunner.Outcome review, java.util.Set<String> severities,
+                                 List<String> manual)
             throws Exception {
         Map<String, Object> artifact = readArtifact(root, review);
         StringBuilder builder = new StringBuilder("# An independent reading asked for changes\n\n");
         if (artifact == null) return builder.append("(the reviewer artifact could not be read)\n").toString();
         builder.append("Reviewer summary: ").append(artifact.get("summary")).append("\n\n");
-        for (Findings.Finding finding : Findings.of(artifact)) {
+        for (Findings.Finding finding : Findings.acknowledging(Findings.of(artifact), manual)) {
             // P1 always; P2 and P3 when the policy repairs them before the human gate. A
             // non-blocking finding handed over here is what the operator would otherwise have
             // had to read at the gate and send back by hand.

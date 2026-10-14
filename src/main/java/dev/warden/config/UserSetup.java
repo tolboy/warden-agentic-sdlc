@@ -167,10 +167,14 @@ public final class UserSetup {
             # that recorded decision: it names one role and one profile, and nothing else.
             failover:
               on_quota_exhausted: confirm
-              # A call that produced no artifact (network, timeout, permission, missing or
-              # invalid artifact). stop is the default and is today's behaviour. confirm and
-              # auto use the same role_failover event as a spent subscription, at most
-              # max_per_stage times in one role dispatch. A finding is not this.
+              # A call that produced no artifact (network, timeout, a location or eligibility
+              # refusal such as HTTP 403, missing or invalid artifact). A location or
+              # eligibility refusal is cause vendor_unavailable: it fails over like any other
+              # missing artifact, and that profile is skipped for the rest of the process.
+              # stop is the default and is today's behaviour. confirm and auto use the same
+              # role_failover event as a spent subscription, at most max_per_stage times in
+              # one role dispatch. A finding is not this. A look stage needs a second
+              # visual_qa profile in the roster before auto has anywhere to switch.
               on_vendor_failure: stop
               max_per_stage: 1
 
@@ -467,7 +471,7 @@ public final class UserSetup {
             ## What has already been settled without you
 
             If screenshots were handed to you, a headless browser may already have loaded the
-            page at each viewport and asserted visibility, clicks and console silence. Those
+            page at each viewport and asserted visibility, clicks, key presses, focus and console silence. Those
             facts are in the report below. **Do not re-litigate them.** If you took the
             pictures yourself, ignore this section: you are the harness.
 
@@ -601,13 +605,27 @@ public final class UserSetup {
             {{visual_scenarios}}
 
             Those two lists are the whole of the machine acceptance, and the second one is not
-            a plan — a headless browser runs it at the named viewports, clicks what it says to
-            click, and fails the run when an assertion does not hold. So "no command verifies
+            a plan — a headless browser runs it at the named viewports. The grammar is
+            `testid=` / `css=` / `role=` / `text=` with `visible`, `hidden`, `click`,
+            `click@x,y` or `focused`, plus `press=KEY` (Escape, Enter, Tab, Space, an arrow,
+            or one character; a matcher before it focuses that element first) and
+            `wait` / `wait-for`. The browser fails the run when an assertion does not hold. So "no command verifies"
             this change" is a finding only when **neither** list covers it. A live review once
             filed a P1 saying nothing asserted an attribute that the browser scenario on the
             next line asserted by name; the implementer was then sent to add a test for
             something already tested. Check both lists before writing that finding, and if the
             gap is real, say which list you would put the check in.
+
+            A check the grammar cannot express is not a P1. Do not demand a scenario for a
+            keyboard chord, a hover, a drag, or anything else this grammar cannot say. File
+            that gap as P2, category contract_gap, and write in the message that it needs
+            manual verification. A P1 contract_gap stops the run, and another implementer
+            pass cannot add a scenario the harness cannot run.
+
+            Items the task already names under manual_verification are acknowledged. Do not
+            file a blocking contract_gap for one of them:
+
+            {{manual_verification}}
 
             ## Hard constraints
 
@@ -665,10 +683,11 @@ public final class UserSetup {
             - `review_disagreement` — you believe an earlier finding was wrong. Say why, on the
               evidence.
 
-            A finding an implementer cannot act on is not a reason to soften it. File it at the
-            severity it deserves with the category that says whose it is. Only a product_defect
-            P1 sends the work back to the implementer; a P1 in any other category stops the run
-            for a person instead of buying another repair.
+            A finding an implementer cannot act on is not a reason to soften a defect. File a
+            product defect at the severity it deserves. A check the grammar cannot express is
+            the exception above: it is P2, advisory, and it names manual verification. Only a
+            product_defect P1 sends the work back to the implementer; a P1 in any other
+            category stops the run for a person instead of buying another repair.
 
             If you are re-reading a candidate you have seen before, you will be told so and given
             back the ids you filed. Reuse an id for anything still open and give a new one only to
@@ -852,8 +871,12 @@ public final class UserSetup {
                than granted. The invocation's grants are in the context below.
             6. **Ask for a visual contract when a person will look at the result.** Set
                `visual_qa.required` to true and give `visual_qa.scenarios` the harness already
-               understands (`testid=`, `text=`, `css=`, `no-console-errors`). Do not invent a
-               data-testid. If you omit `visual_qa`, Warden applies the same rule a
+               understands (`testid=`, `css=`, `role=`, `text=` with `visible`, `hidden`, `click`,
+               `focused`, or `press=KEY` for Escape, Enter, Tab, Space, an arrow or one character,
+               plus `wait`, `wait-for` and `no-console-errors`). Do not demand a scenario
+               the grammar cannot run — a key chord, a hover, a drag — and do not invent a
+               data-testid. Say that such a check needs manual verification. If you omit
+               `visual_qa`, Warden applies the same rule a
                `--prepare off` draft uses: a UI goal on a project that serves a preview gets
                the honest default scenarios, so preparation is not weaker than the
                deterministic drafter.

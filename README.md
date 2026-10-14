@@ -130,7 +130,16 @@ against the roster before the first paid call, and the run header prints the res
 `cast` — which profile fills which stage — so a roster change can be checked with
 `--dry-run` instead of with money. A failure gate also offers `advance`, which starts the
 next run of the task once you have dealt with the blocker, and refuses when nothing has
-changed since the stop.
+changed since the stop. The same gate offers `waive` when the stop is
+`blocking_findings_remain` or `quality_exhausted` and every open blocker is a
+`contract_gap`: `warden approve <run> --decision waive --finding <id>` records the waiver,
+closes the stop, and lands nothing. It is refused when the stop is anything else
+(a machine-gate failure does not become waivable because an earlier run left a
+contract gap in the history), and when any open P1 is a product defect, including
+one another reviewer left open in the finding registry or filed under the same id.
+A task may list checks a person already does by hand under `manual_verification:`; a
+contract gap whose text contains one of those items is recorded as advisory and the run
+continues to the human gate.
 
 **The harness** is a real headless browser over CDP, with zero npm dependencies. Scenarios
 live in the task contract and are checked mechanically:
@@ -147,7 +156,10 @@ visual_qa:
     - "700x400: no-console-errors"
 ```
 
-Matchers `text=` / `css=` / `testid=` / `role=`, assertions `visible` / `hidden` / `click`.
+Matchers `text=` / `css=` / `testid=` / `role=`, assertions `visible` / `hidden` / `click`
+/ `focused`. `press=KEY` sends Escape, Enter, Tab, Space, an arrow or one character
+(`testid=dialog press=Escape` focuses that element first). `warden validate` and
+`run --dry-run` reject a step the grammar does not have.
 A separate `wait N` step holds for N seconds and takes a frame: everything else here judges
 the page 1.2 s after a click and is therefore blind to any interface running on its own clock
 — animations, a deferred scene, a countdown. A pause asserts nothing, it makes evidence, so a
@@ -417,9 +429,13 @@ budget:
 
 `on_vendor_failure` is the same three choices for a call that returned nothing: a dropped
 connection, a timeout, a permission refusal, a missing or invalid artifact, a local model
-that is not serving, or an HTTP error from one. It defaults to `stop`, so a policy that
-never mentions it keeps ending the role. `auto` switches to the next profile that still
-satisfies `require_independent_vendor`, at most `max_per_stage` times in one dispatch, and
+that is not serving, or an HTTP error from one. A location or eligibility refusal (HTTP 403,
+`PERMISSION_DENIED`, "not eligible", "not available in your location") is cause
+`vendor_unavailable`. That profile is skipped for the rest of the process, and a second
+profile for the role — including a second `visual_qa` profile on the look stage — is what
+`auto` switches to. It defaults to `stop`, so a policy that never mentions it keeps ending
+the role. `auto` switches to the next profile that still satisfies
+`require_independent_vendor`, at most `max_per_stage` times in one dispatch, and
 writes `role_failover` with the cause. A review finding, a red gate and a rejection are
 verdicts on the work and never take this path, including a valid artifact followed by a
 non-zero exit: the exit code is recorded and the verdict stands. Under `confirm`,

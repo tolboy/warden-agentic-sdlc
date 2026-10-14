@@ -243,6 +243,11 @@ public final class DirectCliExecutor implements RoleExecutor {
                     // not produce the artifact is still a spent plan.
                     Result quota = quotaFailure(request, process, duration, evidence);
                     if (quota != null) return quota;
+                    // An exit-0 error envelope (agy: status=ERROR, error=PERMISSION_DENIED)
+                    // is not an incomplete answer about the work. A location or eligibility
+                    // refusal is named on its own, and the artifact is not returned.
+                    Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+                    if (unavailable != null) return unavailable;
                     evidence.put("failure", "role_artifact_incomplete");
                     evidence.put("missing_fields", missing);
                     evidence.put("received_keys", new ArrayList<>(artifact.keySet()));
@@ -269,6 +274,9 @@ public final class DirectCliExecutor implements RoleExecutor {
             // knob worth turning was never the code a real ceiling reached.
             Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
             if (ceiling != null) return ceiling;
+            // After quota. A 403 that also says the plan is spent stays a spent plan.
+            Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+            if (unavailable != null) return unavailable;
             evidence.put("failure", "role_command_failed");
             // Both streams: the Codex usage-limit message arrives on stdout while stderr
             // carries unrelated transport noise, so quoting stderr alone hid the cause.
@@ -285,6 +293,8 @@ public final class DirectCliExecutor implements RoleExecutor {
         // a spent subscription is classified apart from an ordinary failure.
         Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
         if (ceiling != null) return ceiling;
+        Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+        if (unavailable != null) return unavailable;
         evidence.put("failure", "role_artifact_unparseable");
         evidence.put("stdout_tail", tail(process.stdout(), 2000));
         return new Result(false, "role_artifact_unparseable", duration, process.stdout(), null, evidence);
@@ -450,6 +460,24 @@ public final class DirectCliExecutor implements RoleExecutor {
         if (!detection.matched()) return null;
         evidence.put("failure", detection.roleCode());
         evidence.put("quota", detection.report());
+        evidence.put("stderr_tail", tail(process.stderr(), 2000));
+        evidence.put("stdout_tail", tail(process.stdout(), 2000));
+        return new Result(false, detection.roleCode(), duration, process.stdout(), null, evidence);
+    }
+
+    /**
+     * A location or eligibility refusal, or null so the caller keeps the generic failure.
+     *
+     * Only for a run that already failed. The returned artifact is null: the sentence is
+     * never a work verdict. Quota has already been consulted by the caller.
+     */
+    private static Result vendorUnavailableFailure(ProcessRunner.Result process,
+                                                   Duration duration, Map<String, Object> evidence) {
+        VendorAvailability.Detection detection = VendorAvailability.detect(
+                process.stdout(), process.stderr());
+        if (!detection.matched()) return null;
+        evidence.put("failure", detection.roleCode());
+        evidence.put("vendor_unavailable", detection.report());
         evidence.put("stderr_tail", tail(process.stderr(), 2000));
         evidence.put("stdout_tail", tail(process.stdout(), 2000));
         return new Result(false, detection.roleCode(), duration, process.stdout(), null, evidence);
@@ -667,6 +695,8 @@ public final class DirectCliExecutor implements RoleExecutor {
             evidence.put("failure", "role_timeout");
             return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
+        Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+        if (unavailable != null) return unavailable;
         evidence.put("failure", "role_command_failed");
         evidence.put("stderr_tail", tail(process.stderr(), 2000));
         evidence.put("stdout_tail", tail(process.stdout(), 2000));

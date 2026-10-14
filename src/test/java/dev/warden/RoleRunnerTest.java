@@ -103,6 +103,11 @@ public final class RoleRunnerTest implements Suite {
                     prompt, "If — and only if — you are also");
             check.contains("with the read-only rule saying that no shell at all is normal here",
                     prompt, "no way to run commands at all");
+            check.contains("the reviewer is told the harness cannot express every check",
+                    prompt, "A check the grammar cannot express is not a P1");
+            check.contains("and to file that gap as manual verification, not a blocking P1",
+                    prompt, "it names manual verification");
+            check.contains("an undeclared hand-check list is explicit", prompt, "(none declared)");
 
             // --- implementer writes, reviewer stays read-only --------------------------
             RoleRunner.Outcome implemented = runRole(project, home, "implementer", "live", null, null, false);

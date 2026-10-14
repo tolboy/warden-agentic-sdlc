@@ -163,6 +163,264 @@ public final class VisualQaTest implements Suite {
         check.eq("and a console-only contract needs no locator at all", null,
                 new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
                         taskWith(project, "quiet", "1280x720: no-console-errors")));
+
+        check.eq("press= on a testid is a sayable scenario", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "keyed", "1280x720: testid=dialog press=Escape")));
+        check.eq("focused is a sayable assertion", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "focus", "1280x720: testid=field focused")));
+        check.eq("a key with no target is a sayable step", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "barekey", "1280x720: press=Tab", "1280x720: press=a")));
+        String unknown = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "blurry", "1280x720: testid=save blur=true"));
+        check.contains("an unknown step is rejected before a vendor is paid",
+                String.valueOf(unknown), "unknown step");
+        check.contains("and the message names the step", String.valueOf(unknown), "blur=true");
+        String badKey = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "misspelled", "1280x720: press=Esacpe"));
+        check.contains("an unknown key is rejected", String.valueOf(badKey), "Esacpe");
+        String typo = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                taskWith(project, "typo", "1280x720: typo=save visible"));
+        check.contains("an unknown verb is rejected", String.valueOf(typo), "typo=save");
+
+        // A CSS attribute may quote a space and a `verb=`. Splitting the whole step on
+        // whitespace used to read `mode=y"]` as an unknown step and fail preflight.
+        check.eq("a quoted css attribute is a selector, not an unknown step", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        quotedScenarios(project, "quoted-css",
+                                "1280x720: css=[data-label=\"x mode=y\"] visible",
+                                "1280x720: css=[data-label='x mode=y'] visible",
+                                "1280x720: css=[data-label=\"x \\\"mode=y\\\" z\"] visible",
+                                "1280x720: css=.panel mode\\=y visible",
+                                "1280x720: wait-for=css=[data-label=\"x mode=y\"]",
+                                "1280x720: wait-for=css=[data-label=\"x mode=y\"] visible",
+                                "1280x720: testid=stage click -> wait-for=css=[data-label=\"x mode=y\"] visible")));
+        String quotedUnknown = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                quotedScenarios(project, "quoted-blur",
+                        "1280x720: css=[data-label=\"x mode=y\"] blur=true"));
+        check.contains("an unknown step outside the quotes is still rejected",
+                String.valueOf(quotedUnknown), "blur=true");
+        String quotedWait = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                quotedScenarios(project, "quoted-wait",
+                        "1280x720: wait-for=css=[data-label=\"x mode=y\"] blur=true"));
+        check.contains("and so is one on a wait-for", String.valueOf(quotedWait), "blur=true");
+
+        apostropheDoesNotSwallowAPress(check, project, adapter);
+        scenariosSurviveAWindowsCommandLine(check);
+        escapingFollowsJavasMode(check);
+        inheritedKeyNamesAreRejected(check, project, adapter);
+
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream previousOut = System.out;
+        int validateExit;
+        System.setOut(new java.io.PrintStream(buffer, true, java.nio.charset.StandardCharsets.UTF_8));
+        try {
+            validateExit = Main.validate(project, "blurry");
+        } finally {
+            System.setOut(previousOut);
+        }
+        check.eq("warden validate rejects the same unknown step dry-run stops on", 1, validateExit);
+        String printed = buffer.toString(java.nio.charset.StandardCharsets.UTF_8);
+        check.contains("and says it is a contract fault", printed, "visual_qa_contract_invalid");
+        check.contains("with the adapter's message", printed, "blur=true");
+        buffer.reset();
+        System.setOut(new java.io.PrintStream(buffer, true, java.nio.charset.StandardCharsets.UTF_8));
+        try {
+            validateExit = Main.validate(project, "keyed");
+        } finally {
+            System.setOut(previousOut);
+        }
+        check.eq("warden validate accepts press= and focused", 0, validateExit);
+    }
+
+    /**
+     * On Windows a child gets one command line, not an array. Java quotes an argument with
+     * whitespace but leaves its inner double quotes bare, and node's parser drops them, so
+     * {@code css=[data-label="Don't Save"]} arrived as {@code [data-label=Don't}. This replays
+     * that path on any platform: Java's quoting, then the MSVC runtime's splitting.
+     */
+    private void scenariosSurviveAWindowsCommandLine(Check check) {
+        List<String> scenarios = List.of(
+                "1280x720: css=[data-label=\"Don't Save\"] press=Escape",
+                "1280x720: css=[data-label=\"x mode=y\"] blur=true",
+                "1280x720: wait-for=css=[data-label=\"x mode=y\"] blur=true",
+                "1280x720: css=[data-label=\"x \\\"mode=y\\\" z\"] visible",
+                "1280x720: css=[data-label='x mode=y'] visible",
+                "1280x720: css=.panel mode\\=y visible",
+                "plain");
+        for (String scenario : scenarios) {
+            List<String> raw = msvcrtSplit(javaWindowsQuote(scenario));
+            List<String> escaped = msvcrtSplit(javaWindowsQuote(ProcessRunner.windowsEscaped(scenario)));
+            check.eq("a Windows child receives the scenario intact: " + scenario,
+                    List.of(scenario), escaped);
+            if (scenario.contains("\"")) {
+                check.that("and unescaped it would not: " + scenario, !raw.equals(List.of(scenario)));
+            }
+        }
+    }
+
+    /** The escaping decision mirrors OpenJDK in both allowAmbiguousCommands modes. */
+    private void escapingFollowsJavasMode(Check check) {
+        check.that("off Windows nothing is escaped",
+                !ProcessRunner.needsManualEscaping("Linux", null, "node"));
+        check.that("default (lenient) Windows JVM: Warden escapes",
+                ProcessRunner.needsManualEscaping("Windows 11", null, "node.exe"));
+        check.that("lenient when the property is anything but false",
+                ProcessRunner.needsManualEscaping("Windows 11", "true", "node.exe"));
+        check.that("strict JVM already escapes: Warden does not",
+                !ProcessRunner.needsManualEscaping("Windows 11", "false", "C:\\node\\node.exe"));
+        check.that("a padded value is lenient, exactly as in OpenJDK",
+                ProcessRunner.needsManualEscaping("Windows 11", "false ", "node.exe"));
+        check.that("strict, case-insensitive",
+                !ProcessRunner.needsManualEscaping("Windows Server 2022", "FALSE", null));
+        check.that("strict but a .cmd shim: Java does not escape, so Warden does",
+                ProcessRunner.needsManualEscaping("Windows 11", "false", "C:\\npm\\orca.CMD"));
+        String scenario = "1280x720: css=[data-label=\"Don't Save\"] press=Escape";
+        String strictArg = ProcessRunner.needsManualEscaping("Windows 11", "false", "node.exe")
+                ? ProcessRunner.windowsEscaped(scenario) : scenario;
+        check.eq("strict mode: node receives the scenario intact, not double-escaped",
+                List.of(scenario), msvcrtSplit(javaStrictWindowsQuote(strictArg)));
+        check.that("and double escaping would have corrupted it",
+                !msvcrtSplit(javaStrictWindowsQuote(ProcessRunner.windowsEscaped(scenario)))
+                        .equals(List.of(scenario)));
+    }
+
+    /** ProcessImpl with allowAmbiguousCommands=false (VERIFICATION_WIN32_SAFE). */
+    private static String javaStrictWindowsQuote(String argument) {
+        boolean needs = argument.isEmpty();
+        for (char c : " \t\"<>&|^".toCharArray()) needs |= argument.indexOf(c) >= 0;
+        if (!needs) return argument;
+        StringBuilder out = new StringBuilder("\"");
+        int backslashes = 0;
+        for (char c : argument.toCharArray()) {
+            if (c == '\\') { backslashes++; out.append(c); continue; }
+            if (c == '"') { out.append("\\".repeat(backslashes)).append('\\'); }
+            backslashes = 0;
+            out.append(c);
+        }
+        out.append("\\".repeat(backslashes)).append('"');
+        return out.toString();
+    }
+
+    /** What java.lang.ProcessImpl does to one argument on Windows. */
+    private static String javaWindowsQuote(String argument) {
+        boolean quoted = argument.length() >= 2 && argument.startsWith("\"") && argument.endsWith("\"");
+        if (quoted || !(argument.isEmpty() || argument.contains(" ") || argument.contains("\t"))) {
+            return argument;
+        }
+        return "\"" + argument + (argument.endsWith("\\") ? "\\" : "") + "\"";
+    }
+
+    /** How the MSVC runtime (and so node) splits a command line into arguments. */
+    private static List<String> msvcrtSplit(String line) {
+        List<String> arguments = new java.util.ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean any = false;
+        int index = 0;
+        while (index < line.length()) {
+            char character = line.charAt(index);
+            if (character == '\\') {
+                int count = 0;
+                while (index < line.length() && line.charAt(index) == '\\') { count++; index++; }
+                if (index < line.length() && line.charAt(index) == '"') {
+                    current.append("\\".repeat(count / 2));
+                    if (count % 2 == 1) { current.append('"'); index++; }
+                } else {
+                    current.append("\\".repeat(count));
+                }
+                any = true;
+                continue;
+            }
+            if (character == '"') {
+                if (inQuotes && index + 1 < line.length() && line.charAt(index + 1) == '"') {
+                    current.append('"');
+                    index += 2;
+                    continue;
+                }
+                inQuotes = !inQuotes;
+                any = true;
+                index++;
+                continue;
+            }
+            if (!inQuotes && (character == ' ' || character == '\t')) {
+                if (any) { arguments.add(current.toString()); current.setLength(0); any = false; }
+                index++;
+                continue;
+            }
+            current.append(character);
+            any = true;
+            index++;
+        }
+        if (any) arguments.add(current.toString());
+        return arguments;
+    }
+
+    /**
+     * `text=Don't Save press=Escape` used to validate and then search for the label
+     * "Don't Save press=Escape". The apostrophe opened a quote that never closed,
+     * so the press token never became a key.
+     */
+    @SuppressWarnings("unchecked")
+    private void apostropheDoesNotSwallowAPress(Check check, Path project, Path adapter) throws Exception {
+        ProcessRunner.Result parsed = new ProcessRunner().run(
+                List.of(nodeExecutable(), adapter.toString(), "--validate-only",
+                        "--scenario", ProcessRunner.argument("1280x720: css=.dialog visible -> text=Don't Save press=Escape"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=.dialog visible -> text=It's the user's file press=Enter"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=[data-label=\"Don't Save\"] press=Escape"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=[data-label='x mode=y'] visible")),
+                project, Duration.ofSeconds(20));
+        check.that("apostrophe scenarios validate", parsed.ok());
+        Map<String, Object> body = Json.findLastObject(parsed.stdout());
+        List<Map<String, Object>> scenarios = listOfMaps(body == null ? null : body.get("parsed"));
+        check.eq("four scenarios were parsed", 4, scenarios.size());
+
+        List<Map<String, Object>> dont = stepsOf(scenarios, 0);
+        check.eq("the dialog step is unchanged", "css", dont.get(0).get("kind"));
+        check.eq("and still asserts visible", "visible", dont.get(0).get("assertion"));
+        check.eq("the label keeps the apostrophe", "Don't Save", dont.get(1).get("value"));
+        check.eq("and press is the assertion", "press", dont.get(1).get("assertion"));
+        check.eq("sending Escape", "Escape", dont.get(1).get("key"));
+        check.eq("as a text matcher", "text", dont.get(1).get("kind"));
+
+        List<Map<String, Object>> users = stepsOf(scenarios, 1);
+        check.eq("a second apostrophe stays in the label", "It's the user's file",
+                users.get(1).get("value"));
+        check.eq("and that press is Enter", "Enter", users.get(1).get("key"));
+
+        List<Map<String, Object>> quotedLabel = stepsOf(scenarios, 2);
+        check.eq("an apostrophe inside double quotes stays in the selector",
+                "[data-label=\"Don't Save\"]", quotedLabel.get(0).get("value"));
+        check.eq("and the press after those quotes is still a press", "press",
+                quotedLabel.get(0).get("assertion"));
+        check.eq("of Escape", "Escape", quotedLabel.get(0).get("key"));
+
+        List<Map<String, Object>> explicitQuote = stepsOf(scenarios, 3);
+        check.eq("an explicit quoted span is still one selector",
+                "[data-label='x mode=y']", explicitQuote.get(0).get("value"));
+        check.eq("whose assertion is visible", "visible", explicitQuote.get(0).get("assertion"));
+        check.eq("and not a press that was swallowed", null, explicitQuote.get(0).get("key"));
+    }
+
+    /** `constructor` and `__proto__` are inherited object properties, not keys. */
+    private void inheritedKeyNamesAreRejected(Check check, Path project, Path adapter) throws Exception {
+        for (String key : List.of("constructor", "__proto__", "toString")) {
+            String id = "badkey-" + key.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "");
+            String rejected = new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                    taskWith(project, id, "1280x720: press=" + key));
+            check.contains("press=" + key + " is not a key", String.valueOf(rejected), key);
+        }
+        check.eq("a named key is still accepted", null,
+                new VisualQaRunner(new ProcessRunner(), adapter).contractProblem(
+                        taskWith(project, "goodkey", "1280x720: press=Escape")));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> stepsOf(List<Map<String, Object>> scenarios, int index) {
+        if (index >= scenarios.size()) return List.of();
+        return listOfMaps(scenarios.get(index).get("steps"));
     }
 
     /**
@@ -283,6 +541,28 @@ public final class VisualQaTest implements Suite {
             if (item instanceof Map<?, ?> map) out.add((Map<String, Object>) map);
         }
         return out;
+    }
+
+    /**
+     * Like {@link #taskWith}, but the scenario is a YAML single-quoted scalar.
+     * A double-quoted scalar would eat the quotes and backslashes a CSS attribute needs.
+     */
+    private static ConfigLoader.Loaded quotedScenarios(Path project, String id, String... scenarios)
+            throws Exception {
+        StringBuilder yaml = new StringBuilder("""
+                version: 1
+                id: %s
+                goal: Fix the Create button
+                scope: code
+                visual_qa:
+                  required: true
+                  scenarios:
+                """.formatted(id));
+        for (String scenario : scenarios) {
+            yaml.append("    - '").append(scenario.replace("'", "''")).append("'\n");
+        }
+        Files.writeString(project.resolve(".warden/tasks/" + id + ".yaml"), yaml.toString());
+        return new ConfigLoader().load(project, id);
     }
 
     /** A task whose only interesting part is its scenarios. */

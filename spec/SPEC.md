@@ -165,6 +165,15 @@ the same acceptance hash and diff base, and a matching on-disk report checksum; 
 it records `reproduction_status: not_run_candidate_present` and continues. Dry runs list
 the commands that must fail and record a `dry_run` reproduction step without execution.
 
+Optional task `manual_verification: ["keyboard chord", "hover"]` lists checks a person
+already does by hand. A blank item is rejected, so it cannot match every finding.
+When the list is non-empty it participates
+in `acceptance_sha256`, joined by NUL and omitted when empty, so a task that declares none
+keeps the hash it had before the key existed. A P1 `contract_gap` whose message, expected,
+actual, scenario or suggestion contains an item (case-insensitive substring) is recorded
+as P2 with `severity_as_filed`, the matched item, and `advisory: true`. It does not block.
+A product defect is never lowered. The vendor artifact is left as filed.
+
 `warden pilot prepare` requires a declared `reproduction.command` to be in
 `checks.acceptance` and writes it into the task's `reproduce` list. Preparation executes
 nothing: `reproduction_check.status` is `enforced_by_warden_run`, or `not_declared` when
@@ -355,8 +364,11 @@ A review finding, a gate failure and a rejection are not this.
 
 A stop caused by a vendor's endpoint rather than by its reading of the work has its own reason:
 `quota_exhausted`, `rate_limited`, `role_timed_out`, `vendor_call_failed`,
-`vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
-`failover_requires_confirmation`. The summary carries `infrastructure_failure` (`cause`, the
+`vendor_unavailable`, `vendor_protocol_failed`, `prompt_undeliverable`, `turn_ceiling_reached`,
+`failover_requires_confirmation`. `vendor_unavailable` is a location or eligibility refusal
+(HTTP 403, `PERMISSION_DENIED`, "not eligible", "not available in your location"). It counts
+as a vendor failure for `on_vendor_failure`, and that profile is skipped for the rest of the
+process. The summary carries `infrastructure_failure` (`cause`, the
 stage and profile, `verdict_on_the_work: false`). A `--continue` after any of them, whether
 answered `retry` or `switch`, reuses the verdicts that still describe the tree.
 
@@ -430,6 +442,14 @@ warden approve <run-id>     record a decision; never lands changes.
                             next_step, and changes nothing on disk. No answer is
                             never accept or reject. The wait imports one decision
                             and never starts a run
+                            --decision waive --finding <ID> closes a failure stop
+                            whose open P1s are all contract_gap. Records
+                            contract_gap_waived and contract_gap_waiver, lands
+                            nothing, starts nothing. Refused for a product
+                            defect, for a stop that still has one (the run-wide
+                            finding registry, including an open or reopened P1
+                            another reviewer filed), and when
+                            --finding is omitted; the decision stays pending
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```
@@ -480,8 +500,9 @@ Properties that are there on purpose:
    machine report, and the text the implementer received when the work came back.
 4. **The tester has eyes, and they come in two layers.** The lower layer is the harness: a real
    headless browser over CDP that locates an element by `text=` / `css=` / `testid=` /
-   `role=`, checks visibility, the reaction to a click and the absence of console errors, and
-   saves a screenshot. It knows nothing about any particular project. The upper layer is the
+   `role=`, checks visibility, focus, the reaction to a click or a named key (`press=KEY`),
+   and the absence of console errors, and saves a screenshot. It knows nothing about any
+   particular project. The upper layer is the
    `visual_qa` role: a model that receives the screenshots as **attachments** rather than
    filenames (`attachments.flag`, `-i` for codex), and answers only what a machine cannot
    measure — clipped text, overlap, a collapsed layout. The role is enabled in the policy and

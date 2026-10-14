@@ -14,19 +14,30 @@
  *     --scenario "1280x720: css=canvas click@0.5,0.86 -> text=Placed visible" \
  *     --scenario "1280x720: testid=stage click -> wait 30 -> css=.fire visible" \
  *     --scenario "1280x720: testid=stage click -> wait-for=css=.hearth" \
+ *     --scenario "1280x720: testid=dialog press=Escape -> testid=dialog hidden" \
+ *     --scenario "1280x720: testid=field focused" \
  *     --scenario "1280x720: no-console-errors"
  *
  * Scenario grammar
  *   WxH: <matcher> <assertion> [-> <matcher> <assertion>]
+ *   WxH: press=KEY
+ *   WxH: <matcher> press=KEY
  *   WxH: no-console-errors
  *
  *   matcher    text=Label | css=SELECTOR | testid=VALUE | role=ROLE
  *              A bare label is read as text=Label, so the older
  *              "700x400:Create visible" still means what it did.
- *   assertion  visible | hidden | click | click@FX,FY
+ *   assertion  visible | hidden | click | click@FX,FY | focused
  *              click@0.5,0.86 presses that fraction across and down the element's
  *              own box instead of its centre. For a full-window canvas the centre
  *              is the only point a plain `click` can ever reach.
+ *              focused asserts document.activeElement is the matched element.
+ *   press=KEY  send that key (keyDown then keyUp). KEY is Escape (Esc), Enter
+ *              (Return), Tab, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
+ *              or one character. A matcher before it is focused first
+ *              (`testid=dialog press=Escape`). A press does not have to change
+ *              the DOM; say what should be true afterwards in the next step.
+ *              An unknown key name is refused, not guessed.
  *   wait N     a step of its own: hold for N seconds, then photograph the page.
  *              Everything else here judges a page 1.2 s after a click, which is
  *              blind to any UI that runs on its own clock — an animation, a
@@ -38,6 +49,16 @@
  *              matcher is required (css= / testid= / role= / text=). A trailing
  *              `visible` is allowed and dropped, being what a wait-for already
  *              means; `hidden` and `click` are refused rather than swallowed.
+ *
+ * A word shaped like `verb=` that is not one of those verbs is an unknown step
+ * and is refused. It used to be swallowed into the matcher value, so
+ * `testid=save press=Escape` was a testid of "save press=Escape" and validate
+ * called that fine. A `verb=` inside a quoted matcher value, or after a
+ * backslash, is part of that value: `css=[data-label="x mode=y"]` is a
+ * selector, not an unknown step named `mode`. An apostrophe inside a word
+ * (`text=Don't Save press=Escape`) is part of the label. A quote starts a
+ * span only when it is a delimiter with a matching closer, so that apostrophe
+ * does not swallow the `press=`.
  *
  * `click` on its own asserts that clicking the element changes the page: the
  * DOM digest before and after must differ. Anything more specific belongs
@@ -122,7 +143,7 @@ function fail(code, message, extra = {}) {
 
 // ---------------------------------------------------------------- scenarios
 
-const ASSERTIONS = new Set(["visible", "hidden", "click"]);
+const ASSERTIONS = new Set(["visible", "hidden", "click", "focused"]);
 /**
  * `click` may name where inside the element to press, as a fraction of its box:
  * `click@0.5,0.86` is halfway across and most of the way down. A canvas is one
@@ -131,6 +152,174 @@ const ASSERTIONS = new Set(["visible", "hidden", "click"]);
  * frame, and never the water, the sky or the shore a scenario means to test.
  */
 const CLICK_AT = /^click@(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)$/i;
+
+/**
+ * Keys a scenario may name. Anything else (`press=Esacpe`, `press=ctrl`,
+ * `press=constructor`) is a contract fault, not a key the page will never see.
+ * A Map, not an object: `constructor` and `__proto__` are inherited properties
+ * of an ordinary object, and looking them up returned a value with no key
+ * fields, which dispatchKeyEvent then sent as a keyless event. `Esc` and
+ * `Return` are the spellings people already write.
+ */
+const NAMED_KEYS = new Map([
+  ["escape", { key: "Escape", code: "Escape", label: "Escape", vk: 27 }],
+  ["esc", { key: "Escape", code: "Escape", label: "Escape", vk: 27 }],
+  ["enter", { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" }],
+  ["return", { key: "Enter", code: "Enter", label: "Enter", vk: 13, text: "\r" }],
+  ["tab", { key: "Tab", code: "Tab", label: "Tab", vk: 9 }],
+  ["space", { key: " ", code: "Space", label: "Space", vk: 32, text: " " }],
+  ["arrowup", { key: "ArrowUp", code: "ArrowUp", label: "ArrowUp", vk: 38 }],
+  ["arrowdown", { key: "ArrowDown", code: "ArrowDown", label: "ArrowDown", vk: 40 }],
+  ["arrowleft", { key: "ArrowLeft", code: "ArrowLeft", label: "ArrowLeft", vk: 37 }],
+  ["arrowright", { key: "ArrowRight", code: "ArrowRight", label: "ArrowRight", vk: 39 }],
+]);
+const KNOWN_VERBS = new Set(["text", "css", "testid", "role", "press"]);
+
+function canonicalKey(raw) {
+  const name = String(raw ?? "").trim();
+  if (!name || /\s/.test(name)) return null;
+  const named = NAMED_KEYS.get(name.toLowerCase());
+  if (named) {
+    return {
+      key: named.key,
+      code: named.code,
+      label: named.label,
+      text: named.text,
+      windowsVirtualKeyCode: named.vk,
+      nativeVirtualKeyCode: named.vk,
+    };
+  }
+  const chars = [...name];
+  if (chars.length !== 1) return null;
+  const ch = chars[0];
+  const codePoint = ch.codePointAt(0);
+  if (codePoint < 32 || codePoint === 127) return null;
+  const upper = ch.toUpperCase();
+  let code = "";
+  let vk = ch.charCodeAt(0);
+  if (upper >= "A" && upper <= "Z") {
+    code = `Key${upper}`;
+    vk = upper.charCodeAt(0);
+  } else if (upper >= "0" && upper <= "9") {
+    code = `Digit${upper}`;
+    vk = upper.charCodeAt(0);
+  }
+  return { key: ch, code, label: ch, text: ch, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+}
+
+/**
+ * Tokens a step verb can occupy: runs of non-space outside quotes.
+ *
+ * A CSS attribute is allowed to contain spaces and `verb=` text,
+ * `css=[data-label="x mode=y"]`. Splitting that on whitespace treats `mode=y"]`
+ * as a step. A single or double quote binds until its pair when it is a
+ * delimiter that has a closer, and a backslash escapes the next character, so
+ * `\"` does not end the value and `mode\=y` is not a step. An apostrophe
+ * inside a word (`Don't`, `user's`) is not a delimiter: treating it as one
+ * left the quote unclosed and hid `press=Escape` inside the label. The span
+ * covers the original text, quotes included, so the selector that is stored
+ * is the selector that was written.
+ */
+function isWordChar(ch) {
+  return typeof ch === "string" && ch !== "" && /[\p{L}\p{N}_]/u.test(ch);
+}
+
+/** Index of the unescaped `quote` that closes the one at `open`, or -1. */
+function matchingCloser(source, open, quote) {
+  let escaped = false;
+  for (let index = open + 1; index < source.length; index++) {
+    const ch = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === quote) return index;
+  }
+  return -1;
+}
+
+function unquotedTokenSpans(text) {
+  const source = String(text);
+  const spans = [];
+  let start = -1;
+  let quote = null;
+  let escaped = false;
+  let tokenEscaped = false;
+  const flush = (end) => {
+    if (start >= 0 && end > start) spans.push({ start, end, escaped: tokenEscaped });
+    start = -1;
+    tokenEscaped = false;
+  };
+  for (let index = 0; index < source.length; index++) {
+    const ch = source[index];
+    if (escaped) {
+      if (!quote) {
+        if (start < 0) start = index;
+        tokenEscaped = true;
+      }
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    // A quote inside a word is an apostrophe. A quote with no closer is the
+    // same: it must not swallow the rest of the step, including press=.
+    if ((ch === '"' || ch === "'")
+        && !(index > 0 && isWordChar(source[index - 1]))
+        && matchingCloser(source, index, ch) >= 0) {
+      if (start < 0) start = index;
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush(index);
+      continue;
+    }
+    if (start < 0) start = index;
+  }
+  flush(source.length);
+  return spans;
+}
+
+function spanText(text, span) {
+  return String(text).slice(span.start, span.end);
+}
+
+/** The `verb=value` at the start of a token, before any quoted tail. */
+function leadingVerb(word) {
+  const verb = String(word).match(/^([a-z][a-z0-9_-]*=\S*)/i);
+  return verb ? verb[1] : null;
+}
+
+/**
+ * A token that looks like a step verb but is not one. `testid=save blur=true`
+ * used to become a testid whose value was the whole remainder, and preflight
+ * then said the scenario was fine. Quoted and escaped matcher text is not a token.
+ */
+function rejectUnknownVerbs(text) {
+  for (const span of unquotedTokenSpans(text)) {
+    if (span.escaped) continue;
+    const word = spanText(text, span);
+    const verb = word.match(/^([a-z][a-z0-9_-]*)=/i);
+    if (!verb) continue;
+    if (KNOWN_VERBS.has(verb[1].toLowerCase())) continue;
+    const shown = leadingVerb(word) || word;
+    throw new Error(`scenario "${text}": unknown step "${shown}". `
+      + `A step is a matcher (text=, css=, testid=, role=) with visible, hidden, click, `
+      + `click@x,y or focused, or press=KEY (Escape, Enter, Tab, Space, an arrow, or one `
+      + `character), or wait N, or wait-for=MATCHER.`);
+  }
+}
 
 /**
  * `wait 30` / `wait 30s`: hold, then photograph. Bounded because a gate that can
@@ -203,12 +392,67 @@ function parseStep(raw, fallbackAssertion = "visible") {
       throw new Error(`scenario "${text}": wait-for needs a typed matcher `
         + `(wait-for=css=.ready, wait-for=testid=hearth), not "${body}"`);
     }
+    const valueSpans = unquotedTokenSpans(typed[2]);
+    for (const extraSpan of valueSpans.slice(1)) {
+      if (extraSpan.escaped) continue;
+      const shown = leadingVerb(spanText(typed[2], extraSpan));
+      if (shown) {
+        throw new Error(`scenario "${text}": unknown step "${shown}". `
+          + `wait-for takes one matcher. Say press= or another assertion as the next step after ->.`);
+      }
+    }
     return {
       kind: "wait-for",
       matcherKind: typed[1].toLowerCase(),
       value: typed[2].trim(),
       assertion: "wait-for",
       seconds: WAIT_FOR_SECONDS,
+      at: null,
+      raw: text,
+    };
+  }
+  if (/^focused$/i.test(text)) {
+    throw new Error(`scenario "${text}": focused needs a matcher, for example "testid=field focused"`);
+  }
+  // Before the last word is read as an assertion. An unknown `verb=` used to be
+  // swallowed into the matcher value, so validate accepted `testid=save press=Escape`
+  // as a testid whose value was the whole remainder.
+  rejectUnknownVerbs(text);
+  const stepSpans = unquotedTokenSpans(text);
+  const lastSpan = stepSpans.length ? stepSpans[stepSpans.length - 1] : null;
+  const pressSpan = [...stepSpans].reverse().find((span) =>
+    !span.escaped && /^press\s*=/i.test(spanText(text, span)));
+  if (pressSpan) {
+    const pressText = spanText(text, pressSpan);
+    const trailingPress = pressSpan === lastSpan ? pressText.match(/^press\s*=\s*(\S+)$/i) : null;
+    if (!trailingPress) {
+      throw new Error(`scenario "${text}": press=KEY is its own step or the last word of one. `
+        + `Write "press=Escape" or "testid=dialog press=Escape".`);
+    }
+    const key = canonicalKey(trailingPress[1]);
+    if (!key) {
+      throw new Error(`scenario "${text}": press= does not know the key "${trailingPress[1]}". `
+        + `Say Escape, Enter, Tab, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, or one character.`);
+    }
+    const target = text.slice(0, pressSpan.start).trim();
+    if (!target) {
+      return { kind: "press", value: key.label, key, assertion: "press", at: null, raw: text };
+    }
+    const targetWords = target.split(/\s+/);
+    const targetLast = targetWords[targetWords.length - 1].toLowerCase();
+    if (ASSERTIONS.has(targetLast) || CLICK_AT.test(targetWords[targetWords.length - 1])) {
+      throw new Error(`scenario "${text}": press= focuses the matcher and then sends the key. `
+        + `Put a further assertion in the next step. Write "testid=dialog press=${key.label}".`);
+    }
+    const typedTarget = target.match(/^(text|css|testid|role)\s*=\s*(.+)$/i);
+    if (!typedTarget) {
+      return { kind: "text", value: target, key, assertion: "press", at: null, raw: text };
+    }
+    return {
+      kind: typedTarget[1].toLowerCase(),
+      value: typedTarget[2].trim(),
+      key,
+      assertion: "press",
       at: null,
       raw: text,
     };
@@ -505,12 +749,14 @@ const PROBE = `(matcher) => {
       .map((el) => (el.innerText || el.getAttribute("aria-label") || "").trim())
       .filter(Boolean).slice(0, 40);
   }
+  if (element && matcher.focus && typeof element.focus === "function") element.focus();
   return {
     title: document.title,
     innerWidth: window.innerWidth,
     innerHeight: window.innerHeight,
     orientation: window.innerWidth >= window.innerHeight ? "landscape" : "portrait",
     found: element ? visibleEnough(element) : null,
+    focused: !!(element && document.activeElement === element),
     considered,
     // Content, not its length. This was two character counts, and a counter going
     // from "0" to "1" is the same length twice — so the click that proved the page
@@ -725,7 +971,7 @@ function publishAxNode(record) {
 function targetsFrom(steps, probes) {
   const targets = [];
   for (const step of steps || []) {
-    if (!step || step.kind === "wait") continue;
+    if (!step || step.kind === "wait" || step.kind === "press") continue;
     const kind = step.kind === "wait-for" ? step.matcherKind : step.kind;
     const value = step.value;
     if (!kind || value == null || String(value).trim() === "") continue;
@@ -739,7 +985,7 @@ function targetsFrom(steps, probes) {
   for (const probe of probes || []) {
     if (!probe) continue;
     const kind = probe.kind || probe.matcherKind;
-    if (!kind || kind === "wait") continue;
+    if (!kind || kind === "wait" || kind === "press") continue;
     const found = probe.found && typeof probe.found === "object" ? probe.found : null;
     const box = found ? normalizeBox(found) : normalizeBox(probe.box);
     const text = found && found.text != null ? String(found.text).trim()
@@ -891,9 +1137,41 @@ function rankA11yOffline() {
   process.exit(0);
 }
 
+async function dispatchKey(cdp, key) {
+  const common = {
+    key: key.key,
+    code: key.code || "",
+    windowsVirtualKeyCode: key.windowsVirtualKeyCode || 0,
+    nativeVirtualKeyCode: key.nativeVirtualKeyCode || key.windowsVirtualKeyCode || 0,
+  };
+  const down = { type: "keyDown", ...common };
+  if (key.text != null) {
+    down.text = key.text;
+    down.unmodifiedText = key.text;
+  }
+  await cdp.send("Input.dispatchKeyEvent", down);
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...common });
+}
+
+async function runPress(cdp, step, outDir, label) {
+  await dispatchKey(cdp, step.key);
+  const info = await probe(cdp, { kind: "css", value: "html" });
+  return {
+    result: {
+      matcher: `press=${step.key.label}`,
+      assertion: "press",
+      pressed: step.key.label,
+      ok: true,
+      screenshot_after: await shoot(cdp, outDir, `${label}-after-press-${step.index}`),
+    },
+    info,
+  };
+}
+
 async function runStep(cdp, step, outDir, label) {
   if (step.kind === "wait") return await runWait(cdp, step, outDir, label);
   if (step.kind === "wait-for") return await runWaitFor(cdp, step, outDir, label);
+  if (step.kind === "press") return await runPress(cdp, step, outDir, label);
   const info = await probe(cdp, { kind: step.kind, value: step.value });
   const found = info.found;
   const visible = isVisible(found);
@@ -909,12 +1187,37 @@ async function runStep(cdp, step, outDir, label) {
     if (!result.ok) result.why = `${step.kind}=${step.value} was expected to be hidden but is visible`;
     return { result, info };
   }
+  if (step.assertion === "focused") {
+    result.focused = !!info.focused;
+    result.ok = !!info.focused;
+    if (!result.ok) {
+      result.why = found
+        ? `${step.kind}=${step.value} is not document.activeElement`
+        : describeMiss(step, info);
+    }
+    return { result, info };
+  }
   if (!visible) {
     result.why = found
       ? `matched an element that is not visible: display=${found.display} visibility=${found.visibility} `
         + `opacity=${found.opacity} size=${Math.round(found.width)}x${Math.round(found.height)}`
       : describeMiss(step, info);
     return { result, info };
+  }
+  if (step.assertion === "press") {
+    let focusedInfo = info;
+    if (!info.focused) {
+      focusedInfo = await probe(cdp, { kind: step.kind, value: step.value, focus: true });
+    }
+    if (!focusedInfo.focused) {
+      result.why = `${step.kind}=${step.value} could not take focus before press=${step.key.label}`;
+      return { result, info: focusedInfo };
+    }
+    await dispatchKey(cdp, step.key);
+    result.pressed = step.key.label;
+    result.ok = true;
+    result.screenshot_after = await shoot(cdp, outDir, `${label}-after-press-${step.index}`);
+    return { result, info: focusedInfo };
   }
   if (step.assertion !== "click") {
     result.ok = true;
@@ -987,7 +1290,7 @@ async function runScenario(cdp, scenario, outDir, targetUrl) {
       const { result, info } = await runStep(cdp, { ...step, index: position + 1 }, outDir, label);
       page = page || info;
       steps.push(result);
-      if (info && step.kind !== "wait") {
+      if (info && step.kind !== "wait" && step.kind !== "press") {
         const kind = step.kind === "wait-for" ? step.matcherKind : step.kind;
         probes.push({ kind, value: step.value, found: info.found || null });
       }
@@ -1063,7 +1366,8 @@ function contractProblem(list) {
   const empty = parsed.find((s) => !asserts(s) && s.steps.length === 0);
   if (empty) {
     return `scenario "${empty.raw}" states no assertion. Use "WxH: text=Label visible", `
-      + `"WxH: css=SELECTOR visible", "WxH: testid=ID click" or "WxH: no-console-errors".`;
+      + `"WxH: css=SELECTOR visible", "WxH: testid=ID click", "WxH: testid=field focused", `
+      + `"WxH: press=Escape" or "WxH: no-console-errors".`;
   }
   const onlyWaiting = parsed.find((s) => !asserts(s) && s.steps.length > 0
     && s.steps.every((step) => step.kind === "wait"));
@@ -1076,7 +1380,10 @@ function contractProblem(list) {
   // says nothing about the fragility of its second, and the interesting case is exactly the
   // mixed one: the strong scenarios make the file look rigorous while the weak neighbour is
   // the one that will go red after somebody renames a label.
-  const byCopy = parsed.find((s) => s.steps.some((step) => step.kind !== "wait")
+  // A target-less press names no control, so it neither anchors a contract nor
+  // needs an anchor. `press=Escape -> text=Closed visible` still does: the text
+  // step looks at copy and the press does not count as a testid/css/role.
+  const byCopy = parsed.find((s) => s.steps.some((step) => step.kind !== "wait" && step.kind !== "press")
     && !s.steps.some((step) => STRONG_MATCHERS.has(locatorKind(step))));
   if (byCopy) {
     return `scenario "${byCopy.raw}" names what it looks at only by the copy on it. `
@@ -1168,10 +1475,33 @@ if (validateOnly) {
   // No browser, no output directory, no page. A distinct code, because "your contract does
   // not say anything" and "this machine has no browser" send an operator to different places.
   const problem = contractProblem(scenarios);
-  console.log(JSON.stringify(problem
+  const report = problem
     ? { ok: false, code: "visual_qa_contract_invalid", message: problem }
-    : { ok: true, code: "scenarios_valid", scenarios: scenarios.length }));
+    : {
+      ok: true,
+      code: "scenarios_valid",
+      scenarios: scenarios.length,
+      // What the grammar made of each scenario. Validation alone accepted
+      // `text=Don't Save press=Escape` while parsing it as a visible label
+      // that included the press token.
+      parsed: scenarios.map(parseScenario).map(describeParsed),
+    };
+  console.log(JSON.stringify(report));
   process.exit(problem ? 2 : 0);
+}
+
+/** The fields a caller can assert without a browser: kind, value, assertion, key. */
+function describeParsed(scenario) {
+  return {
+    raw: scenario.raw,
+    steps: (scenario.steps || []).map((step) => {
+      const view = { kind: step.kind, assertion: step.assertion };
+      if (step.value != null) view.value = step.value;
+      if (step.matcherKind) view.matcher = step.matcherKind;
+      if (step.key) view.key = step.key.label;
+      return view;
+    }),
+  };
 }
 
 if (rankOnly) rankA11yOffline();

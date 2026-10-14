@@ -86,6 +86,24 @@ public final class ConfigTest implements Suite {
         check.that("changing reproduction invalidates acceptance receipts",
                 !redProof.acceptanceFingerprint().equals(TaskSpec.parse(reproductionTask,
                         "task.yaml").resolve(project, "task.yaml").acceptanceFingerprint()));
+        TaskSpec handChecked = TaskSpec.parse(reproductionTask
+                + "manual_verification:\n  - \"keyboard chord\"\n  - \"hover\"\n",
+                "task.yaml");
+        check.eq("hand-checks are kept in the order they were written",
+                List.of("keyboard chord", "hover"), handChecked.manualVerification());
+        check.rejects("a blank hand-check is rejected, so it cannot match every finding",
+                "manual_verification[1] must be a non-empty string",
+                () -> TaskSpec.parse(reproductionTask
+                        + "manual_verification:\n  - \"keyboard chord\"\n  - \"  \"\n",
+                        "task.yaml"));
+        TaskSpec.ResolvedTask resolvedHand = handChecked.resolve(project, "task.yaml");
+        check.eq("and they survive resolution",
+                List.of("keyboard chord", "hover"), resolvedHand.manualVerification());
+        check.that("adding a hand-check moves the acceptance hash",
+                !resolvedHand.acceptanceFingerprint().equals(TaskSpec.parse(reproductionTask,
+                        "task.yaml").resolve(project, "task.yaml").acceptanceFingerprint()));
+        check.eq("a task that names none keeps an empty list", List.of(),
+                TaskSpec.parse(reproductionTask, "task.yaml").manualVerification());
 
         // What has to happen in a checkout before any of `checks` can run. Most projects have
         // nothing to say here; a `git worktree` of an npm project has no node_modules, and

@@ -113,8 +113,30 @@ public final class Main {
 
     private static int validate(String[] args) throws Exception {
         if (args.length < 2) throw new IllegalArgumentException("validate requires a task id or YAML path");
-        ConfigLoader.Loaded loaded = new ConfigLoader().load(Path.of("."), args[1]);
+        return validate(Path.of("."), args[1]);
+    }
+
+    /**
+     * Load the task and refuse a browser scenario the harness cannot run.
+     *
+     * {@code warden run} and {@code --dry-run} already ask the adapter before the first
+     * vendor is paid. Validate used to print {@code ok} for a step the grammar does not
+     * have, so a typo was discovered only when the browser stage ran. The grammar stays
+     * in the adapter: a missing node is not a failure here, the same as preflight.
+     */
+    static int validate(Path root, String task) throws Exception {
+        ConfigLoader.Loaded loaded = new ConfigLoader().load(root, task);
+        String scenarioProblem = new VisualQaRunner(new ProcessRunner()).contractProblem(loaded);
         Map<String, Object> result = new LinkedHashMap<>();
+        if (scenarioProblem != null) {
+            result.put("ok", false);
+            result.put("code", "visual_qa_contract_invalid");
+            result.put("message", scenarioProblem);
+            result.put("project", loaded.project().project());
+            result.put("task_id", loaded.resolved().id());
+            System.out.println(Json.write(result));
+            return 1;
+        }
         result.put("ok", true);
         result.put("project", loaded.project().project());
         result.put("task_id", loaded.resolved().id());
@@ -1631,21 +1653,36 @@ public final class Main {
             }
             String expected = option(args, "--expected-updated-at", pending.updatedAt().toString());
 
+            // Waive closes a contract_gap-only stop. Refused before the decision is written,
+            // so a product defect stays pending and the gate can still be answered another way.
+            ContractGapWaiver waiver = null;
+            if ("waive".equals(choice)) {
+                waiver = waiveContractGap(root, pending, option(args, "--finding", null));
+            }
             // A gate past its declared life can still be closed, but not accepted on the
             // strength of evidence that was current when it was published: a live page, a
             // deployment, a network observation may all have moved since. Reject, abort and
             // retry remain available, and an explicit acknowledgement re-opens accept.
-            if ("accept".equals(choice) && pending.expiredAt(java.time.Instant.ofEpochMilli(env.clock.nowMillis()))
-                    && !hasFlag(args, "--acknowledge-expired")) {
+            boolean expired = pending.expiredAt(java.time.Instant.ofEpochMilli(env.clock.nowMillis()));
+            if ("accept".equals(choice) && expired && !hasFlag(args, "--acknowledge-expired")) {
                 throw new ApprovalException("gate_expired", "run " + runId + " asked its question "
                         + "on " + pending.createdAt() + " and its gate expired on "
                         + pending.expiresAt() + " (budgets.gate_ttl_hours). Re-check anything "
                         + "that can go stale, then accept with --acknowledge-expired, or answer "
                         + "reject/retry/abort; no answer is never an acceptance.");
             }
-            // Acceptance is valid only for the exact candidate the human inspected. Reject,
-            // abort and retry remain available when the tree moved, because they grant no land.
-            if ("accept".equals(choice) && pending.candidateFingerprint() != null) {
+            if ("waive".equals(choice) && expired && !hasFlag(args, "--acknowledge-expired")) {
+                throw new ApprovalException("gate_expired", "run " + runId + " asked its question "
+                        + "on " + pending.createdAt() + " and its gate expired on "
+                        + pending.expiresAt() + " (budgets.gate_ttl_hours). Re-check anything "
+                        + "that can go stale, then waive with --acknowledge-expired, or answer "
+                        + "retry/abort; no answer is never a waiver.");
+            }
+            // Acceptance, and a waiver of a contract gap, are valid only for the exact
+            // candidate the human inspected. Reject, abort and retry remain available when
+            // the tree moved, because they grant no land.
+            if (("accept".equals(choice) || "waive".equals(choice))
+                    && pending.candidateFingerprint() != null) {
                 Path summaryPath = Path.of(pending.summaryPath());
                 if (!summaryPath.isAbsolute()) summaryPath = root.resolve(summaryPath);
                 Map<String, Object> summary = Json.parseObject(java.nio.file.Files.readString(summaryPath));
@@ -1673,7 +1710,8 @@ public final class Main {
             HumanDecision resolved = store.resolve(runId, expected, choice, actor, note, current -> {
                 if (applyProposal) dev.warden.run.ContractProposal.apply(root, current);
             });
-            boolean summaryProjectionUpdated = updateDecisionProjection(root, resolved);
+            Map<String, Object> waiverView = waiver == null ? null : waiver.view(actor, note);
+            boolean summaryProjectionUpdated = updateDecisionProjection(root, resolved, waiverView);
             long waitMillis = Math.max(0L,
                     Duration.between(resolved.createdAt(), resolved.updatedAt()).toMillis());
             Map<String, Object> recorded = new LinkedHashMap<>();
@@ -1686,15 +1724,22 @@ public final class Main {
             recorded.put("wait_millis", waitMillis);
             recorded.put("updated_at", resolved.updatedAt().toString());
             recorded.put("lands", false);
+            if (waiverView != null) {
+                recorded.put("finding_id", waiverView.get("finding_id"));
+                recorded.put("waived_findings", waiverView.get("waived_findings"));
+                recorded.put("cause", "contract_gap");
+            }
             UserConfig user = env.user();
             EvidenceLedger decisionLedger = new EvidenceLedger(root, runId, user.home());
             decisionLedger.append("human_decision", recorded);
-            // The card and the tab stop asking. `accept`, `abort` and a rejection with nothing
-            // to carry close the run. Every other decision expects another run, and the card
-            // goes to the running column when that run actually starts, not here: set here,
-            // it said "running" over a retry nobody had started and a continuation that was
-            // refused. The tab was opened by another process; its handle is on disk.
-            boolean closes = "accept".equals(choice) || "abort".equals(choice)
+            if (waiverView != null) decisionLedger.append("contract_gap_waived", waiverView);
+            // The card and the tab stop asking. `accept`, `abort`, `waive` and a rejection
+            // with nothing to carry close the run. Waive does not start another run: the
+            // same gap would stop it again. Every other decision expects another run, and
+            // the card goes to the running column when that run actually starts, not here:
+            // set here, it said "running" over a retry nobody had started and a continuation
+            // that was refused. The tab was opened by another process; its handle is on disk.
+            boolean closes = "accept".equals(choice) || "abort".equals(choice) || "waive".equals(choice)
                     || ("reject".equals(choice) && !rejectedWithNote(resolved.kind(), choice, note));
             dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
             card.adopt(runId);
@@ -1722,6 +1767,9 @@ public final class Main {
                 } else {
                     result.put("next", started.get("command"));
                 }
+            } else if ("waive".equals(choice)) {
+                result.put("next", "the contract_gap stop was waived; nothing was landed. "
+                        + "A product defect cannot be waived.");
             } else {
                 result.put("next", "accept".equals(choice)
                         ? "inspect the exact diff and land it manually if desired"
@@ -2153,10 +2201,15 @@ public final class Main {
         boolean previewable = dev.warden.dashboard.DecisionPage.offersPreview(root, pending.taskId());
         try (var preview = new dev.warden.gate.CandidatePreview(root, pending.taskId(),
                 narrationFile(root, runId).resolveSibling("decision-preview.log"), opener::open);
-             var page = new dev.warden.dashboard.DecisionPage(root, runId, (choice, note, expected) -> {
+             var page = new dev.warden.dashboard.DecisionPage(root, runId,
+                     (choice, note, expected, finding) -> {
             List<String> approve = new java.util.ArrayList<>(List.of("approve", runId,
                     "--decision", choice, "--note", note, "--expected-updated-at", expected,
                     "--actor", "orca-decision-page", "--no-start"));
+            if (finding != null && !finding.isBlank()) {
+                approve.add("--finding");
+                approve.add(finding);
+            }
             approve.addAll(passThrough);
             return approveDecision(root, approve.toArray(String[]::new), env).report();
         }, previewable ? preview::open : null)) {
@@ -2383,8 +2436,131 @@ public final class Main {
         return outcome.ok() ? 0 : 1;
     }
 
+    /**
+     * A waiver of one contract_gap-only stop: the finding the person named, and every open
+     * contract_gap it closed with it.
+     */
+    private record ContractGapWaiver(String findingId, List<String> waivedFindings) {
+        Map<String, Object> view(String actor, String note) {
+            Map<String, Object> view = new LinkedHashMap<>();
+            view.put("finding_id", findingId);
+            view.put("waived_findings", waivedFindings);
+            view.put("note", note == null ? "" : note);
+            view.put("actor", actor);
+            view.put("cause", "contract_gap");
+            return view;
+        }
+    }
+
+    /**
+     * Refuse {@code waive} unless this stop itself is caused by contract-gap findings and
+     * every open P1 is a contract_gap, the named finding among them. A continuation
+     * restores earlier findings, so an inherited gap can still be open when the new run
+     * stops on a machine gate; that history is not this stop. The decision stays pending
+     * when this throws.
+     */
+    private static ContractGapWaiver waiveContractGap(Path root, HumanDecision pending, String findingId)
+            throws java.io.IOException {
+        if (pending.kind() != HumanDecision.Kind.FAILURE) {
+            throw new ApprovalException("waive_refused",
+                    "waive is a failure option; run " + pending.runId() + " is "
+                            + pending.kind().jsonValue());
+        }
+        if (findingId == null || findingId.isBlank()) {
+            throw new ApprovalException("waive_refused",
+                    "waive requires --finding <ID>, the contract_gap to accept.");
+        }
+        Map<String, Object> summary = decisionSummary(root, pending);
+        String stop = pending.reason();
+        Object reported = summary.get("reason");
+        if (!CONTRACT_GAP_STOPS.contains(stop)
+                || !(reported instanceof String reportedReason && reportedReason.equals(stop))) {
+            throw new ApprovalException("waive_refused",
+                    "waive refused: run " + pending.runId() + " stopped for " + stop
+                            + ". Waive closes a stop caused solely by contract-gap findings, "
+                            + "not a machine-gate failure or any other reason.");
+        }
+        List<Map<String, Object>> open = openBlockingFindings(summary);
+        if (open.isEmpty()) {
+            throw new ApprovalException("waive_refused",
+                    "this run has no open contract_gap to waive.");
+        }
+        Map<String, Object> named = null;
+        List<String> ids = new ArrayList<>();
+        for (Map<String, Object> finding : open) {
+            String id = finding.get("id") instanceof String text ? text : "";
+            if (!id.isBlank()) ids.add(id);
+            if (findingId.equals(id)) named = finding;
+        }
+        if (named == null) {
+            throw new ApprovalException("waive_refused",
+                    "waive refused: no open P1 with id " + findingId + ". Open blockers: "
+                            + String.join(", ", ids));
+        }
+        String namedCategory = findingCategory(named);
+        if (!"contract_gap".equals(namedCategory)) {
+            if ("product_defect".equals(namedCategory)) {
+                throw new ApprovalException("waive_refused",
+                        "waive refused: finding " + findingId
+                                + " is a product_defect. A product defect stays blocking; "
+                                + "waive is only for a contract_gap.");
+            }
+            throw new ApprovalException("waive_refused",
+                    "waive refused: finding " + findingId + " is a " + namedCategory
+                            + ". Waive is only for a contract_gap.");
+        }
+        for (Map<String, Object> finding : open) {
+            String category = findingCategory(finding);
+            if ("contract_gap".equals(category)) continue;
+            throw new ApprovalException("waive_refused",
+                    "waive refused: run " + pending.runId()
+                            + " still has a blocking finding that is not a contract_gap ("
+                            + finding.get("id") + ", " + category
+                            + "). Waive closes a stop whose blockers are only contract gaps.");
+        }
+        return new ContractGapWaiver(findingId, List.copyOf(ids));
+    }
+
+    /** The task summary the decision points at. Missing is a refusal, not an empty stop. */
+    private static Map<String, Object> decisionSummary(Path root, HumanDecision pending)
+            throws java.io.IOException {
+        Path summaryPath = Path.of(pending.summaryPath());
+        if (!summaryPath.isAbsolute()) summaryPath = root.resolve(summaryPath);
+        if (!java.nio.file.Files.isRegularFile(summaryPath)) {
+            throw new ApprovalException("waive_refused",
+                    "task summary could not be read at " + pending.summaryPath());
+        }
+        return Json.parseObject(java.nio.file.Files.readString(summaryPath));
+    }
+
+    /**
+     * Open P1s across the run's finding registry, the same set
+     * {@link dev.warden.run.NextStep} routes by. A downgraded advisory is already P2.
+     * A closed record is not a blocker; an open or reopened one is, including a product
+     * defect another reviewer filed and a later recheck did not mention.
+     */
+    private static List<Map<String, Object>> openBlockingFindings(Map<String, Object> summary) {
+        if (summary == null || !(summary.get("finding_history") instanceof List<?> rounds)) {
+            return List.of();
+        }
+        return dev.warden.ledger.Findings.openBlockers(rounds);
+    }
+
+    /** Absent or unrecognised category is a product defect, matching {@link dev.warden.ledger.Findings}. */
+    private static String findingCategory(Map<String, Object> finding) {
+        Object raw = finding.get("category");
+        String category = raw instanceof String text ? text : "";
+        return dev.warden.ledger.Findings.CATEGORIES.contains(category)
+                ? category : dev.warden.ledger.Findings.DEFAULT_CATEGORY;
+    }
+
     /** decision.json is authoritative; task-run.json is a convenient, explicitly derived view. */
     private static boolean updateDecisionProjection(Path root, HumanDecision decision) {
+        return updateDecisionProjection(root, decision, null);
+    }
+
+    private static boolean updateDecisionProjection(Path root, HumanDecision decision,
+                                                    Map<String, Object> waiver) {
         try {
             Path summary = Path.of(decision.summaryPath());
             if (!summary.isAbsolute()) summary = root.resolve(summary);
@@ -2398,6 +2574,7 @@ public final class Main {
             report.put("decision_actor", decision.actor());
             report.put("decision_note", decision.note());
             report.put("decision_updated_at", decision.updatedAt().toString());
+            if (waiver != null) report.put("contract_gap_waiver", waiver);
             String file = summary.getFileName().toString();
             if (!file.endsWith(".json")) return false;
             new EvidenceLedger(root, decision.runId()).writeReport(
@@ -2574,8 +2751,11 @@ public final class Main {
                   warden approve <run-id> --decision <choice>
                                                record a decision; never lands changes.
                                                Must be run from the worktree the run lives in.
-                                               Failure options: retry, abort, advance.
-                                               advance closes this run and starts the next
+                                               Failure options: retry, abort, advance, waive.
+                                               waive closes a contract_gap-only stop
+                                               (--finding <id>) and lands nothing; a product
+                                               defect stays blocking. advance closes this run
+                                               and starts the next
                                                id of the same task (writers carry; verdicts
                                                do not). --no-start records it and prints the
                                                command instead.

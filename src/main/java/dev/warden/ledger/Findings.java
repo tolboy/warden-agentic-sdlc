@@ -93,6 +93,18 @@ public final class Findings {
             if (suggestion instanceof String proposed && !proposed.isBlank()) {
                 value.put("suggestion", proposed);
             }
+            // A contract_gap Warden itself accepted as already covered by the task's
+            // manual_verification list. Present only on that downgrade, so a finding the
+            // vendor filed is byte-for-byte what it always was.
+            Object filed = raw.get("severity_as_filed");
+            if (filed instanceof String original && !original.isBlank()) {
+                value.put("severity_as_filed", original);
+            }
+            Object acknowledged = raw.get("manual_verification");
+            if (acknowledged instanceof String item && !item.isBlank()) {
+                value.put("manual_verification", item);
+            }
+            if (Boolean.TRUE.equals(raw.get("advisory"))) value.put("advisory", true);
             value.put("evidence_refs", refs(raw.get("evidence_refs")));
             value.put("supersedes", refs(raw.get("supersedes")));
             // A serialized empty list is indistinguishable from a field the vendor never
@@ -114,6 +126,61 @@ public final class Findings {
             if (row instanceof Map<?, ?> entry) findings.add(one((Map<String, Object>) entry));
         }
         return findings;
+    }
+
+    /**
+     * A contract_gap the task already named under {@code manual_verification} is not a blocker.
+     *
+     * The match is a case-insensitive substring of the message, expected, actual, scenario or
+     * suggestion. Only a P1 {@code contract_gap} is lowered, to P2, and the vendor's severity
+     * is kept beside it as {@code severity_as_filed}. A product defect is never lowered, even
+     * when its text contains an item. The vendor's own map is not written to: the downgrade
+     * lives on the copy Warden records, so the first round is already P2 and a later reading
+     * of the same words is not mistaken for the reviewer softening its own P1.
+     */
+    public static List<Finding> acknowledging(List<Finding> findings, List<String> manual) {
+        if (findings == null || findings.isEmpty()) return findings == null ? List.of() : findings;
+        List<String> items = new ArrayList<>();
+        if (manual != null) {
+            for (String item : manual) {
+                if (item != null && !item.isBlank()) items.add(item.trim());
+            }
+        }
+        if (items.isEmpty()) return findings;
+        List<Finding> acknowledged = new ArrayList<>();
+        for (Finding finding : findings) {
+            if (!finding.blocking() || !"contract_gap".equals(finding.category())) {
+                acknowledged.add(finding);
+                continue;
+            }
+            String matched = matchedItem(finding, items);
+            if (matched == null) {
+                acknowledged.add(finding);
+                continue;
+            }
+            Map<String, Object> copy = new LinkedHashMap<>(finding.raw());
+            copy.put("severity", "P2");
+            copy.put("severity_as_filed", finding.severity());
+            copy.put("manual_verification", matched);
+            copy.put("advisory", true);
+            acknowledged.add(new Finding(finding.id(), finding.idSource(), finding.category(),
+                    finding.categorySource(), "P2", finding.path(), finding.message(), copy));
+        }
+        return acknowledged;
+    }
+
+    /** The first declared item that occurs in the finding's checkable text, or null. */
+    private static String matchedItem(Finding finding, List<String> items) {
+        String haystack = (finding.message() + "\n"
+                + text(finding.raw().get("expected")) + "\n"
+                + text(finding.raw().get("actual")) + "\n"
+                + text(finding.raw().get("scenario")) + "\n"
+                + text(finding.raw().get("suggestion")))
+                .toLowerCase(java.util.Locale.ROOT);
+        for (String item : items) {
+            if (haystack.contains(item.toLowerCase(java.util.Locale.ROOT))) return item;
+        }
+        return null;
     }
 
     /**
@@ -200,6 +267,37 @@ public final class Findings {
         digest.update((byte) 0);
         digest.update(normalised.getBytes(StandardCharsets.UTF_8));
         return "f-" + HexFormat.of().formatHex(digest.digest()).substring(0, 12);
+    }
+
+    /**
+     * Open P1s for the whole run, from the finding registry rather than one round's report.
+     *
+     * A repair rechecks earlier reviewers before it re-reads the reviewer whose defect
+     * prompted it. That recheck can be the latest round and name only a {@code contract_gap},
+     * while another reviewer's P1 stays {@code open} or {@code reopened} in the registry:
+     * silence from a stage that did not file a finding does not close it. A waiver that
+     * read only the latest report would accept that stop. Closed records are not blockers.
+     * A round that never wrote a registry contributes its own findings, which is all an
+     * older summary has. A later stage that reuses an id with a different category or
+     * severity does not replace the owner's record, so that record is still what is open.
+     */
+    public static List<Map<String, Object>> openBlockers(List<?> history) {
+        List<Map<String, Object>> rounds = new ArrayList<>();
+        if (history != null) {
+            for (Object row : history) {
+                if (!(row instanceof Map<?, ?> map)) continue;
+                Map<String, Object> copy = new LinkedHashMap<>();
+                map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                rounds.add(copy);
+            }
+        }
+        List<Map<String, Object>> open = new ArrayList<>();
+        for (Map<String, Object> finding : registryOf(rounds)) {
+            if (!"P1".equals(String.valueOf(finding.get("severity")))) continue;
+            if ("closed".equals(finding.get("status"))) continue;
+            open.add(finding);
+        }
+        return open;
     }
 
     /** The ids of the findings that block acceptance, in report order. */
@@ -410,9 +508,20 @@ public final class Findings {
             if (newAfterClosure && !spokeEvidence)
                 unverified.add(finding.id() + ": new blocker after a closure; artifact named no "
                         + "evidence_refs so the evidence invariant could not be checked");
-            if (reopening) value.put("status", "reopened");
+            // The stage that filed the id owns its category and severity. Another stage
+            // may reopen that id, or repeat it, but may not rewrite it into a different
+            // kind of blocker: a recheck that files contract_gap "A1" where review-second
+            // filed product_defect "A1" used to replace the registry record, and waive
+            // then saw only the gap. The owner's record stays. The round is a protocol
+            // failure, the same way a duplicate id is.
             Object priorStage = old != null ? old.get("recorded_at_stage") : null;
-            value.put("recorded_at_stage", priorStage instanceof String s && !s.isBlank() ? s : stage);
+            String owner = priorStage instanceof String s && !s.isBlank() ? s : stage;
+            if (old != null && !owner.equals(stage) && !sameBlockingIdentity(old, value)) {
+                violations.add(finding.id() + ": conflicting cross-stage id owned by " + owner);
+                continue;
+            }
+            if (reopening) value.put("status", "reopened");
+            value.put("recorded_at_stage", owner);
             value.put("seen_evidence_refs", unionEvidence(old, value));
             known.put(finding.id(), value);
         }
@@ -422,6 +531,28 @@ public final class Findings {
                 .map(Map.Entry::getKey).toList());
         row.put("protocol_violations", violations);
         row.put("unverified_invariants", unverified);
+    }
+
+    /**
+     * Category and severity, the two fields that decide whether an open record blocks
+     * and whether a waiver may close it. An absent or unrecognised category is the
+     * default product defect, matching {@link Finding#toMap()}.
+     */
+    private static boolean sameBlockingIdentity(Map<String, Object> recorded,
+                                                Map<String, Object> incoming) {
+        return recordedCategory(recorded).equals(recordedCategory(incoming))
+                && recordedSeverity(recorded).equals(recordedSeverity(incoming));
+    }
+
+    private static String recordedCategory(Map<String, Object> finding) {
+        Object raw = finding.get("category");
+        String category = raw instanceof String text ? text : "";
+        return CATEGORIES.contains(category) ? category : DEFAULT_CATEGORY;
+    }
+
+    private static String recordedSeverity(Map<String, Object> finding) {
+        Object raw = finding.get("severity");
+        return raw instanceof String text ? text : "";
     }
 
     /**

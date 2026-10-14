@@ -71,9 +71,11 @@ public record HumanDecision(
          * {@code advance} starts the next run of the same task after this one is closed.
          * The operator (or a supervisor answering the gate) is saying the blocker was
          * dealt with — a contract edit, a scope fix, a repaired tree — without typing the
-         * four follow-up commands. Older files that offered only retry/abort still parse.
+         * four follow-up commands. {@code waive} closes a stop whose open blockers are
+         * only contract gaps; it lands nothing and starts nothing. Older files that
+         * offered only retry/abort, or retry/abort/advance, still parse.
          */
-        FAILURE("failure", List.of("retry", "abort", "advance")),
+        FAILURE("failure", List.of("retry", "abort", "advance", "waive")),
         /**
          * A vendor ran out mid-run and another could take over. Distinct from FAILURE
          * because the choice is not "try again or give up" — the work so far is fine, and
@@ -126,7 +128,8 @@ public record HumanDecision(
         boolean acceptsOptions(List<String> declared) {
             if (options.equals(declared)) return true;
             if (this == FAILOVER && List.of("abort", "switch").equals(declared)) return true;
-            return this == FAILURE && List.of("retry", "abort").equals(declared);
+            return this == FAILURE && (List.of("retry", "abort").equals(declared)
+                    || List.of("retry", "abort", "advance").equals(declared));
         }
     }
 

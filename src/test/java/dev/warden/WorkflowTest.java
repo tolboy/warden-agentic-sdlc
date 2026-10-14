@@ -329,7 +329,8 @@ public final class WorkflowTest implements Suite {
         // told to wait out and continue — and the continuation then threw every verdict away.
         for (String reason : List.of("quota_exhausted", "rate_limited",
                 "failover_requires_confirmation", "role_timed_out", "vendor_call_failed",
-                "vendor_protocol_failed", "prompt_undeliverable", "orca_worker_not_started")) {
+                "vendor_unavailable", "vendor_protocol_failed", "prompt_undeliverable",
+                "orca_worker_not_started")) {
             check.eq(reason + " is not a verdict on the work",
                     false, dev.warden.run.TaskLoop.isAboutTheWork(reason));
         }
@@ -339,6 +340,7 @@ public final class WorkflowTest implements Suite {
         check.eq("and so is a contract whose acceptance passed before the change",
                 true, dev.warden.run.TaskLoop.isAboutTheWork("reproduction_passed_before_change"));
         for (String code : List.of("role_timeout", "role_command_failed",
+                "role_vendor_unavailable",
                 "role_artifact_unparseable", "role_artifact_incomplete",
                 "role_artifact_schema_violation", "role_prompt_undeliverable",
                 "role_rate_limited", "role_quota_exhausted", "role_turns_exhausted",

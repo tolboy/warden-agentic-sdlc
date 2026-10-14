@@ -18,7 +18,7 @@ that exists in code but has never been run live says so.
   (default 1). A switch a person confirms on `--continue` counts, and the continuation
   keeps both that count and every profile that already failed the stage, so the roster
   cannot cycle back to one. Each switch writes `role_failover` with the cause (`vendor_call_failed`,
-  `role_timeout` or `artifact_invalid`), the role code, both profiles and who authorised
+  `role_timeout`, `artifact_invalid` or `vendor_unavailable`), the role code, both profiles and who authorised
   it. The same path covers `role_local_endpoint_unreachable` and
   `role_local_http_error`. The failed attempt stays in `vendor_attempts` with its stderr
   tail, and with `start_error` when the process could not be launched. A valid artifact from
@@ -48,6 +48,75 @@ that exists in code but has never been run live says so.
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
 ### Fixed
+
+- A finding id belongs to the stage that filed it. Another stage that reports the
+  same id with a different category or severity does not replace that record; the
+  round is `finding_protocol_failure`. Waive of the shared id is refused while the
+  owner's P1 product defect is still open, and the decision stays pending. A
+  later report of the same category and severity is still the same finding.
+  Suite `findings`, `decision-page`.
+- `warden approve --decision waive` requires the current stop to be
+  `blocking_findings_remain` or `quality_exhausted`, and the report to say the
+  same. A continuation that restores an earlier contract gap and then stops on
+  `gates_not_satisfied` is refused; the decision stays pending. The same gap is
+  still waivable when that gap is the stop. Suite `decision-page`.
+- A visual label may contain an apostrophe. `text=Don't Save press=Escape` keeps
+  the label `Don't Save` and sends Escape. A quote starts a span only when it is
+  a delimiter with a matching closer (`css=[data-label="x mode=y"]`,
+  `css=[data-label='x mode=y']`). `press=constructor`, `press=__proto__` and
+  `press=toString` are unknown keys, not inherited object properties. Suite
+  `visual qa`.
+
+- `warden approve --decision waive` reads the run-wide finding registry. A repair
+  rechecks earlier reviewers first; that recheck can report only a `contract_gap`
+  while another reviewer's P1 `product_defect` is still open or reopened. Waive is
+  refused and the decision stays pending. A defect that reviewer has closed does
+  not block the waiver. Suite `decision-page`.
+- A vendor error envelope is a location refusal when its `code` is 403 or its
+  `status` is `PERMISSION_DENIED`, even if the message text does not say so.
+  `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Request had insufficient authentication scopes."}}`
+  is `vendor_unavailable`. A bare `403` in stderr text is still not one. Quota
+  still wins when the message is a spent plan, and a usable review artifact that
+  mentions the code is not reclassified. Suite `vendor availability`.
+- Visual scenario preflight treats `verb=` inside a quoted or backslash-escaped
+  matcher value as part of the selector. `css=[data-label="x mode=y"] visible`
+  and the same selector as `wait-for` validate. An unknown step outside the
+  quotes (`blur=true`) is still `visual_qa_contract_invalid`. Suite `visual qa`.
+
+- A contract gap the harness cannot express no longer dead-ends the run. The reviewer
+  prompt states the browser grammar and says a check it cannot say — a chord, a hover, a
+  drag — is a P2 `contract_gap` that names manual verification, rather than a P1. A task
+  may declare `manual_verification:`. A P1 `contract_gap` whose message, expected, actual,
+  scenario or suggestion contains one of those items (case-insensitive) is recorded as P2
+  (`severity_as_filed`, `advisory`) and does not block. A product defect is never lowered.
+  The vendor artifact is left as filed. The first recorded round is already P2, so a later
+  reading of the same words is not severity laundering. `warden approve <run> --decision
+  waive --finding <ID>` closes a stop whose open blockers are only contract gaps, records
+  `contract_gap_waived` on the ledger and `contract_gap_waiver` on the report, and lands
+  nothing. It does not start another run. Waive is refused when any open P1 is not a
+  contract gap, and when `--finding` is omitted; the decision stays pending. An amending
+  planner is told the same grammar and not to invent a scenario it cannot run. `warden
+  setup` does not overwrite an existing reviewer prompt; copy the new paragraphs into
+  `prompts/reviewer.md`. Not yet run live. Suites `findings`, `decision-page`, `task loop`.
+
+- The visual harness accepts `press=KEY` and `focused`. `press=Escape` (also Enter, Tab,
+  Space, the arrows, and one character) sends a CDP keyDown then keyUp; a matcher before
+  it (`testid=dialog press=Escape`) focuses that element first. `testid=field focused`
+  asserts `document.activeElement`. A press does not need the DOM to change. `warden
+  validate` and `run --dry-run` reject an unknown step (`blur=true`, `press=Esacpe`) with
+  the adapter's message, the same check the browser stage already used, so a typo is
+  `visual_qa_contract_invalid` before a vendor is paid. Not yet run live against a browser.
+  Suite `visual qa`.
+
+- A location or eligibility refusal is `vendor_unavailable`, not a generic command failure
+  and not a verdict. HTTP 403, `PERMISSION_DENIED`, "not eligible" and "not available in
+  your location" are classified from a structured error or stderr, and only when the call
+  left no usable artifact. Quota still wins when both are present. The cause counts for
+  `failover.on_vendor_failure`, including a `visual_qa` look stage: list a second visual
+  profile and `auto` runs it. The refused profile is skipped for the rest of that process,
+  so a later stage does not dispatch it; a different profile of the same vendor is not
+  skipped, and independence still applies. A new process does not remember the refusal.
+  The default remains `stop`. Not yet run live. Suites `vendor availability` and `task loop`.
 
 - A quota failover in the same dispatch does not name a profile whose vendor call already
   failed. The ledger records the profile that runs, or the role stops when none can.

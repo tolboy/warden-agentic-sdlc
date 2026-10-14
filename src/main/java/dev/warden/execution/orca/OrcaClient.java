@@ -68,25 +68,7 @@ public final class OrcaClient {
      * require, so a value that legitimately contains one still arrives intact.
      */
     public static String jsonArgument(Object value) {
-        String json = Json.write(value);
-        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return json;
-        StringBuilder escaped = new StringBuilder(json.length() + 8);
-        int backslashes = 0;
-        for (int index = 0; index < json.length(); index++) {
-            char character = json.charAt(index);
-            if (character == '\\') {
-                backslashes++;
-                escaped.append(character);
-                continue;
-            }
-            if (character == '"') {
-                for (int repeat = 0; repeat < backslashes; repeat++) escaped.append('\\');
-                escaped.append('\\');
-            }
-            backslashes = 0;
-            escaped.append(character);
-        }
-        return escaped.toString();
+        return ProcessRunner.argument(Json.write(value));
     }
 
     public Rpc invoke(Path workingDirectory, Duration timeout, List<String> args) throws Exception {

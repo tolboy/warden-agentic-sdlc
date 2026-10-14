@@ -20,6 +20,78 @@ public final class ProcessRunner {
         public boolean ok() { return !timedOut && exitCode == 0; }
     }
 
+    /**
+     * Prepares one argument so that a Windows child receives it exactly as given.
+     *
+     * Java hands a Windows child one command line, and only wraps an argument in quotes when
+     * it contains whitespace; it never escapes a double quote inside it. The child (node, an
+     * Orca CLI, any MSVC-runtime program) then splits that line by the usual rules, which
+     * treat a bare {@code "} as a quote toggle and drop it. A visual QA scenario such as
+     * {@code css=[data-label="Don't Save"] press=Escape} reached the adapter as
+     * {@code css=[data-label=Don't Save] press=Escape} inside a different quote span, so the
+     * selector, the press and an unknown-step check all broke on Windows only.
+     *
+     * Each {@code "} is escaped as {@code \"}, and the backslashes right before it are doubled
+     * as those rules require. Off Windows the argument is returned unchanged; arguments go
+     * to the child as an array there.
+     */
+    public static String argument(String value) {
+        return argument(null, value);
+    }
+
+    /**
+     * {@link #argument(String)} for a known executable. Java itself escapes interior quotes
+     * when it runs with {@code -Djdk.lang.Process.allowAmbiguousCommands=false} and the
+     * executable is not a {@code .cmd}/{@code .bat} file (OpenJDK's ProcessImpl, mode
+     * VERIFICATION_WIN32_SAFE); escaping here as well would hand the child literal backslashes.
+     */
+    public static String argument(String executable, String value) {
+        boolean escape = needsManualEscaping(System.getProperty("os.name", ""),
+                System.getProperty("jdk.lang.Process.allowAmbiguousCommands"), executable);
+        return escape ? windowsEscaped(value) : value;
+    }
+
+    /**
+     * Whether Warden must escape interior quotes itself, mirroring how OpenJDK's Windows
+     * ProcessImpl builds a command line. Pure, so both modes are testable on any platform.
+     *
+     * @param osName             value of {@code os.name}
+     * @param allowAmbiguous     value of {@code jdk.lang.Process.allowAmbiguousCommands}, or null
+     * @param executable         the program being run, or null when unknown (assumed not a script)
+     */
+    public static boolean needsManualEscaping(String osName, String allowAmbiguous, String executable) {
+        if (osName == null || !osName.toLowerCase(java.util.Locale.ROOT).contains("win")) return false;
+        // OpenJDK: the property is ambiguous (lenient) unless it is exactly "false", ignoring case.
+        boolean lenient = allowAmbiguous == null || !"false".equalsIgnoreCase(allowAmbiguous);
+        if (lenient) return true;
+        // Strict mode: Java escapes quotes itself, except for batch files (VERIFICATION_CMD_BAT).
+        if (executable == null) return false;
+        String lower = executable.trim().toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith("\"")) lower = lower.substring(0, lower.length() - 1);
+        return lower.endsWith(".cmd") || lower.endsWith(".bat");
+    }
+
+    /** The Windows form of {@link #argument}, on any platform, so it can be tested anywhere. */
+    public static String windowsEscaped(String value) {
+        StringBuilder escaped = new StringBuilder(value.length() + 8);
+        int backslashes = 0;
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character == '\\') {
+                backslashes++;
+                escaped.append(character);
+                continue;
+            }
+            if (character == '"') {
+                for (int repeat = 0; repeat < backslashes; repeat++) escaped.append('\\');
+                escaped.append('\\');
+            }
+            backslashes = 0;
+            escaped.append(character);
+        }
+        return escaped.toString();
+    }
+
     public Result run(List<String> command, Path workingDirectory, Duration timeout)
             throws IOException, InterruptedException {
         return run(command, workingDirectory, timeout, DEFAULT_CAPTURE_BYTES);

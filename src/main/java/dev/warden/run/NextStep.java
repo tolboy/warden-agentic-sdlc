@@ -39,7 +39,7 @@ public final class NextStep {
         Map<String, Object> step = new LinkedHashMap<>();
         step.put("kind", kind);
         step.put("summary", sentence(kind, reason, summary, runId, taskId, taskFile, acceptance, findings));
-        step.put("commands", commands(kind, summary, runId, taskId, findings));
+        step.put("commands", commands(kind, reason, summary, runId, taskId, findings));
         step.put("edits", edits(kind, reason, summary, taskFile, acceptance, findings));
         step.put("consequences", consequences(kind, summary));
         step.put("findings", "fix_contract".equals(kind) || "resolve_blockers".equals(kind)
@@ -98,9 +98,9 @@ public final class NextStep {
             };
             case "quota_exhausted", "rate_limited" -> "wait_or_add_vendor";
             case "failover_requires_confirmation" -> "confirm_failover";
-            case "role_timed_out", "vendor_call_failed", "vendor_protocol_failed",
-                    "prompt_undeliverable", "turn_ceiling_reached", "orca_worker_not_started"
-                    -> "retry_infrastructure";
+            case "role_timed_out", "vendor_call_failed", "vendor_unavailable",
+                    "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached",
+                    "orca_worker_not_started" -> "retry_infrastructure";
             case "plan_review_findings_remain" -> "revise_plan";
             case "reproduction_passed_before_change", "reproduction_inconclusive" -> "fix_contract";
             case "blocking_findings_remain", "quality_exhausted" -> blockingKind(summary);
@@ -185,7 +185,14 @@ public final class NextStep {
             case "confirm_failover" ->
                     "Confirm the vendor substitution for run " + runId
                             + ", then continue it so the work already done is kept.";
-            case "retry_infrastructure" -> verdictsKept(summary)
+            case "retry_infrastructure" -> "vendor_unavailable".equals(reason)
+                    ? "The vendor account cannot be used here (a location or eligibility refusal, "
+                            + "not a verdict). That profile is skipped for the rest of this process. "
+                            + "Add another profile for the role, then retry run " + runId
+                            + (verdictsKept(summary)
+                            ? " so the verdicts already reached are kept."
+                            : ". The failed stage runs again.")
+                    : verdictsKept(summary)
                     ? "Retry the infrastructure failure on run " + runId
                             + "; the verdicts already reached on this tree are kept."
                     : "Retry the infrastructure failure on run " + runId
@@ -233,6 +240,35 @@ public final class NextStep {
         return false;
     }
 
+    /**
+     * Stops whose remaining blockers are the contract, the same pair
+     * {@code Main} uses before it will waive. A machine-gate failure and a
+     * reproduction stop are not in it: a continuation may still be carrying an
+     * earlier contract gap, and that gap did not cause this stop.
+     */
+    private static boolean contractGapStop(String reason) {
+        return "blocking_findings_remain".equals(reason) || "quality_exhausted".equals(reason);
+    }
+
+    /** Waive closes a stop only when every open P1 is a contract gap. */
+    private static boolean onlyContractGaps(List<Map<String, Object>> findings) {
+        if (findings.isEmpty()) return false;
+        for (Map<String, Object> finding : findings) {
+            if (!"contract_gap".equals(categoryOf(finding))) return false;
+        }
+        return true;
+    }
+
+    /** The first open contract_gap, which is the finding a waiver has to name. */
+    private static String firstContractGapId(List<Map<String, Object>> findings) {
+        for (Map<String, Object> finding : findings) {
+            if ("contract_gap".equals(categoryOf(finding)) && finding.get("id") != null) {
+                return String.valueOf(finding.get("id"));
+            }
+        }
+        return "";
+    }
+
     private static String contractSentence(String reason, String taskFile, List<String> acceptance,
                                            Map<String, Object> summary,
                                            List<Map<String, Object>> findings) {
@@ -259,7 +295,7 @@ public final class NextStep {
         return sentence.toString();
     }
 
-    private static List<String> commands(String kind, Map<String, Object> summary,
+    private static List<String> commands(String kind, String reason, Map<String, Object> summary,
                                          String runId, String taskId,
                                          List<Map<String, Object>> findings) {
         String newId = newRunId(taskId, runId);
@@ -276,6 +312,13 @@ public final class NextStep {
             case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
                     "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
+                if ("fix_contract".equals(kind) && contractGapStop(reason) && onlyContractGaps(findings)) {
+                    String gap = firstContractGapId(findings);
+                    if (!gap.isBlank()) {
+                        commands.add("warden approve " + runId
+                                + " --decision waive --finding " + gap);
+                    }
+                }
                 commands.add("warden approve " + runId + " --decision advance --note \""
                         + note(kind, findings) + "\"");
                 commands.add("warden approve " + runId + " --decision " + closeOption(summary)
@@ -340,6 +383,9 @@ public final class NextStep {
 
     private static List<Map<String, Object>> profileEdits(String reason) {
         String change = switch (reason) {
+            case "vendor_unavailable" ->
+                    "add another profile for this role; the one that ran is unavailable for the "
+                            + "rest of this process (a location or eligibility refusal, not a verdict)";
             case "role_timed_out" ->
                     "raise limits.wall_clock_minutes on the profile (the wall clock that bound "
                             + "this call), or narrow the task";
@@ -480,21 +526,17 @@ public final class NextStep {
     }
 
     /**
-     * Open P1s as {@code warden report} already has them: the last {@code finding_history}
-     * round, not a re-derivation from stage artifacts.
+     * Open P1s as the run-wide finding registry has them, not the latest round's own
+     * report. A recheck can be that latest round and name only a contract gap while
+     * another reviewer's product defect is still open or reopened. A downgraded
+     * advisory is already P2. Closed records are not blockers.
      */
     private static List<Map<String, Object>> openBlockingFindings(Map<String, Object> summary) {
-        List<Map<String, Object>> result = new ArrayList<>();
-        if (!(summary.get("finding_history") instanceof List<?> rounds) || rounds.isEmpty()) {
-            return result;
+        if (summary == null || !(summary.get("finding_history") instanceof List<?> rounds)) {
+            return List.of();
         }
-        Map<?, ?> last = null;
-        for (Object row : rounds) if (row instanceof Map<?, ?> map) last = map;
-        if (last == null || !(last.get("findings") instanceof List<?> findings)) return result;
-        for (Object item : findings) {
-            if (!(item instanceof Map<?, ?> finding)) continue;
-            if (!"P1".equals(String.valueOf(finding.get("severity")))) continue;
-            if ("closed".equals(String.valueOf(finding.get("status")))) continue;
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> finding : Findings.openBlockers(rounds)) {
             result.add(projectFinding(finding));
         }
         return result;

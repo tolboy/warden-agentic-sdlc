@@ -854,11 +854,15 @@ public final class Preparation {
                 + "  expected behaviour broke; in `visual_qa.scenarios`, add browser scenarios in the\n"
                 + "  harness grammar `WxH: <matcher> <assertion> [-> <matcher> <assertion> ...]`, with\n"
                 + "  matchers `testid=`, `css=`, `role=`, `text=` and assertions `visible`, `hidden`,\n"
-                + "  `click`; a `text=` step needs an anchored step (`testid=`, `css=`, `role=`) before it\n"
+                + "  `click`, `click@x,y`, `focused`, plus `press=KEY` (Escape, Enter, Tab, Space, an\n"
+                + "  arrow, or one character; `testid=dialog press=Escape` focuses that element first);\n"
+                + "  a `text=` step needs an anchored step (`testid=`, `css=`, `role=`) before it\n"
                 + "  in the same scenario, e.g. `1280x720: testid=greeting visible -> text=Hello, World visible`;\n"
                 + "- nothing you leave out is removed: Warden keeps every existing check and scenario and\n"
                 + "  adds only what you name that is not there yet; your other fields are not used;\n"
-                + "- if a finding cannot be expressed as a named check or a scenario, say so in `summary`.\n\n");
+                + "- if a finding cannot be expressed as a named check or a scenario, say so in `summary`.\n"
+                + "  Do not invent a scenario the grammar cannot run (a chord, a hover, a drag);\n"
+                + "  say that it needs manual verification.\n\n");
         body.append("## The contract as it stands\n\n```yaml\n").append(amendment.before().strip()).append("\n```\n\n");
         body.append("## What the readers found\n\n");
         for (Map<String, Object> gap : amendment.gaps()) {

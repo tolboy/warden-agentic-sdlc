@@ -159,6 +159,37 @@ starts the next run itself, and the command is not printed. If neither the contr
 tree has changed since the stop, `advance` refuses rather than spending a run id to reach
 the same wall.
 
+When the stop is `blocking_findings_remain` or `quality_exhausted` and every open
+blocker is a `contract_gap`, the same gate offers `waive`:
+
+```text
+warden approve <run> --decision waive --finding <id>
+```
+
+That closes the stop, writes `contract_gap_waived` on the ledger and `contract_gap_waiver`
+on the report, and lands nothing. It does not start another run. It is refused when the
+stop is not one of those two reasons — a continuation can restore an earlier contract
+gap and then fail machine gates, and that inherited gap does not authorise the waiver —
+when the named finding is not an open `contract_gap`, when any other open P1 is not one,
+and when `--finding` is omitted. Open P1s are the run-wide finding registry, so a later
+round that reports only a contract gap does not waive a product defect another reviewer
+left open or reopened. A shared id does not either: a stage that reuses an id with a
+different category or severity leaves the owner's record in place. A product defect
+stays blocking.
+
+A task may name checks a person already does by hand. A P1 `contract_gap` whose message,
+expected, actual, scenario or suggestion contains one of those items is recorded as P2
+(`severity_as_filed`, `advisory`) and does not stop the run:
+
+```yaml
+manual_verification:
+  - "keyboard chord"
+  - "hover"
+```
+
+`warden setup` does not overwrite an existing `prompts/reviewer.md`. Copy the new grammar
+paragraphs into it, or a reviewer that still has the old prompt can file the same P1.
+
 Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
 `~/.warden`.
 
@@ -231,6 +262,10 @@ roles:
   implementer:   { profiles: [grok-implement],   strategy: first }
   reviewer:      { profiles: [astra-review, claude-review], strategy: rotate,
                    require_independent_vendor: true }
+  visual_qa:     { profiles: [agy-opus-visual, claude-visual-qa], strategy: first,
+                   require_independent_vendor: true }
+failover:
+  on_vendor_failure: auto
 workflow:
   stages:
     - { stage: implement,     run: role, role: implementer, on_fail: stop }
@@ -239,6 +274,10 @@ workflow:
         on_fail: stop, on_findings: fix, recheck_after_fix: true }
     - { stage: review-second, run: role, role: reviewer, when: [review_required],
         on_fail: stop, on_findings: fix }
+    - { stage: browser,       run: visual_harness, when: [visual_qa_required],
+        on_fail: fix, recheck_after_fix: true }
+    - { stage: look,          run: role, role: visual_qa, when: [visual_qa_required],
+        sees: browser, on_fail: stop, on_findings: fix }
 ```
 
 A call that returns no artifact — a dropped connection, a timeout, a permission refusal, an
@@ -248,6 +287,16 @@ profile that still satisfies `require_independent_vendor` and records `role_fail
 a red gate and a rejection are verdicts and never take this path. `failover.max_per_stage`
 (default 1) is how many times one dispatch may switch. A role may set its own
 `on_vendor_failure`; omitting it inherits the policy.
+
+The look stage is that same path. List a second `visual_qa` profile, as `agy-opus-visual` then
+`claude-visual-qa` above, when the first account can be refused for where it is running. A
+403, `PERMISSION_DENIED`, "not eligible", or "not available in your location" is
+`vendor_unavailable`: a vendor failure, not a verdict on the work. With `on_vendor_failure: auto`
+the next independent `visual_qa` profile runs and the ledger records `role_failover` with that
+cause. The refused profile is skipped for the rest of that process, so a later stage does not
+pay for the same refusal; a different profile of the same vendor is not skipped. The default
+`stop` does not switch. The exclusion lasts for the process that learned it. A later
+`warden run` starts clean.
 
 `warden do <goal> --prepare always` runs the planner, then the plan reviewer over the compiled
 contract. The reviewer is told which workflow stages will judge the candidate. Blocking

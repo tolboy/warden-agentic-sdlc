@@ -55,10 +55,11 @@ import java.util.Set;
  *
  * <h2>Failing over when the call produced no artifact</h2>
  *
- * A network error, a timeout, a permission refusal, or an artifact that is missing or
- * invalid is also not a verdict on the work. {@code failover.on_vendor_failure} decides
- * whether another profile may take the role. It defaults to {@code stop}, so a policy that
- * never mentions it ends the role exactly as before. {@code auto} switches, {@code confirm}
+ * A network error, a timeout, a permission refusal, a location or eligibility refusal
+ * ({@code role_vendor_unavailable}), or an artifact that is missing or invalid is also not
+ * a verdict on the work. {@code failover.on_vendor_failure} decides whether another profile
+ * may take the role. It defaults to {@code stop}, so a policy that never mentions it ends
+ * the role exactly as before. {@code auto} switches, {@code confirm}
  * stops for the same human decision a spent subscription does, and {@code max_per_stage}
  * (default 1) is how many substitutions that stage may make, including a switch confirmed
  * on {@code --continue}. The continuation keeps that count and every profile that already
@@ -219,8 +220,21 @@ public final class RoleRunner {
      * Cleared at the start of each dispatch. A network error is not a spent subscription,
      * so the next stage may try the same profile again; within this dispatch it must not
      * be selected twice, or a strategy of {@code first} would loop on it.
+     * A location or eligibility refusal is the exception and lives in {@link #unavailable}.
      */
     private final Set<String> vendorFailedThisDispatch = new LinkedHashSet<>();
+
+    /**
+     * Profiles that returned {@code role_vendor_unavailable} during the life of this runner.
+     *
+     * A 403, {@code PERMISSION_DENIED}, or a "not eligible" / "not available in your
+     * location" refusal fails the same way on every later call. The profile is skipped
+     * up front for the rest of this process, including later stages. It is not added to
+     * {@link #exhausted}: that set means a spent subscription, and a different profile of
+     * the same vendor is still eligible. A new process starts with this set empty. A
+     * network error is not recorded here.
+     */
+    private final Set<String> unavailable = new LinkedHashSet<>();
 
     /**
      * A vendor-failure confirmation carried by {@code --continue}, keyed by stage.
@@ -399,6 +413,7 @@ public final class RoleRunner {
 
     private String usable(String profile) {
         if (profile == null || exhausted.contains(profile)
+                || unavailable.contains(profile)
                 || vendorFailedThisDispatch.contains(profile)) return null;
         return profile;
     }
@@ -428,6 +443,7 @@ public final class RoleRunner {
             rejected.put(pinned, "vision_capability_unverified");
         } else if (!profile.verified()) rejected.put(pinned, "profile_unverified");
         else if (exhausted.contains(pinned)) rejected.put(pinned, "quota_exhausted_this_run");
+        else if (unavailable.contains(pinned)) rejected.put(pinned, "vendor_unavailable_this_run");
         else if (vendorFailedThisDispatch.contains(pinned)) {
             rejected.put(pinned, "vendor_failed_this_attempt");
         }
@@ -564,7 +580,7 @@ public final class RoleRunner {
                     ? resolvePinned(pinned, role, user, known, pinnedByOperator(stage, role)).selected()
                     : new RoleResolver().resolve(role, user.policy(), user.profiles(), known,
                             stagePosition >= 0 ? stagePosition : nextRotation(root, role, true),
-                            this::available, exhausted).selected();
+                            this::available, exhausted, Set.of(), unavailable).selected();
             return overlay.adapt(stage, selected, user.profiles());
         } catch (Exception nobody) {
             return null;
@@ -589,7 +605,7 @@ public final class RoleRunner {
                 return null;
             }
             new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
-                    Math.max(0, rotation), this::available, exhausted);
+                    Math.max(0, rotation), this::available, exhausted, Set.of(), unavailable);
             return null;
         } catch (RoleResolver.Unresolvable nobody) {
             return nobody.rejected();
@@ -613,7 +629,7 @@ public final class RoleRunner {
                 return true;
             }
             new RoleResolver().resolve(role, user.policy(), user.profiles(), writers,
-                    Math.max(0, rotation), this::available, exhausted);
+                    Math.max(0, rotation), this::available, exhausted, Set.of(), unavailable);
             return true;
         } catch (RuntimeException nobody) {
             return false;
@@ -725,7 +741,8 @@ public final class RoleRunner {
                 resolution = pinned != null
                         ? resolvePinned(pinned, role, user, writers, pinnedByOperator(stageName, role))
                         : new RoleResolver().resolve(role, user.policy(), user.profiles(),
-                                writers, rotation, this::available, exhausted, vendorFailedThisDispatch);
+                                writers, rotation, this::available, exhausted,
+                                vendorFailedThisDispatch, unavailable);
             } catch (RoleResolver.Unresolvable failure) {
                 return unresolved(ledger, role, user, attempts, failure, spent, roleInvocationId,
                         roleFailovers);
@@ -741,13 +758,17 @@ public final class RoleRunner {
             Profile chosen = overlay.adapt(stageName, resolution.selected(), user.profiles());
             String overlayProblem = overlay.problem(stageName, resolution.selected(), user.profiles());
             if (overlayProblem != null || exhausted.contains(chosen.name())
+                    || unavailable.contains(chosen.name())
                     || vendorFailedThisDispatch.contains(chosen.name())) {
                 String why = overlayProblem != null ? "run_override_unavailable"
                         : exhausted.contains(chosen.name()) ? "quota_exhausted_this_run"
+                        : unavailable.contains(chosen.name()) ? "vendor_unavailable_this_run"
                         : "vendor_failed_this_attempt";
                 String message = overlayProblem != null ? overlayProblem
                         : exhausted.contains(chosen.name())
                         ? "profile exhausted: " + chosen.name()
+                        : unavailable.contains(chosen.name())
+                        ? "profile unavailable this run: " + chosen.name()
                         : "profile failed this attempt: " + chosen.name();
                 return unresolved(ledger, role, user, attempts,
                         new RoleResolver.Unresolvable(message, Map.of(chosen.name(), why)),
@@ -1001,7 +1022,8 @@ public final class RoleRunner {
             }
 
             if (result.artifact() != null) {
-                List<Findings.Finding> found = Findings.of(result.artifact());
+                List<Findings.Finding> found = Findings.acknowledging(
+                        Findings.of(result.artifact()), task.manualVerification());
                 if (!found.isEmpty()) {
                     report.put("findings", found.stream().map(Findings.Finding::toMap).toList());
                 }
@@ -1137,6 +1159,12 @@ public final class RoleRunner {
                 // enter this method. This branch is only a call that left nothing a later
                 // stage can believe: the vendor did not answer, or the answer was not an artifact.
                 vendorFailedThisDispatch.add(profile.name());
+                if ("role_vendor_unavailable".equals(result.code())) {
+                    // Stable for this process, unlike a dropped connection. Not quota: a
+                    // different profile of the same vendor may still run. Cleared with the
+                    // process, not with this dispatch.
+                    unavailable.add(profile.name());
+                }
                 int maxSwitches = user.policy().maxVendorFailovers();
                 String mode = user.policy().vendorFailureModeFor(role);
                 boolean bounded = vendorFailovers >= maxSwitches;
@@ -1304,9 +1332,10 @@ public final class RoleRunner {
                         if (overlay.problem(stageName, profile, user.profiles()) != null) return false;
                         Profile effective = overlay.adapt(stageName, profile, user.profiles());
                         return !exhausted.contains(effective.name())
+                                && !unavailable.contains(effective.name())
                                 && !vendorFailed.contains(effective.name())
                                 && available(effective);
-                    }, exhausted, vendorFailed).selected();
+                    }, exhausted, vendorFailed, unavailable).selected();
             return new Successor(overlay.adapt(stageName, candidate, user.profiles()), Map.of());
         } catch (RoleResolver.Unresolvable none) {
             return new Successor(null, none.rejected());
@@ -1331,7 +1360,8 @@ public final class RoleRunner {
             "role_artifact_incomplete",
             "role_artifact_schema_violation",
             "role_local_endpoint_unreachable",
-            "role_local_http_error");
+            "role_local_http_error",
+            "role_vendor_unavailable");
 
     private static boolean vendorFailure(String code) {
         return VENDOR_FAILURE_CODES.contains(code);
@@ -1349,6 +1379,7 @@ public final class RoleRunner {
             case "role_timeout" -> "role_timeout";
             case "role_artifact_unparseable", "role_artifact_incomplete",
                     "role_artifact_schema_violation" -> "artifact_invalid";
+            case "role_vendor_unavailable" -> "vendor_unavailable";
             default -> code;
         };
     }
@@ -1393,7 +1424,8 @@ public final class RoleRunner {
         String value = cause == null ? "" : String.valueOf(cause);
         return "vendor_call_failed".equals(value)
                 || "role_timeout".equals(value)
-                || "artifact_invalid".equals(value);
+                || "artifact_invalid".equals(value)
+                || "vendor_unavailable".equals(value);
     }
 
     private static void rememberFailovers(Map<String, Object> report,
@@ -1534,6 +1566,8 @@ public final class RoleRunner {
         if (raw != null) entry.put("raw_stdout", raw);
         Object quota = result.evidence().get("quota");
         if (quota != null) entry.put("quota", quota);
+        Object unavailableEvidence = result.evidence().get("vendor_unavailable");
+        if (unavailableEvidence != null) entry.put("vendor_unavailable", unavailableEvidence);
         // The failed call stays readable after a switch. The home corpus allowlist drops
         // these tails; the local attempt does not.
         for (String tail : List.of("stderr_tail", "stdout_tail", "exit_code", "timed_out", "start_error")) {
@@ -1565,6 +1599,12 @@ public final class RoleRunner {
                 && !PromptRenderer.uses(template, "visual_scenarios");
     }
 
+    /** Items the task already accepts as checked by hand, or an explicit empty list. */
+    private static String manualLines(List<String> items) {
+        if (items == null || items.isEmpty()) return "(none declared)";
+        return bullets(items);
+    }
+
     private static String browserScenarioSection(String scenarios) {
         return """
 
@@ -1572,7 +1612,10 @@ public final class RoleRunner {
 
                 A headless browser runs these against the app after the acceptance commands.
                 They are part of the definition of done, not a suggestion: a matcher that finds
-                nothing fails the run and comes back to you as a fix round.
+                nothing fails the run and comes back to you as a fix round. The grammar is
+                `testid=` / `css=` / `role=` / `text=` with `visible`, `hidden`, `click`,
+                `click@x,y` or `focused`, plus `press=KEY` (Escape, Enter, Tab, Space, an arrow,
+                or one character; a matcher before it is focused first) and `wait` / `wait-for`.
 
                 """ + scenarios + "\n";
     }
@@ -1611,6 +1654,7 @@ public final class RoleRunner {
         values.put("changed_files", changedFileList(loaded.root(), mergeBase));
         values.put("acceptance_commands", bullets(task.acceptanceCommands()));
         values.put("visual_scenarios", bullets(task.visualQa().scenarios()));
+        values.put("manual_verification", manualLines(task.manualVerification()));
         values.put("authority", "workspace_write=" + task.authority().workspaceWrite()
                 + ", network=" + task.authority().network() + ", land=" + task.authority().land());
         values.put("operator_goal", task.goal());

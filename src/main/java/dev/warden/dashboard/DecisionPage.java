@@ -50,7 +50,8 @@ public final class DecisionPage implements AutoCloseable {
     /** Records one choice the way `warden approve` does, and reports what happened. */
     @FunctionalInterface
     public interface Decider {
-        Map<String, Object> decide(String choice, String note, String expectedUpdatedAt) throws Exception;
+        Map<String, Object> decide(String choice, String note, String expectedUpdatedAt, String finding)
+                throws Exception;
     }
 
     /** Starts the candidate where the operator can use it, and says what happened. */
@@ -299,7 +300,8 @@ public final class DecisionPage implements AutoCloseable {
             byte[] body = exchange.getRequestBody().readNBytes(64 * 1024);
             Map<String, String> form = form(new String(body, StandardCharsets.UTF_8));
             Map<String, Object> result = decider.decide(form.getOrDefault("choice", ""),
-                    form.getOrDefault("note", ""), form.getOrDefault("expected", ""));
+                    form.getOrDefault("note", ""), form.getOrDefault("expected", ""),
+                    form.getOrDefault("finding", ""));
             send(exchange, 200, HTML, render(result, null));
         } else {
             send(exchange, 404, "text/plain; charset=utf-8", "not found");
@@ -372,8 +374,12 @@ public final class DecisionPage implements AutoCloseable {
                     .append("<input type=hidden name=expected value='")
                     .append(escape(decision.updatedAt().toString())).append("'>")
                     .append("<label>Заметка (для «Отклонить» — что исправить; она уйдёт исполнителю)"
-                        + "<textarea name=note rows=3></textarea></label>")
-                    .append("<div class=buttons>");
+                        + "<textarea name=note rows=3></textarea></label>");
+            if (decision.options().contains("waive")) {
+                html.append("<label>Id замечания для «Принять пробел» (только contract_gap)"
+                        + "<input name=finding autocomplete=off></label>");
+            }
+            html.append("<div class=buttons>");
             for (String option : decision.options()) {
                 html.append("<button name=choice value='").append(escape(option)).append("' class='")
                         .append("accept".equals(option) ? "primary" : "").append("'>")
@@ -434,7 +440,11 @@ public final class DecisionPage implements AutoCloseable {
         for (Map<String, Object> finding : open) {
             html.append("<div class=finding><div><span class=sev>").append(escape(String.valueOf(finding.get("severity"))))
                     .append("</span> ").append(escape(category(finding.get("category")))).append(" · ")
-                    .append(escape(String.valueOf(finding.get("_stage")))).append("</div><p>")
+                    .append(escape(String.valueOf(finding.get("_stage"))));
+            if (finding.get("id") instanceof String id && !id.isBlank()) {
+                html.append(" · <code>").append(escape(id)).append("</code>");
+            }
+            html.append("</div><p>")
                     .append(escape(String.valueOf(finding.get("message")))).append("</p>");
             for (String[] field : List.of(new String[] {"expected", "Ожидалось"}, new String[] {"actual", "На деле"},
                     new String[] {"suggestion", "Предложение"})) {
@@ -1061,6 +1071,7 @@ public final class DecisionPage implements AutoCloseable {
             case "retry" -> "Повторить";
             case "abort" -> "Прекратить";
             case "advance" -> "Дальше";
+            case "waive" -> "Принять пробел";
             case "switch" -> "Переключить вендора";
             case "apply" -> "Применить правку";
             case "replan" -> "Перепланировать";
@@ -1076,6 +1087,7 @@ public final class DecisionPage implements AutoCloseable {
             case "retry" -> "запустить снова; вердикты по неизменному дереву сохранятся";
             case "abort" -> "закрыть задачу без продолжения";
             case "advance" -> "причина устранена, начать следующий прогон";
+            case "waive" -> "закрыть остановку, где остались только пробелы контракта; дефект продукта так не закрывается";
             case "switch" -> "перейти на предложенного вендора и продолжить";
             case "apply" -> "применить предложенную правку контракта и продолжить";
             case "replan" -> "снова запустить планировщика; писатели не получают отклонённый контракт";
@@ -1092,6 +1104,7 @@ public final class DecisionPage implements AutoCloseable {
             case "retry", "advance", "switch", "apply", "replan", "proceed" ->
                     "Warden продолжает петлю; ход виден во вкладке нарратива.";
             case "accept" -> "Дальше — проверить diff и при желании `warden land`.";
+            case "waive" -> "Пробел контракта принят; ничего не выложено.";
             default -> "Вкладку можно закрыть.";
         };
     }
@@ -1135,7 +1148,7 @@ public final class DecisionPage implements AutoCloseable {
                 + "figure{margin:0;max-width:440px}img{max-width:100%;border:1px solid #30404d;border-radius:8px;background:#fff}"
                 + "details{margin:8px 0}summary{cursor:pointer;color:#9fb4c6}details>:not(summary){color:#c9d6e2}"
                 + "ol{padding-left:24px}li{margin:4px 0}a{color:#8cc4ff}.pass{color:#8fdcb4}"
-                + "figcaption{color:#9caebd;font-size:12px}textarea{width:100%;background:#19232c;color:inherit;"
+                + "figcaption{color:#9caebd;font-size:12px}textarea,input[name=finding]{width:100%;background:#19232c;color:inherit;"
                 + "border:1px solid #405363;border-radius:6px;padding:8px;margin-top:6px}label{display:block}"
                 + ".buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}button{background:#233240;color:#e5edf4;"
                 + "border:1px solid #405363;border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer;text-align:left}"

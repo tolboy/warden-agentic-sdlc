@@ -82,10 +82,15 @@ public final class NextStepTest implements Suite {
         check.eq("failover", "confirm_failover",
                 kind("failover_requires_confirmation", summary("run-1", "hello")));
         for (String reason : List.of("role_timed_out", "vendor_call_failed",
-                "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached",
-                "orca_worker_not_started")) {
+                "vendor_unavailable", "vendor_protocol_failed", "prompt_undeliverable",
+                "turn_ceiling_reached", "orca_worker_not_started")) {
             check.eq(reason, "retry_infrastructure", kind(reason, summary("run-1", "hello")));
         }
+        Map<String, Object> geo = NextStep.of("vendor_unavailable", summary("run-1", "hello"), null);
+        check.contains("a location refusal is not a verdict",
+                String.valueOf(geo.get("summary")), "not a verdict");
+        check.contains("and the edit is another profile",
+                String.valueOf(geo.get("edits")), "another profile");
         Map<String, Object> bare = NextStep.of("vendor_protocol_failed", summary("run-1", "hello"), null);
         String bareText = String.valueOf(bare.get("summary")) + String.valueOf(bare.get("consequences"));
         check.that("an infrastructure stop with no reading does not invent a kept verdict",
@@ -159,6 +164,8 @@ public final class NextStepTest implements Suite {
         check.contains("names the current acceptance_sha256", blob, "abc123sha");
         check.contains("advances this run", String.valueOf(step.get("commands")),
                 "warden approve gap-review-2 --decision advance");
+        check.contains("or waives the contract gap by id", String.valueOf(step.get("commands")),
+                "warden approve gap-review-2 --decision waive --finding acceptance-too-weak");
         check.contains("or aborts this run", String.valueOf(step.get("commands")),
                 "warden approve gap-review-2 --decision abort");
         check.contains("validates the task", String.valueOf(step.get("commands")),
@@ -244,6 +251,8 @@ public final class NextStepTest implements Suite {
                 String.valueOf(step.get("findings")), "Restart the test provider");
         check.contains("and closes the run before a new one",
                 String.valueOf(step.get("commands")), "warden approve down-1 --decision abort");
+        check.that("a blocker that is not a contract gap is not offered waive",
+                !String.valueOf(step.get("commands")).contains("waive"));
 
         Map<String, Object> mixed = summary("mixed-1", "hello");
         mixed.put("acceptance_commands", List.of("npm test"));
@@ -259,6 +268,8 @@ public final class NextStepTest implements Suite {
                 String.valueOf(both.get("edits")), "assert the exact refusal text");
         check.that("never another category's",
                 !String.valueOf(both.get("edits")).contains("Restart the test provider"));
+        check.that("and waive is not offered while a non-gap blocker is still open",
+                !String.valueOf(both.get("commands")).contains("waive"));
     }
 
     private void repairOrRetryForAProductDefect(Check check) {
