@@ -85,7 +85,7 @@ public final class VisualQaRunner {
                     nodeExecutable(), script.toString(), "--validate-only"));
             for (String scenario : visual.scenarios()) {
                 command.add("--scenario");
-                command.add(scenario);
+                command.add(ProcessRunner.argument(scenario));
             }
             ProcessRunner.Result result = processes.run(command, loaded.root(),
                     Duration.ofSeconds(30), 64 * 1024);
@@ -179,7 +179,7 @@ public final class VisualQaRunner {
             command.add(shots.toString());
             for (String scenario : visual.scenarios()) {
                 command.add("--scenario");
-                command.add(scenario);
+                command.add(ProcessRunner.argument(scenario));
             }
             Duration budget = adapterBudget(visual.scenarios());
             report.put("adapter_timeout_seconds", budget.toSeconds());

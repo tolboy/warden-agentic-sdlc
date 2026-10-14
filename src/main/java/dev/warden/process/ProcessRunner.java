@@ -20,6 +20,47 @@ public final class ProcessRunner {
         public boolean ok() { return !timedOut && exitCode == 0; }
     }
 
+    /**
+     * Prepares one argument so that a Windows child receives it exactly as given.
+     *
+     * Java hands a Windows child one command line, and only wraps an argument in quotes when
+     * it contains whitespace; it never escapes a double quote inside it. The child (node, an
+     * Orca CLI, any MSVC-runtime program) then splits that line by the usual rules, which
+     * treat a bare {@code "} as a quote toggle and drop it. A visual QA scenario such as
+     * {@code css=[data-label="Don't Save"] press=Escape} reached the adapter as
+     * {@code css=[data-label=Don't Save] press=Escape} inside a different quote span, so the
+     * selector, the press and an unknown-step check all broke on Windows only.
+     *
+     * Each {@code "} is escaped as {@code \"}, and the backslashes right before it are doubled
+     * as those rules require. Off Windows the argument is returned unchanged; arguments go
+     * to the child as an array there.
+     */
+    public static String argument(String value) {
+        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return value;
+        return windowsEscaped(value);
+    }
+
+    /** The Windows form of {@link #argument}, on any platform, so it can be tested anywhere. */
+    public static String windowsEscaped(String value) {
+        StringBuilder escaped = new StringBuilder(value.length() + 8);
+        int backslashes = 0;
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character == '\\') {
+                backslashes++;
+                escaped.append(character);
+                continue;
+            }
+            if (character == '"') {
+                for (int repeat = 0; repeat < backslashes; repeat++) escaped.append('\\');
+                escaped.append('\\');
+            }
+            backslashes = 0;
+            escaped.append(character);
+        }
+        return escaped.toString();
+    }
+
     public Result run(List<String> command, Path workingDirectory, Duration timeout)
             throws IOException, InterruptedException {
         return run(command, workingDirectory, timeout, DEFAULT_CAPTURE_BYTES);

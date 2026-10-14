@@ -208,6 +208,7 @@ public final class VisualQaTest implements Suite {
         check.contains("and so is one on a wait-for", String.valueOf(quotedWait), "blur=true");
 
         apostropheDoesNotSwallowAPress(check, project, adapter);
+        scenariosSurviveAWindowsCommandLine(check);
         inheritedKeyNamesAreRejected(check, project, adapter);
 
         java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
@@ -234,6 +235,86 @@ public final class VisualQaTest implements Suite {
     }
 
     /**
+     * On Windows a child gets one command line, not an array. Java quotes an argument with
+     * whitespace but leaves its inner double quotes bare, and node's parser drops them, so
+     * {@code css=[data-label="Don't Save"]} arrived as {@code [data-label=Don't}. This replays
+     * that path on any platform: Java's quoting, then the MSVC runtime's splitting.
+     */
+    private void scenariosSurviveAWindowsCommandLine(Check check) {
+        List<String> scenarios = List.of(
+                "1280x720: css=[data-label=\"Don't Save\"] press=Escape",
+                "1280x720: css=[data-label=\"x mode=y\"] blur=true",
+                "1280x720: wait-for=css=[data-label=\"x mode=y\"] blur=true",
+                "1280x720: css=[data-label=\"x \\\"mode=y\\\" z\"] visible",
+                "1280x720: css=[data-label='x mode=y'] visible",
+                "1280x720: css=.panel mode\\=y visible",
+                "plain");
+        for (String scenario : scenarios) {
+            List<String> raw = msvcrtSplit(javaWindowsQuote(scenario));
+            List<String> escaped = msvcrtSplit(javaWindowsQuote(ProcessRunner.windowsEscaped(scenario)));
+            check.eq("a Windows child receives the scenario intact: " + scenario,
+                    List.of(scenario), escaped);
+            if (scenario.contains("\"")) {
+                check.that("and unescaped it would not: " + scenario, !raw.equals(List.of(scenario)));
+            }
+        }
+    }
+
+    /** What java.lang.ProcessImpl does to one argument on Windows. */
+    private static String javaWindowsQuote(String argument) {
+        boolean quoted = argument.length() >= 2 && argument.startsWith("\"") && argument.endsWith("\"");
+        if (quoted || !(argument.isEmpty() || argument.contains(" ") || argument.contains("\t"))) {
+            return argument;
+        }
+        return "\"" + argument + (argument.endsWith("\\") ? "\\" : "") + "\"";
+    }
+
+    /** How the MSVC runtime (and so node) splits a command line into arguments. */
+    private static List<String> msvcrtSplit(String line) {
+        List<String> arguments = new java.util.ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        boolean any = false;
+        int index = 0;
+        while (index < line.length()) {
+            char character = line.charAt(index);
+            if (character == '\\') {
+                int count = 0;
+                while (index < line.length() && line.charAt(index) == '\\') { count++; index++; }
+                if (index < line.length() && line.charAt(index) == '"') {
+                    current.append("\\".repeat(count / 2));
+                    if (count % 2 == 1) { current.append('"'); index++; }
+                } else {
+                    current.append("\\".repeat(count));
+                }
+                any = true;
+                continue;
+            }
+            if (character == '"') {
+                if (inQuotes && index + 1 < line.length() && line.charAt(index + 1) == '"') {
+                    current.append('"');
+                    index += 2;
+                    continue;
+                }
+                inQuotes = !inQuotes;
+                any = true;
+                index++;
+                continue;
+            }
+            if (!inQuotes && (character == ' ' || character == '\t')) {
+                if (any) { arguments.add(current.toString()); current.setLength(0); any = false; }
+                index++;
+                continue;
+            }
+            current.append(character);
+            any = true;
+            index++;
+        }
+        if (any) arguments.add(current.toString());
+        return arguments;
+    }
+
+    /**
      * `text=Don't Save press=Escape` used to validate and then search for the label
      * "Don't Save press=Escape". The apostrophe opened a quote that never closed,
      * so the press token never became a key.
@@ -242,10 +323,10 @@ public final class VisualQaTest implements Suite {
     private void apostropheDoesNotSwallowAPress(Check check, Path project, Path adapter) throws Exception {
         ProcessRunner.Result parsed = new ProcessRunner().run(
                 List.of(nodeExecutable(), adapter.toString(), "--validate-only",
-                        "--scenario", "1280x720: css=.dialog visible -> text=Don't Save press=Escape",
-                        "--scenario", "1280x720: css=.dialog visible -> text=It's the user's file press=Enter",
-                        "--scenario", "1280x720: css=[data-label=\"Don't Save\"] press=Escape",
-                        "--scenario", "1280x720: css=[data-label='x mode=y'] visible"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=.dialog visible -> text=Don't Save press=Escape"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=.dialog visible -> text=It's the user's file press=Enter"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=[data-label=\"Don't Save\"] press=Escape"),
+                        "--scenario", ProcessRunner.argument("1280x720: css=[data-label='x mode=y'] visible")),
                 project, Duration.ofSeconds(20));
         check.that("apostrophe scenarios validate", parsed.ok());
         Map<String, Object> body = Json.findLastObject(parsed.stdout());
