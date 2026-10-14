@@ -1,7 +1,5 @@
 package dev.warden.config;
 
-import dev.warden.git.GitRepository;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,6 +41,11 @@ public final class WardenTree {
 
     /** Relative path → SHA-256 of its bytes, for every configuration file under `.warden`. */
     public static Map<String, String> snapshot(Path projectRoot) throws IOException {
+        return snapshot(projectRoot, null);
+    }
+
+    /** Pin both hashes and byte-exact recovery copies before a writer can change the tree. */
+    public static Map<String, String> snapshot(Path projectRoot, String runId) throws IOException {
         Path root = projectRoot.toAbsolutePath().normalize();
         Path warden = root.resolve(DIRECTORY);
         Map<String, String> files = new TreeMap<>();
@@ -51,8 +54,24 @@ public final class WardenTree {
             for (Path file : paths.filter(Files::isRegularFile).toList()) {
                 String relative = relative(root, file);
                 if (isEvidence(relative)) continue;
-                files.put(relative, GitRepository.contentSha256(file));
+                byte[] bytes = Files.readAllBytes(file);
+                if (runId != null) {
+                    Path copy = root.resolve(EVIDENCE).resolve(runId).resolve("contract").resolve(relative);
+                    Files.createDirectories(copy.getParent());
+                    Files.write(copy, bytes);
+                }
+                try {
+                    files.put(relative, HexFormat.of().formatHex(
+                            MessageDigest.getInstance("SHA-256").digest(bytes)));
+                } catch (NoSuchAlgorithmException impossible) {
+                    throw new IllegalStateException(impossible);
+                }
             }
+        }
+        if (runId != null) {
+            Path contract = root.resolve(EVIDENCE).resolve(runId).resolve("contract");
+            Files.createDirectories(contract);
+            Files.writeString(contract.resolve("manifest.json"), dev.warden.json.Json.write(files));
         }
         return Map.copyOf(files);
     }

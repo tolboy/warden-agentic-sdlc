@@ -668,7 +668,7 @@ public final class TaskLoop {
         String diffBaseCommit = git.mergeBase(task.baseRef());
         // The whole `.warden` tree, not two files: a second task contract, a rewritten policy
         // or a deleted scenario file are all terms the run would then be judged by.
-        Map<String, String> configSnapshot = WardenTree.snapshot(root);
+        Map<String, String> configSnapshot = WardenTree.snapshot(root, runId);
         String contractHash = WardenTree.digest(configSnapshot);
         Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd(),
                 task.budget().maxElapsedMinutes(), clock);

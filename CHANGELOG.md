@@ -11,6 +11,12 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- A run keeps a byte-exact copy of every pinned `.warden` file, plus a SHA-256 manifest, under
+  `.warden/runs/<run-id>/contract/`. A writer's `git checkout` / `stash` / `reset` that reverts
+  the uncommitted compiled contract no longer loses those bytes. New
+  `warden restore-contract <run-id>` verifies every copy, restores it, re-checks the hash, and
+  lists files added since the pin without deleting them. The `contract_mutated` next step names
+  this command (#26). Not yet run live. Suites `restore contract`, `task loop`, `next step`.
 - Task `prior_writers: [vendor, ...]` vouches for who wrote a starting tree that already
   differs from the diff base (an existing PR branch). Those vendors join the writer set as
   `declared_prior_writers`, so a cross-vendor reader is `independent` instead of `unproven`;

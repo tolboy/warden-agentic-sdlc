@@ -62,6 +62,7 @@ public final class Main {
         try {
             int exit = switch (args[0]) {
                 case "validate" -> validate(args);
+                case "restore-contract" -> restoreContract(args);
                 case "init" -> init(args);
                 case "gates" -> gates(args);
                 case "visual-qa" -> visualQa(args);
@@ -109,6 +110,14 @@ public final class Main {
                 true, java.nio.charset.StandardCharsets.UTF_8));
         System.setErr(new java.io.PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.err),
                 true, java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static int restoreContract(String[] args) throws Exception {
+        if (args.length != 2) throw new IllegalArgumentException("restore-contract requires a run id");
+        Map<String, Object> report = new dev.warden.config.RestoreContractCommand()
+                .run(Path.of("."), args[1]);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     private static int validate(String[] args) throws Exception {
@@ -2655,6 +2664,8 @@ public final class Main {
                                            or global home, never runs checks or vendors.
                                            Does not close all of P2 or implement P3/P4.
                   warden validate <task>       validate and resolve the project task contract
+                  warden restore-contract <run-id>
+                                               restore pinned contract bytes; added files need a manual decision
                   warden gates <task>          preflight and machine gates only; spends nothing
                   warden visual-qa <task>      launch preview, screenshot, assert control visibility
                   warden role <role> <task>    run one role; add --dry-run to spend nothing

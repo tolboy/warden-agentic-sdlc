@@ -43,6 +43,7 @@ public final class TestMain {
                 new dev.warden.OrcaStartTest(),
                 new dev.warden.OrcaDecisionGateTest(),
                 new dev.warden.NextStepTest(),
+                new dev.warden.RestoreContractTest(),
                 new dev.warden.LocalHttpExecutorTest(),
                 new dev.warden.LedgerTest(),
                 new dev.warden.LedgerCompareTest(),
