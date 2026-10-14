@@ -2558,7 +2558,8 @@ public final class TaskLoop {
                 // the ladder this is a no-op; on it, the next rung's pair is pinned or the
                 // run stops for a reason that names the rung.
                 maybeEscalate(stage, index);
-                fixRound(stage, index, reviewContext(loaded.root(), reviewed, repairSeverities()));
+                fixRound(stage, index, reviewContext(loaded.root(), reviewed, repairSeverities(),
+                        task.manualVerification()));
                 outcome = execute(stage);
                 if (failed(outcome)) throw new StopException(terminalReason(stage, outcome));
                 reviewed = (RoleRunner.Outcome) outcome;
@@ -3889,7 +3890,8 @@ public final class TaskLoop {
          */
         private void recordFindingRound(Workflow.Stage stage, RoleRunner.Outcome outcome)
                 throws Exception {
-            List<Findings.Finding> found = Findings.of(readArtifact(loaded.root(), outcome));
+            List<Findings.Finding> found = acknowledgedFindings(
+                    loaded.root(), outcome, task.manualVerification());
             // The run's whole history, not this stage's last round. The deltas below are still
             // this stage against itself; the lifecycle the evidence rules are checked against
             // belongs to the run, so a stage rechecked after another stage closed something
@@ -3955,7 +3957,7 @@ public final class TaskLoop {
         }
 
         private long recordFindings(Workflow.Stage stage, RoleRunner.Outcome outcome) throws Exception {
-            long blocking = blockingFindings(loaded.root(), outcome);
+            long blocking = blockingFindings(loaded.root(), outcome, task.manualVerification());
             recordFindingRound(stage, outcome);
             // Kept: an operator's greps, the report reader and the reuse rules for a
             // single-stage role all read this. It is keyed by role, so a chain with two review
@@ -4130,7 +4132,7 @@ public final class TaskLoop {
             if (outcome instanceof GateRunner.Outcome gate) return gateContext(gate);
             if (outcome instanceof VisualQaRunner.Outcome visual) return visualContext(visual);
             if (outcome instanceof RoleRunner.Outcome role) {
-                return reviewContext(loaded.root(), role, repairSeverities());
+                return reviewContext(loaded.root(), role, repairSeverities(), task.manualVerification());
             }
             return "# " + stage.name() + " failed\n";
         }
@@ -6089,22 +6091,31 @@ public final class TaskLoop {
         return body.toString();
     }
 
-    private long blockingFindings(Path root, RoleRunner.Outcome review) throws Exception {
-        Map<String, Object> artifact = readArtifact(root, review);
-        if (artifact == null) return 0;
-        if (!(artifact.get("findings") instanceof List<?> list)) return 0;
-        return list.stream()
-                .filter(item -> item instanceof Map<?, ?> map && "P1".equals(map.get("severity")))
-                .count();
+    private long blockingFindings(Path root, RoleRunner.Outcome review, List<String> manual)
+            throws Exception {
+        return acknowledgedFindings(root, review, manual).stream()
+                .filter(Findings.Finding::blocking).count();
     }
 
-    private String reviewContext(Path root, RoleRunner.Outcome review, java.util.Set<String> severities)
+    /**
+     * The reviewer's findings after a task's {@code manual_verification} list has been applied.
+     * The file the vendor wrote is left as they wrote it.
+     */
+    private List<Findings.Finding> acknowledgedFindings(Path root, RoleRunner.Outcome review,
+                                                        List<String> manual) throws Exception {
+        Map<String, Object> artifact = readArtifact(root, review);
+        if (artifact == null) return List.of();
+        return Findings.acknowledging(Findings.of(artifact), manual);
+    }
+
+    private String reviewContext(Path root, RoleRunner.Outcome review, java.util.Set<String> severities,
+                                 List<String> manual)
             throws Exception {
         Map<String, Object> artifact = readArtifact(root, review);
         StringBuilder builder = new StringBuilder("# An independent reading asked for changes\n\n");
         if (artifact == null) return builder.append("(the reviewer artifact could not be read)\n").toString();
         builder.append("Reviewer summary: ").append(artifact.get("summary")).append("\n\n");
-        for (Findings.Finding finding : Findings.of(artifact)) {
+        for (Findings.Finding finding : Findings.acknowledging(Findings.of(artifact), manual)) {
             // P1 always; P2 and P3 when the policy repairs them before the human gate. A
             // non-blocking finding handed over here is what the operator would otherwise have
             // had to read at the gate and send back by hand.

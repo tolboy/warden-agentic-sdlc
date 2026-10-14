@@ -165,6 +165,15 @@ the same acceptance hash and diff base, and a matching on-disk report checksum; 
 it records `reproduction_status: not_run_candidate_present` and continues. Dry runs list
 the commands that must fail and record a `dry_run` reproduction step without execution.
 
+Optional task `manual_verification: ["keyboard chord", "hover"]` lists checks a person
+already does by hand. A blank item is rejected, so it cannot match every finding.
+When the list is non-empty it participates
+in `acceptance_sha256`, joined by NUL and omitted when empty, so a task that declares none
+keeps the hash it had before the key existed. A P1 `contract_gap` whose message, expected,
+actual, scenario or suggestion contains an item (case-insensitive substring) is recorded
+as P2 with `severity_as_filed`, the matched item, and `advisory: true`. It does not block.
+A product defect is never lowered. The vendor artifact is left as filed.
+
 `warden pilot prepare` requires a declared `reproduction.command` to be in
 `checks.acceptance` and writes it into the task's `reproduce` list. Preparation executes
 nothing: `reproduction_check.status` is `enforced_by_warden_run`, or `not_declared` when
@@ -433,6 +442,12 @@ warden approve <run-id>     record a decision; never lands changes.
                             next_step, and changes nothing on disk. No answer is
                             never accept or reject. The wait imports one decision
                             and never starts a run
+                            --decision waive --finding <ID> closes a failure stop
+                            whose open P1s are all contract_gap. Records
+                            contract_gap_waived and contract_gap_waiver, lands
+                            nothing, starts nothing. Refused for a product
+                            defect, for a stop that still has one, and when
+                            --finding is omitted; the decision stays pending
 warden land <run-id>        plan (and with --commit/--push/--pull-request, carry out) the
                             commit and request for an accepted run. Merges nothing
 ```

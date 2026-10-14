@@ -130,7 +130,12 @@ against the roster before the first paid call, and the run header prints the res
 `cast` — which profile fills which stage — so a roster change can be checked with
 `--dry-run` instead of with money. A failure gate also offers `advance`, which starts the
 next run of the task once you have dealt with the blocker, and refuses when nothing has
-changed since the stop.
+changed since the stop. The same gate offers `waive` when every open blocker is a
+`contract_gap`: `warden approve <run> --decision waive --finding <id>` records the waiver,
+closes the stop, and lands nothing. It is refused when any open P1 is a product defect.
+A task may list checks a person already does by hand under `manual_verification:`; a
+contract gap whose text contains one of those items is recorded as advisory and the run
+continues to the human gate.
 
 **The harness** is a real headless browser over CDP, with zero npm dependencies. Scenarios
 live in the task contract and are checked mechanically:

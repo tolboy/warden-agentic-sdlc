@@ -1022,7 +1022,8 @@ public final class RoleRunner {
             }
 
             if (result.artifact() != null) {
-                List<Findings.Finding> found = Findings.of(result.artifact());
+                List<Findings.Finding> found = Findings.acknowledging(
+                        Findings.of(result.artifact()), task.manualVerification());
                 if (!found.isEmpty()) {
                     report.put("findings", found.stream().map(Findings.Finding::toMap).toList());
                 }
@@ -1598,6 +1599,12 @@ public final class RoleRunner {
                 && !PromptRenderer.uses(template, "visual_scenarios");
     }
 
+    /** Items the task already accepts as checked by hand, or an explicit empty list. */
+    private static String manualLines(List<String> items) {
+        if (items == null || items.isEmpty()) return "(none declared)";
+        return bullets(items);
+    }
+
     private static String browserScenarioSection(String scenarios) {
         return """
 
@@ -1647,6 +1654,7 @@ public final class RoleRunner {
         values.put("changed_files", changedFileList(loaded.root(), mergeBase));
         values.put("acceptance_commands", bullets(task.acceptanceCommands()));
         values.put("visual_scenarios", bullets(task.visualQa().scenarios()));
+        values.put("manual_verification", manualLines(task.manualVerification()));
         values.put("authority", "workspace_write=" + task.authority().workspaceWrite()
                 + ", network=" + task.authority().network() + ", land=" + task.authority().land());
         values.put("operator_goal", task.goal());

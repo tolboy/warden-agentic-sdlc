@@ -85,6 +85,7 @@ public final class RunReport {
         report.put("budget_limit_hit", summary.get("budget_limit_hit"));
         report.put("safe_next_step", summary.get("safe_next_step"));
         report.put("next_step", summary.get("next_step"));
+        report.put("contract_gap_waiver", summary.get("contract_gap_waiver"));
         // What a continuation refused to carry over, and why. A run that paid for a stage it
         // could have inherited should be able to say which term moved.
         report.put("reused_judgements", summary.get("reused_judgements"));
@@ -680,6 +681,15 @@ public final class RunReport {
             out.append("human    ").append(map.get("state"))
                     .append(map.get("decision") == null ? "" : " -> " + map.get("decision"))
                     .append("  options=").append(map.get("options")).append('\n');
+        }
+        if (report.get("contract_gap_waiver") instanceof Map<?, ?> waiver) {
+            out.append("waived   contract_gap ").append(waiver.get("finding_id"))
+                    .append("  also ").append(waiver.get("waived_findings"));
+            Object note = waiver.get("note");
+            if (note != null && !String.valueOf(note).isBlank()) {
+                out.append("  ").append(note);
+            }
+            out.append('\n');
         }
 
         out.append('\n').append("stage           attempt  ok  vendor/model                    "

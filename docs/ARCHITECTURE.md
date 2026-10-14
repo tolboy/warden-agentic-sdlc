@@ -491,6 +491,18 @@ Each finding now carries an identity and a category, both recorded with their pr
   category is not `product_defect` still blocks acceptance, but it stops the run for a person
   instead of buying another implementer call.
 
+A task may declare `manual_verification:`, a list of checks a person already does by hand.
+A P1 `contract_gap` whose message, expected, actual, scenario or suggestion contains one of
+those items (a case-insensitive substring) is recorded as P2. The vendor's severity is kept
+as `severity_as_filed`, the matched item as `manual_verification`, and `advisory: true`.
+The vendor's artifact file is not rewritten. A product defect is never lowered, and a P2
+the vendor already filed is not stamped as a downgrade. The first recorded round is already
+P2, so a later reading of the same words is not severity laundering. With no blocking
+finding left, the run reaches the human gate. The reviewer prompt states the harness
+grammar and tells the model to file a check that grammar cannot express — a chord, a hover,
+a drag — as that P2, with a manual-verification note. `warden setup` does not overwrite an
+existing reviewer prompt.
+
 Both fields are optional in the shipped schema, so a reviewer that supplies neither still
 validates and still gets a usable identity.
 
@@ -600,7 +612,14 @@ reported `budget_exhausted` and nothing else.
   `--continue`. Only a `contract_gap` finding proposes an acceptance edit, and only with its
   own suggestion; blockers of the other non-product categories — missing access, an
   unavailable provider, spent quota, a tooling failure, a disagreement — are
-  `resolve_blockers`, which lists them and edits nothing. The preview command takes a
+  `resolve_blockers`, which lists them and edits nothing. When every open P1 is a
+  `contract_gap`, the commands also include `warden approve <run> --decision waive
+  --finding <id>`. Waive closes that stop, writes `contract_gap_waived` on the ledger
+  (the finding id, every open gap it closed, the note) and `contract_gap_waiver` on the
+  report, and lands nothing. It does not start another run: the same gap would stop it
+  again. It is refused when the named finding is not an open `contract_gap`, when any
+  other open P1 is not one, and when `--finding` is omitted. A product defect stays
+  blocking. The preview command takes a
   generated id, because a dry run reserves the id it runs under.
 
 Neither of the first two implies the other, and a run can legitimately be a pass on one and a

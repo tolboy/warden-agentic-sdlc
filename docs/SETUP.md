@@ -159,6 +159,30 @@ starts the next run itself, and the command is not printed. If neither the contr
 tree has changed since the stop, `advance` refuses rather than spending a run id to reach
 the same wall.
 
+When every open blocker is a `contract_gap`, the same gate offers `waive`:
+
+```text
+warden approve <run> --decision waive --finding <id>
+```
+
+That closes the stop, writes `contract_gap_waived` on the ledger and `contract_gap_waiver`
+on the report, and lands nothing. It does not start another run. It is refused when the
+named finding is not an open `contract_gap`, when any other open P1 is not one, and when
+`--finding` is omitted. A product defect stays blocking.
+
+A task may name checks a person already does by hand. A P1 `contract_gap` whose message,
+expected, actual, scenario or suggestion contains one of those items is recorded as P2
+(`severity_as_filed`, `advisory`) and does not stop the run:
+
+```yaml
+manual_verification:
+  - "keyboard chord"
+  - "hover"
+```
+
+`warden setup` does not overwrite an existing `prompts/reviewer.md`. Copy the new grammar
+paragraphs into it, or a reviewer that still has the old prompt can file the same P1.
+
 Set `WARDEN_CONFIG_HOME` the same way every other command does if the configuration is not in
 `~/.warden`.
 

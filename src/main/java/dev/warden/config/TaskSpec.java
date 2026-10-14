@@ -30,10 +30,12 @@ public record TaskSpec(
         Long maxFixAttempts,
         Long timeoutMinutes,
         String reviewAssurance,
-        RunOverride use) {
+        RunOverride use,
+        List<String> manualVerification) {
 
     public TaskSpec {
         if (use == null) use = RunOverride.NONE;
+        manualVerification = manualVerification == null ? List.of() : List.copyOf(manualVerification);
     }
 
     /**
@@ -97,7 +99,7 @@ public record TaskSpec(
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
             "authority", "visual_qa", "budgets", "max_fix_attempts", "timeout_minutes",
-            "review_assurance", "use");
+            "review_assurance", "use", "manual_verification");
     private static final Set<String> AUTHORITY_KEYS = Set.of("workspace_write", "network", "land");
     private static final Set<String> VISUAL_KEYS =
             Set.of("required", "scenarios", "start", "url", "evidence");
@@ -176,10 +178,19 @@ public record TaskSpec(
                 ? root.optInt("timeout_minutes", 30, 1, 240) : null;
         String reviewAssurance = root.requireEnum("review_assurance", REVIEW_ASSURANCES, "independent");
         RunOverride use = RunOverride.parse(root.optMap("use"));
+        // Checks a person has already accepted by hand. A contract_gap whose text contains
+        // one of these (case-insensitive substring) is recorded as advisory rather than
+        // blocking. The list reader rejects a blank item. This loop drops one anyway,
+        // because a blank would match every finding.
+        List<String> manualVerification = new ArrayList<>();
+        for (String item : root.optStringList("manual_verification", List.of())) {
+            if (item != null && !item.isBlank()) manualVerification.add(item.trim());
+        }
 
         root.throwIfAny();
         return new TaskSpec(id, goal, List.copyOf(nonGoals), risk, scope, checks, acceptance, reproduce,
-                authority, visualQa, budget, maxFixAttempts, timeoutMinutes, reviewAssurance, use);
+                authority, visualQa, budget, maxFixAttempts, timeoutMinutes, reviewAssurance, use,
+                manualVerification);
     }
 
     /**
@@ -280,7 +291,8 @@ public record TaskSpec(
                 budget,
                 maxFixAttempts != null ? maxFixAttempts : project.defaultMaxFixAttempts(),
                 timeoutMinutes != null ? timeoutMinutes : project.defaultTimeoutMinutes(),
-                reviewAssurance == null ? "independent" : reviewAssurance);
+                reviewAssurance == null ? "independent" : reviewAssurance,
+                manualVerification);
     }
 
     private static List<String> resolveCommands(List<String> requested, boolean bareChecks,
@@ -317,7 +329,12 @@ public record TaskSpec(
             Budget budget,
             long maxFixAttempts,
             long timeoutMinutes,
-            String reviewAssurance) {
+            String reviewAssurance,
+            List<String> manualVerification) {
+
+        public ResolvedTask {
+            manualVerification = manualVerification == null ? List.of() : List.copyOf(manualVerification);
+        }
 
         public ResolvedTask(String id, String goal, List<String> nonGoals, String risk,
                             String baseRef, List<String> scopePaths, List<String> baselineCommands,
@@ -326,7 +343,7 @@ public record TaskSpec(
                             long maxFixAttempts, long timeoutMinutes) {
             this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
                     acceptanceCommands, reproduceCommands, authority, visualQa, budget,
-                    maxFixAttempts, timeoutMinutes, "independent");
+                    maxFixAttempts, timeoutMinutes, "independent", List.of());
         }
 
         // Existing internal callers construct planning-only tasks without reproduction.
@@ -336,7 +353,7 @@ public record TaskSpec(
                             Budget budget, long maxFixAttempts, long timeoutMinutes) {
             this(id, goal, nonGoals, risk, baseRef, scopePaths, baselineCommands,
                     acceptanceCommands, List.of(), authority, visualQa, budget,
-                    maxFixAttempts, timeoutMinutes, "independent");
+                    maxFixAttempts, timeoutMinutes, "independent", List.of());
         }
 
         /**
@@ -380,6 +397,13 @@ public record TaskSpec(
             // means; a task that never spoke keeps the hash it had before the key existed.
             if (!"independent".equals(reviewAssurance)) {
                 fields.put("review_assurance", reviewAssurance);
+            }
+            // What a person has already agreed to check by hand. Adding or removing an item
+            // changes what a contract_gap is allowed to leave open, so earlier verdicts
+            // cannot survive it. Omitted when empty, so a task that declares none keeps the
+            // hash it had before the key existed.
+            if (!manualVerification.isEmpty()) {
+                fields.put("manual_verification", String.join("\u0000", manualVerification));
             }
             fields.put("visual_required", String.valueOf(visualQa.required()));
             fields.put("visual_url", String.valueOf(visualQa.url()));

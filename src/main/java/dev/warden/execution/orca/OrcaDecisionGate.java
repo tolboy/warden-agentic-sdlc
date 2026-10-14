@@ -274,6 +274,10 @@ public final class OrcaDecisionGate {
         if (decision.options().contains("advance")) {
             text.append(". advance starts the next run of this task after you dealt with the blocker");
         }
+        if (decision.options().contains("waive")) {
+            text.append(". waive accepts a stop whose blockers are only contract gaps"
+                    + " and is recorded with warden approve --decision waive --finding <id>");
+        }
         text.append(". Nothing is landed either way.");
         return text.toString();
     }

@@ -95,6 +95,7 @@ public final class FindingsTest implements Suite {
                 "id", "plain", "severity", "P1", "path", "src/a", "message", "broken")))).get(0);
         c.that("a finding with no suggestion omits the key rather than writing null",
                 !withoutSuggestion.toMap().containsKey("suggestion"));
+        manualVerificationDowngrade(c);
 
         var unnamed = Findings.of(Map.of("findings", List.of(Map.of(
                 "severity", "P1", "path", "src/a", "message", "legacy")))).get(0);
@@ -266,5 +267,69 @@ public final class FindingsTest implements Suite {
                 List.of("receipt-1"), snapA.get("evidence_refs"));
         c.that("that snapshot still refuses the first receipt as new",
                 !round(s3, a0, blocker).get("protocol_violations").equals(List.of()));
+    }
+
+    /**
+     * A contract gap the task already named under {@code manual_verification} is recorded
+     * and does not block. A product defect that happens to contain the same words stays a P1.
+     */
+    private void manualVerificationDowngrade(Check c) {
+        Map<String, Object> gap = Map.of(
+                "id", "keyboard-chord", "severity", "P1", "category", "contract_gap",
+                "path", "src/keys.js", "message", "no scenario presses Ctrl+K",
+                "expected", "a harness scenario covers the chord",
+                "actual", "the grammar has no chord", "scenario", "read the handler",
+                "suggestion", "verify the keyboard chord by hand", "confidence", "confirmed");
+        Findings.Finding filed = Findings.of(Map.of("findings", List.of(gap))).get(0);
+        List<Findings.Finding> lowered = Findings.acknowledging(List.of(filed),
+                List.of("  ", "Keyboard Chord"));
+        c.eq("a matching P1 contract_gap is lowered to P2", "P2", lowered.get(0).severity());
+        c.that("and no longer blocks", !lowered.get(0).blocking());
+        Map<String, Object> recorded = lowered.get(0).toMap();
+        c.eq("the vendor severity is kept beside it", "P1", recorded.get("severity_as_filed"));
+        c.eq("the matched item is the one declared, not a re-cased copy",
+                "Keyboard Chord", recorded.get("manual_verification"));
+        c.eq("and the downgrade is marked advisory", true, recorded.get("advisory"));
+        c.eq("the vendor's own finding is left at P1", "P1", filed.severity());
+        c.that("and its map is not given the advisory flag", !filed.raw().containsKey("advisory"));
+
+        Findings.Finding defect = Findings.of(Map.of("findings", List.of(Map.of(
+                "id", "still-broken", "severity", "P1", "category", "product_defect",
+                "path", "src/keys.js", "message", "the keyboard chord handler drops the event",
+                "confidence", "confirmed")))).get(0);
+        Findings.Finding stayed = Findings.acknowledging(List.of(defect),
+                List.of("keyboard chord")).get(0);
+        c.eq("a product defect is not lowered even when its text contains the item",
+                "P1", stayed.severity());
+        c.that("and carries no advisory flag", !stayed.toMap().containsKey("advisory"));
+
+        Findings.Finding elsewhere = Findings.of(Map.of("findings", List.of(Map.of(
+                "id", "hover", "severity", "P1", "category", "contract_gap",
+                "path", "src/menu.js", "message", "hover is untested",
+                "suggestion", "a person should check the hover",
+                "confidence", "confirmed")))).get(0);
+        Findings.Finding fromSuggestion = Findings.acknowledging(List.of(elsewhere),
+                List.of("check the hover")).get(0);
+        c.eq("a match in the suggestion is enough", "P2", fromSuggestion.severity());
+
+        Findings.Finding already = Findings.of(Map.of("findings", List.of(Map.of(
+                "id", "note", "severity", "P2", "category", "contract_gap",
+                "path", "src/keys.js", "message", "keyboard chord needs a person",
+                "confidence", "confirmed")))).get(0);
+        Findings.Finding untouched = Findings.acknowledging(List.of(already),
+                List.of("keyboard chord")).get(0);
+        c.eq("a P2 the vendor already filed is not rewritten", "P2", untouched.severity());
+        c.that("and is not stamped as a downgrade", !untouched.toMap().containsKey("severity_as_filed"));
+
+        Findings.Finding unrelated = Findings.acknowledging(List.of(filed), List.of("drag")).get(0);
+        c.eq("an item that does not occur leaves the P1", "P1", unrelated.severity());
+        c.eq("an empty list changes nothing", filed, Findings.acknowledging(List.of(filed), List.of()).get(0));
+
+        var first = Findings.round("review", 1, "tree", lowered, null);
+        var second = Findings.round("review", 2, "tree",
+                Findings.acknowledging(List.of(filed), List.of("keyboard chord")), first);
+        c.eq("the first recorded round was never blocking", List.of(), first.get("blocking_ids"));
+        c.eq("so the same downgrade on the next reading is not a relabel",
+                List.of(), second.get("severity_downgraded"));
     }
 }

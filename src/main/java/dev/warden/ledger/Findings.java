@@ -93,6 +93,18 @@ public final class Findings {
             if (suggestion instanceof String proposed && !proposed.isBlank()) {
                 value.put("suggestion", proposed);
             }
+            // A contract_gap Warden itself accepted as already covered by the task's
+            // manual_verification list. Present only on that downgrade, so a finding the
+            // vendor filed is byte-for-byte what it always was.
+            Object filed = raw.get("severity_as_filed");
+            if (filed instanceof String original && !original.isBlank()) {
+                value.put("severity_as_filed", original);
+            }
+            Object acknowledged = raw.get("manual_verification");
+            if (acknowledged instanceof String item && !item.isBlank()) {
+                value.put("manual_verification", item);
+            }
+            if (Boolean.TRUE.equals(raw.get("advisory"))) value.put("advisory", true);
             value.put("evidence_refs", refs(raw.get("evidence_refs")));
             value.put("supersedes", refs(raw.get("supersedes")));
             // A serialized empty list is indistinguishable from a field the vendor never
@@ -114,6 +126,61 @@ public final class Findings {
             if (row instanceof Map<?, ?> entry) findings.add(one((Map<String, Object>) entry));
         }
         return findings;
+    }
+
+    /**
+     * A contract_gap the task already named under {@code manual_verification} is not a blocker.
+     *
+     * The match is a case-insensitive substring of the message, expected, actual, scenario or
+     * suggestion. Only a P1 {@code contract_gap} is lowered, to P2, and the vendor's severity
+     * is kept beside it as {@code severity_as_filed}. A product defect is never lowered, even
+     * when its text contains an item. The vendor's own map is not written to: the downgrade
+     * lives on the copy Warden records, so the first round is already P2 and a later reading
+     * of the same words is not mistaken for the reviewer softening its own P1.
+     */
+    public static List<Finding> acknowledging(List<Finding> findings, List<String> manual) {
+        if (findings == null || findings.isEmpty()) return findings == null ? List.of() : findings;
+        List<String> items = new ArrayList<>();
+        if (manual != null) {
+            for (String item : manual) {
+                if (item != null && !item.isBlank()) items.add(item.trim());
+            }
+        }
+        if (items.isEmpty()) return findings;
+        List<Finding> acknowledged = new ArrayList<>();
+        for (Finding finding : findings) {
+            if (!finding.blocking() || !"contract_gap".equals(finding.category())) {
+                acknowledged.add(finding);
+                continue;
+            }
+            String matched = matchedItem(finding, items);
+            if (matched == null) {
+                acknowledged.add(finding);
+                continue;
+            }
+            Map<String, Object> copy = new LinkedHashMap<>(finding.raw());
+            copy.put("severity", "P2");
+            copy.put("severity_as_filed", finding.severity());
+            copy.put("manual_verification", matched);
+            copy.put("advisory", true);
+            acknowledged.add(new Finding(finding.id(), finding.idSource(), finding.category(),
+                    finding.categorySource(), "P2", finding.path(), finding.message(), copy));
+        }
+        return acknowledged;
+    }
+
+    /** The first declared item that occurs in the finding's checkable text, or null. */
+    private static String matchedItem(Finding finding, List<String> items) {
+        String haystack = (finding.message() + "\n"
+                + text(finding.raw().get("expected")) + "\n"
+                + text(finding.raw().get("actual")) + "\n"
+                + text(finding.raw().get("scenario")) + "\n"
+                + text(finding.raw().get("suggestion")))
+                .toLowerCase(java.util.Locale.ROOT);
+        for (String item : items) {
+            if (haystack.contains(item.toLowerCase(java.util.Locale.ROOT))) return item;
+        }
+        return null;
     }
 
     /**

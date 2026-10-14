@@ -53,7 +53,7 @@ public final class MeasurementProjector {
             "attempts_used", "role_runs", "total_cost_usd", "unpriced_calls",
             "cost_ceiling_binding", "budget_max_role_runs", "budget_max_cost_usd",
             "decision", "source", "wait_millis", "created_at", "decided_at", "updated_at",
-            "lands", "kind",
+            "lands", "kind", "finding_id", "waived_findings",
             "from_profile", "from_vendor", "to_profile", "to_vendor", "cause", "authorized_by",
             "role_code", "policy_setting",
             "failed_over_from", "exhausted_profiles", "role_failovers",

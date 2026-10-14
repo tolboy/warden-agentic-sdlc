@@ -272,6 +272,7 @@ public final class TaskLoopTest implements Suite {
             findingIdentityChecks(check);
             findingHistoryChecks(check, sandbox, home);
             nonactionableBlockerChecks(check, sandbox, home);
+            manualVerificationChecks(check, sandbox, home);
             handoverPackageChecks(check, sandbox, home);
             cumulativeClosureChecks(check, sandbox, home);
             crossStageRegistryChecks(check, sandbox, home);
@@ -3218,8 +3219,8 @@ public final class TaskLoopTest implements Suite {
                     String.valueOf(stopped.summaryReport().get("safe_next_step")), "review is reused");
 
             dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
-            check.eq(mode + ": the person is asked retry, abort or advance",
-                    List.of("retry", "abort", "advance"), store.read(first).options());
+            check.eq(mode + ": the person is asked retry, abort, advance or waive",
+                    List.of("retry", "abort", "advance", "waive"), store.read(first).options());
             store.resolve(first, store.read(first).updatedAt().toString(), "retry", "operator",
                     "waited for the window");
 
@@ -5004,6 +5005,97 @@ public final class TaskLoopTest implements Suite {
                 steps(afterDefect).stream().filter(s -> "reviewer".equals(s.get("step"))).count());
         check.eq("and names the leftover", List.of("acceptance-too-weak"),
                 afterDefect.summaryReport().get("nonactionable_blocking_ids"));
+    }
+
+    /**
+     * A contract gap the task already named under {@code manual_verification} is recorded
+     * and does not stop the run. An item that does not occur still blocks, and a product
+     * defect is never lowered just because its words appear on that list.
+     */
+    @SuppressWarnings("unchecked")
+    private void manualVerificationChecks(Check check, Path sandbox, Path home) throws Exception {
+        Path matched = newProject(sandbox, "manual-match", "medium", 20);
+        editTask(matched, "max_fix_attempts: 2\n",
+                "max_fix_attempts: 2\nmanual_verification:\n  - \"matches a substring\"\n");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("manual-match-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-categorised", sandbox.resolve("manual-match-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome passed = loop(matched, home, "mv1");
+        check.that("a declared hand-check lets the run reach the gate", passed.ok());
+        check.eq("as ready for a person", "ready_for_human", passed.reason());
+        check.eq("and the next action is the human gate", "human_gate", passed.nextAction());
+        Map<String, Object> lowered = lastFinding(passed);
+        check.eq("the gap is recorded as P2", "P2", lowered.get("severity"));
+        check.eq("with the vendor severity beside it", "P1", lowered.get("severity_as_filed"));
+        check.eq("still a contract_gap", "contract_gap", lowered.get("category"));
+        check.eq("marked advisory", true, lowered.get("advisory"));
+        check.eq("naming the declared item", "matches a substring", lowered.get("manual_verification"));
+        check.eq("and nothing blocks", 0L,
+                ((Number) passed.summaryReport().get("blocking_findings")).longValue());
+        check.that("so the non-actionable stop is not written",
+                passed.summaryReport().get("nonactionable_blocking_ids") == null);
+        check.eq("the implementer was not sent to repair a hand-check", 1L,
+                steps(passed).stream().filter(step -> "implementer".equals(step.get("step"))).count());
+        Map<String, Object> artifact = readJson(matched.resolve(
+                ".warden/runs/mv1--reviewer-0/artifacts/reviewer.json"));
+        check.eq("the vendor file is still the P1 they filed", "P1",
+                ((List<Map<String, Object>>) artifact.get("findings")).get(0).get("severity"));
+        String prompt = Files.readString(matched.resolve(
+                ".warden/runs/mv1--reviewer-0/prompts/reviewer.md"));
+        check.contains("the prompt names the declared hand-check", prompt, "matches a substring");
+        check.contains("and the grammar limit", prompt, "grammar cannot express");
+
+        Path missed = newProject(sandbox, "manual-miss", "medium", 20);
+        editTask(missed, "max_fix_attempts: 2\n",
+                "max_fix_attempts: 2\nmanual_verification:\n  - \"keyboard chord\"\n");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("manual-miss-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-categorised", sandbox.resolve("manual-miss-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome stopped = loop(missed, home, "mm1");
+        check.that("an item that does not occur still stops the run", !stopped.ok());
+        check.eq("for the same reason a bare contract gap does",
+                "blocking_findings_remain", stopped.reason());
+        Map<String, Object> stayed = lastFinding(stopped);
+        check.eq("recorded at the vendor's P1", "P1", stayed.get("severity"));
+        check.that("and not stamped as a downgrade", !stayed.containsKey("severity_as_filed"));
+
+        Path defect = newProject(sandbox, "manual-defect", "medium", 20);
+        editTask(defect, "max_fix_attempts: 2\n",
+                "max_fix_attempts: 2\nmanual_verification:\n  - \"the content is still wrong\"\n");
+        writeProfile(home, "loop-impl", "implementer", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("manual-defect-impl.count"), 1);
+        writeProfile(home, "loop-review", "reviewer", "reviewvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review-repeats-p1", sandbox.resolve("manual-defect-review.count"), 1);
+        policy(home, "loop-review", "loop-impl");
+        TaskLoop.Outcome stalled = loop(defect, home, "md1");
+        check.that("a product defect whose text matches is still a stop", !stalled.ok());
+        check.eq("and the repair that changes nothing is what stops it",
+                "repair_made_no_progress", stalled.reason());
+        Map<String, Object> unbroken = lastFinding(stalled);
+        check.eq("still a P1", "P1", unbroken.get("severity"));
+        check.eq("and still a product defect", "product_defect", unbroken.get("category"));
+        check.that("with no advisory flag", !unbroken.containsKey("advisory"));
+
+        writeProfiles(home, sandbox, "manual-restore", 1, 1);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> lastFinding(TaskLoop.Outcome outcome) {
+        List<Map<String, Object>> history =
+                (List<Map<String, Object>>) outcome.summaryReport().get("finding_history");
+        List<Map<String, Object>> findings =
+                (List<Map<String, Object>>) history.get(history.size() - 1).get("findings");
+        return findings.get(0);
     }
 
     /**

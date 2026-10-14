@@ -860,7 +860,9 @@ public final class Preparation {
                 + "  in the same scenario, e.g. `1280x720: testid=greeting visible -> text=Hello, World visible`;\n"
                 + "- nothing you leave out is removed: Warden keeps every existing check and scenario and\n"
                 + "  adds only what you name that is not there yet; your other fields are not used;\n"
-                + "- if a finding cannot be expressed as a named check or a scenario, say so in `summary`.\n\n");
+                + "- if a finding cannot be expressed as a named check or a scenario, say so in `summary`.\n"
+                + "  Do not invent a scenario the grammar cannot run (a chord, a hover, a drag);\n"
+                + "  say that it needs manual verification.\n\n");
         body.append("## The contract as it stands\n\n```yaml\n").append(amendment.before().strip()).append("\n```\n\n");
         body.append("## What the readers found\n\n");
         for (Map<String, Object> gap : amendment.gaps()) {

@@ -49,6 +49,22 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- A contract gap the harness cannot express no longer dead-ends the run. The reviewer
+  prompt states the browser grammar and says a check it cannot say — a chord, a hover, a
+  drag — is a P2 `contract_gap` that names manual verification, rather than a P1. A task
+  may declare `manual_verification:`. A P1 `contract_gap` whose message, expected, actual,
+  scenario or suggestion contains one of those items (case-insensitive) is recorded as P2
+  (`severity_as_filed`, `advisory`) and does not block. A product defect is never lowered.
+  The vendor artifact is left as filed. The first recorded round is already P2, so a later
+  reading of the same words is not severity laundering. `warden approve <run> --decision
+  waive --finding <ID>` closes a stop whose open blockers are only contract gaps, records
+  `contract_gap_waived` on the ledger and `contract_gap_waiver` on the report, and lands
+  nothing. It does not start another run. Waive is refused when any open P1 is not a
+  contract gap, and when `--finding` is omitted; the decision stays pending. An amending
+  planner is told the same grammar and not to invent a scenario it cannot run. `warden
+  setup` does not overwrite an existing reviewer prompt; copy the new paragraphs into
+  `prompts/reviewer.md`. Not yet run live. Suites `findings`, `decision-page`, `task loop`.
+
 - The visual harness accepts `press=KEY` and `focused`. `press=Escape` (also Enter, Tab,
   Space, the arrows, and one character) sends a CDP keyDown then keyUp; a matcher before
   it (`testid=dialog press=Escape`) focuses that element first. `testid=field focused`

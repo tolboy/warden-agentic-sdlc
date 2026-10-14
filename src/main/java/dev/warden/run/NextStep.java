@@ -240,6 +240,25 @@ public final class NextStep {
         return false;
     }
 
+    /** Waive closes a stop only when every open P1 is a contract gap. */
+    private static boolean onlyContractGaps(List<Map<String, Object>> findings) {
+        if (findings.isEmpty()) return false;
+        for (Map<String, Object> finding : findings) {
+            if (!"contract_gap".equals(categoryOf(finding))) return false;
+        }
+        return true;
+    }
+
+    /** The first open contract_gap, which is the finding a waiver has to name. */
+    private static String firstContractGapId(List<Map<String, Object>> findings) {
+        for (Map<String, Object> finding : findings) {
+            if ("contract_gap".equals(categoryOf(finding)) && finding.get("id") != null) {
+                return String.valueOf(finding.get("id"));
+            }
+        }
+        return "";
+    }
+
     private static String contractSentence(String reason, String taskFile, List<String> acceptance,
                                            Map<String, Object> summary,
                                            List<Map<String, Object>> findings) {
@@ -283,6 +302,13 @@ public final class NextStep {
             case "fix_contract", "resolve_blockers", "fix_baseline", "fix_scope",
                     "restore_contract" -> {
                 List<String> commands = new ArrayList<>();
+                if ("fix_contract".equals(kind) && onlyContractGaps(findings)) {
+                    String gap = firstContractGapId(findings);
+                    if (!gap.isBlank()) {
+                        commands.add("warden approve " + runId
+                                + " --decision waive --finding " + gap);
+                    }
+                }
                 commands.add("warden approve " + runId + " --decision advance --note \""
                         + note(kind, findings) + "\"");
                 commands.add("warden approve " + runId + " --decision " + closeOption(summary)

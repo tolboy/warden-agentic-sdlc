@@ -616,6 +616,17 @@ public final class UserSetup {
             something already tested. Check both lists before writing that finding, and if the
             gap is real, say which list you would put the check in.
 
+            A check the grammar cannot express is not a P1. Do not demand a scenario for a
+            keyboard chord, a hover, a drag, or anything else this grammar cannot say. File
+            that gap as P2, category contract_gap, and write in the message that it needs
+            manual verification. A P1 contract_gap stops the run, and another implementer
+            pass cannot add a scenario the harness cannot run.
+
+            Items the task already names under manual_verification are acknowledged. Do not
+            file a blocking contract_gap for one of them:
+
+            {{manual_verification}}
+
             ## Hard constraints
 
             1. **You are read-only.** Do not create, modify or delete any file, and run no command
@@ -672,10 +683,11 @@ public final class UserSetup {
             - `review_disagreement` — you believe an earlier finding was wrong. Say why, on the
               evidence.
 
-            A finding an implementer cannot act on is not a reason to soften it. File it at the
-            severity it deserves with the category that says whose it is. Only a product_defect
-            P1 sends the work back to the implementer; a P1 in any other category stops the run
-            for a person instead of buying another repair.
+            A finding an implementer cannot act on is not a reason to soften a defect. File a
+            product defect at the severity it deserves. A check the grammar cannot express is
+            the exception above: it is P2, advisory, and it names manual verification. Only a
+            product_defect P1 sends the work back to the implementer; a P1 in any other
+            category stops the run for a person instead of buying another repair.
 
             If you are re-reading a candidate you have seen before, you will be told so and given
             back the ids you filed. Reuse an id for anything still open and give a new one only to
@@ -861,8 +873,10 @@ public final class UserSetup {
                `visual_qa.required` to true and give `visual_qa.scenarios` the harness already
                understands (`testid=`, `css=`, `role=`, `text=` with `visible`, `hidden`, `click`,
                `focused`, or `press=KEY` for Escape, Enter, Tab, Space, an arrow or one character,
-               plus `wait`, `wait-for` and `no-console-errors`). Do not invent a
-               data-testid. If you omit `visual_qa`, Warden applies the same rule a
+               plus `wait`, `wait-for` and `no-console-errors`). Do not demand a scenario
+               the grammar cannot run — a key chord, a hover, a drag — and do not invent a
+               data-testid. Say that such a check needs manual verification. If you omit
+               `visual_qa`, Warden applies the same rule a
                `--prepare off` draft uses: a UI goal on a project that serves a preview gets
                the honest default scenarios, so preparation is not weaker than the
                deterministic drafter.
