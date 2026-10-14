@@ -36,8 +36,39 @@ public final class ProcessRunner {
      * to the child as an array there.
      */
     public static String argument(String value) {
-        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return value;
-        return windowsEscaped(value);
+        return argument(null, value);
+    }
+
+    /**
+     * {@link #argument(String)} for a known executable. Java itself escapes interior quotes
+     * when it runs with {@code -Djdk.lang.Process.allowAmbiguousCommands=false} and the
+     * executable is not a {@code .cmd}/{@code .bat} file (OpenJDK's ProcessImpl, mode
+     * VERIFICATION_WIN32_SAFE); escaping here as well would hand the child literal backslashes.
+     */
+    public static String argument(String executable, String value) {
+        boolean escape = needsManualEscaping(System.getProperty("os.name", ""),
+                System.getProperty("jdk.lang.Process.allowAmbiguousCommands"), executable);
+        return escape ? windowsEscaped(value) : value;
+    }
+
+    /**
+     * Whether Warden must escape interior quotes itself, mirroring how OpenJDK's Windows
+     * ProcessImpl builds a command line. Pure, so both modes are testable on any platform.
+     *
+     * @param osName             value of {@code os.name}
+     * @param allowAmbiguous     value of {@code jdk.lang.Process.allowAmbiguousCommands}, or null
+     * @param executable         the program being run, or null when unknown (assumed not a script)
+     */
+    public static boolean needsManualEscaping(String osName, String allowAmbiguous, String executable) {
+        if (osName == null || !osName.toLowerCase(java.util.Locale.ROOT).contains("win")) return false;
+        // OpenJDK: the property is ambiguous (lenient) unless it is exactly "false", ignoring case.
+        boolean lenient = allowAmbiguous == null || !"false".equalsIgnoreCase(allowAmbiguous);
+        if (lenient) return true;
+        // Strict mode: Java escapes quotes itself, except for batch files (VERIFICATION_CMD_BAT).
+        if (executable == null) return false;
+        String lower = executable.trim().toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith("\"")) lower = lower.substring(0, lower.length() - 1);
+        return lower.endsWith(".cmd") || lower.endsWith(".bat");
     }
 
     /** The Windows form of {@link #argument}, on any platform, so it can be tested anywhere. */

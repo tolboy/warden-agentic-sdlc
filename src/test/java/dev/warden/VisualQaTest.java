@@ -209,6 +209,7 @@ public final class VisualQaTest implements Suite {
 
         apostropheDoesNotSwallowAPress(check, project, adapter);
         scenariosSurviveAWindowsCommandLine(check);
+        escapingFollowsJavasMode(check);
         inheritedKeyNamesAreRejected(check, project, adapter);
 
         java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
@@ -258,6 +259,49 @@ public final class VisualQaTest implements Suite {
                 check.that("and unescaped it would not: " + scenario, !raw.equals(List.of(scenario)));
             }
         }
+    }
+
+    /** The escaping decision mirrors OpenJDK in both allowAmbiguousCommands modes. */
+    private void escapingFollowsJavasMode(Check check) {
+        check.that("off Windows nothing is escaped",
+                !ProcessRunner.needsManualEscaping("Linux", null, "node"));
+        check.that("default (lenient) Windows JVM: Warden escapes",
+                ProcessRunner.needsManualEscaping("Windows 11", null, "node.exe"));
+        check.that("lenient when the property is anything but false",
+                ProcessRunner.needsManualEscaping("Windows 11", "true", "node.exe"));
+        check.that("strict JVM already escapes: Warden does not",
+                !ProcessRunner.needsManualEscaping("Windows 11", "false", "C:\\node\\node.exe"));
+        check.that("a padded value is lenient, exactly as in OpenJDK",
+                ProcessRunner.needsManualEscaping("Windows 11", "false ", "node.exe"));
+        check.that("strict, case-insensitive",
+                !ProcessRunner.needsManualEscaping("Windows Server 2022", "FALSE", null));
+        check.that("strict but a .cmd shim: Java does not escape, so Warden does",
+                ProcessRunner.needsManualEscaping("Windows 11", "false", "C:\\npm\\orca.CMD"));
+        String scenario = "1280x720: css=[data-label=\"Don't Save\"] press=Escape";
+        String strictArg = ProcessRunner.needsManualEscaping("Windows 11", "false", "node.exe")
+                ? ProcessRunner.windowsEscaped(scenario) : scenario;
+        check.eq("strict mode: node receives the scenario intact, not double-escaped",
+                List.of(scenario), msvcrtSplit(javaStrictWindowsQuote(strictArg)));
+        check.that("and double escaping would have corrupted it",
+                !msvcrtSplit(javaStrictWindowsQuote(ProcessRunner.windowsEscaped(scenario)))
+                        .equals(List.of(scenario)));
+    }
+
+    /** ProcessImpl with allowAmbiguousCommands=false (VERIFICATION_WIN32_SAFE). */
+    private static String javaStrictWindowsQuote(String argument) {
+        boolean needs = argument.isEmpty();
+        for (char c : " \t\"<>&|^".toCharArray()) needs |= argument.indexOf(c) >= 0;
+        if (!needs) return argument;
+        StringBuilder out = new StringBuilder("\"");
+        int backslashes = 0;
+        for (char c : argument.toCharArray()) {
+            if (c == '\\') { backslashes++; out.append(c); continue; }
+            if (c == '"') { out.append("\\".repeat(backslashes)).append('\\'); }
+            backslashes = 0;
+            out.append(c);
+        }
+        out.append("\\".repeat(backslashes)).append('"');
+        return out.toString();
     }
 
     /** What java.lang.ProcessImpl does to one argument on Windows. */
