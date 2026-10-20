@@ -1315,8 +1315,8 @@ public final class TaskLoopTest implements Suite {
     }
 
     /**
-     * The earlier answer fits in the capture prefix. The later turn is past the 4 MiB cap,
-     * and the process exits non-zero. The prefix must not be returned as success.
+     * The later turn is past the former 4 MiB cap and the process exits non-zero.
+     * The full spool must retain that turn and reject the earlier answer as stale.
      */
     @SuppressWarnings("unchecked")
     private void truncatedTranscriptChecks(Check check, Path sandbox, Path home) throws Exception {
@@ -1336,10 +1336,10 @@ public final class TaskLoopTest implements Suite {
         Path raw = project.resolve(".warden/runs/tr1--reviewer-0/raw/reviewer.stdout.txt");
         String captured = Files.readString(raw);
         check.that("the earlier answer is in the prefix", captured.contains("earlier turn"));
-        check.that("stdout was kept only up to the capture cap",
-                Files.size(raw) <= dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES);
-        check.that("and the later turn is not in that prefix",
-                !captured.contains("later-turn-cut-off"));
+        check.that("raw stdout survives the former capture cap",
+                Files.size(raw) > dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES);
+        check.that("and retains the later turn that invalidates the earlier answer",
+                captured.contains("later-turn-cut-off"));
     }
 
     /**
@@ -1374,10 +1374,10 @@ public final class TaskLoopTest implements Suite {
         Path raw = project.resolve(".warden/runs/tt0--reviewer-0/raw/reviewer.stdout.txt");
         String captured = Files.readString(raw);
         check.that("the earlier answer is in the prefix", captured.contains("earlier turn"));
-        check.that("stdout was kept only up to the capture cap",
-                Files.size(raw) <= dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES);
-        check.that("and the later turn is not in that prefix",
-                !captured.contains("later-turn-cut-off"));
+        check.that("raw stdout survives the former capture cap",
+                Files.size(raw) > dev.warden.execution.DirectCliExecutor.STDOUT_CAPTURE_BYTES);
+        check.that("and retains the later turn that invalidates the earlier answer",
+                captured.contains("later-turn-cut-off"));
     }
 
     /**
@@ -3639,6 +3639,44 @@ public final class TaskLoopTest implements Suite {
                         ((Map<String, Object>) noMore.summaryReport().get("chain"))
                                 .get("fix_attempts_remaining")));
 
+        // Waiting is execution too. A completed rate-limited attempt leaves 61 seconds,
+        // enough for an immediate call but not the policy's fifteen-minute retry pause.
+        Path retryDeadline = newProject(sandbox, "chain-retry-deadline", "medium", 20);
+        editTask(retryDeadline, "max_cost_usd: 10.0", "max_cost_usd: 10.0\n  max_elapsed_minutes: 2");
+        writeProfiles(home, sandbox, "chain-retry-deadline", 1, 1);
+        writeCostlyProfile(home, sandbox, "loop-review", "reviewer", "reviewvendor",
+                "rate-limit-once", null, 0.03);
+        Files.writeString(home.resolve("policy.yaml"), Files.readString(home.resolve("policy.yaml"))
+                .stripTrailing() + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 900 } }\n");
+        java.util.concurrent.atomic.AtomicLong retryNanos = new java.util.concurrent.atomic.AtomicLong();
+        java.util.List<Long> retrySleeps = new java.util.ArrayList<>();
+        TaskLoop.Outcome refusedRetry = new TaskLoop(new ProcessRunner())
+                .withProgress(line -> {
+                    if (line.contains("loop-review") && line.contains("dispatching, up to")) {
+                        retryNanos.addAndGet(59_000_000_000L);
+                    }
+                }).withClock(retryNanos::get).withSleeper(retrySleeps::add)
+                .run(new ConfigLoader().load(retryDeadline, "hello"), UserConfig.load(home), "crd1", false);
+        check.eq("an unaffordable retry pause stops on the chain budget", "budget_exhausted",
+                refusedRetry.reason());
+        check.eq("and identifies the time ceiling", "max_elapsed_minutes",
+                refusedRetry.summaryReport().get("budget_limit_hit"));
+        check.eq("without sleeping beyond that ceiling", List.of(), retrySleeps);
+        check.eq("or reserving the refused retry", 2L, refusedRetry.summaryReport().get("role_runs"));
+        check.eq("the rate-limited vendor was called exactly once", "1",
+                Files.readString(sandbox.resolve("loop-review.count")).strip());
+        check.that("the completed attempts still charge their reported prices",
+                Math.abs(((Number) refusedRetry.summaryReport().get("total_cost_usd")).doubleValue()
+                        - 0.042) < 1e-9);
+        check.eq("and the chain keeps the time already spent", 59L,
+                ((Map<String, Object>) refusedRetry.summaryReport().get("chain")).get("elapsed_seconds"));
+        Map<String, Object> refusedRole = readJson(
+                retryDeadline.resolve(".warden/runs/crd1--reviewer-0/role-reviewer.json"));
+        check.eq("the refused retry keeps the paid role attempt", 1,
+                ((List<?>) refusedRole.get("vendor_attempts")).size());
+        check.that("and records why waiting was refused",
+                refusedRole.get("rate_limit_retry_declined") instanceof Map<?, ?>);
+
         // Time. A minute of execution; the implementer's two-minute wall clock is lowered to
         // it, and the reviewer is refused because what is left is under a minute. The clock is
         // the suite's: each dispatch takes fifty seconds.
@@ -4799,8 +4837,9 @@ public final class TaskLoopTest implements Suite {
                 (l, r) -> new VisualQaRunner.Outcome(false, "visual_qa_unavailable", null,
                         Map.of("message", "no browser"))).run(
                 new ConfigLoader().load(a1, "hello"), UserConfig.load(home), "wr1", false);
-        check.eq("A1 first run stops on the missing browser", "visual_qa_unavailable",
-                a1first.reason());
+        check.eq("A1 first run stops on the missing browser; resolution="
+                        + a1first.summaryReport().get("resolution"), "visual_qa_unavailable", a1first.reason());
+        if (!"visual_qa_unavailable".equals(a1first.reason())) return;
         check.eq("its implementer wrote once", "1", Files.readString(a1impl).strip());
         check.eq("its reviewer read once", "1", Files.readString(a1review).strip());
 

@@ -81,6 +81,16 @@ public final class GateRunner {
                                 Map<String, String> pinnedConfig, String pinnedMergeBase,
                                 List<String> commandsToRun, Kind kind)
             throws IOException, InterruptedException {
+        try (var execution = dev.warden.execution.WorktreeLease.acquire(loaded.root(), runId)) {
+            dev.warden.execution.WorktreeLease.requireLocalDispatch(loaded.root());
+            return runCommandsOwned(loaded, runId, pinnedConfig, pinnedMergeBase, commandsToRun, kind);
+        }
+    }
+
+    private Outcome runCommandsOwned(ConfigLoader.Loaded loaded, String runId,
+                                Map<String, String> pinnedConfig, String pinnedMergeBase,
+                                List<String> commandsToRun, Kind kind)
+            throws IOException, InterruptedException {
         EvidenceLedger ledger = new EvidenceLedger(loaded.root(), runId, home);
         try {
         GitRepository git = new GitRepository(loaded.root(), processes);

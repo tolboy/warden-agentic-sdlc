@@ -63,6 +63,7 @@ public final class Main {
             int exit = switch (args[0]) {
                 case "validate" -> validate(args);
                 case "restore-contract" -> restoreContract(args);
+                case "recover" -> recover(args);
                 case "init" -> init(args);
                 case "gates" -> gates(args);
                 case "visual-qa" -> visualQa(args);
@@ -89,6 +90,9 @@ public final class Main {
                 }
             };
             if (exit != 0) System.exit(exit);
+        } catch (dev.warden.execution.WorktreeLease.Refused refused) {
+            System.out.println(Json.write(refused.report()));
+            System.exit(1);
         } catch (Exception failure) {
             Map<String, Object> error = new LinkedHashMap<>();
             error.put("ok", false);
@@ -110,6 +114,15 @@ public final class Main {
                 true, java.nio.charset.StandardCharsets.UTF_8));
         System.setErr(new java.io.PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.err),
                 true, java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static int recover(String[] args) throws Exception {
+        if (args.length > 2 || (args.length == 2 && !"--confirm-stopped".equals(args[1]))) {
+            throw new IllegalArgumentException("recover accepts only --confirm-stopped");
+        }
+        Map<String, Object> report = dev.warden.execution.WorktreeLease.recover(Path.of("."), args.length == 2);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     private static int restoreContract(String[] args) throws Exception {
@@ -493,6 +506,11 @@ public final class Main {
                         Preparation.parseMode(prepare), false, 0, 0, 0, false));
             }
             outcome = loop.run(loaded, user, runId, dryRun, carried.failover(), carried.continuation());
+        } catch (dev.warden.execution.WorktreeLease.Refused refused) {
+            Map<String, Object> result = new LinkedHashMap<>(refused.report());
+            result.put("run_id", runId);
+            System.out.println(Json.write(result));
+            return 1;
         } catch (EvidenceLedger.RunExistsException duplicate) {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
@@ -2664,6 +2682,9 @@ public final class Main {
                                            or global home, never runs checks or vendors.
                                            Does not close all of P2 or implement P3/P4.
                   warden validate <task>       validate and resolve the project task contract
+                  warden recover [--confirm-stopped]
+                                           inspect stopped vendor receipts and release a crash fence;
+                                           confirmation is required only for incomplete receipts
                   warden restore-contract <run-id>
                                                restore pinned contract bytes; added files need a manual decision
                   warden gates <task>          preflight and machine gates only; spends nothing

@@ -1,23 +1,40 @@
 package dev.warden.process;
 
+import dev.warden.execution.WorktreeLease;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /** Runs a bounded child process and always settles, including when descendants keep pipes open. */
 public final class ProcessRunner {
     public static final int DEFAULT_CAPTURE_BYTES = 64 * 1024;
+    public static final long DEFAULT_RAW_BYTES = 64L * 1024 * 1024;
+
+    public static final class CaptureException extends IOException {
+        private final boolean settled;
+        CaptureException(String message, boolean settled) { super(message); this.settled = settled; }
+        public boolean settled() { return settled; }
+    }
 
     public record Result(List<String> command, int exitCode, boolean timedOut, long durationMillis,
                          String stdout, String stderr, boolean stdoutTruncated,
-                         boolean stderrTruncated) {
-        public boolean ok() { return !timedOut && exitCode == 0; }
+                         boolean stderrTruncated, boolean outputLimitExceeded) {
+        public Result(List<String> command, int exitCode, boolean timedOut, long durationMillis,
+                      String stdout, String stderr, boolean stdoutTruncated, boolean stderrTruncated) {
+            this(command, exitCode, timedOut, durationMillis, stdout, stderr,
+                    stdoutTruncated, stderrTruncated, false);
+        }
+        public boolean ok() { return !timedOut && !outputLimitExceeded && exitCode == 0; }
     }
 
     /**
@@ -109,56 +126,141 @@ public final class ProcessRunner {
      */
     public Result run(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
                       String stdinText) throws IOException, InterruptedException {
+        return runCaptured(command, workingDirectory, timeout, captureBytes, stdinText, null, null, DEFAULT_RAW_BYTES, false);
+    }
+
+    /**
+     * Spools output up to DEFAULT_RAW_BYTES per stream. The returned strings are bounded
+     * head-and-tail previews; reaching a raw limit is a separate failed outcome.
+     * Opening a file or failing to finish its capture fails the call rather than presenting
+     * a partial transcript as complete. Existing overloads retain their prefix-only capture.
+     */
+    public Result run(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
+                      String stdinText, Path stdoutFile, Path stderrFile)
+            throws IOException, InterruptedException {
+        try (OutputStream stdout = Files.newOutputStream(stdoutFile);
+             OutputStream stderr = Files.newOutputStream(stderrFile)) {
+            return runCaptured(command, workingDirectory, timeout, captureBytes, stdinText, stdout, stderr, DEFAULT_RAW_BYTES, false);
+        }
+    }
+
+    /** Vendor calls settle their known descendants before returning to a failover caller. */
+    public Result runVendor(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
+                            String stdinText, Path stdoutFile, Path stderrFile, long rawBytes)
+            throws IOException, InterruptedException {
+        if (rawBytes < 1) throw new IllegalArgumentException("raw output limit must be positive");
+        try (OutputStream stdout = Files.newOutputStream(stdoutFile);
+             OutputStream stderr = Files.newOutputStream(stderrFile)) {
+            return runCaptured(command, workingDirectory, timeout, captureBytes, stdinText,
+                    stdout, stderr, rawBytes, true);
+        }
+    }
+
+    private Result runCaptured(List<String> command, Path workingDirectory, Duration timeout,
+                               int captureBytes, String stdinText, OutputStream stdoutFile,
+                               OutputStream stderrFile, long rawBytes, boolean vendor) throws IOException, InterruptedException {
         long started = System.nanoTime();
-        Process process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start();
-        LimitedBuffer stdout = new LimitedBuffer(captureBytes);
-        LimitedBuffer stderr = new LimitedBuffer(captureBytes);
+        if (vendor) WorktreeLease.startingVendor();
+        Process process;
+        try { process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start(); }
+        catch (IOException cannotStart) {
+            if (vendor) WorktreeLease.vendorNotStarted();
+            throw cannotStart;
+        }
+        Map<Long, ProcessHandle> descendants = new LinkedHashMap<>();
+        try {
+            if (vendor) WorktreeLease.track(process.toHandle());
+            if (vendor) observeDescendants(process, descendants, true);
+        } catch (IOException receiptFailed) {
+            process.toHandle().destroyForcibly();
+            WorktreeLease.requireRecovery("cannot persist vendor process receipt");
+            throw new CaptureException("cannot persist vendor process receipt", false);
+        }
+        LimitedBuffer stdout = new LimitedBuffer(captureBytes, stdoutFile, rawBytes);
+        LimitedBuffer stderr = new LimitedBuffer(captureBytes, stderrFile, rawBytes);
         // The readers start before anything is written. A child that prints before it reads
         // its input fills its stdout pipe and waits for it to be emptied; if this call were
         // still writing that child's stdin, each would wait on the other for good.
         Thread outReader = Thread.ofVirtual().start(() -> drain(process.getInputStream(), stdout));
         Thread errReader = Thread.ofVirtual().start(() -> drain(process.getErrorStream(), stderr));
-        // No command executed by Warden is interactive. Leaving stdin open makes CLIs that
-        // probe it wait forever for input that can never arrive — so it is always closed,
-        // whether or not something was written to it first. Closing an empty pipe cannot
-        // block, so with nothing to write it is closed here and now. A prompt is written on
-        // its own thread, so the timeout below bounds it as well: written inline, a prompt
-        // larger than the pipe blocked this call inside write() for as long as the child did
-        // not read it, before any timeout, wall-clock cap or chain deadline could apply.
-        Thread writer = null;
-        if (stdinText == null) {
-            feed(process.getOutputStream(), null);
-        } else {
-            byte[] input = stdinText.getBytes(StandardCharsets.UTF_8);
-            writer = Thread.ofVirtual().start(() -> feed(process.getOutputStream(), input));
-        }
-
-        boolean finished;
         try {
-            finished = process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (InterruptedException interrupted) {
-            // Cancellation is not permission to orphan a vendor CLI or its descendants.
-            terminateTree(process, Duration.ofSeconds(2));
+            // No command executed by Warden is interactive. Leaving stdin open makes CLIs that
+            // probe it wait forever for input that can never arrive — so it is always closed,
+            // whether or not something was written to it first. Closing an empty pipe cannot
+            // block, so with nothing to write it is closed here and now. A prompt is written on
+            // its own thread, so the timeout below bounds it as well: written inline, a prompt
+            // larger than the pipe blocked this call inside write() for as long as the child did
+            // not read it, before any timeout, wall-clock cap or chain deadline could apply.
+            Thread writer = null;
+            if (stdinText == null) {
+                feed(process.getOutputStream(), null);
+            } else {
+                byte[] input = stdinText.getBytes(StandardCharsets.UTF_8);
+                writer = Thread.ofVirtual().start(() -> feed(process.getOutputStream(), input));
+            }
+
+            boolean finished;
+            try {
+                finished = await(process, timeout, descendants, vendor,
+                        () -> stdout.exceeded() || stderr.exceeded() || stdout.failed() || stderr.failed());
+            } catch (InterruptedException interrupted) {
+                // Cancellation is not permission to orphan a vendor CLI or its descendants.
+                terminateTree(process, descendants, Duration.ofSeconds(2), vendor);
+                settle(writer);
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            }
+            boolean outputLimit = stdout.exceeded() || stderr.exceeded();
+            boolean captureFailed = stdout.failed() || stderr.failed();
+            boolean timedOut = !finished && !outputLimit && !captureFailed;
+            if (timedOut || outputLimit || captureFailed || (vendor && descendants.values().stream().anyMatch(ProcessHandle::isAlive))) {
+                terminateTree(process, descendants, Duration.ofSeconds(2), vendor);
+            }
+            if (vendor && (process.isAlive() || descendants.values().stream().anyMatch(ProcessHandle::isAlive))) {
+                WorktreeLease.requireRecovery("vendor process tree did not settle");
+                throw new CaptureException("vendor process tree did not settle", false);
+            }
+            int exitCode = process.isAlive() ? -1 : process.exitValue();
+            // The child has exited or been stopped with its descendants, so nothing holds the read
+            // end of its stdin any more and a write still waiting on that pipe fails now.
             settle(writer);
-            Thread.currentThread().interrupt();
-            throw interrupted;
+
+            // A killed descendant may keep an inherited pipe alive. Bound the readers separately.
+            outReader.join(2_000);
+            errReader.join(2_000);
+            if (outReader.isAlive()) outReader.interrupt();
+            if (errReader.isAlive()) errReader.interrupt();
+
+            // Interrupting a thread blocked on a native pipe does not necessarily stop it. The
+            // caller must not parse a spool that a surviving descendant may still append to.
+            if (stdoutFile != null && (outReader.isAlive() || errReader.isAlive())) {
+                stdout.stopSpooling();
+                stderr.stopSpooling();
+                if (vendor) WorktreeLease.requireRecovery("raw output capture did not settle");
+                throw new CaptureException("raw output capture did not settle after process termination", false);
+            }
+            try { stdout.checkSpool(); stderr.checkSpool(); }
+            catch (IOException failure) { throw new CaptureException(failure.getMessage(), true); }
+
+            long durationMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
+            return new Result(List.copyOf(command), exitCode, timedOut, durationMillis,
+                    stdout.text(), stderr.text(), stdout.truncated(), stderr.truncated(),
+                    stdout.exceeded() || stderr.exceeded());
+        } catch (IOException failure) {
+            if (vendor && !(failure instanceof CaptureException)) {
+                WorktreeLease.requireRecovery("vendor process receipt or capture failed");
+                throw new CaptureException(failure.getMessage(), false);
+            }
+            throw failure;
+        } finally {
+            if (vendor && (process.isAlive() || descendants.values().stream().anyMatch(ProcessHandle::isAlive))) {
+                terminateTree(process, descendants, Duration.ofSeconds(2), vendor);
+            }
+            // In particular on cancellation, never let a lingering reader race the owner
+            // closing its raw file after this method returns.
+            stdout.stopSpooling();
+            stderr.stopSpooling();
         }
-        boolean timedOut = !finished;
-        if (timedOut) terminateTree(process, Duration.ofSeconds(2));
-        int exitCode = process.isAlive() ? -1 : process.exitValue();
-        // The child has exited or been stopped with its descendants, so nothing holds the read
-        // end of its stdin any more and a write still waiting on that pipe fails now.
-        settle(writer);
-
-        // A killed descendant may keep an inherited pipe alive. Bound the readers separately.
-        outReader.join(2_000);
-        errReader.join(2_000);
-        if (outReader.isAlive()) outReader.interrupt();
-        if (errReader.isAlive()) errReader.interrupt();
-
-        long durationMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
-        return new Result(List.copyOf(command), exitCode, timedOut, durationMillis,
-                stdout.text(), stderr.text(), stdout.truncated(), stderr.truncated());
     }
 
     /**
@@ -169,14 +271,54 @@ public final class ProcessRunner {
      * before the grace wait and the forced kill below could run. The handle only signals; the
      * stdin stream stays with its writer, which closes it once the pipe breaks.
      */
-    private static void terminateTree(Process process, Duration grace) throws InterruptedException {
+    private static void terminateTree(Process process, Map<Long, ProcessHandle> descendants,
+                                      Duration grace, boolean vendor) throws InterruptedException, IOException {
         ProcessHandle child = process.toHandle();
-        process.descendants().forEach(ProcessHandle::destroy);
+        observeDescendants(process, descendants, vendor);
+        descendants.values().forEach(ProcessHandle::destroy);
         child.destroy();
-        if (process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS)) return;
-        process.descendants().forEach(ProcessHandle::destroyForcibly);
+        if (awaitTree(process, descendants, grace, vendor)) return;
+        observeDescendants(process, descendants, vendor);
+        descendants.values().stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
         child.destroyForcibly();
-        process.waitFor(grace.toMillis(), TimeUnit.MILLISECONDS);
+        awaitTree(process, descendants, grace, vendor);
+    }
+
+    private static boolean await(Process process, Duration timeout, Map<Long, ProcessHandle> descendants,
+                                 boolean vendor, java.util.function.BooleanSupplier stop)
+            throws InterruptedException, IOException {
+        long started = System.nanoTime();
+        long budget = Math.max(0, timeout.toNanos());
+        while (process.isAlive()) {
+            // Windows enumerates the system process table here. Git and short gate
+            // commands need a census only when they must be terminated, not every call.
+            if (vendor) observeDescendants(process, descendants, true);
+            long remaining = budget - (System.nanoTime() - started);
+            if (remaining <= 0 || stop.getAsBoolean()) return false;
+            process.waitFor(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100)), TimeUnit.NANOSECONDS);
+        }
+        return true;
+    }
+
+    private static void observeDescendants(Process process, Map<Long, ProcessHandle> descendants,
+                                           boolean vendor) throws IOException {
+        try (var children = process.descendants()) {
+            for (ProcessHandle handle : children.toList()) {
+                if (descendants.putIfAbsent(handle.pid(), handle) == null && vendor) WorktreeLease.track(handle);
+            }
+        }
+    }
+
+    private static boolean awaitTree(Process process, Map<Long, ProcessHandle> descendants, Duration grace, boolean vendor)
+            throws InterruptedException, IOException {
+        long deadline = System.nanoTime() + grace.toNanos();
+        while (process.isAlive() || descendants.values().stream().anyMatch(ProcessHandle::isAlive)) {
+            observeDescendants(process, descendants, vendor);
+            if (System.nanoTime() >= deadline) return false;
+            if (process.isAlive()) process.waitFor(25, TimeUnit.MILLISECONDS);
+            else Thread.sleep(25);
+        }
+        return true;
     }
 
     /** Writes the child's input, if any, and always closes it. */
@@ -215,17 +357,60 @@ public final class ProcessRunner {
     private static final class LimitedBuffer {
         private final int limit;
         private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private final byte[] tail;
+        private OutputStream spool;
+        private IOException spoolError;
+        private int tailPosition;
+        private long received;
         private boolean truncated;
+        private final long rawLimit;
+        private long persisted;
+        private boolean exceeded;
 
-        LimitedBuffer(int limit) { this.limit = Math.max(0, limit); }
-
-        synchronized void add(byte[] source, int length) {
-            int writable = Math.min(length, Math.max(0, limit - bytes.size()));
-            if (writable > 0) bytes.write(source, 0, writable);
-            if (writable < length) truncated = true;
+        LimitedBuffer(int limit, OutputStream spool, long rawLimit) {
+            this.limit = Math.max(0, limit);
+            this.spool = spool;
+            this.rawLimit = rawLimit;
+            this.tail = new byte[spool == null ? 0 : this.limit / 2];
         }
 
-        synchronized String text() { return bytes.toString(StandardCharsets.UTF_8); }
+        synchronized void add(byte[] source, int length) {
+            if (spool != null) {
+                try {
+                    int count = (int) Math.min(length, Math.max(0, rawLimit - persisted));
+                    if (count > 0) spool.write(source, 0, count);
+                    persisted += count;
+                    if (count < length) exceeded = true;
+                }
+                catch (IOException failure) { spoolError = failure; spool = null; }
+            }
+            int writable = Math.min(length, Math.max(0, limit - tail.length - bytes.size()));
+            if (writable > 0) bytes.write(source, 0, writable);
+            for (int index = writable; tail.length > 0 && index < length; index++) {
+                tail[tailPosition] = source[index];
+                tailPosition = (tailPosition + 1) % tail.length;
+            }
+            received += length;
+            if (received > limit) truncated = true;
+        }
+
+        synchronized String text() {
+            if (tail.length == 0) return bytes.toString(StandardCharsets.UTF_8);
+            int size = (int) Math.min(tail.length, received - bytes.size());
+            ByteArrayOutputStream result = new ByteArrayOutputStream(bytes.size() + size);
+            result.writeBytes(bytes.toByteArray());
+            int start = size < tail.length ? 0 : tailPosition;
+            int first = Math.min(size, tail.length - start);
+            result.write(tail, start, first);
+            result.write(tail, 0, size - first);
+            return result.toString(StandardCharsets.UTF_8);
+        }
+        synchronized void stopSpooling() { spool = null; }
+        synchronized void checkSpool() throws IOException {
+            if (spoolError != null) throw new IOException("cannot persist raw process output", spoolError);
+        }
         synchronized boolean truncated() { return truncated; }
+        synchronized boolean exceeded() { return exceeded; }
+        synchronized boolean failed() { return spoolError != null; }
     }
 }

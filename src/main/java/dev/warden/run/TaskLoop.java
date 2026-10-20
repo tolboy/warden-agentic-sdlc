@@ -146,6 +146,7 @@ public final class TaskLoop {
     private java.util.function.LongConsumer sleeper;
     /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
     private Executors.Factory executors;
+    private RoleResolver.Availability availability;
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -189,6 +190,14 @@ public final class TaskLoop {
         return copy;
     }
 
+    /** Program readiness supplied by an embedded adapter or an offline executor fixture. */
+    public TaskLoop withAvailability(RoleResolver.Availability next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.availability = next;
+        return copy;
+    }
+
     /**
      * The same loop, dispatching through {@code next} instead of the profile's own runner.
      *
@@ -220,6 +229,7 @@ public final class TaskLoop {
         copy.sleeper = sleeper;
         copy.watchNarration = watchNarration;
         copy.executors = executors;
+        copy.availability = availability;
         return copy;
     }
 
@@ -392,6 +402,9 @@ public final class TaskLoop {
             "vendor_call_failed",
             "vendor_unavailable",
             "vendor_protocol_failed",
+            "worktree_recovery_required",
+            "output_capture_failed",
+            "output_limit_exceeded",
             "prompt_undeliverable",
             "orca_worker_not_started",
             // The candidate passed; what is being fixed is what it was judged by. The writer's
@@ -430,6 +443,9 @@ public final class TaskLoop {
      */
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
+            Map.entry("role_process_unsettled", "worktree_recovery_required"),
+            Map.entry("role_output_capture_failed", "output_capture_failed"),
+            Map.entry("role_output_limit_exceeded", "output_limit_exceeded"),
             Map.entry("role_command_failed", "vendor_call_failed"),
             Map.entry("role_vendor_unavailable", "vendor_unavailable"),
             Map.entry("role_artifact_unparseable", "vendor_protocol_failed"),
@@ -613,6 +629,20 @@ public final class TaskLoop {
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                        Map<String, String> authorizedFailover, Continuation carried) throws Exception {
+        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+                : dev.warden.execution.WorktreeLease.acquire(loaded.root(), runId)) {
+            // Orca's adapter owns exact attach/reconciliation. With an Orca route available,
+            // defer worker admission to that adapter (local roles and machine gates still
+            // check immediately before execution). A blanket refusal blocks valid resumes.
+            if (!dryRun && user.profiles().values().stream().noneMatch(p -> "orca".equals(p.runner()))) {
+                dev.warden.execution.WorktreeLease.requireLocalDispatch(loaded.root());
+            }
+            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried);
+        }
+    }
+
+    private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
+                             Map<String, String> authorizedFailover, Continuation carried) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
@@ -686,6 +716,8 @@ public final class TaskLoop {
 
             @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
 
+            @Override public void requireRetryWait(long pauseMillis) { budget.requireRetryWait(pauseMillis); }
+
             // Asked before a failover dispatch. Answering no makes the role return the spent
             // call as its outcome, so the loop still charges it; throwing from the next
             // dispatch instead lost that call's cost and its unpriced count.
@@ -703,6 +735,7 @@ public final class TaskLoop {
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
         if (executors != null) roles.withExecutors(executors);
+        if (availability != null) roles.availability(availability);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
@@ -1150,6 +1183,10 @@ public final class TaskLoop {
             summary.put("budget_stop", exceeded.getMessage());
             summary.put("budget_limit_hit", exceeded.limit());
             return stop(ledger, summary, "budget_exhausted", steps, engine.attempt(), budget);
+        } catch (dev.warden.execution.WorktreeLease.Refused refused) {
+            summary.put("resolution", refused.getMessage());
+            summary.put("execution_state", refused.report().get("execution_state"));
+            return stop(ledger, summary, refused.code(), steps, engine.attempt(), budget);
         } catch (HomeCorpus.UnavailableException unavailable) {
             summary.put("corpus_status", "error");
             summary.put("corpus_error", unavailable.getMessage());
@@ -4350,6 +4387,18 @@ public final class TaskLoop {
             return left != null && left.getSeconds() < MINIMUM_CALL_SECONDS;
         }
 
+        /** Check the wait without consuming the next call's reservation. */
+        void requireRetryWait(long pauseMillis) {
+            if (maxElapsedSeconds == null) return;
+            java.time.Duration left = java.time.Duration.ofSeconds(maxElapsedSeconds - inherited.elapsedSeconds())
+                    .minusNanos(clock.getAsLong() - startedNanos);
+            if (left.minusMillis(pauseMillis).getSeconds() >= MINIMUM_CALL_SECONDS) return;
+            throw new ExceededException("max_elapsed_minutes", "max_elapsed_minutes of "
+                    + (maxElapsedSeconds / 60) + " cannot fit a " + pauseMillis
+                    + " ms rate-limit retry wait and the next call's minimum "
+                    + MINIMUM_CALL_SECONDS + " s: " + left.getSeconds() + " s remain");
+        }
+
         /**
          * Vendor calls that already happened before this loop, counted so preparation is
          * not free. A reservation is never given back: see {@link #requireRoleRun}.
@@ -4519,6 +4568,14 @@ public final class TaskLoop {
             @Override public boolean hasRoom() { return budget.hasRoom(); }
 
             @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            @Override public void requireRetryWait(long pauseMillis) {
+                try {
+                    budget.requireRetryWait(pauseMillis);
+                } catch (Budget.ExceededException exceeded) {
+                    throw new dev.warden.run.Preparation.Exhausted(exceeded.getMessage());
+                }
+            }
 
             @Override public void settleAttempt(Object costUsd, Double declaredBound) {
                 budget.settleAttempt(costUsd, declaredBound);

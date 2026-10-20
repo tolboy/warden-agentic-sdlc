@@ -225,6 +225,7 @@ public final class RoleRunnerTest implements Suite {
             check.eq("and never exceeds fifteen minutes", 900_000L,
                     RoleRunner.retryPauseMillis(Map.of("quota", Map.of("vendor_message",
                             "Retry-After: 5000")), new dev.warden.config.Policy.RateLimitRetry(2, 30), 1));
+            rateLimitDeadlineChecks(check, project, home);
             writePolicy(home, "stub-review", "stub-impl");
 
             // --- read-only is verified, not trusted ------------------------------------
@@ -297,6 +298,80 @@ public final class RoleRunnerTest implements Suite {
         } finally {
             deleteTree(sandbox);
         }
+    }
+
+    /**
+     * Retry waiting spends the same deadline as execution, and admission must leave a
+     * whole minute for the next dispatch. All time here belongs to the test clock.
+     */
+    private void rateLimitDeadlineChecks(Check check, Path project, Path home) throws Exception {
+        java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+        RoleRunner.DispatchGate bounded = dev.warden.run.TaskLoop.amendmentGate(project, "no-prior-chain",
+                new dev.warden.config.TaskSpec.Budget(2, 10, 2L), nanos::get);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<Long> slept = new java.util.ArrayList<>();
+        RoleRunner denied = new RoleRunner(new ProcessRunner(), bounded)
+                .withSleeper(slept::add)
+                .withExecutors((profile, processes, git) -> request -> {
+                    calls.incrementAndGet();
+                    nanos.addAndGet(59_000_000_000L);
+                    return new dev.warden.execution.RoleExecutor.Result(false, "role_rate_limited",
+                            Duration.ofSeconds(59), "", null, Map.of("cost_usd", 1.25,
+                            "quota", Map.of("vendor_message", "Retry-After: 900")));
+                });
+        check.rejects("a long retry wait is refused before sleeping", "max_elapsed_minutes",
+                () -> denied.run(new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                        "reviewer", "rate-deadline", (String) null, null, false));
+        check.eq("the refused wait dispatches no retry", 1, calls.get());
+        check.eq("and consumes no sleeper time", List.of(), slept);
+        Map<String, Object> stopped = readJson(
+                project.resolve(".warden/runs/rate-deadline/role-reviewer.json"));
+        check.eq("the completed paid attempt stays in the report", 1,
+                objects(stopped.get("vendor_attempts")).size());
+        check.eq("with its reported cost", 1.25, stopped.get("attempts_cost_usd"));
+        check.that("the refused pause is explicit", stopped.get("rate_limit_retry_declined") instanceof Map);
+        check.that("the refused pause is not reported as time actually slept",
+                stopped.get("rate_limit_retry") == null);
+        String journal = Files.readString(project.resolve(".warden/runs/rate-deadline/evidence.jsonl"));
+        check.contains("the attempt survives in the durable journal", journal, "\"type\":\"vendor_attempt\"");
+        bounded.requireDispatch();
+        check.rejects("wait admission never reserved a second call", "max_role_runs", bounded::requireDispatch);
+
+        // At the exact boundary, one second of waiting leaves the required minute.
+        java.util.concurrent.atomic.AtomicLong fittingNanos = new java.util.concurrent.atomic.AtomicLong();
+        RoleRunner.DispatchGate fitting = dev.warden.run.TaskLoop.amendmentGate(project, "no-prior-chain",
+                new dev.warden.config.TaskSpec.Budget(2, 10, 2L), fittingNanos::get);
+        java.util.concurrent.atomic.AtomicInteger fittingCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<Long> fittingSleeps = new java.util.ArrayList<>();
+        RoleRunner.Outcome fitted = new RoleRunner(new ProcessRunner(), fitting)
+                .withSleeper(millis -> {
+                    fittingSleeps.add(millis);
+                    fittingNanos.addAndGet(millis * 1_000_000L);
+                })
+                .withExecutors((profile, processes, git) -> request -> {
+                    if (fittingCalls.incrementAndGet() == 1) {
+                        fittingNanos.addAndGet(59_000_000_000L);
+                        return new dev.warden.execution.RoleExecutor.Result(false, "role_rate_limited",
+                                Duration.ofSeconds(59), "", null,
+                                Map.of("quota", Map.of("vendor_message", "Retry-After: 1")));
+                    }
+                    return new dev.warden.execution.RoleExecutor.Result(true, "role_completed",
+                            Duration.ZERO, "", Map.of("role", "reviewer", "task_id", "hello",
+                            "status", "completed", "verdict", "pass", "summary", "ok", "findings", List.of()),
+                            Map.of());
+                })
+                .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home),
+                        "reviewer", "rate-deadline-fits", (String) null, null, false);
+        check.that("a retry that leaves the minimum call allowance succeeds", fitted.ok());
+        check.eq("it waits exactly the requested second", List.of(1000L), fittingSleeps);
+        check.eq("and dispatches exactly twice", 2, fittingCalls.get());
+
+        java.util.concurrent.atomic.AtomicLong fractionalNanos = new java.util.concurrent.atomic.AtomicLong();
+        RoleRunner.DispatchGate fractional = dev.warden.run.TaskLoop.amendmentGate(project, "no-prior-chain",
+                new dev.warden.config.TaskSpec.Budget(2, 10, 2L), fractionalNanos::get);
+        fractionalNanos.set(59_500_000_000L);
+        check.rejects("fractional seconds do not round an unaffordable wait into the deadline",
+                "max_elapsed_minutes", () -> fractional.requireRetryWait(1000));
     }
 
     /**
@@ -446,6 +521,43 @@ public final class RoleRunnerTest implements Suite {
                 "role, task_id, status, verdict, summary, findings");
         writePolicy(home, "stub-spent, stub-review", "stub-impl");
 
+        UserConfig loadedUser = UserConfig.load(home);
+        var permissive = dev.warden.config.Policy.parse(Files.readString(home.resolve("policy.yaml"))
+                .replace("failover: { on_quota_exhausted: auto }",
+                        "failover: { on_quota_exhausted: auto, on_vendor_failure: auto, max_per_stage: 1 }")
+                + "\nretry: { rate_limited: { max_attempts: 1, backoff_seconds: 7 } }\n", "fencing policy");
+        UserConfig permissiveUser = new UserConfig(home, permissive, loadedUser.profiles(), Map.of(), true);
+        for (String code : List.of("role_quota_exhausted", "role_rate_limited", "role_command_failed")) {
+            int[] calls = {0};
+            RoleRunner.Outcome unsettled = new RoleRunner(new ProcessRunner())
+                    .withSleeper(millis -> { throw new AssertionError("an unsettled writer cannot sleep/retry"); })
+                    .withExecutors((profile, processes, git) -> request -> {
+                        calls[0]++;
+                        return new dev.warden.execution.RoleExecutor.Result(false, code, Duration.ZERO, "", null,
+                                Map.of("process_tree_settled", false, "cost_usd", 0.01));
+                    }).run(new ConfigLoader().load(project, "hello"), permissiveUser,
+                            "reviewer", "unsettled-" + code, (String) null, null, false);
+            check.eq("unsettled vendor overrides retry/failover: " + code, "role_process_unsettled", unsettled.code());
+            check.eq("unsettled vendor never starts a successor: " + code, 1, calls[0]);
+            check.eq("unsettled report agrees with the outcome: " + code,
+                    "role_process_unsettled", unsettled.details().get("code"));
+            check.eq("unsettled attempt journal agrees with the outcome: " + code, "role_process_unsettled",
+                    ((Map<?, ?>) ((List<?>) unsettled.details().get("vendor_attempts")).get(0)).get("code"));
+            check.eq("unsettled attempt keeps billed cost: " + code, 0.01, unsettled.details().get("attempts_cost_usd"));
+            dev.warden.execution.WorktreeLease.recover(project, true);
+        }
+        for (String code : List.of("role_output_limit_exceeded", "role_output_capture_failed")) {
+            int[] calls = {0};
+            RoleRunner.Outcome incomplete = new RoleRunner(new ProcessRunner())
+                    .withExecutors((profile, processes, git) -> request -> {
+                        calls[0]++;
+                        return new dev.warden.execution.RoleExecutor.Result(false, code, Duration.ZERO, "", null,
+                                Map.of("process_tree_settled", true));
+                    }).run(new ConfigLoader().load(project, "hello"), permissiveUser,
+                            "reviewer", "capture-" + code, (String) null, null, false);
+            check.eq("capture failure is explicit: " + code, code, incomplete.code());
+            check.eq("capture failure never triggers auto vendor failover: " + code, 1, calls[0]);
+        }
         RoleRunner.Outcome failedOver = runRole(project, home, "reviewer", "failover", null, null, false);
         check.that("a role whose first vendor ran out still completes", failedOver.ok());
         check.eq("because it was re-dispatched to another vendor", "stub-review", failedOver.profile());

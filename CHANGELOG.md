@@ -11,6 +11,20 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Checkout-wide execution leases cover workflows, preparation, standalone roles and machine
+  gates. Linked worktrees remain independent; projects beneath one checkout share admission.
+  Vendor PID/start-time receipts and launch intent survive crashes. `warden recover` releases
+  a proven stopped owner; `--confirm-stopped` acknowledges an incomplete receipt after
+  inspection and never bypasses a known live process. Gate/build daemons are excluded.
+  Verified offline with real local JVMs on Windows; live vendors and live Orca remain untested.
+- Direct CLI output is spooled byte-for-byte up to 64 MiB per stream, with a bounded preview
+  and streaming protocol recovery beyond the former 4 MiB cap. Provider receipts supply
+  telemetry; tool/arbitrary JSON does not. Raw limits, failed capture and unsettled vendor
+  processes have distinct stop codes and cannot trigger automatic failover.
+- Rate-limit backoff checks the chain's remaining deadline before sleeping and retains the
+  completed attempt and its billed cost when a retry cannot fit. Gate/baseline timeouts
+  keep their existing independent contract.
+
 - A run keeps a byte-exact copy of every pinned `.warden` file, plus a SHA-256 manifest, under
   `.warden/runs/<run-id>/contract/`. A writer's `git checkout` / `stash` / `reset` that reverts
   the uncommitted compiled contract no longer loses those bytes. New
