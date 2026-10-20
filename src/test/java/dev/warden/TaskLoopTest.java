@@ -269,6 +269,7 @@ public final class TaskLoopTest implements Suite {
             recheckFindingsChecks(check, sandbox, home);
             stagedResumeChecks(check, sandbox, home);
             independenceChecks(check, sandbox, home);
+            multiWriterPreflight(check, sandbox, home);
             judgingContractChecks(check, sandbox, home);
             resumeCurrencyChecks(check, sandbox, home);
             findingIdentityChecks(check);
@@ -4081,6 +4082,88 @@ public final class TaskLoopTest implements Suite {
         check.contains("and says the change reached what the work is judged by",
                 String.valueOf(afterGoalChange.summaryReport().get("reuse_declined")),
                 "reaches what the work is judged by");
+    }
+
+    @SuppressWarnings("unchecked")
+    private void multiWriterPreflight(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "multi-writer-preflight");
+        writeProfiles(home, sandbox, "multi-writer-preflight", 1, 1);
+        writeProfile(home, "loop-impl-b", "implementer", "reviewvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("multi-writer-b.count"), 1);
+        String policyText = """
+                version: 1
+                roles:
+                  implementer: { profiles: [loop-impl, loop-impl-b], strategy: rotate, require_independent_vendor: false }
+                  reviewer: { profiles: [loop-review], strategy: first, require_independent_vendor: true }
+                review: { required_for_risk: [medium, high] }
+                workflow:
+                  stages:
+                    - { stage: first, run: role, role: implementer, on_fail: stop }
+                    - { stage: second, run: role, role: implementer, on_fail: stop }
+                    - { stage: gates, run: machine_gates, on_fail: stop }
+                    - { stage: review, run: role, role: reviewer, on_findings: stop, on_fail: stop }
+                """;
+        Files.writeString(home.resolve("policy.yaml"), policyText);
+        var loaded = new ConfigLoader().load(project, "hello");
+        var preview = TaskLoop.dispatchPreview(project, loaded, UserConfig.load(home), profile -> true);
+        check.eq("rotation predicts the first writer", "loop-impl", preview.get(0).get("profile"));
+        check.eq("rotation predicts the second writer", "loop-impl-b", preview.get(1).get("profile"));
+        check.eq("the second writer's vendor cannot review either writer's work", null, preview.get(2).get("profile"));
+        TaskLoop.Outcome refused = loop(project, home, "multi-writer-stop");
+        check.eq("the multi-writer roster gap is found before dispatch", "independent_review_unavailable", refused.reason());
+        check.eq("no writer was paid to produce an unreviewable candidate", 0L, refused.summaryReport().get("role_runs"));
+        Map<String, Object> gap = (Map<String, Object>) refused.summaryReport().get("unavailable_role");
+        check.eq("the gap names both authors", List.of("loop-impl", "loop-impl-b"), gap.get("writer_profiles"));
+        check.eq("and both vendors", List.of("implvendor", "reviewvendor"), gap.get("writer_vendors"));
+        check.that("the stopped run still freezes all requested conditions",
+                refused.summaryReport().get("comparison_conditions") instanceof Map<?, ?>);
+        Map<String, Object> frozen = (Map<String, Object>) refused.summaryReport().get("comparison_conditions");
+        Map<String, Object> data = (Map<String, Object>) frozen.get("data");
+        check.that("the executable build is fingerprinted even before the first call",
+                ((Map<?, ?>) data.get("warden_build")).get("sha256") instanceof String sha
+                        && sha.matches("[0-9a-f]{64}"));
+
+        // A reader of the first candidate must not be excluded by a future author.
+        String earlierReview = policyText.replace(
+                "    - { stage: second, run: role, role: implementer, on_fail: stop }\n", "")
+                + "    - { stage: second, run: role, role: implementer, on_fail: stop }\n";
+        Files.writeString(home.resolve("policy.yaml"), earlierReview);
+        preview = TaskLoop.dispatchPreview(project, loaded, UserConfig.load(home), profile -> true);
+        check.eq("a review before the second writer remains independent", "loop-review", preview.get(1).get("profile"));
+        TaskLoop.Outcome dry = new TaskLoop(new ProcessRunner()).run(loaded, UserConfig.load(home), "multi-writer-order", true);
+        check.that("preflight also respects stage order", !"independent_review_unavailable".equals(dry.summaryReport().get("would_stop")));
+
+        writeProfile(home, "loop-review-c", "reviewer", "thirdvendor", true,
+                "reviewer", "role, task_id, status, verdict, summary, findings",
+                "review", sandbox.resolve("multi-writer-c.count"), 1);
+        Files.writeString(home.resolve("policy.yaml"), policyText.replace("profiles: [loop-review]", "profiles: [loop-review, loop-review-c]"));
+        preview = TaskLoop.dispatchPreview(project, loaded, UserConfig.load(home), profile -> true);
+        check.eq("an independent third vendor is selected", "loop-review-c", preview.get(2).get("profile"));
+        check.eq("preview names all preceding authors", List.of("loop-impl", "loop-impl-b"), preview.get(2).get("judged_against"));
+        Path taskFile = project.resolve(".warden/tasks/hello.yaml");
+        String originalTask = Files.readString(taskFile);
+        Files.writeString(taskFile, originalTask + "\nuse:\n  first: { profile: loop-impl-b }\n  second: { profile: loop-impl }\n");
+        loaded = new ConfigLoader().load(project, "hello");
+        preview = TaskLoop.dispatchPreview(project, loaded, UserConfig.load(home), profile -> true);
+        check.eq("task pins override rotation for the first author", "loop-impl-b", preview.get(0).get("profile"));
+        check.eq("and for the second author", "loop-impl", preview.get(1).get("profile"));
+        check.eq("pins preserve the complete writer set", List.of("loop-impl", "loop-impl-b"), preview.get(2).get("judged_against"));
+
+        // Runtime treats every writable role as an author, including a custom planner.
+        writeProfile(home, "loop-planner", "planner", "implvendor", false,
+                "implementer", "role, task_id, status, summary, files_changed",
+                "impl", sandbox.resolve("multi-planner.count"), 1);
+        Files.writeString(taskFile, originalTask + "\nuse:\n  second: { profile: loop-impl-b }\n");
+        Files.writeString(home.resolve("policy.yaml"), policyText
+                .replace("roles:\n", "roles:\n  planner: { profiles: [loop-planner], strategy: first, require_independent_vendor: false }\n")
+                .replace("stage: first, run: role, role: implementer", "stage: first, run: role, role: planner"));
+        loaded = new ConfigLoader().load(project, "hello");
+        preview = TaskLoop.dispatchPreview(project, loaded, UserConfig.load(home), profile -> true);
+        check.eq("writable roles other than implementer also exclude their vendor", null, preview.get(2).get("profile"));
+        refused = loop(project, home, "multi-planner-stop");
+        check.eq("preflight fences custom writable roles too", "independent_review_unavailable", refused.reason());
+        check.eq("without paying for that custom writer", 0L, refused.summaryReport().get("role_runs"));
     }
 
     /**

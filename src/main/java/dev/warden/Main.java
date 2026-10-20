@@ -2768,10 +2768,11 @@ public final class Main {
                                                is flagged, not merged. Contracts, units, lineage
                                                and cost the source never had stay unknown.
                                                --compare groups local task-run summaries by
-                                               prepare, risk, workflow and roster, folding a
+                                               frozen requested conditions (model/effort too), folding a
                                                continued chain into one unit attributed to its
                                                last run. --baseline-file PATH sits manually
-                                               observed (non-Warden) tasks beside them.
+                                               observed (non-Warden) tasks beside them and can
+                                               declare experiments and task/repeat pairs.
                                                --text prints a compact table. Refused with
                                                --import. A stopped task is not a success.
                   warden report <run-id> [--text]

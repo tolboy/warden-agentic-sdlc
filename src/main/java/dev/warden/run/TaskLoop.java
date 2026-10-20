@@ -853,6 +853,11 @@ public final class TaskLoop {
                 user.policy() == null ? 1L : (long) user.policy().maxVendorFailovers());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
+        RunOverride frozenOverlay = overlay;
+        summary.put("comparison_conditions", dev.warden.ledger.ComparisonConditions.snapshot(
+                workflow, user, task, overlay,
+                stage -> selectableProfiles(stage, user, frozenOverlay, authorizedFailover),
+                stage -> skipReason(stage, user, task, reviewByRisk)));
         Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
                 user.policy() == null ? "full" : user.policy().repairReserve()));
         if (task.budget().maxElapsedMinutes() != null) {
@@ -1428,7 +1433,7 @@ public final class TaskLoop {
     }
 
     /**
-     * The first judging stage no reader could fill against the writer the chain would
+     * The first judging stage no reader could fill against its preceding writers, as the chain would
      * dispatch, or null when every one can be. Asked once, before the first paid call.
      *
      * The writer is the profile the roster would actually choose, so a `first` strategy is
@@ -1439,46 +1444,63 @@ public final class TaskLoop {
     private static Map<String, Object> readerGap(Path root, Workflow workflow, UserConfig user,
                                                  TaskSpec.ResolvedTask task, boolean reviewByRisk,
                                                  RoleRunner roles) {
-        Workflow.Stage writerStage = null;
+        RoleResolver.Writers wouldWrite = initialPreviewWriters(task);
         for (Workflow.Stage stage : workflow.stages()) {
-            if (stage.kind() == Workflow.Kind.ROLE && "implementer".equals(stage.role())
-                    && skipReason(stage, user, task, reviewByRisk) == null) {
-                writerStage = stage;
-                break;
-            }
-        }
-        if (writerStage == null) return null;
-        dev.warden.config.Profile writer = roles.peek(root, user, writerStage.name(), "implementer",
-                RoleResolver.Writers.NONE, workflow.rotationPositionOf(writerStage));
-        // A writer nobody can fill is reported by the dispatch itself, with the roster's
-        // own reasons; this check is about the readers.
-        if (writer == null) return null;
-        RoleResolver.Writers wouldWrite = new RoleResolver.Writers(java.util.Set.of(writer.vendor()),
-                java.util.Set.of(writer.name()), true,
-                "same_vendor_peer".equals(task.reviewAssurance()));
-        for (Workflow.Stage stage : workflow.stages()) {
-            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) continue;
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            int position = workflow.rotationPositionOf(stage);
+            RoleResolver.Writers judgedBy = stage.onFindings() != null
+                    ? wouldWrite : RoleResolver.Writers.NONE;
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    judgedBy, position);
+            if (chosen != null) {
+                wouldWrite = withPreviewWriter(wouldWrite, chosen);
+                continue;
+            }
+            // A missing writer is a routing failure, not proof that the following readers
+            // are impossible. Neither preflight nor preview advances rotation or dispatches.
+            if (stage.onFindings() == null || wouldWrite.vendors().isEmpty()) continue;
             Map<String, String> refused = roles.explainFill(user, stage.name(), stage.role(),
-                    wouldWrite, workflow.rotationPositionOf(stage));
+                    wouldWrite, position);
             if (refused == null) continue;
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("role", stage.role());
             gap.put("needed_for", stage.name());
             gap.put("blocked_at", "preflight");
             gap.put("rejected_profiles", refused);
-            gap.put("must_differ_from_vendor", writer.vendor());
-            gap.put("writer_profile", writer.name());
+            gap.put("writer_vendors", wouldWrite.vendors().stream().sorted().toList());
+            gap.put("writer_profiles", wouldWrite.profiles().stream().sorted().toList());
+            // Keep the single-writer fields for existing consumers.
+            if (wouldWrite.vendors().size() == 1)
+                gap.put("must_differ_from_vendor", wouldWrite.vendors().iterator().next());
+            if (wouldWrite.profiles().size() == 1)
+                gap.put("writer_profile", wouldWrite.profiles().iterator().next());
             gap.put("exhausted_profiles", List.copyOf(roles.exhaustedProfiles()));
             gap.put("message", "no profile can fill role '" + stage.role() + "' for stage '"
-                    + stage.name() + "' once " + writer.name() + " (" + writer.vendor()
-                    + ") has written the candidate (" + refused + "). Add a profile from another vendor, "
+                    + stage.name() + "' after the preceding writers " + wouldWrite.profiles()
+                    + " (vendors " + wouldWrite.vendors() + ") have written the candidate ("
+                    + refused + "). Add a profile from another vendor, "
                     + "or declare a same_vendor_peer pair in policy.yaml and set "
                     + "review_assurance: same_vendor_peer on the task if that weaker check is "
                     + "acceptable; nothing was dispatched.");
             return gap;
         }
         return null;
+    }
+
+    private static RoleResolver.Writers initialPreviewWriters(TaskSpec.ResolvedTask task) {
+        return new RoleResolver.Writers(new java.util.HashSet<>(task.priorWriters()),
+                java.util.Set.of(), true, "same_vendor_peer".equals(task.reviewAssurance()));
+    }
+
+    private static RoleResolver.Writers withPreviewWriter(RoleResolver.Writers written,
+                                                          dev.warden.config.Profile profile) {
+        if (profile.readOnly()) return written;
+        java.util.Set<String> vendors = new java.util.HashSet<>(written.vendors());
+        java.util.Set<String> profiles = new java.util.HashSet<>(written.profiles());
+        vendors.add(profile.vendor());
+        profiles.add(profile.name());
+        return new RoleResolver.Writers(vendors, profiles, written.known(), written.peerAllowed());
     }
 
     /**
@@ -1625,8 +1647,8 @@ public final class TaskLoop {
      * which runner, and whether a `--use` they typed landed on the stage they meant. Finding
      * that out required reading the summary of a run that had already been paid for.
      *
-     * A preview, and honestly labelled as one. Rotation is read without advancing, the writer
-     * set is taken as empty because nobody has written yet, and a mid-run failover can still
+     * A preview, and honestly labelled as one. Rotation is read without advancing, preceding
+     * writable profiles join the declared prior writers, and a mid-run failover can still
      * put a different vendor in a chair — the row says who the roster names now, which is the
      * question being asked now.
      */
@@ -1634,6 +1656,7 @@ public final class TaskLoop {
                                            TaskSpec.ResolvedTask task, boolean reviewByRisk,
                                            RoleRunner roles, RunOverride overlay) {
         List<Map<String, Object>> rows = new ArrayList<>();
+        RoleResolver.Writers written = initialPreviewWriters(task);
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
@@ -1641,11 +1664,13 @@ public final class TaskLoop {
             row.put("stage", stage.name());
             row.put("role", stage.role());
             dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
-                    RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                    stage.onFindings() != null ? written : RoleResolver.Writers.NONE,
+                    workflow.rotationPositionOf(stage));
             if (chosen == null) {
                 row.put("profile", null);
                 Map<String, String> why = roles.explainFill(user, stage.name(), stage.role(),
-                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                        stage.onFindings() != null ? written : RoleResolver.Writers.NONE,
+                        workflow.rotationPositionOf(stage));
                 row.put("unresolved", why == null ? Map.of() : why);
             } else {
                 row.put("profile", chosen.name());
@@ -1660,6 +1685,7 @@ public final class TaskLoop {
                     row.put("from_overlay",
                             overlay.problem(stage.name(), chosen, user.profiles()) == null);
                 }
+                written = withPreviewWriter(written, chosen);
             }
             if (stage.fixWith() != null && ("fix".equals(stage.onFail()) || "fix".equals(stage.onFindings()))) {
                 dev.warden.config.Profile fixer = roles.peek(root, user, stage.name() + "/fix",
@@ -1677,7 +1703,7 @@ public final class TaskLoop {
      *
      * Built from the preflight's own calls, in its order. The task's {@code use:} is pinned
      * and overlaid on the runner as the loop does it, the workflow is the one the task runs
-     * (agent evidence swaps the browser stage), the writer is peeked first and every reader
+     * (agent evidence swaps the browser stage), writable roles accumulate in order and every reader
      * that judges findings is peeked against it with the task's {@code review_assurance}, and
      * an overlay the chosen profile cannot deliver is refused with {@link RunOverride#problem},
      * the check {@code overlayGap} stops a run on. A table built from the policy alone named
@@ -1697,7 +1723,7 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
         overlay.pin(roles);
         roles.overlay(overlay);
-        RoleResolver.Writers written = RoleResolver.Writers.NONE;
+        RoleResolver.Writers written = initialPreviewWriters(task);
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
@@ -1736,11 +1762,7 @@ public final class TaskLoop {
                     row.put("message", problem);
                 }
             }
-            if ("implementer".equals(stage.role()) && written == RoleResolver.Writers.NONE) {
-                written = new RoleResolver.Writers(java.util.Set.of(chosen.vendor()),
-                        java.util.Set.of(chosen.name()), true,
-                        "same_vendor_peer".equals(task.reviewAssurance()));
-            }
+            written = withPreviewWriter(written, chosen);
         }
         return rows;
     }
