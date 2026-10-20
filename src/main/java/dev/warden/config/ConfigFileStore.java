@@ -50,6 +50,7 @@ public final class ConfigFileStore {
     }
 
     @FunctionalInterface interface Replacer { void replace(Path from, Path to) throws IOException; }
+    @FunctionalInterface public interface Guard { void check() throws IOException; }
     private final Replacer replacer;
     public ConfigFileStore() {
         this((from, to) -> Files.move(from, to, StandardCopyOption.ATOMIC_MOVE,
@@ -73,6 +74,12 @@ public final class ConfigFileStore {
 
     public Saved save(Snapshot source, String candidate, Consumer<String> validate,
                       String backupLabel) throws IOException {
+        return save(source, candidate, validate, backupLabel, () -> {});
+    }
+
+    /** Optional context check under the target lock; other files remain optimistic inputs. */
+    public Saved save(Snapshot source, String candidate, Consumer<String> validate,
+                      String backupLabel, Guard guard) throws IOException {
         if (!backupLabel.matches("[a-z][a-z0-9-]*")) throw new IllegalArgumentException("invalid backup label");
         validate.accept(candidate); // Never expose an unparseable candidate, even briefly.
         Path file = source.file().toRealPath();
@@ -89,6 +96,7 @@ public final class ConfigFileStore {
                 catch (OverlappingFileLockException busy) { lock = null; }
                 if (lock == null) throw new Refused("config_busy", "another configuration edit is in progress; retry after reloading", null);
                 try (FileLock held = lock) {
+                    guard.check();
                     Snapshot current = read(file);
                     expect(current, source.sha256());
                     var dos = Files.getFileAttributeView(file, java.nio.file.attribute.DosFileAttributeView.class);
@@ -100,6 +108,7 @@ public final class ConfigFileStore {
                         writeAndForce(staged, candidate.getBytes(StandardCharsets.UTF_8));
                         // Backups contain the exact accepted source, never a second racy copy.
                         Path backup = backup(file, source.text().getBytes(StandardCharsets.UTF_8), backupLabel);
+                        guard.check();
                         try { replace(source, staged, file); }
                         catch (AtomicMoveNotSupportedException unsupported) {
                             throw new Refused("atomic_replace_unsupported", "filesystem does not support atomic configuration replacement", source.sha256());

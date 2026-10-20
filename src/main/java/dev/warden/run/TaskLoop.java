@@ -1242,10 +1242,10 @@ public final class TaskLoop {
             if (cap > 0 && cap < callPlan.minimumToFinish()) {
                 progress.line("      that cap cannot finish this chain even with no repairs");
             }
-            // Named every time, because the number looks like a cap and is not one: a vendor
-            // that reports no price spends against it nothing at all.
             progress.line("      max_cost_usd " + Progress.money(task.budget().maxCostUsd())
-                    + " is a threshold on the spend vendors report, not a strict cap");
+                    + (task.budget().maxCostUsd() == 0 ? " disables the money limit"
+                    : task.budget().strictCostCap() ? " is a strict cap reserved against declared call bounds"
+                    : " is a threshold on the spend vendors report, not a strict cap"));
             for (Map<String, Object> branch : recoveryBranches(summary)) {
                 progress.line("      if " + branch.get("stage") + " sends the work back: "
                         + branch.get("calls_to_repair_and_finish") + " call(s) to repair and "
@@ -1824,6 +1824,20 @@ public final class TaskLoop {
                 gap = new LinkedHashMap<>(gap);
                 gap.put("code", "cost_cap_unenforceable");
                 problems.add(gap);
+            } else {
+                // Prove only an impossible cap here: even the cheapest declared option at
+                // every owed stage cannot fit. Actual dispatch still reserves selected and
+                // outstanding worst-case bounds, including later failovers and repairs.
+                double minimum = 0;
+                for (Workflow.Stage stage : workflow.stages()) {
+                    if (stage.kind() != Workflow.Kind.ROLE || skipReason(stage, user, task, reviewByRisk) != null) continue;
+                    minimum += selectableProfiles(stage, user, overlay, Map.of()).stream()
+                            .filter(p -> p.maxCostUsd() != null).mapToDouble(p -> p.maxCostUsd()).min().orElse(0);
+                }
+                result.put("strict_minimum_bound_usd", minimum);
+                if (task.budget().maxCostUsd() > 0 && minimum > task.budget().maxCostUsd())
+                    problems.add(Map.of("code", "budget_insufficient", "message",
+                            "Strict cost cap is below even the minimum declared bounds of required calls: " + minimum));
             }
         }
         for (Map<String, Object> row : dispatch) {
@@ -5211,7 +5225,9 @@ public final class TaskLoop {
         progress.line("plan  " + String.join(" -> ", names));
         printCast(cast);
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
-                + Progress.money(task.budget().maxCostUsd()) + " of reported spend, fix rounds <= "
+                + Progress.money(task.budget().maxCostUsd())
+                + (task.budget().maxCostUsd() == 0 ? " (money limit disabled)"
+                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend") + ", fix rounds <= "
                 + task.maxFixAttempts()
                 + (task.budget().maxElapsedMinutes() == null ? ""
                         : ", " + task.budget().maxElapsedMinutes() + " min of execution"));

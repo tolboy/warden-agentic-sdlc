@@ -33,10 +33,11 @@ public final class NextRun {
         Conflict() { super("Settings changed; reload the task before previewing again"); }
     }
 
-    private record State(ConfigLoader.Loaded loaded, UserConfig user, String revision) {}
-    private final Path project;
-    private final Path home;
-    private final RoleResolver.Availability availability;
+    record State(ConfigLoader.Loaded loaded, UserConfig user, String revision,
+                 Map<Path, ConfigFileStore.Snapshot> sources) {}
+    final Path project;
+    final Path home;
+    final RoleResolver.Availability availability;
 
     public NextRun(Path project, Path home, RoleResolver.Availability availability) {
         this.project = project.toAbsolutePath().normalize();
@@ -64,6 +65,8 @@ public final class NextRun {
         result.put("cost_cap", task.budget().costCap());
         result.put("max_elapsed_minutes", task.budget().maxElapsedMinutes());
         result.put("max_fix_attempts", task.maxFixAttempts());
+        result.put("timeout_minutes", task.timeoutMinutes());
+        result.put("gate_ttl_hours", task.budget().gateTtlHours());
         result.put("task_use", state.loaded().task().use().toMap());
         result.put("problems", user.problems());
         List<Map<String, Object>> stages = new ArrayList<>();
@@ -145,7 +148,7 @@ public final class NextRun {
         return result;
     }
 
-    private State read(String taskId) throws IOException {
+    State read(String taskId) throws IOException {
         if (taskId == null || !taskId.matches("[\\p{L}\\p{N}][\\p{L}\\p{N}._-]{0,79}"))
             throw new IllegalArgumentException("Choose a task ID from this project");
         Map<String, String> before = versions(taskId);
@@ -167,7 +170,7 @@ public final class NextRun {
         if (!before.equals(after)) throw new Conflict();
         var loaded = new ConfigLoader.Loaded(project, projectFile, taskFile, config, task,
                 task.resolve(config, taskFile.toString()));
-        return new State(loaded, user, digest(Json.write(after).getBytes(StandardCharsets.UTF_8)));
+        return new State(loaded, user, digest(Json.write(after).getBytes(StandardCharsets.UTF_8)), sources);
     }
 
     private Map<String, String> versions(String taskId) throws IOException {
@@ -233,7 +236,7 @@ public final class NextRun {
         return yaml.toString();
     }
 
-    private static String digest(byte[] bytes) {
+    static String digest(byte[] bytes) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }

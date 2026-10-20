@@ -105,6 +105,18 @@ public final class LedgerReader {
         return summary;
     }
 
+    /** Same accounting for a bounded, confined dashboard read. Does not expose raw events. */
+    public static Map<String, Object> summarizeRecords(List<Map<String, Object>> events) {
+        Metrics metrics = new Metrics();
+        metrics.accept(localView(events, true));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("metrics", metrics.toMap());
+        result.put("settings", metrics.settings.values().stream().map(SettingMetric::toMap).toList());
+        result.put("calls", metrics.callTrace);
+        metrics.markAmbiguous(result);
+        return result;
+    }
+
     /**
      * Aggregate the home corpus for one project identity. {@code projectId} blank or
      * null selects measurements whose project identity is unknown — imported legacy
@@ -183,6 +195,8 @@ public final class LedgerReader {
         private final Map<String, Long> byVendor = new LinkedHashMap<>();
         private final Map<String, Long> byModel = new LinkedHashMap<>();
         private final Map<String, Long> byRequestedModel = new LinkedHashMap<>();
+        private final Map<String, SettingMetric> settings = new LinkedHashMap<>();
+        private final List<Map<String, Object>> callTrace = new ArrayList<>();
         private final Map<String, Long> byRunner = new LinkedHashMap<>();
         private final Map<String, Long> byOutcome = new LinkedHashMap<>();
         private final DecimalMetric cost = new DecimalMetric();
@@ -206,6 +220,7 @@ public final class LedgerReader {
         private long humanWaitEvents;
         private final IntegerMetric humanWaitMillis = new IntegerMetric();
         private long ambiguousCoverage;
+        private long unchargedAttempts;
 
         void accept(List<Map<String, Object>> events) {
             acceptEvents(events, false);
@@ -368,6 +383,13 @@ public final class LedgerReader {
         @SuppressWarnings("unchecked")
         private void acceptRoleAttempt(Map<String, Object> roleRun, Map<String, Object> attempt,
                                        boolean finalAttempt) {
+            // A worker fenced before its first vendor turn stays in evidence, but the
+            // loop returned its reservation. It is neither a paid call nor missing price
+            // coverage. Coverage reconciliation above still deduplicates this attempt.
+            if (Boolean.FALSE.equals(inherited(attempt, roleRun, "budget_charged", finalAttempt))) {
+                unchargedAttempts++;
+                return;
+            }
             roleRuns++;
             increment(byRole, dimension(inherited(attempt, roleRun, "role", true)));
             increment(byProfile, dimension(inherited(attempt, roleRun, "profile", finalAttempt)));
@@ -397,6 +419,37 @@ public final class LedgerReader {
             inputTokens.accept(firstPresent(tokens, "input", "input_tokens", "inputTokens"));
             outputTokens.accept(firstPresent(tokens, "output", "output_tokens", "outputTokens"));
             totalTokens.accept(firstPresent(tokens, "total", "total_tokens", "totalTokens"));
+            Map<String, Object> context = new LinkedHashMap<>();
+            context.put("vendor", inherited(attempt, roleRun, "vendor", finalAttempt));
+            context.put("model_requested", requested);
+            context.put("model_reported", model(attempt, roleRun, finalAttempt));
+            context.put("effort_requested", inherited(attempt, roleRun, "effort_requested", finalAttempt));
+            context.put("runner", inherited(attempt, roleRun, "runner", finalAttempt));
+            // Only labelled scalar dimensions reach the dashboard; no raw output or commands.
+            context.replaceAll((key, value) -> value instanceof String ? value : null);
+            SettingMetric setting = settings.computeIfAbsent(dev.warden.json.Json.write(context), ignored -> new SettingMetric(context));
+            setting.calls++;
+            if (Boolean.FALSE.equals(okBody)) setting.failed++;
+            setting.cost.accept(inherited(attempt, roleRun, "cost_usd", finalAttempt));
+            setting.duration.accept(duration);
+            Map<String, Object> call = new LinkedHashMap<>(context);
+            for (String key : List.of("vendor_attempt_id", "role_invocation_id", "workflow_run_id", "role", "stage", "profile", "code")) {
+                Object value = inherited(attempt, roleRun, key, finalAttempt);
+                call.put(key, value instanceof String ? value : null);
+            }
+            call.put("ok", okBody instanceof Boolean ? okBody : null);
+            Object measuredCost = inherited(attempt, roleRun, "cost_usd", finalAttempt);
+            call.put("cost_usd", nonnegativeNumber(measuredCost));
+            call.put("duration_millis", nonnegativeNumber(duration));
+            Object launchBody = inherited(attempt, roleRun, "launch", finalAttempt);
+            if (launchBody instanceof Map<?, ?> launch && launch.get("effective") instanceof Map<?, ?> effective) {
+                Map<String, Object> options = new LinkedHashMap<>();
+                for (String key : List.of("model", "effort", "agent"))
+                    if (effective.get(key) instanceof String value) options.put(key, value);
+                call.put("launch_effective", options);
+                if (launch.get("status") instanceof String status) call.put("launch_status", status);
+            }
+            callTrace.add(call);
         }
 
         private void acceptTaskRun(Map<String, Object> event) {
@@ -434,6 +487,7 @@ public final class LedgerReader {
         Map<String, Object> toMap() {
             Map<String, Object> role = new LinkedHashMap<>();
             role.put("total", roleRuns);
+            role.put("uncharged_attempts", unchargedAttempts);
             role.put("by_role", byRole);
             role.put("by_profile", byProfile);
             role.put("by_vendor", byVendor);
@@ -483,6 +537,24 @@ public final class LedgerReader {
             result.put("human", human);
             return result;
         }
+    }
+
+    private static final class SettingMetric {
+        private final Map<String, Object> context;
+        private long calls, failed;
+        private final DecimalMetric cost = new DecimalMetric();
+        private final IntegerMetric duration = new IntegerMetric();
+        SettingMetric(Map<String, Object> context) { this.context = context; }
+        Map<String, Object> toMap() {
+            Map<String, Object> row = new LinkedHashMap<>(context);
+            row.put("calls", calls); row.put("failed_calls", failed);
+            row.put("cost_usd", cost.toMap()); row.put("duration_millis", duration.toMapWithPercentiles());
+            return row;
+        }
+    }
+
+    private static Object nonnegativeNumber(Object value) {
+        return value instanceof Number n && Double.isFinite(n.doubleValue()) && n.doubleValue() >= 0 ? value : null;
     }
 
     private static final class DecimalMetric {

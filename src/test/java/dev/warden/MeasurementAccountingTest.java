@@ -23,6 +23,7 @@ public final class MeasurementAccountingTest implements Suite {
         Path root = Files.createTempDirectory("warden-measurement-accounting-");
         try {
             crashAccounting(check, root);
+            unchargedAttempts(check, root);
             transitions(check, root);
             tokenCoverage(check, root);
             models(check, root);
@@ -74,6 +75,37 @@ public final class MeasurementAccountingTest implements Suite {
         check.eq("unprovable coverage is incomplete locally too", true, unknown.get("incomplete"));
         check.eq("unprovable coverage does not claim exact spend", null, spend(unknown));
         check.eq("unprovable coverage does not invent a second call", 1L, calls(unknown));
+    }
+
+    private void unchargedAttempts(Check check, Path root) throws Exception {
+        Path project = root.resolve("uncharged"), home = root.resolve("uncharged-home");
+        var ledger = new EvidenceLedger(project, "run", home);
+        var blocked = call("not-started", "alpha", "one", 0.0);
+        blocked.put("budget_charged", false);
+        blocked.put("ok", false);
+        blocked.put("code", "role_orca_dispatch_failed");
+        blocked.remove("cost_usd");
+        var paid = call("started", "beta", "two", 0.5);
+        ledger.append("vendor_attempt", blocked);
+        ledger.append("vendor_attempt", paid);
+        ledger.append("role_run", role(List.of(blocked, paid)));
+        var reader = new LedgerReader();
+        for (var measured : List.of(reader.summarize(project),
+                reader.summarizeCorpus(home, ProjectIdentity.resolve(project)),
+                LedgerReader.summarizeRecords(List.of(
+                        new LinkedHashMap<>(Map.of("type", "role_run", "vendor_attempts", List.of(blocked, paid))))))) {
+            check.eq("uncharged attempt is not another vendor call", 1L, calls(measured));
+            check.eq("uncharged attempt is retained separately and deduplicated", 1L,
+                    map(map(measured.get("metrics")).get("role_runs")).get("uncharged_attempts"));
+            check.eq("uncharged attempt does not make paid price coverage unknown", 0L,
+                    map(map(map(measured.get("metrics")).get("telemetry")).get("cost_usd")).get("unknown_count"));
+            check.eq("uncharged attempt does not change actual spend", 0.5, spend(measured));
+        }
+        var projected = MeasurementProjector.project(Map.of("type", "vendor_attempt", "budget_charged", false,
+                "vendor_attempts", List.of(blocked))).body();
+        check.eq("uncharged evidence survives the corpus allowlist", false, projected.get("budget_charged"));
+        check.eq("nested uncharged evidence survives historical projection", false,
+                map(((List<?>) projected.get("vendor_attempts")).get(0)).get("budget_charged"));
     }
 
     private void transitions(Check check, Path root) throws Exception {

@@ -93,5 +93,5 @@ Custom effort не подтверждает поддержку моделью и
 
 Проверен браузер Orca; фактический vendor worker dispatch и оплаченные probes не
 запускались. POSIX shell execution экспорта отдельно от Java tests не проверялось.
-Постоянный Apply defaults с diff и digest F08, редактирование task budgets и
-аналитическая вкладка остаются следующими этапами.
+Постоянный Apply defaults с diff и digest F08, task budgets и аналитика реализованы
+следующей поставкой: [этапы 1–3](AGENT-LOOP-UI-SETTINGS-ANALYTICS-2026-10-20.md).

@@ -19,6 +19,8 @@ F09, колонки dashboard и подробный preview задачи — в
 [отчёте исправления таблиц](AGENT-LOOP-DASHBOARD-FIXES-2026-10-20.md).
 Форма следующего запуска, resolver preview и экспорт CLI/task overlay — в
 [отчёте next-run UI](AGENT-LOOP-NEXT-RUN-2026-10-20.md).
+Постоянный Apply, редактор бюджетов и аналитика результатов — в
+[отчёте этапов 1–3](AGENT-LOOP-UI-SETTINGS-ANALYTICS-2026-10-20.md).
 
 | Область | Реализованные механизмы | Практический смысл |
 |---|---|---|

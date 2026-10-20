@@ -213,7 +213,7 @@ public final class NextRunTest implements Suite {
             budgets: { max_role_runs: 3, max_cost_usd: 20, max_elapsed_minutes: 5 }
             """;
 
-    private static void fixture(Path home, Path root) throws Exception {
+    static void fixture(Path home, Path root) throws Exception {
         Files.createDirectories(home.resolve("profiles"));
         Files.createDirectories(root.resolve(".warden/tasks"));
         Files.createDirectories(root.resolve("src"));

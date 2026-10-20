@@ -296,8 +296,11 @@ the run that asked has stopped waiting, so a question left unanswered never need
 
 The same panel has a **Следующий запуск** form: select a task and role profiles,
 inspect model/effort/runner and the call budget, then copy a CLI dry-run, run command
-or merged task `use:` block. It previews the resolver's choices without dispatch;
-stale settings require a reload. See [the setup guide](docs/SETUP.md#build-the-next-run-in-the-dashboard).
+or task `use:` block. Save task choices and budgets, or personal fallback/retry policy,
+through a reviewed diff and versioned **Apply**. Stale settings require a reload.
+The **Аналитика результатов** section separates vendor success, workflow readiness and
+human acceptance, with cost/token coverage, retries, failovers and continuation context.
+See [the setup guide](docs/SETUP.md#build-the-next-run-in-the-dashboard).
 
 ```text
 run   chapter-hearth-4

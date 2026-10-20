@@ -184,7 +184,8 @@ The same map may live on the task as `use:`, where a replan preserves it and
 Open `warden dashboard` (or add `--open-orca`) and use **Следующий запуск**. Choose
 an existing project task, then a profile for each role stage. Profile options expose
 vendor, model, effort, runner and verification; the vendor filter only narrows this
-list. A blank choice inherits the task's `use:` and the policy. Effort accepts a
+list. Saved task `use:` is populated in the controls; clearing a field removes that
+task pin and inherits the policy/profile. Effort accepts a
 custom value, and the Orca placement option uses the same declared-twin rule as
 `--host`. Mechanical stages have no profile controls; required readers stay governed
 by the contract.
@@ -202,10 +203,58 @@ After settings checks pass, the form also offers a run command and a complete
 merged task `use:` block. Replace the existing `use:` block when using that export.
 Exported commands read current files: repeat preview and dry-run after editing them.
 
-The form does not execute the commands or save personal defaults. Model variants
-come from declared profiles; a custom effort is not a claim that the model supports
-it, and a profile's verification stamp does not verify the new effort. Persistent
-roster edits still use the versioned `warden roster` commands above.
+The budget editor covers vendor calls, USD threshold/strict cap, chain execution
+minutes, repair rounds, call timeout and human-gate lifetime. Zero USD means no money
+limit, as in the CLI; missing chain minutes or gate lifetime is unbounded. Empty
+repair/timeout fields inherit the project. Strict-cap preview rejects missing bounds
+and a ceiling below even the cheapest declared calls; actual dispatch still reserves
+the selected/outstanding bounds and may refuse a later retry or fallback.
+
+Preview shows a diff of the task file. **Apply в файл задачи** saves `use:` and budget
+edits together, with a backup and atomic replacement. Changed budgets or removing a
+stored pin require saving before CLI export: those changes cannot be expressed by
+the invocation flags. The command always reads the current task file.
+
+**Личные настройки по умолчанию** separately edits `policy.yaml` in the displayed
+config home: ordered fallback profiles, first/rotate, per-role vendor-failure mode,
+quota/vendor failover, stage switch limit, rate-limit retries/backoff and repair reserve.
+Profiles expose vendor/model/effort/runner in their labels. Preview checks the policy
+against the selected task; that task's `use:` still takes priority. Other projects
+using the same home inherit the saved policy, and need their own preflight.
+
+Each Apply is one file, never a multi-file transaction. It requires the exact reviewed
+candidate hash and the same project/task, policy, profile inventory and rotation
+revision. A changed file or concurrent edit returns a conflict/busy refusal, requiring
+reload and a fresh diff. Untouched YAML sections remain verbatim; edited sections use
+flow mappings and retain their comments ahead of the section. Backups preserve the
+exact predecessor. External editors that ignore Warden locks can race an optimistic
+check; filesystem atomic-replace support remains required.
+
+The form does not execute commands. Model variants come from declared profiles;
+custom effort does not prove model support or receive a verification stamp. The
+versioned `warden roster` commands remain available for CLI edits.
+
+### Read results in the dashboard
+
+**Аналитика результатов** reads local `evidence.jsonl`, task summaries and decisions.
+Use task/run filters and **Обновить аналитику**. It shows vendor call success separately
+from workflow readiness, review passage and human acceptance; price/token coverage;
+call and recorded human-wait p50/p95; failover, observed same-profile rate retries and
+requested backoff; requested/launch/reported settings; finding transitions; and stage
+timelines. Model settings rows are descriptive, not a model-quality ranking.
+
+The same ledger accounting reconciles journaled attempts and enclosing role summaries.
+Only per-run calls are added; cumulative continuation counters remain context.
+Explicitly uncharged attempts (workers fenced before the first vendor turn) are shown
+separately and do not inflate vendor failures or unknown-price coverage. Older home
+corpus records that omitted this flag cannot establish that distinction.
+Unknown price stays unknown, and cost is labelled as a known subtotal when coverage is
+partial. `closed` is a transition in blocking IDs, not proof of an independently
+adjudicated fix. Missing infrastructure wait, actual backoff duration and escaped
+defects are not inferred. Dry-runs are excluded. Missing call measurements, malformed
+or skipped evidence display an incomplete-data warning. Reads are confined to the
+project's runs directory and bounded to 2,000 directories, 20,000 events, 8 MiB per file
+and 64 MiB total; raw transcripts, commands and private decision notes stay out.
 
 A failure gate also offers `advance`: it closes this run and starts the next id of the same
 task after you dealt with the blocker. The next run keeps this run's `--use`, `--effort` and

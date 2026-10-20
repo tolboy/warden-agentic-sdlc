@@ -42,7 +42,8 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 
 | Field | Meaning |
 |---|---|
-| `total` | Vendor attempts recorded across every run in this project; a failover adds another attempt |
+| `total` | Chargeable vendor attempts recorded across every run; a failover adds another attempt |
+| `uncharged_attempts` | Deduplicated attempts explicitly marked `budget_charged: false`, outside `total` and its splits |
 | `by_role` | Split by `implementer`, `reviewer`, `architect`, `visual_qa`, `planner` |
 | `by_profile` | Split by the concrete configured profile used for each attempt |
 | `by_vendor` | Split by the vendor that answered, so independence is auditable after the fact |
@@ -62,6 +63,13 @@ and keep unavailable fields for earlier attempts under `<unknown>`. A historical
 `model` field has no reliable provenance and establishes neither requested nor reported
 model. The original field stays in the evidence; grouping uses `model_requested`,
 `model_reported` or the corresponding labelled values in `measurement_context`.
+
+An Orca worker fenced before its first vendor turn returns its budget reservation.
+When evidence explicitly records `budget_charged: false`, the attempt remains in
+`uncharged_attempts`, outside vendor success/failure, cost/token coverage and call timing.
+This flag is preserved on both journal and nested attempts in new corpus projections.
+Older corpus records that dropped it cannot establish that the reservation was returned;
+absence is not evidence that a call was uncharged.
 
 Modern `vendor_attempt` journal events count even if a crash prevented the final `role_run`.
 The local ledger and home corpus both reconcile the nested summary by `vendor_attempt_id`,
