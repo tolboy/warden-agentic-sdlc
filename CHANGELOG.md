@@ -9,6 +9,17 @@ that exists in code but has never been run live says so.
 
 ## [Unreleased]
 
+### Fixed
+
+- Local attempt accounting retains completed vendor calls when a crash prevents the role
+  summary, reconciles partial journals by attempt identity, and withholds exact spend for
+  ambiguous coverage. Retry A→A no longer counts as failover; recorded automatic and
+  confirmed switches count once across journal and summary.
+- Model metrics and joined reports use vendor-reported identity. Requested settings are
+  recorded separately; historical model fields without provenance remain unknown in
+  measured grouping. Token totals retain unknown coverage for each field independently,
+  including partially reported usage and reported zeroes.
+
 ### Added
 
 - Checkout-wide execution leases cover workflows, preparation, standalone roles and machine

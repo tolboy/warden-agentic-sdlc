@@ -48,6 +48,7 @@ public final class TestMain {
                 new dev.warden.RestoreContractTest(),
                 new dev.warden.LocalHttpExecutorTest(),
                 new dev.warden.LedgerTest(),
+                new dev.warden.MeasurementAccountingTest(),
                 new dev.warden.LedgerCompareTest(),
                 new dev.warden.HomeCorpusTest(),
                 new dev.warden.CorpusReaderTest(),

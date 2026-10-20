@@ -884,6 +884,7 @@ public final class RoleRunner {
             report.put("profile", profile.name());
             report.put("vendor", profile.vendor());
             report.put("model", profile.model());
+            report.put("model_requested", profile.model());
             report.put("effort_requested", profile.effort());
             report.put("workflow_run_id", workflowRunId == null ? runId : workflowRunId);
             report.put("stage", stageName == null ? role : stageName);
@@ -1607,11 +1608,13 @@ public final class RoleRunner {
         entry.put("vendor", profile.vendor());
         entry.put("runner", profile.runner());
         entry.put("effort_requested", profile.effort());
+        entry.put("model_requested", profile.model());
         if (result.evidence().containsKey("launch")) entry.put("launch", result.evidence().get("launch"));
         Object reportedModel = result.evidence().get("model_reported");
-        Object model = reportedModel != null ? reportedModel
-                : result.evidence().getOrDefault("model", profile.model());
-        if (model != null) entry.put("model", model);
+        if (reportedModel instanceof String value && !value.isBlank()) {
+            entry.put("model_reported", value);
+            entry.put("model", value);
+        }
         entry.put("ok", result.ok());
         entry.put("code", result.code());
         entry.put("duration_millis", result.duration().toMillis());

@@ -47,22 +47,42 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 | `by_profile` | Split by the concrete configured profile used for each attempt |
 | `by_vendor` | Split by the vendor that answered, so independence is auditable after the fact |
 | `by_model` | Split by the model as the vendor reported it, not as the profile requested it |
+| `by_requested_model` | Split by the separately recorded profile request; never fills a missing reported model |
 | `by_runner` | Split by `direct`, `orca` or `local` — which adapter dispatched the call |
 | `by_outcome` | Split by outcome code: `ok`, `role_artifact_schema_violation`, `role_quota_exhausted`, and so on |
 
 A dimension the evidence did not carry is counted under `<unknown>` rather than dropped, so
 the splits always sum to `total`.
 
-One `role_run` can contain several `vendor_attempts` when quota failover occurred. Those
+One `role_run` can contain several `vendor_attempts` when retry or failover occurred. Those
 attempts, rather than only the final successful vendor, are the unit of every split and every
 telemetry count. Historical ledgers without `vendor_attempts` remain one attempt per
 `role_run`; older sparse attempt arrays inherit final-attempt fields from the enclosing event
-and keep unavailable fields for earlier attempts under `<unknown>`.
+and keep unavailable fields for earlier attempts under `<unknown>`. A historical bare
+`model` field has no reliable provenance and establishes neither requested nor reported
+model. The original field stays in the evidence; grouping uses `model_requested`,
+`model_reported` or the corresponding labelled values in `measurement_context`.
+
+Modern `vendor_attempt` journal events count even if a crash prevented the final `role_run`.
+The local ledger and home corpus both reconcile the nested summary by `vendor_attempt_id`,
+so a partial journal preserves uncovered calls and a late or repeated journal entry does
+not charge the same attempt again. A relationship that cannot be proved is marked
+`ambiguous_coverage` / `incomplete`, with exact spend withheld. The local run verdict and
+visible event count retain their historical presentation: an orphan call does not invent
+a completed run. `warden report` still requires a task summary; use the ledger to inspect
+attempt accounting when a crash prevented that summary.
 
 ### `telemetry` — cost, tokens, wall clock
 
 `cost_usd`, `tokens.input`, `tokens.output`, `tokens.total` and `duration_millis`, each in the
 three-field shape above; `duration_millis` also carries `p50` and `p95`.
+
+The joined `warden report` vendor rows also preserve coverage independently for input,
+output and total tokens: `input_tokens_unknown_calls`, `output_tokens_unknown_calls` and
+`total_tokens_unknown_calls`. Each total is `null` when no call reported that field. A
+reported zero remains known; input alone cannot establish output or total. The existing
+`tokens_unknown_calls` field now counts calls missing **any** of these fields, and the
+terminal describes that partial coverage beside the reported sums.
 
 Cost is only ever what a vendor printed. Warden has no price list and does not want one:
 a table of per-model prices in this repository would be wrong within a month, and it would be
@@ -72,11 +92,20 @@ wrong silently.
 
 | Field | Meaning |
 |---|---|
-| `failovers` | Vendor-to-vendor transitions, counted per transition |
+| `failovers` | Recorded profile/vendor switches, counted per transition; a same-profile retry is not a switch |
 | `failover_role_runs` | Role runs that involved at least one, so one run that switched twice is not read as two runs that switched |
 | `vendor_failure_failovers` | `role_failover` events whose cause is not a spent subscription: a call that produced no artifact |
 | `fix_rounds` | Fix attempts consumed, from each task run's `attempts_used` |
 | `fix_rounds_unknown_runs` | Task runs whose attempt count could not be read, kept separate rather than assumed to be 0 |
+
+`role_failover` journal events and `role_failovers` in the role summary describe the same
+switches and are reconciled by role invocation. Recorded switches take precedence over
+inference from historical adjacent attempts. A confirmed continuation with one new call
+still counts its switch; A→A counts zero, A→B and A→A→B count one each. An attempt count
+without profile/vendor identities cannot establish a switch. A switch journaled before a
+crash remains visible even without the final role summary.
+When only part of a switch journal reached the corpus, the summary's recorded transitions
+complete its count instead of being discarded merely because one journal row exists.
 
 ### `failures` — what refused, split by who could act on it
 

@@ -84,7 +84,7 @@ public final class LedgerTest implements Suite {
                     object(roleRuns.get("by_profile")).get("claude"));
             check.eq("role runs grouped by vendor", 1L,
                     object(roleRuns.get("by_vendor")).get("openai"));
-            check.eq("legacy role run without a model stays explicit", 1L,
+            check.eq("models without vendor provenance stay explicit", 2L,
                     object(roleRuns.get("by_model")).get("<unknown>"));
             check.eq("reported model wins over the declared model", 1L,
                     object(roleRuns.get("by_model")).get("gpt-test"));
@@ -164,8 +164,10 @@ public final class LedgerTest implements Suite {
             Map<String, Object> oldRoleRuns = object(oldMetrics.get("role_runs"));
             check.eq("sparse historical attempt arrays still count both calls", 2L,
                     oldRoleRuns.get("total"));
-            check.eq("the historical final attempt inherits its top-level model", 1L,
-                    object(oldRoleRuns.get("by_model")).get("gpt-old"));
+            check.eq("historical declarations do not prove the served model", 2L,
+                    object(oldRoleRuns.get("by_model")).get("<unknown>"));
+            check.eq("historical model fields do not prove requested settings either", 2L,
+                    object(oldRoleRuns.get("by_requested_model")).get("<unknown>"));
             Map<String, Object> oldTelemetry = object(oldMetrics.get("telemetry"));
             check.eq("historical final telemetry is inherited exactly once", 0.4,
                     object(oldTelemetry.get("cost_usd")).get("total"));

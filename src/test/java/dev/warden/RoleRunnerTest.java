@@ -121,6 +121,10 @@ public final class RoleRunnerTest implements Suite {
             List<Map<String, Object>> implAttempts = objects(implReport.get("vendor_attempts"));
             check.eq("attempt evidence keeps the vendor-reported model", "stub-impl-model",
                     implAttempts.get(0).get("model"));
+            check.eq("attempt evidence labels the reported model", "stub-impl-model",
+                    implAttempts.get(0).get("model_reported"));
+            check.eq("requested model is retained apart from the receipt", implReport.get("model_requested"),
+                    implAttempts.get(0).get("model_requested"));
             check.eq("attempt evidence keeps the runner", "direct",
                     implAttempts.get(0).get("runner"));
             check.eq("attempt evidence keeps reported tokens", 12L,
@@ -173,6 +177,7 @@ public final class RoleRunnerTest implements Suite {
                     profile: stub-rate
                     role: reviewer
                     vendor: ratevendor
+                    model: requested-rate-model
                     command: %s
                     read_only: true
                     args: ["-cp", %s, "dev.warden.testing.StubVendor", "rate-limit-once", "--counter", %s, "--threshold", "2", "--prompt-file", "{{prompt_file}}"]
@@ -213,6 +218,14 @@ public final class RoleRunnerTest implements Suite {
             check.eq("after one pause of the declared backoff", List.of(7000L), slept);
             check.eq("both calls are vendor attempts", 2,
                     ((List<?>) retried.details().get("vendor_attempts")).size());
+            for (Map<String, Object> rateAttempt : objects(retried.details().get("vendor_attempts"))) {
+                check.eq("retry retains the requested model", "requested-rate-model", rateAttempt.get("model_requested"));
+                check.eq("retry does not invent a reported model", null, rateAttempt.get("model_reported"));
+                check.eq("legacy attempt model is not filled from the request", null, rateAttempt.get("model"));
+            }
+            Map<?, ?> retryMetrics = (Map<?, ?>) new dev.warden.ledger.LedgerReader().summarize(project).get("metrics");
+            check.eq("actual A to A rate retry is not a failover", 0L,
+                    ((Map<?, ?>) retryMetrics.get("iterations")).get("failovers"));
             check.that("and the report says a retry happened",
                     retried.details().get("rate_limit_retry") != null);
             check.eq("a vendor that names its own wait is obeyed", 12_000L,

@@ -44,7 +44,7 @@ public final class MeasurementProjector {
             "stage", "role", "role_invocation_id", "task_id", "task_kind", "risk",
             "vendor_attempt", "vendor_attempt_id", "candidate_fingerprint",
             "ok", "code", "reason", "next_action", "verdict",
-            "profile", "vendor", "model", "model_reported", "runner",
+            "profile", "vendor", "model", "model_requested", "model_reported", "runner",
             "effort_requested", "read_only", "strategy", "independence_required",
             "rotation_counter", "workflow_run_id",
             "duration_millis", "duration_ms", "cost_usd", "attempts_cost_usd",
@@ -94,7 +94,7 @@ public final class MeasurementProjector {
             "workspace_write", "network", "land", "source");
 
     private static final Set<String> ATTEMPT = Set.of(
-            "attempt", "profile", "vendor", "runner", "model", "model_reported",
+            "attempt", "profile", "vendor", "runner", "model", "model_requested", "model_reported",
             "effort_requested", "ok", "code", "duration_millis", "duration_ms",
             "cost_usd", "tokens", "inherited_unfinished_work",
             "vendor_attempt_id");

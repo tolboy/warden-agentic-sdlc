@@ -42,10 +42,16 @@ public final class LedgerReader {
             "authority_denied", "run_prepared", "run_reserved", "vendor_attempt");
 
     private static List<Map<String, Object>> localView(List<Map<String, Object>> events) {
+        return localView(events, false);
+    }
+
+    private static List<Map<String, Object>> localView(List<Map<String, Object>> events,
+                                                        boolean includeAttempts) {
         List<Map<String, Object>> visible = new ArrayList<>(events.size());
         for (Map<String, Object> event : events) {
             Object type = event.get("type");
-            if (type == null || !CORPUS_ONLY_EVENTS.contains(String.valueOf(type))) {
+            if (type == null || !CORPUS_ONLY_EVENTS.contains(String.valueOf(type))
+                    || (includeAttempts && "vendor_attempt".equals(type))) {
                 visible.add(event);
             }
         }
@@ -77,7 +83,9 @@ public final class LedgerReader {
                     row.put("verdict", verdict);
                     row.put("events", (long) events.size());
                     runRows.add(row);
-                    metrics.accept(events);
+                    // Presentation keeps historical verdict/event-count semantics, while
+                    // accounting must retain calls completed before a role summary existed.
+                    metrics.accept(localView(read.rows(), true));
                 }
             }
         }
@@ -90,6 +98,7 @@ public final class LedgerReader {
         summary.put("failed", failed);
         summary.put("runs", runRows);
         summary.put("metrics", metrics.toMap());
+        metrics.markAmbiguous(summary);
         summary.put("future_dimensions", List.of("vendor", "model", "duration_ms", "cost_usd",
                 "fix_attempts", "review_findings", "human_decision"));
         markIncomplete(summary, skipped);
@@ -173,6 +182,7 @@ public final class LedgerReader {
         private final Map<String, Long> byProfile = new LinkedHashMap<>();
         private final Map<String, Long> byVendor = new LinkedHashMap<>();
         private final Map<String, Long> byModel = new LinkedHashMap<>();
+        private final Map<String, Long> byRequestedModel = new LinkedHashMap<>();
         private final Map<String, Long> byRunner = new LinkedHashMap<>();
         private final Map<String, Long> byOutcome = new LinkedHashMap<>();
         private final DecimalMetric cost = new DecimalMetric();
@@ -217,17 +227,44 @@ public final class LedgerReader {
                     .count();
             quotaFailures += explicitQuotaEvents;
             long fallbackQuotaFailures = 0;
-            CoveredCalls covered = corpus ? CoveredCalls.of(events) : CoveredCalls.NONE;
+            CoveredCalls covered = CoveredCalls.of(events, corpus);
+            Set<String> countedAttempts = new LinkedHashSet<>();
+            Map<String, long[]> journaledSwitches = new LinkedHashMap<>();
+            Set<String> countedSwitchRoles = new LinkedHashSet<>();
+            Set<String> summarizedSwitchRoles = new LinkedHashSet<>();
+            for (Map<String, Object> event : events) {
+                if ("role_failover".equals(text(event.get("type")))) {
+                    String invocation = switchIdentity(event);
+                    if (invocation != null) {
+                        long[] counts = journaledSwitches.computeIfAbsent(invocation, ignored -> new long[2]);
+                        counts[0]++;
+                        if (vendorFailureSwitch(event)) counts[1]++;
+                    }
+                }
+            }
 
             for (Map<String, Object> event : events) {
-                if (corpus && countsAsNewCall(event)) {
-                    acceptRoleAttempt(event, event, true);
+                if (isJournalCall(event, corpus)) {
+                    String id = attemptId(event);
+                    if (id == null || countedAttempts.add(id)) acceptRoleAttempt(event, event, true);
                 }
                 String type = text(event.get("type"));
                 String code = text(event.get("code"));
                 if ("role_run".equals(type)) {
                     if (corpus) acceptCorpusRoleRun(event, covered);
-                    else acceptRoleRun(event);
+                    else acceptExpandedRoleRun(event, covered);
+                    String invocation = switchIdentity(event);
+                    if (invocation == null || summarizedSwitchRoles.add(invocation)) {
+                        List<Map<String, Object>> recorded = RoleMeasurements.failovers(event);
+                        long transitions = recorded.size();
+                        long[] journaled = invocation == null ? null : journaledSwitches.get(invocation);
+                        if (transitions > 0) {
+                            failovers += Math.max(0, transitions - (journaled == null ? 0 : journaled[0]));
+                            if (journaled == null) failoverRoleRuns++;
+                        }
+                        long failures = recorded.stream().filter(LedgerReader::vendorFailureSwitch).count();
+                        vendorFailureFailovers += Math.max(0, failures - (journaled == null ? 0 : journaled[1]));
+                    }
                     if ("role_quota_exhausted".equals(code)) fallbackQuotaFailures++;
                     if (isConfigurationFailure(code)) configurationFailures++;
                     if ("visual_qa".equals(text(event.get("role")))
@@ -251,9 +288,11 @@ public final class LedgerReader {
                     visualHarnessFailures++;
                 }
                 if ("task_run".equals(type)) acceptTaskRun(event);
-                if ("role_failover".equals(type)
-                        && !"role_quota_exhausted".equals(text(event.get("cause")))) {
-                    vendorFailureFailovers++;
+                if ("role_failover".equals(type)) {
+                    failovers++;
+                    String invocation = switchIdentity(event);
+                    if (invocation == null || countedSwitchRoles.add(invocation)) failoverRoleRuns++;
+                    if (vendorFailureSwitch(event)) vendorFailureFailovers++;
                 }
                 acceptHumanEvent(event, type);
             }
@@ -276,7 +315,6 @@ public final class LedgerReader {
                 acceptExpandedRoleRun(event, covered);
                 return;
             }
-            acceptRoleRunMeta(event);
             if (accountingUnitUnknown(event, covered)) acceptUnknownAccounting();
         }
 
@@ -304,10 +342,12 @@ public final class LedgerReader {
                     }
                     acceptRoleAttempt(event, attempt, index == attempts.size() - 1);
                 }
-            } else {
+            } else if (!covered.coversAttempt(event) && !covered.ambiguousWith(event, event)) {
                 acceptRoleAttempt(event, event, true);
+            } else if (!covered.coversAttempt(event)) {
+                ambiguousCoverage++;
+                acceptUnknownAccounting();
             }
-            acceptRoleRunMeta(event);
         }
 
         private void acceptUnknownAccounting() {
@@ -318,48 +358,11 @@ public final class LedgerReader {
             totalTokens.accept(null);
         }
 
-        @SuppressWarnings("unchecked")
-        private void acceptRoleRun(Map<String, Object> event) {
-            if (event.get("vendor_attempts") instanceof List<?> attempts && !attempts.isEmpty()) {
-                for (int index = 0; index < attempts.size(); index++) {
-                    Object body = attempts.get(index);
-                    Map<String, Object> attempt = body instanceof Map<?, ?> map
-                            ? (Map<String, Object>) map : Map.of();
-                    acceptRoleAttempt(event, attempt, index == attempts.size() - 1);
-                }
-            } else {
-                // Ledgers written before vendor_attempts existed represented one actual call
-                // directly on role_run. Keep reading that format indefinitely.
-                acceptRoleAttempt(event, event, true);
-            }
-            acceptRoleRunMeta(event);
-        }
-
-        private void acceptRoleRunMeta(Map<String, Object> event) {
-            long transitions = 0;
-            if (event.get("vendor_attempts") instanceof List<?> attempts && attempts.size() > 1) {
-                transitions = attempts.size() - 1L;
-            }
-            if (event.get("failed_over_from") instanceof List<?> prior) {
-                transitions = Math.max(transitions, prior.size());
-            }
-            if (event.get("accounting") instanceof Map<?, ?> accounting
-                    && accounting.get("vendor_attempt_count") instanceof Number count
-                    && count.longValue() > 1) {
-                transitions = Math.max(transitions, count.longValue() - 1);
-            }
-            // A human-confirmed switch on --continue is one attempt plus a role_failover.
-            // Attempt transitions alone count it as zero. A later automatic quota switch
-            // in that same dispatch is a second recorded row beside the one attempt pair
-            // (B, then C). The larger source is the count, so both are included once the
-            // rows are on the role_run, and a switch that is in both is not counted twice.
-            if (event.get("role_failovers") instanceof List<?> recorded && !recorded.isEmpty()) {
-                transitions = Math.max(transitions, recorded.size());
-            }
-            if (transitions > 0) {
-                failoverRoleRuns++;
-                failovers += transitions;
-            }
+        void markAmbiguous(Map<String, Object> summary) {
+            if (ambiguousCoverage == 0) return;
+            summary.put("ambiguous_coverage", ambiguousCoverage);
+            summary.put("incomplete", true);
+            withholdExactSpend(summary);
         }
 
         @SuppressWarnings("unchecked")
@@ -370,6 +373,9 @@ public final class LedgerReader {
             increment(byProfile, dimension(inherited(attempt, roleRun, "profile", finalAttempt)));
             increment(byVendor, dimension(inherited(attempt, roleRun, "vendor", finalAttempt)));
             increment(byModel, dimension(model(attempt, roleRun, finalAttempt)));
+            Object requested = RoleMeasurements.requestedModel(attempt);
+            if (requested == null && finalAttempt) requested = RoleMeasurements.requestedModel(roleRun);
+            increment(byRequestedModel, dimension(requested));
             increment(byRunner, dimension(inherited(attempt, roleRun, "runner", finalAttempt)));
             Object outcome = inherited(attempt, roleRun, "code", finalAttempt);
             Object okBody = inherited(attempt, roleRun, "ok", finalAttempt);
@@ -432,6 +438,7 @@ public final class LedgerReader {
             role.put("by_profile", byProfile);
             role.put("by_vendor", byVendor);
             role.put("by_model", byModel);
+            role.put("by_requested_model", byRequestedModel);
             role.put("by_runner", byRunner);
             role.put("by_outcome", byOutcome);
 
@@ -559,11 +566,11 @@ public final class LedgerReader {
 
     private static Object model(Map<String, Object> attempt, Map<String, Object> roleRun,
                                 boolean finalAttempt) {
-        Object reported = firstPresent(attempt, "model_reported");
-        if (reported == null && finalAttempt) reported = firstPresent(roleRun, "model_reported");
-        if (reported != null) return reported;
-        Object declared = firstPresent(attempt, "model");
-        return declared != null || !finalAttempt ? declared : firstPresent(roleRun, "model");
+        Object reported = RoleMeasurements.reportedModel(attempt);
+        if (reported == null && finalAttempt && attemptId(attempt) == null) {
+            reported = RoleMeasurements.reportedModel(roleRun);
+        }
+        return reported;
     }
 
     private static String firstText(Map<String, Object> map, String... names) {
@@ -609,6 +616,23 @@ public final class LedgerReader {
             return Boolean.TRUE.equals(accounting.get("counts_as_new_calls"));
         }
         return false;
+    }
+
+    private static boolean isJournalCall(Map<String, Object> event, boolean corpus) {
+        return corpus ? countsAsNewCall(event) : "vendor_attempt".equals(event.get("type"));
+    }
+
+    private static boolean vendorFailureSwitch(Map<String, Object> event) {
+        String cause = nonBlank(text(event.get("cause")));
+        return cause != null && !"role_quota_exhausted".equals(cause);
+    }
+
+    private static String switchIdentity(Map<String, Object> event) {
+        String invocation = nonBlank(text(event.get("role_invocation_id")));
+        if (invocation != null) return "invocation:" + invocation;
+        String run = firstNonBlank(text(event.get("run_instance_id")), text(event.get("run_id")));
+        String role = nonBlank(text(event.get("role")));
+        return run == null || role == null ? null : "run:" + run + ":" + role + ":" + event.get("stage");
     }
 
     private static boolean hasRecordedAttempts(Map<String, Object> event) {
@@ -663,15 +687,13 @@ public final class LedgerReader {
      * rather than counted as two unrelated calls.
      */
     private record CoveredCalls(Set<String> attemptIds, List<JournalCall> journal) {
-        static final CoveredCalls NONE = new CoveredCalls(Set.of(), List.of());
-
         private record JournalCall(String instance, String operator, String attemptId) {}
 
-        static CoveredCalls of(List<Map<String, Object>> events) {
+        static CoveredCalls of(List<Map<String, Object>> events, boolean corpus) {
             Set<String> attemptIds = new LinkedHashSet<>();
             List<JournalCall> journal = new ArrayList<>();
             for (Map<String, Object> event : events) {
-                if (!countsAsNewCall(event)) continue;
+                if (!isJournalCall(event, corpus)) continue;
                 String instance = nonBlank(text(event.get("run_instance_id")));
                 String operator = nonBlank(firstText(event, "operator_run_id", "run_id"));
                 String attempt = attemptId(event);
