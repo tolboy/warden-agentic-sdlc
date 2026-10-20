@@ -4,6 +4,7 @@ import dev.warden.config.Policy;
 import dev.warden.config.Profile;
 import dev.warden.config.RosterCommand;
 import dev.warden.config.UserSetup;
+import dev.warden.config.ConfigFileStore;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
@@ -35,7 +36,8 @@ public final class RosterTest implements Suite {
             modelRemovesVerifiedOnUnlessKept(check, sandbox);
             modelReachesTheVendorOrIsRefused(check, sandbox);
             effortWithoutPlaceholderIsRefused(check, home(sandbox, "effort"));
-            failedReparseRestoresOriginalBytes(check, home(sandbox, "reparse"));
+            invalidCandidateNeverWrites(check, home(sandbox, "reparse"));
+            versionedEdits(check, home(sandbox, "versioned"));
             allowMissingAndMismatch(check, home(sandbox, "allow"));
         } finally {
             deleteTree(sandbox);
@@ -490,24 +492,57 @@ public final class RosterTest implements Suite {
         check.eq("nothing was backed up", null, outcome.report().get("backup"));
     }
 
-    private void failedReparseRestoresOriginalBytes(Check check, Path home) throws Exception {
+    private void invalidCandidateNeverWrites(Check check, Path home) throws Exception {
         Path policy = home.resolve("policy.yaml");
         byte[] original = Files.readAllBytes(policy);
         String broken = Files.readString(policy, StandardCharsets.UTF_8)
                 .replace("version: 1", "version: 9");
         RosterCommand.Outcome outcome = new RosterCommand().rewriteAndReparse(
-                policy, broken, "policy", "roster_set",
+                ConfigFileStore.read(policy), broken, "policy", "roster_set",
                 List.of("version: 1"), List.of("version: 9"), Map.of());
         check.that("a parser refusal is not ok", !outcome.ok());
         check.eq("code", "reparse_failed", outcome.report().get("code"));
         check.contains("parser message is the failure",
                 String.valueOf(outcome.report().get("message")), "version must be 1");
-        check.that("the old file is byte-identical after restore",
+        check.that("the old file is byte-identical without a restore",
                 Arrays.equals(original, Files.readAllBytes(policy)));
-        Path backup = Path.of(String.valueOf(outcome.report().get("backup")));
-        check.that("the backup was not deleted", Files.isRegularFile(backup));
-        check.that("the backup still equals the original",
-                Arrays.equals(original, Files.readAllBytes(backup)));
+        check.eq("invalid candidates need no backup", null, outcome.report().get("backup"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private void versionedEdits(Check check, Path home) throws Exception {
+        Path policy = home.resolve("policy.yaml");
+        Map<String, String> versions = (Map<String, String>) roster(home, "roster").report().get("file_versions");
+        String initialHash = versions.get("policy.yaml");
+        check.eq("listed policy digest comes from its bytes", ConfigFileStore.read(policy).sha256(), initialHash);
+        RosterCommand.Outcome first = roster(home, "roster", "set", "reviewer", "--profiles", "claude-review",
+                "--expected-sha256", initialHash.toUpperCase(java.util.Locale.ROOT));
+        check.that("a current digest accepts an edit", first.ok());
+        check.eq("result identifies the replaced bytes", initialHash, first.report().get("before_sha256"));
+        check.eq("result identifies the committed bytes", ConfigFileStore.read(policy).sha256(), first.report().get("sha256"));
+        String changed = Files.readString(policy);
+        RosterCommand.Outcome stale = roster(home, "roster", "set", "reviewer", "--profiles", "grok-review",
+                "--expected-sha256", initialHash);
+        check.eq("a stale editor is refused", "config_conflict", stale.report().get("code"));
+        check.eq("stale edit preserves the newer role", changed, Files.readString(policy));
+        check.eq("a conflict makes no backup", null, stale.report().get("backup"));
+        check.eq("malformed digest is usage error", "usage", roster(home, "roster", "set", "reviewer",
+                "--profiles", "grok-review", "--expected-sha256", "bad").report().get("code"));
+        Path file = home.resolve("profiles/grok-review.yaml");
+        forwardsModel(file);
+        String hash = ConfigFileStore.read(file).sha256();
+        check.that("profile accepts a current digest", roster(home, "roster", "model", "grok-review", "--model", "next",
+                "--expected-sha256", hash).ok());
+        String edited = Files.readString(file);
+        check.eq("profile also refuses a stale digest", "config_conflict", roster(home, "roster", "model", "grok-review",
+                "--model", "later", "--expected-sha256", hash).report().get("code"));
+        check.eq("profile conflict preserves current bytes", edited, Files.readString(file));
+        ConfigFileStore.Snapshot snapshot = ConfigFileStore.read(policy);
+        Files.writeString(policy, snapshot.text() + "# another editor\r\n");
+        RosterCommand.Outcome raced = new RosterCommand().rewriteAndReparse(snapshot, snapshot.text(), "policy",
+                "roster_set", List.of(), List.of(), Map.of());
+        check.eq("an edit prepared before another writer is refused", "config_conflict", raced.report().get("code"));
+        check.contains("concurrent comment survives", Files.readString(policy), "# another editor");
     }
 
     private void allowMissingAndMismatch(Check check, Path home) throws Exception {

@@ -114,6 +114,34 @@ warden roster model grok-review --model grok-4.6-build --effort high
 first as `policy.yaml.before-roster-<timestamp>`. If the role is not in `roles:` yet, a block
 is appended there rather than invented elsewhere.
 
+Both edits validate the candidate in memory, take an exclusive per-file lock, check the
+source SHA-256, save a backup, and atomically replace the file. Invalid YAML never reaches
+the active file. `config_busy` means another Warden editor holds the lock;
+`config_conflict` means the file changed since the edit was prepared. Reload before retrying.
+An unsupported atomic replacement fails with `atomic_replace_unsupported`, preserving the
+active file. Backups remain available after a failed replacement.
+
+For a delayed edit (including a future settings form), JSON `warden roster` returns
+`file_versions`, keyed by `policy.yaml` and `profiles/<name>.yaml`. Each digest belongs to
+the exact bytes parsed for that report. Pass the relevant value to either write command:
+
+```text
+warden roster set reviewer --profiles grok-review,claude-review --expected-sha256 <policy-hash>
+warden roster model grok-review --model <model> --expected-sha256 <profile-hash>
+```
+
+Successful writes return `before_sha256` and `sha256`. Without the optional flag, the CLI
+still checks the version it read while preparing its own edit. A verification probe also
+retains its source digest: an edit made during the probe prevents stamping the changed
+profile. Verification stamps use the same atomic writer and save `*.before-verify-*`.
+
+The small `*.warden-write.lock` sidecar stays on disk; the OS releases its lock on exit or
+crash. Do not delete it while writers are running. These guarantees cover one file at a
+time and writers using this protocol. An external editor that ignores the sidecar can race
+the last digest check and rename. Atomic replacement does not guarantee directory metadata
+survives a power failure. A process killed before rename can leave a `.warden-config-*.tmp`
+file; the live configuration stays complete and the next edit can proceed.
+
 `model` does the same to `profiles/<name>.yaml`. Changing the model invalidates
 `verification.verified_on` — that date stamped a probe against the old model — so the line is
 removed unless you pass `--keep-verified`. The command prints `verify_with` for

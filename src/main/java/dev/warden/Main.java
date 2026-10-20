@@ -376,7 +376,8 @@ public final class Main {
      * date claimed.
      */
     private static int verifyProfile(String name, boolean confirm) throws Exception {
-        UserConfig user = UserConfig.load();
+        Map<Path, dev.warden.config.ConfigFileStore.Snapshot> sources = new LinkedHashMap<>();
+        UserConfig user = UserConfig.load(UserConfig.defaultHome(), sources);
         Profile profile = user.profiles().get(name);
         if (profile == null) {
             Map<String, Object> unknown = new LinkedHashMap<>();
@@ -404,7 +405,7 @@ public final class Main {
         }
 
         Path file = user.home().resolve("profiles").resolve(name + ".yaml");
-        ProfileVerifier.Stamp stamp = verifier.stamp(file, profile, LocalDate.now());
+        ProfileVerifier.Stamp stamp = verifier.stamp(file, profile, LocalDate.now(), sources.get(file).sha256());
         result.put("ok", stamp.written());
         result.put("code", stamp.code());
         result.put("message", stamp.message());
@@ -2664,14 +2665,17 @@ public final class Main {
                   warden roster set <role> --profiles a,b[,c] [--strategy first|rotate]
                                            rewrite that role's profiles (and strategy) in
                                            policy.yaml; comments and every other byte stay.
-                                           Copies the file to *.before-roster-<timestamp>
-                                           first. --allow-missing permits a name with no
+                                           Validates first, locks and atomically replaces;
+                                           saves *.before-roster-<timestamp>.
+                                           --expected-sha256 HASH refuses a stale edit (hash
+                                           from roster.file_versions); --allow-missing permits a name with no
                                            profiles/<name>.yaml yet
                   warden roster model <name> --model X [--effort Y] [--keep-verified]
                                            rewrite model/effort in profiles/<name>.yaml the
                                            same way. Drops verified_on (the stamp was for
                                            the old model) unless --keep-verified; prints
-                                           verify_with so the probe is re-run
+                                           verify_with so the probe is re-run.
+                                           Also accepts --expected-sha256 HASH
                   warden init [--base-ref REF] create a conservative project starter config
                   warden pilot prepare --spec FILE --output DIR
                                            write a self-contained offline pilot bundle from

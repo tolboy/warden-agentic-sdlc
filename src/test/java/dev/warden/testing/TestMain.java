@@ -15,6 +15,7 @@ public final class TestMain {
                 new dev.warden.SchemaTest(),
                 new dev.warden.YamlTest(),
                 new dev.warden.ConfigTest(),
+                new dev.warden.config.ConfigFileStoreTest(),
                 new dev.warden.RuntimeTest(),
                 new dev.warden.WorktreeLeaseTest(),
                 new dev.warden.DirectCaptureTest(),

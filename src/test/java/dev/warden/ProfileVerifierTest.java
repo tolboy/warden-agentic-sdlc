@@ -3,6 +3,7 @@ package dev.warden;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
 import dev.warden.config.UserConfig;
+import dev.warden.config.ConfigFileStore;
 import dev.warden.execution.orca.OrcaProbe;
 import dev.warden.process.ProcessRunner;
 import dev.warden.testing.Check;
@@ -167,9 +168,54 @@ public final class ProfileVerifierTest implements Suite {
             check.contains("the operator is told to write the probe first",
                     missing.message(), "add one with a probe");
 
+            Path changing = write(home, "changing", succeeds(), null);
+            ConfigFileStore.Snapshot tested = ConfigFileStore.read(changing);
+            Profile testedProfile = load(changing);
+            Files.writeString(changing, tested.text() + "# edit during probe\n");
+            ProfileVerifier.Stamp stale = verifier.stamp(changing, testedProfile, LocalDate.now(), tested.sha256());
+            check.eq("even a comment edit during the probe blocks its stamp", "config_conflict", stale.code());
+            check.that("newer bytes remain unverified", !load(changing).verified());
+            Files.writeString(changing, tested.text().replace("vendor: somevendor", "vendor: another"));
+            check.eq("legacy caller cannot stamp a different vendor", "config_conflict",
+                    verifier.stamp(changing, testedProfile, LocalDate.now()).code());
+            Files.writeString(changing, tested.text().replace("\n", "\r\n"));
+            ConfigFileStore.Snapshot crlf = ConfigFileStore.read(changing);
+            check.that("current profile can be stamped", verifier.stamp(changing, load(changing), LocalDate.now(), crlf.sha256()).written());
+            String stampedText = Files.readString(changing);
+            check.that("verification preserves CRLF", !stampedText.replace("\r\n", "").contains("\n"));
+            try (var files = Files.list(changing.getParent())) {
+                Path backup = files.filter(p -> p.getFileName().toString().startsWith("changing.yaml.before-verify-")).findFirst().orElseThrow();
+                check.eq("stamp backup contains the exact probed version", crlf.text(), Files.readString(backup));
+            }
+
+            cliRefusesStampAfterProbeEdit(check, home.resolve("cli"));
+
             orcaChannelProbe(check, home);
         } finally {
             deleteTree(home);
+        }
+    }
+
+    private void cliRefusesStampAfterProbeEdit(Check check, Path isolated) throws Exception {
+        Files.createDirectories(isolated.resolve("profiles"));
+        Path file = write(isolated, "cli-race",
+                "echo edit-during-probe >> profiles/cli-race.yaml && echo probe-ran", null, "probe-ran");
+        String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        ProcessBuilder builder = new ProcessBuilder(javaExecutable, "-cp", System.getProperty("java.class.path"),
+                "dev.warden.Main", "profiles", "--verify", "cli-race");
+        builder.environment().put(UserConfig.HOME_ENVIRONMENT_VARIABLE, isolated.toAbsolutePath().toString());
+        Path log = isolated.resolve("cli.log");
+        Process cli = builder.redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            if (!cli.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) throw new IOException("verification CLI timed out");
+            String output = Files.readString(log);
+            check.eq("CLI rejects a profile changed by its running probe", 1, cli.exitValue());
+            check.contains("CLI reports the conflict after a passing probe", output, "\"code\":\"config_conflict\"");
+            check.contains("CLI confirms stamp was refused", output, "\"stamped\":false");
+            check.contains("CLI leaves the probe's newer bytes intact", Files.readString(file), "edit-during-probe");
+            check.that("CLI does not stamp the changed profile", !Files.readString(file).contains("verified_on:"));
+        } finally {
+            if (cli.isAlive()) cli.destroyForcibly().waitFor();
         }
     }
 

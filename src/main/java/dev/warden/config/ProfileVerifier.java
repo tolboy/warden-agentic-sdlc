@@ -145,12 +145,26 @@ public final class ProfileVerifier {
      * established by running them, and are the most valuable thing in the file.
      */
     public Stamp stamp(Path profileFile, Profile profile, LocalDate date) throws IOException {
+        return stamp(profileFile, profile, date, null);
+    }
+
+    /** expectedSha256 is captured from the bytes used to construct the probed profile. */
+    public Stamp stamp(Path profileFile, Profile profile, LocalDate date, String expectedSha256) throws IOException {
+        ConfigFileStore.Snapshot source = ConfigFileStore.read(profileFile);
+        try { ConfigFileStore.expect(source, expectedSha256); }
+        catch (ConfigFileStore.Refused refused) {
+            return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
+        }
+        if (!Profile.parse(source.text(), profileFile.toString()).equals(profile)) {
+            return new Stamp(false, "config_conflict", "profile changed since the probe; reload and verify again", profileFile, null);
+        }
         if (profile.verified()) {
             return new Stamp(false, "already_verified",
                     "profile '" + profile.name() + "' already carries verification.verified_on",
                     profileFile, null);
         }
-        List<String> lines = new ArrayList<>(Files.readAllLines(profileFile, StandardCharsets.UTF_8));
+        RosterCommand.Document document = RosterCommand.Document.from(source);
+        List<String> lines = document.lines;
         int header = -1;
         for (int index = 0; index < lines.size(); index++) {
             if (lines.get(index).stripTrailing().equals("verification:")) { header = index; break; }
@@ -176,8 +190,12 @@ public final class ProfileVerifier {
         }
         String stamped = date.toString();
         lines.add(insertAt, indent + "verified_on: \"" + stamped + "\"");
-        Files.writeString(profileFile, String.join(System.lineSeparator(), lines) + System.lineSeparator(),
-                StandardCharsets.UTF_8);
+        try {
+            new ConfigFileStore().save(source, document.render(),
+                    candidate -> Profile.parse(candidate, profileFile.toString()), "verify");
+        } catch (ConfigFileStore.Refused refused) {
+            return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
+        }
         return new Stamp(true, "verified", "verification.verified_on set to " + stamped,
                 profileFile, stamped);
     }

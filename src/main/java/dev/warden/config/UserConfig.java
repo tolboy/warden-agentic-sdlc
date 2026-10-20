@@ -46,6 +46,11 @@ public record UserConfig(
     public static UserConfig load() throws IOException { return load(defaultHome()); }
 
     public static UserConfig load(Path home) throws IOException {
+        return load(home, new LinkedHashMap<>());
+    }
+
+    /** Capture the exact bytes parsed, for versioned edits and verification after a probe. */
+    public static UserConfig load(Path home, Map<Path, ConfigFileStore.Snapshot> sources) throws IOException {
         Map<String, Profile> profiles = new LinkedHashMap<>();
         Map<String, String> problems = new LinkedHashMap<>();
 
@@ -58,7 +63,9 @@ public record UserConfig(
             for (Path file : files) {
                 String key = stripExtension(file.getFileName().toString());
                 try {
-                    Profile profile = Profile.parse(Files.readString(file), file.toString());
+                    ConfigFileStore.Snapshot source = ConfigFileStore.read(file);
+                    sources.put(file, source);
+                    Profile profile = Profile.parse(source.text(), file.toString());
                     if (!profile.name().equals(key)) {
                         problems.put(key, "profile name '" + profile.name()
                                 + "' does not match the file name; rename one so they agree");
@@ -76,7 +83,9 @@ public record UserConfig(
         Policy policy = null;
         if (policyPresent) {
             try {
-                policy = Policy.parse(Files.readString(policyFile), policyFile.toString());
+                ConfigFileStore.Snapshot source = ConfigFileStore.read(policyFile);
+                sources.put(policyFile, source);
+                policy = Policy.parse(source.text(), policyFile.toString());
             } catch (RuntimeException failure) {
                 problems.put("policy.yaml", String.valueOf(failure.getMessage()));
             }

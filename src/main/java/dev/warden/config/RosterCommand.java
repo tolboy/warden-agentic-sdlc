@@ -6,8 +6,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,17 +17,14 @@ import java.util.Map;
  *
  * Policy and profile files are written by people and carry comments that are the record of
  * why a flag is there. Re-emitting the parsed tree would drop those comments. So this command
- * copies the file, then rewrites the one or two target lines by indentation-aware matching,
- * then re-parses. If the parser refuses the result, the copy is restored byte-for-byte.
+ * edits lines in memory, validates, then replaces the file atomically under a version check
+ * and lock. A rejected edit never changes the live file.
  */
 public final class RosterCommand {
 
     public record Outcome(boolean ok, Map<String, Object> report, String text) {
         public int exitCode() { return ok ? 0 : 1; }
     }
-
-    private static final DateTimeFormatter BACKUP_STAMP =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
     public Outcome run(Path home, String[] args) throws IOException {
         int index = 0;
@@ -57,35 +52,32 @@ public final class RosterCommand {
     }
 
     /**
-     * Backup, write, re-parse. On parser refusal the original bytes are restored and the
-     * backup is left in place. The suite drives this directly for the restore case.
+     * Validate before writing; the snapshot must be the one used to prepare the edit.
      */
-    public Outcome rewriteAndReparse(Path file, String edited, String parseKind, String successCode,
-                                     List<String> before, List<String> after,
+    public Outcome rewriteAndReparse(ConfigFileStore.Snapshot source, String edited, String parseKind,
+                                     String successCode, List<String> before, List<String> after,
                                      Map<String, Object> extra) throws IOException {
-        byte[] original = Files.readAllBytes(file);
-        Path backup = copyBackup(file);
+        Path file = source.file();
+        ConfigFileStore.Saved saved;
         try {
-            Files.writeString(file, edited, StandardCharsets.UTF_8);
-        } catch (IOException writeFailed) {
-            Files.write(file, original);
-            throw writeFailed;
-        }
-        try {
-            String written = Files.readString(file, StandardCharsets.UTF_8);
-            if ("profile".equals(parseKind)) Profile.parse(written, file.toString());
-            else Policy.parse(written, file.toString());
+            saved = new ConfigFileStore().save(source, edited, candidate -> {
+                if ("profile".equals(parseKind)) Profile.parse(candidate, file.toString());
+                else Policy.parse(candidate, file.toString());
+            }, "roster");
+        } catch (ConfigFileStore.Refused refused) {
+            return conflict(refused, file, extra);
         } catch (RuntimeException parseFailed) {
-            Files.write(file, original);
             Map<String, Object> extraFail = extra == null ? Map.of() : extra;
             return fail("reparse_failed", String.valueOf(parseFailed.getMessage()),
-                    file, backup, changed(before, after), extraFail);
+                    file, null, changed(before, after), extraFail);
         }
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("ok", true);
         report.put("code", successCode);
         report.put("file", file.toString());
-        report.put("backup", backup.toString());
+        report.put("backup", saved.backup().toString());
+        report.put("before_sha256", saved.beforeSha256());
+        report.put("sha256", saved.sha256());
         report.put("changed", changed(before, after));
         if (extra != null) report.putAll(extra);
         return new Outcome(true, report, null);
@@ -94,7 +86,8 @@ public final class RosterCommand {
     // ---------------------------------------------------------------- list
 
     private Outcome list(Path home, boolean text) throws IOException {
-        UserConfig user = UserConfig.load(home);
+        Map<Path, ConfigFileStore.Snapshot> sources = new LinkedHashMap<>();
+        UserConfig user = UserConfig.load(home, sources);
         Path policyFile = home.resolve("policy.yaml");
         Map<String, Object> report = new LinkedHashMap<>();
         boolean loaded = user.policy() != null;
@@ -104,6 +97,9 @@ public final class RosterCommand {
         report.put("backup", null);
         report.put("changed", null);
         report.put("home", home.toString());
+        Map<String, String> versions = new LinkedHashMap<>();
+        sources.forEach((path, source) -> versions.put(home.relativize(path).toString().replace('\\', '/'), source.sha256()));
+        report.put("file_versions", versions);
 
         List<Object> roles = new ArrayList<>();
         if (user.policy() != null) {
@@ -114,7 +110,7 @@ public final class RosterCommand {
                 row.put("require_independent_vendor", spec.requireIndependentVendor());
                 List<Object> profiles = new ArrayList<>();
                 for (String name : spec.profiles()) {
-                    profiles.add(profileRow(user, name));
+                    profiles.add(profileRow(user, name, sources));
                 }
                 row.put("profiles", profiles);
                 roles.add(row);
@@ -170,7 +166,7 @@ public final class RosterCommand {
         return eligible.get(Math.floorMod(chain.rotationPositionOf(stage), eligible.size()));
     }
 
-    private static Map<String, Object> profileRow(UserConfig user, String name) {
+    private static Map<String, Object> profileRow(UserConfig user, String name, Map<Path, ConfigFileStore.Snapshot> sources) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("profile", name);
         Profile profile = user.profiles().get(name);
@@ -188,21 +184,21 @@ public final class RosterCommand {
         row.put("effort", profile.effort());
         row.put("runner", profile.runner());
         row.put("read_only", profile.readOnly());
-        row.put("verified", verifiedOn(user.home().resolve("profiles").resolve(name + ".yaml")));
+        ConfigFileStore.Snapshot source = sources.get(user.home().resolve("profiles").resolve(name + ".yaml"));
+        row.put("verified", source == null ? null : verifiedOn(source.text()));
         return row;
     }
 
     @SuppressWarnings("unchecked")
-    private static String verifiedOn(Path file) {
-        if (!Files.isRegularFile(file)) return null;
+    private static String verifiedOn(String text) {
         try {
-            Object parsed = Yaml.parse(Files.readString(file, StandardCharsets.UTF_8));
+            Object parsed = Yaml.parse(text);
             if (!(parsed instanceof Map<?, ?> root)) return null;
             Object verification = root.get("verification");
             if (!(verification instanceof Map<?, ?> map)) return null;
             Object date = map.get("verified_on");
             return date == null ? null : String.valueOf(date);
-        } catch (RuntimeException | IOException ignored) {
+        } catch (RuntimeException ignored) {
             return null;
         }
     }
@@ -283,10 +279,16 @@ public final class RosterCommand {
         String role = null;
         String profilesRaw = null;
         String strategy = null;
+        String expectedSha256 = null;
         boolean allowMissing = false;
         for (int i = from; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
+                case "--expected-sha256" -> {
+                    if (i + 1 >= args.length || !args[i + 1].matches("(?i)[a-f0-9]{64}"))
+                        return fail("usage", "--expected-sha256 needs a 64-character SHA-256", policyFile, null, null);
+                    expectedSha256 = args[++i];
+                }
                 case "--profiles" -> {
                     if (i + 1 >= args.length) {
                         return fail("usage", "roster set --profiles needs a value", policyFile, null, null);
@@ -355,13 +357,15 @@ public final class RosterCommand {
         }
 
         Document document = Document.read(policyFile);
+        try { ConfigFileStore.expect(document.source, expectedSha256); }
+        catch (ConfigFileStore.Refused refused) { return conflict(refused, policyFile, Map.of()); }
         List<String> before = new ArrayList<>();
         List<String> after = new ArrayList<>();
         String editError = applySet(document.lines, role, names, strategy, before, after);
         if (editError != null) {
             return fail("policy_line_not_found", editError, policyFile, null, null);
         }
-        return rewriteAndReparse(policyFile, document.render(), "policy", "roster_set",
+        return rewriteAndReparse(document.source, document.render(), "policy", "roster_set",
                 before, after, Map.of());
     }
 
@@ -432,9 +436,15 @@ public final class RosterCommand {
         String model = null;
         String effort = null;
         boolean keepVerified = false;
+        String expectedSha256 = null;
         for (int i = from; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
+                case "--expected-sha256" -> {
+                    if (i + 1 >= args.length || !args[i + 1].matches("(?i)[a-f0-9]{64}"))
+                        return fail("usage", "--expected-sha256 needs a 64-character SHA-256", profilesDir, null, null);
+                    expectedSha256 = args[++i];
+                }
                 case "--model" -> {
                     if (i + 1 >= args.length) {
                         return fail("usage", "roster model --model needs a value", profilesDir, null, null);
@@ -470,9 +480,12 @@ public final class RosterCommand {
             return fail("profile_not_found", "profile '" + name + "' does not exist under profiles/",
                     file, null, null);
         }
+        Document document = Document.read(file);
+        try { ConfigFileStore.expect(document.source, expectedSha256); }
+        catch (ConfigFileStore.Refused refused) { return conflict(refused, file, Map.of()); }
         Profile profile;
         try {
-            profile = Profile.parse(Files.readString(file, StandardCharsets.UTF_8), file.toString());
+            profile = Profile.parse(document.source.text(), file.toString());
         } catch (RuntimeException unreadable) {
             return fail("profile_unreadable", String.valueOf(unreadable.getMessage()), file, null, null);
         }
@@ -483,7 +496,6 @@ public final class RosterCommand {
         Outcome unforwarded = refuseUnforwardedModel(profile, file);
         if (unforwarded != null) return unforwarded;
 
-        Document document = Document.read(file);
         List<String> before = new ArrayList<>();
         List<String> after = new ArrayList<>();
         String editError = applyModel(document.lines, model, effort, keepVerified, before, after);
@@ -512,7 +524,7 @@ public final class RosterCommand {
         extra.put("profile", name);
         String probeWarning = probeWarning(document.lines, profile.verificationProbe() != null);
         if (probeWarning != null) extra.put("probe_warning", probeWarning);
-        return rewriteAndReparse(file, document.render(), "profile", "roster_model",
+        return rewriteAndReparse(document.source, document.render(), "profile", "roster_model",
                 before, after, extra);
     }
 
@@ -603,7 +615,7 @@ public final class RosterCommand {
         try {
             parsed = Profile.parse(rewritten, file.toString());
         } catch (RuntimeException unreadable) {
-            return null; // rewriteAndReparse reports it and restores the original bytes
+            return null; // rewriteAndReparse validates before exposing the candidate
         }
         boolean placeholder = parsed.args().stream().anyMatch(a -> a.contains("{{model}}"));
         if (placeholder && !parsed.args().contains(oldModel)) return null;
@@ -617,7 +629,7 @@ public final class RosterCommand {
         try {
             return Profile.parse(rewritten, file.toString()).verified();
         } catch (RuntimeException unreadable) {
-            return false; // rewriteAndReparse reports it and restores the original bytes
+            return false; // rewriteAndReparse validates before exposing the candidate
         }
     }
 
@@ -796,18 +808,11 @@ public final class RosterCommand {
 
     // ---------------------------------------------------------------- file + line helpers
 
-    static Path copyBackup(Path file) throws IOException {
-        String stamp = LocalDateTime.now().format(BACKUP_STAMP);
-        String base = file.getFileName().toString() + ".before-roster-" + stamp;
-        Path dir = file.getParent() == null ? Path.of(".") : file.getParent();
-        Path candidate = dir.resolve(base);
-        int suffix = 2;
-        while (Files.exists(candidate)) {
-            candidate = dir.resolve(base + "-" + suffix);
-            suffix++;
-        }
-        Files.copy(file, candidate);
-        return candidate;
+    private static Outcome conflict(ConfigFileStore.Refused refused, Path file, Map<String, Object> extra) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (extra != null) details.putAll(extra);
+        details.put("sha256", refused.actualSha256());
+        return fail(refused.code(), refused.getMessage(), file, null, null, details);
     }
 
     private static Map<String, Object> changed(List<String> before, List<String> after) {
@@ -968,21 +973,27 @@ public final class RosterCommand {
 
     /** Split on the file's own newline so a rewrite can put the same one back. */
     static final class Document {
+        final ConfigFileStore.Snapshot source;
         final String newline;
         final List<String> lines;
 
-        Document(String newline, List<String> lines) {
+        Document(ConfigFileStore.Snapshot source, String newline, List<String> lines) {
+            this.source = source;
             this.newline = newline;
             this.lines = lines;
         }
 
         static Document read(Path file) throws IOException {
-            String text = Files.readString(file, StandardCharsets.UTF_8);
+            return from(ConfigFileStore.read(file));
+        }
+
+        static Document from(ConfigFileStore.Snapshot source) {
+            String text = source.text();
             String newline = text.contains("\r\n") ? "\r\n" : "\n";
             String[] parts = text.split(java.util.regex.Pattern.quote(newline), -1);
             List<String> lines = new ArrayList<>(parts.length);
             for (String part : parts) lines.add(part);
-            return new Document(newline, lines);
+            return new Document(source, newline, lines);
         }
 
         String render() {
