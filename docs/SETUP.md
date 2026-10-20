@@ -179,6 +179,34 @@ cast  implement      grok-implement        xai/grok-4.6
 The same map may live on the task as `use:`, where a replan preserves it and
 `--conductor` carries it into the inner run. Flags win over the task.
 
+### Build the next run in the dashboard
+
+Open `warden dashboard` (or add `--open-orca`) and use **Следующий запуск**. Choose
+an existing project task, then a profile for each role stage. Profile options expose
+vendor, model, effort, runner and verification; the vendor filter only narrows this
+list. A blank choice inherits the task's `use:` and the policy. Effort accepts a
+custom value, and the Orca placement option uses the same declared-twin rule as
+`--host`. Mechanical stages have no profile controls; required readers stay governed
+by the contract.
+
+**Проверить состав и бюджет** resolves the effective cast, independence refusals,
+minimum calls and repair reserves through the same TaskLoop code as the CLI.
+Changing an input clears the result. Edits to policy, profiles, project/task YAML or
+rotation invalidate the selected version and require a reload.
+
+Copy the dry-run command first. It checks the remaining workspace and runtime
+conditions without dispatch. The exported commands select this project and config
+home, restore the shell context afterwards, and quote their arguments for the
+server's platform shell (PowerShell on Windows, POSIX shell otherwise).
+After settings checks pass, the form also offers a run command and a complete
+merged task `use:` block. Replace the existing `use:` block when using that export.
+Exported commands read current files: repeat preview and dry-run after editing them.
+
+The form does not execute the commands or save personal defaults. Model variants
+come from declared profiles; a custom effort is not a claim that the model supports
+it, and a profile's verification stamp does not verify the new effort. Persistent
+roster edits still use the versioned `warden roster` commands above.
+
 A failure gate also offers `advance`: it closes this run and starts the next id of the same
 task after you dealt with the blocker. The next run keeps this run's `--use`, `--effort` and
 `--host` even though it does not keep the verdicts. `--no-start` records the decision and

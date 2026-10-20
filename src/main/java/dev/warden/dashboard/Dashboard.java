@@ -27,7 +27,8 @@ import java.util.Map;
 /**
  * Local projection for Orca's browser. No dispatch, no approval and no terminal input.
  *
- * One action: for a pending decision, put up its decision page, or go to the one already up.
+ * The next-run builder previews settings and exports commands without executing them.
+ * For a pending decision, put up its decision page, or go to the one already up.
  * A decision used to outlive the only process that knew its page, and the way back was
  * `warden decide` typed in the worktree. The answer itself is still given on the decision
  * page, through the same path as `warden approve`; this only finds or starts that page.
@@ -51,6 +52,11 @@ public final class Dashboard implements AutoCloseable {
 
     /** @param decisions null for a dashboard that offers no action at all */
     public Dashboard(Path project, int port, DecisionOpener decisions) throws IOException {
+        this(project, port, decisions, new NextRun(project, UserConfig.defaultHome(),
+                profile -> RoleRunner.executableFound(new ProcessRunner(), profile)));
+    }
+
+    public Dashboard(Path project, int port, DecisionOpener decisions, NextRun nextRun) throws IOException {
         byte[] secret = new byte[24];
         new SecureRandom().nextBytes(secret);
         token = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
@@ -87,12 +93,43 @@ public final class Dashboard implements AutoCloseable {
                         body = notice("Страница решения для " + runId + " не открыта: " + refused.getMessage());
                     }
                 }
+            } else if ("POST".equals(exchange.getRequestMethod()) && "/api/next-run/preview".equals(path)) {
+                if (!MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+                        String.valueOf(exchange.getRequestHeaders().getFirst("X-Warden-Token"))
+                                .getBytes(StandardCharsets.UTF_8))) {
+                    status = 403; body = "{}";
+                } else {
+                    byte[] input = exchange.getRequestBody().readNBytes(32769);
+                    if (input.length > 32768) {
+                        status = 413; body = Json.write(Map.of("error", "preview_too_large"));
+                    } else try {
+                        body = Json.write(nextRun.preview(Json.parseObject(
+                                new String(input, StandardCharsets.UTF_8))));
+                    } catch (NextRun.Conflict changed) {
+                        status = 409; body = Json.write(Map.of("error", "config_conflict", "message", changed.getMessage()));
+                    } catch (IllegalArgumentException | Json.JsonException invalid) {
+                        status = 400; body = Json.write(Map.of("error", "invalid_preview", "message", String.valueOf(invalid.getMessage())));
+                    } catch (Exception unavailable) {
+                        status = 503; body = Json.write(Map.of("error", "Settings unavailable; reload configuration"));
+                    }
+                }
             } else if (!"GET".equals(exchange.getRequestMethod())) {
                 status = 405; body = "{}";
             } else if ("/".equals(path)) {
                 contentType = "text/html; charset=utf-8";
-                body = HTML.replace("{{TOKEN}}", decisions == null ? "" : token)
+                body = HTML.replace("{{TOKEN}}", token)
                         .replace("{{ACTIONS}}", decisions == null ? "false" : "true");
+            } else if ("/api/next-run".equals(path)) {
+                try {
+                    body = Json.write(nextRun.describe(form(exchange.getRequestURI()
+                            .getRawQuery() == null ? "" : exchange.getRequestURI().getRawQuery()).get("task")));
+                } catch (NextRun.Conflict changed) {
+                    status = 409; body = Json.write(Map.of("error", "config_conflict", "message", changed.getMessage()));
+                } catch (IllegalArgumentException invalid) {
+                    status = 400; body = Json.write(Map.of("error", "invalid_task", "message", String.valueOf(invalid.getMessage())));
+                } catch (Exception unavailable) {
+                    status = 503; body = Json.write(Map.of("error", "Settings unavailable; reload configuration"));
+                }
             } else if ("/api/config".equals(path)) {
                 try {
                     ProcessRunner processes = new ProcessRunner();
@@ -428,12 +465,41 @@ public final class Dashboard implements AutoCloseable {
             button{background:#233a35;color:#9ee9c6;border:1px solid #2f5a4d;border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}.badge{background:#233a35;color:#9ee9c6;border-radius:5px;padding:3px 7px}.bad{color:#ffae94}#path{overflow-wrap:anywhere}.empty{padding:28px;color:#9caebd}
             details.timeline{white-space:normal;font-weight:400;max-width:480px}details.timeline summary{cursor:pointer;color:#9fb4c6}details.timeline div{padding:2px 0}
             #tasks td:nth-child(8){white-space:pre-line;min-width:320px;max-width:520px}
+            select,textarea{background:#19232c;border:1px solid #405363;border-radius:6px;padding:8px;color:inherit;font:inherit;max-width:100%;box-sizing:border-box}
+            #next-run{border:1px solid #405363;border-radius:10px;padding:16px;margin:24px 0}
+            #next-run label{display:flex;flex-direction:column;gap:5px;min-width:0}
+            #next-run select,#next-run input{min-width:0;width:100%;box-sizing:border-box}
+            #next-run fieldset{border:1px solid #405363;border-radius:8px;margin:12px 0;padding:12px;min-width:0}
+            .next-fields{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}.next-filter{margin-bottom:8px}
+            #next-run pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}#next-run textarea{width:100%;min-height:90px}
+            #next-run button{margin:6px 6px 6px 0}#next-run button:disabled{opacity:.5;cursor:default}
+            @media(max-width:700px){.next-fields{grid-template-columns:1fr}#next-run{padding:10px}#next-run fieldset{padding:8px}}
             </style><h1>Warden <span class="muted">/ Agents</span></h1>
             <meta name="warden-token" content="{{TOKEN}}"><meta name="warden-actions" content="{{ACTIONS}}">
             <div id="connection" role="status">Подключение…</div><p id="path" class="muted"></p>
             <h2>Ждут вашего решения</h2><p class="muted">Кнопка открывает страницу решения или возвращает к уже открытой. Если процесс, задавший вопрос, перестал ждать, панель поднимает страницу заново и продолжает работу после ответа.</p>
             <div class="scroll"><table><thead><tr><th>Run / задача</th><th>Вопрос</th><th>Варианты</th><th>Задан</th><th>Страница</th><th></th></tr></thead><tbody id="pending"></tbody></table><div id="pending-empty" class="empty" hidden>Открытых решений нет.</div></div>
             <p class="muted">Workflow и роли задаёт Warden. Orca подтверждает параметры запуска. Эти данные не подтверждают фактическую модель inference и не заменяют результат проверок.</p>
+            <section id="next-run" aria-labelledby="next-title">
+            <h2 id="next-title">Следующий запуск</h2>
+            <p class="muted">Выберите задачу и параметры этого запуска. Модель и runner выбираются через объявленный профиль; effort можно задать отдельно. Пустой выбор наследует task use: и policy. Обязательные стадии определяет контракт.</p>
+            <label>Задача<select id="next-task"><option value="">Загрузка задач…</option></select></label>
+            <p id="next-status" role="status" aria-live="polite"></p>
+            <pre id="next-contract"></pre><div id="next-stages"></div>
+            <datalist id="next-efforts"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
+            <p class="muted">Effort вне профиля — пользовательский вариант: доставка параметра проверяется resolver, поддержка моделью требует отдельного probe. Текущие лимиты и обязательные проверки показаны выше выбора стадий.</p>
+            <button id="next-preview" type="button" disabled>Проверить состав и бюджет</button>
+            <button id="next-reset" type="button" disabled>Сбросить выбор и перечитать</button>
+            <div id="next-result" hidden>
+            <h3>Preview</h3><pre id="next-cast"></pre><pre id="next-budget"></pre><pre id="next-problems" class="bad"></pre>
+            <p class="muted">Preview проверяет настройки. Перед запуском выполните CLI dry-run: он также проверит рабочее дерево и доступность среды. Команды читают актуальные файлы, поэтому после их изменения повторите проверку.</p>
+            <label>CLI dry-run<textarea id="next-dry-command" readonly></textarea></label>
+            <button type="button" data-next-copy="next-dry-command">Скопировать dry-run</button>
+            <label>CLI запуск<textarea id="next-run-command" readonly></textarea></label>
+            <button type="button" data-next-copy="next-run-command">Скопировать команду запуска</button>
+            <label>Task use: (объединён с настройками задачи)<textarea id="next-yaml" readonly></textarea></label>
+            <button type="button" data-next-copy="next-yaml">Скопировать use:</button>
+            </div></section>
             <h2>Состав по стадиям</h2><p class="muted">По политике, до настроек конкретной задачи: её <code>use:</code> может закрепить другой профиль, а <code>review_assurance</code> — допустить пару того же вендора. Что запустится для задачи, показывает столбец «Запустится» в таблице задач. Кто заполнит каждую стадию и почему остальные кандидаты не подходят — это ответы самого резолвера. Ридеры проверены против писателя, которого выбрал бы запуск. Источник: личное — ~/.warden, проект — .warden/project.yaml, задача — файл задачи, по умолчанию — встроенное значение Warden.</p>
             <p><button id="reload-config" type="button">Перечитать настройки</button> <span id="config-status" class="muted"></span></p>
             <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · effort · runner</th><th>Проверен</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
@@ -474,6 +540,49 @@ public final class Dashboard implements AutoCloseable {
             if(!d.profile)return stage+'некому: '+Object.entries(d.unresolved||{}).map(([p,r])=>p+' '+reason(r)).join(', ');
             const model=d.model??(d.runner==='orca'?'модель агента по умолчанию':'модель не задана');
             return stage+d.profile+' · '+(d.vendor??'вендор не задан')+' · '+model+' · '+(d.effort==null?'effort не задан':'effort='+d.effort)+' · '+(d.runner??'runner не задан')+(d.from_overlay===true?' (overlay)':'')+(d.refused?' (отвергнется: '+reason(d.refused)+')':'')}
+            let nextData=null,nextGeneration=0;
+            function clearNext(){nextGeneration++;$('next-result').hidden=true;for(const id of ['next-dry-command','next-run-command','next-yaml'])$(id).value=''}
+            function labelled(parent,text,control){const label=document.createElement('label');label.append(document.createTextNode(text),control);parent.append(label);return control}
+            function option(select,value,text){const item=document.createElement('option');item.value=value;item.textContent=text;select.append(item)}
+            function nextTasks(tasks){const select=$('next-task'),old=select.value;select.replaceChildren();for(const t of tasks.filter(t=>!t.problem))option(select,t.task,t.task);
+            if(!select.options.length)option(select,'','Нет доступных задач');else if(Array.from(select.options).some(o=>o.value===old))select.value=old;loadNext()}
+            async function loadNext(){clearNext();const generation=nextGeneration,task=$('next-task').value;nextData=null;$('next-stages').replaceChildren();$('next-contract').textContent='';
+            $('next-preview').disabled=true;$('next-reset').disabled=true;if(!task){$('next-status').textContent='Создайте задачу через Warden, затем перечитайте настройки.';return}
+            $('next-status').textContent='Читаю задачу…';try{const response=await fetch('/api/next-run?task='+encodeURIComponent(task),{cache:'no-store'}),data=await response.json();if(generation!==nextGeneration)return;
+            if(!response.ok)throw Error(data.message??data.error);nextData=data;
+            $('next-contract').textContent=data.goal+'\\nРиск: '+data.risk+' · scope: '+data.scope.join(', ')+'\\nПроверки: '+data.acceptance.join('; ')+
+            '\\nЛимит вызовов: '+data.max_role_runs+' · '+data.cost_cap+' $'+data.max_cost_usd+' · минуты: '+(data.max_elapsed_minutes??'не заданы')+' · исправления: '+data.max_fix_attempts+
+            '\\nVisual QA: '+(data.visual_qa?'обязательна':'не требуется')+' · review assurance: '+data.review_assurance+'\\nTask use: '+JSON.stringify(data.task_use);
+            for(const s of data.stages){const field=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=s.stage+(s.role?' · '+s.role:'');field.append(legend);
+            if(s.kind!=='ROLE'){const note=document.createElement('p');note.textContent='Механическая стадия · условия: '+(s.when.join(', ')||'всегда');field.append(note);$('next-stages').append(field);continue}
+            field.dataset.nextStage=s.stage;const filter=document.createElement('select');filter.className='next-filter';option(filter,'','Все вендоры (фильтр вариантов)');for(const v of [...new Set(s.profiles.map(p=>p.vendor))])option(filter,v,v);labelled(field,'Вендор — фильтр профилей',filter);
+            const grid=document.createElement('div');grid.className='next-fields';field.append(grid);
+            const profile=document.createElement('select');profile.dataset.nextKind='profile';profile.setAttribute('aria-label',s.stage+' профиль');
+            function fillProfiles(){profile.replaceChildren();option(profile,'','Наследовать задачу и policy');for(const p of s.profiles.filter(p=>!filter.value||p.vendor===filter.value))option(profile,p.profile,p.profile+' · '+p.vendor+' · '+(p.model??'модель по умолчанию')+' · '+(p.effort??'effort не задан')+' · '+p.runner+(p.verified?' · проверен':' · НЕ проверен'))}
+            fillProfiles();labelled(grid,'Профиль · модель · runner',profile);
+            const effort=document.createElement('input');effort.dataset.nextKind='effort';effort.setAttribute('list','next-efforts');effort.setAttribute('aria-label',s.stage+' effort');effort.placeholder='Наследовать';effort.maxLength=120;labelled(grid,'Effort (custom)',effort);
+            const host=document.createElement('select');host.dataset.nextKind='host';host.setAttribute('aria-label',s.stage+' размещение');option(host,'','Наследовать профиль/task use:');option(host,'orca','Orca · объявленный профиль');labelled(grid,'Размещение',host);
+            const note=document.createElement('p');note.className='muted';note.textContent='Условия: '+(s.when.join(', ')||'всегда')+' · policy '+(s.strategy??'—')+': '+(s.fallback.join(' → ')||'роль не настроена');field.append(note);
+            filter.addEventListener('change',()=>{fillProfiles();clearNext();$('next-status').textContent='Фильтр изменён. Выберите профиль и повторите preview.'});
+            for(const control of [profile,effort,host])control.addEventListener('input',()=>{clearNext();$('next-status').textContent='Выбор изменён. Повторите preview.'});$('next-stages').append(field)}
+            $('next-status').textContent='Задача прочитана. Выберите параметры и проверьте preview.';$('next-preview').disabled=false;$('next-reset').disabled=false;
+            }catch(e){if(generation===nextGeneration){$('next-status').textContent='Не удалось прочитать задачу: '+e.message;$('next-reset').disabled=false}}}
+            $('next-task').addEventListener('change',loadNext);$('next-reset').addEventListener('click',loadNext);
+            $('next-preview').addEventListener('click',async()=>{if(!nextData)return;clearNext();const generation=nextGeneration,override=Object.create(null);
+            for(const field of $('next-stages').querySelectorAll('[data-next-stage]'))for(const control of field.querySelectorAll('[data-next-kind]')){const value=control.value.trim();if(value)(override[control.dataset.nextKind]??=Object.create(null))[field.dataset.nextStage]=value}
+            $('next-status').textContent='Проверяю состав и бюджет…';$('next-preview').disabled=true;
+            try{const response=await fetch('/api/next-run/preview',{method:'POST',headers:{'Content-Type':'application/json','X-Warden-Token':document.querySelector('meta[name="warden-token"]').content},body:JSON.stringify({task:nextData.task,revision:nextData.revision,override})});
+            const data=await response.json();if(generation!==nextGeneration)return;if(!response.ok){if(response.status===409){nextData=null;throw Error('Настройки изменились. Нажмите «Сбросить выбор и перечитать».')}throw Error(data.message??data.error)}
+            $('next-cast').textContent=data.would_run.map(plannedDispatch).join('\\n');
+            const plan=data.budget_plan;$('next-budget').textContent='Минимум вызовов: '+plan.minimum_success_calls+' · cap: '+plan.requested_cap+' · резерв: '+plan.repair_reserve+
+            (plan.recovery_branches.length?'\\nИсправления:\\n'+plan.recovery_branches.map(b=>b.stage+': ещё '+b.calls_required_here+' вызовов · '+(b.repair_allowed_under_cap?'помещается':'не помещается')+' в cap').join('\\n'):'');
+            $('next-problems').textContent=data.problems.map(p=>(p.stage?p.stage+': ':'')+(p.code??p.stop_reason??'отказ')+' · '+(p.message??'')).join('\\n');
+            $('next-dry-command').value=data.dry_run_command;$('next-run-command').value=data.run_command??'';$('next-yaml').value=data.task_overlay??'';
+            for(const button of document.querySelectorAll('[data-next-copy]'))button.disabled=!$(button.dataset.nextCopy).value;
+            $('next-result').hidden=false;$('next-status').textContent=data.settings_ok?'Состав и бюджет согласованы. Команды готовы к копированию.':'Есть причины отказа. Проверьте параметры; CLI dry-run доступен для диагностики.';
+            }catch(e){if(generation===nextGeneration)$('next-status').textContent=e.message}finally{if(nextData)$('next-preview').disabled=false}});
+            for(const button of document.querySelectorAll('[data-next-copy]'))button.addEventListener('click',async()=>{const output=$(button.dataset.nextCopy);if(!output.value||$('next-result').hidden)return;
+            try{await navigator.clipboard.writeText(output.value);$('next-status').textContent='Скопировано.'}catch(e){output.focus();output.select();$('next-status').textContent='Текст выделен; скопируйте его сочетанием клавиш.'}});
             function drawConfig(config){const stages=$('stages');stages.replaceChildren();
             for(const s of config.stages||[]){const head=document.createElement('tr');const td=document.createElement('td');td.colSpan=5;
             let text=s.stage+(s.role?' · '+s.role:'')+' · '+(s.kind==='role'?('стратегия '+(s.strategy??'—')+(s.require_independent_vendor?' · нужен независимый вендор':'')+(s.same_vendor_peer?' · пара '+s.same_vendor_peer:'')+(s.judged_against?' · против писателя '+s.judged_against.profile+' ('+s.judged_against.vendor+')':'')):'механическая стадия: профиль не заполняет, overlay отвергается')+(s.when&&s.when.length?' · когда '+s.when.join(', '):'');
@@ -483,7 +592,7 @@ public final class Dashboard implements AutoCloseable {
             table('limits',(config.limits||[]).map(l=>[l.key,l.value==null?'—':typeof l.value==='object'?JSON.stringify(l.value):String(l.value),sources[l.source]??l.source]));
             const tasks=config.tasks||[];table('tasks',tasks.map(t=>t.problem?[t.task,'ошибка: '+t.problem,'','','','','','','']:[t.task,sourced(t.risk),sourced(t.max_role_runs),(t.cost_cap?.value==='strict'?'строгий cap $':'порог $')+(t.max_cost_usd?.value??'—')+' · '+(sources[t.max_cost_usd?.source]??''),sourced(t.max_elapsed_minutes),sourced(t.max_fix_attempts),sourced(t.visual_qa),(t.would_run||[]).map(plannedDispatch).join('\\n')||'—',(t.overlay||[]).map(o=>o.stage+' '+o.what+'='+o.value+(o.refused?' (отвергнется: '+reason(o.refused)+')':o.skipped?' (стадия пропускается)':'')).join('; ')||'—']));
             $('tasks-empty').hidden=tasks.length>0}
-            async function loadConfig(){$('config-status').textContent='читаю…';try{const response=await fetch('/api/config',{cache:'no-store'});if(!response.ok)throw Error('unavailable');drawConfig(await response.json());$('config-status').textContent='прочитано '+new Date().toLocaleTimeString()}catch(e){$('config-status').textContent='настройки недоступны'}}
+            async function loadConfig(){$('config-status').textContent='читаю…';try{const response=await fetch('/api/config',{cache:'no-store'});if(!response.ok)throw Error('unavailable');const config=await response.json();drawConfig(config);nextTasks(config.tasks||[]);$('config-status').textContent='прочитано '+new Date().toLocaleTimeString()}catch(e){$('config-status').textContent='настройки недоступны'}}
             $('reload-config').addEventListener('click',loadConfig);loadConfig();
             function drawRuns(){openRuns=new Set([...document.querySelectorAll('#runs details[open]')].map(d=>d.dataset.run));const body=$('runs');body.replaceChildren();const runs=data.runs||[];
             for(const r of runs){const tr=document.createElement('tr');const chain=r.chain||{},decision=r.decision||{},gate=r.orca_gate||{};

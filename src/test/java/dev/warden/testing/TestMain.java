@@ -38,6 +38,7 @@ public final class TestMain {
                 new dev.warden.LaunchSettingsTest(),
                 new dev.warden.DashboardTest(),
                 new dev.warden.ConfigViewTest(),
+                new dev.warden.NextRunTest(),
                 new dev.warden.OrcaSettlementTest(),
                 new dev.warden.OrcaLifecycleTest(),
                 new dev.warden.OrcaWorkspaceTest(),

@@ -17,6 +17,8 @@ F08, атомарные настройки и защита verification stamp �
 [отчёте сохранения настроек](AGENT-LOOP-SETTINGS-FIXES-2026-10-20.md).
 F09, колонки dashboard и подробный preview задачи — в
 [отчёте исправления таблиц](AGENT-LOOP-DASHBOARD-FIXES-2026-10-20.md).
+Форма следующего запуска, resolver preview и экспорт CLI/task overlay — в
+[отчёте next-run UI](AGENT-LOOP-NEXT-RUN-2026-10-20.md).
 
 | Область | Реализованные механизмы | Практический смысл |
 |---|---|---|

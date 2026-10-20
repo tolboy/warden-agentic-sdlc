@@ -858,16 +858,7 @@ public final class TaskLoop {
                 workflow, user, task, overlay,
                 stage -> selectableProfiles(stage, user, frozenOverlay, authorizedFailover),
                 stage -> skipReason(stage, user, task, reviewByRisk)));
-        Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
-                user.policy() == null ? "full" : user.policy().repairReserve()));
-        if (task.budget().maxElapsedMinutes() != null) {
-            plan.put("time_reserve", "not reserved: budgets.max_elapsed_minutes ("
-                    + task.budget().maxElapsedMinutes() + ") bounds the execution time of this "
-                    + "run and every continuation of it. No vendor call starts with less than "
-                    + "a minute left, and each call's wall clock is lowered to what is left. A "
-                    + "call's duration is not predicted, so a repair is never refused in advance "
-                    + "for time; gates and the baseline are bounded by timeout_minutes instead");
-        }
+        Map<String, Object> plan = budgetPreview(callPlan, user, task);
         if (!budget.inherited().runs().isEmpty()) {
             plan.put("already_spent_by_chain", Map.of(
                     "runs", budget.inherited().runs(),
@@ -1617,6 +1608,20 @@ public final class TaskLoop {
                 preparationStages);
     }
 
+    private static Map<String, Object> budgetPreview(CallPlan plan, UserConfig user, TaskSpec.ResolvedTask task) {
+        Map<String, Object> result = new LinkedHashMap<>(plan.toMap(task.budget().maxRoleRuns(),
+                user.policy() == null ? "full" : user.policy().repairReserve()));
+        if (task.budget().maxElapsedMinutes() != null) {
+            result.put("time_reserve", "not reserved: budgets.max_elapsed_minutes ("
+                    + task.budget().maxElapsedMinutes() + ") bounds the execution time of this "
+                    + "run and every continuation of it. No vendor call starts with less than "
+                    + "a minute left, and each call's wall clock is lowered to what is left. A "
+                    + "call's duration is not predicted, so a repair is never refused in advance "
+                    + "for time; gates and the baseline are bounded by timeout_minutes instead");
+        }
+        return result;
+    }
+
     /**
      * Why a stage will not run at all, or null when it will.
      *
@@ -1715,11 +1720,18 @@ public final class TaskLoop {
     public static List<Map<String, Object>> dispatchPreview(Path root, ConfigLoader.Loaded loaded,
                                                             UserConfig user,
                                                             RoleResolver.Availability availability) {
+        return dispatchPreview(root, loaded, user, availability, RunOverride.NONE);
+    }
+
+    public static List<Map<String, Object>> dispatchPreview(Path root, ConfigLoader.Loaded loaded,
+                                                            UserConfig user,
+                                                            RoleResolver.Availability availability,
+                                                            RunOverride invocation) {
         TaskSpec.ResolvedTask task = loaded.resolved();
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
         if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
-        RunOverride overlay = loaded.task().use().withWriterFixes(workflow);
+        RunOverride overlay = loaded.task().use().merged(invocation).withWriterFixes(workflow);
         RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
         overlay.pin(roles);
         roles.overlay(overlay);
@@ -1765,6 +1777,67 @@ public final class TaskLoop {
             written = withPreviewWriter(written, chosen);
         }
         return rows;
+    }
+
+    /**
+     * Settings-only preview for a fresh invocation. Uses the loop's own resolver, skip
+     * predicate, call arithmetic and settings preflights, without a run reservation,
+     * prompts, probes, rotation advances or dispatch. Workspace and live adapter checks
+     * still belong to the CLI dry run; this is not an authorization to execute.
+     */
+    public static Map<String, Object> settingsPreview(Path root, ConfigLoader.Loaded loaded,
+                                                      UserConfig user, RunOverride invocation,
+                                                      RoleResolver.Availability availability) {
+        TaskSpec.ResolvedTask task = loaded.resolved();
+        Workflow workflow = user.policy() == null ? Workflow.builtIn() : user.policy().workflow();
+        if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
+        boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
+        RunOverride overlay = loaded.task().use().merged(invocation).withWriterFixes(workflow);
+        RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
+        overlay.pin(roles);
+        roles.overlay(overlay);
+        List<Map<String, Object>> dispatch = dispatchPreview(root, loaded, user, availability, invocation);
+        CallPlan plan = planFor(workflow, user, task, List.of());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("would_run", dispatch);
+        result.put("budget_plan", budgetPreview(plan, user, task));
+        List<Map<String, Object>> problems = new ArrayList<>();
+        if (user.policyPresent() && user.policy() == null) {
+            problems.add(Map.of("code", "policy_invalid", "message", "policy.yaml does not parse"));
+        }
+        TaskLoop loop = new TaskLoop(new ProcessRunner());
+        Map<String, Object> gap = loop.overlayGap(root, workflow, user, task, reviewByRisk, roles, overlay);
+        if (gap != null) problems.add(gap);
+        gap = judgeGap(workflow, user, task, reviewByRisk, roles);
+        if (gap != null) problems.add(gap);
+        gap = loop.toolingGap(root, workflow, user, task, reviewByRisk, roles);
+        if (gap != null) problems.add(gap);
+        gap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        if (gap != null) {
+            gap = new LinkedHashMap<>(gap);
+            gap.put("code", "independent_review_unavailable");
+            problems.add(gap);
+        }
+        if (task.budget().strictCostCap()) {
+            gap = strictCapGap(workflow, user, task, reviewByRisk, overlay, Map.of());
+            if (gap != null) {
+                gap = new LinkedHashMap<>(gap);
+                gap.put("code", "cost_cap_unenforceable");
+                problems.add(gap);
+            }
+        }
+        for (Map<String, Object> row : dispatch) {
+            if (row.containsKey("skipped") || row.get("profile") != null) continue;
+            problems.add(Map.of("code", "no_eligible_profile", "stage", row.get("stage"),
+                    "message", "No eligible profile: " + row.get("unresolved")));
+        }
+        if (task.budget().maxRoleRuns() > 0 && task.budget().maxRoleRuns() < plan.minimumToFinish()) {
+            problems.add(Map.of("code", "budget_insufficient", "message",
+                    "Call cap is below the minimum needed to finish"));
+        }
+        result.put("problems", problems);
+        result.put("settings_ok", problems.isEmpty());
+        return result;
     }
 
     /** The cast as a person reads it: one stage per line, aligned, with the overlay marked. */

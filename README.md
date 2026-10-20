@@ -294,6 +294,11 @@ still waiting for you. A button there opens that decision's page, or puts it bac
 the run that asked has stopped waiting, so a question left unanswered never needs
 `warden decide` typed in the worktree.
 
+The same panel has a **Следующий запуск** form: select a task and role profiles,
+inspect model/effort/runner and the call budget, then copy a CLI dry-run, run command
+or merged task `use:` block. It previews the resolver's choices without dispatch;
+stale settings require a reload. See [the setup guide](docs/SETUP.md#build-the-next-run-in-the-dashboard).
+
 ```text
 run   chapter-hearth-4
 task  chapter-with-a-reason   risk=medium   scope=src, scripts
