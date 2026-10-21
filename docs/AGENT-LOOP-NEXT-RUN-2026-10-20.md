@@ -1,5 +1,7 @@
 # Форма следующего запуска — 2026-10-20
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 Продолжение [аудита](AUDIT-AGENT-LOOP-2026-10-19.md),
 [F08](AGENT-LOOP-SETTINGS-FIXES-2026-10-20.md) и
 [F09](AGENT-LOOP-DASHBOARD-FIXES-2026-10-20.md).
@@ -52,33 +54,33 @@ preview не может вернуть их после редактирован�
 независимость, недоставляемый effort, механическая/неизвестная стадия, revision
 conflicts до и во время lookup, HTTP token/origin/body/schema и сравнение с настоящим
 CLI dry-run. GUI и CLI дают одинаковые profile/vendor/model/effort/runner и полный
-budget plan, включая deadline note. [Лог Windows](../out/next-run-windows.log).
+budget plan, включая deadline note. Лог Windows (`out/next-run-windows.log`).
 
 Внешний Edge через bundled Playwright: **27 проверок**, page errors отсутствуют.
 Проверены успешный preview, наследование task overlay и Orca defaults, отказ reader,
 stale files, reset и поздний ответ после редактирования. На 1400×1000, 700×900 и
 390×844 нет горизонтального overflow страницы; просмотрены снимки формы на всех
-трёх размерах. [Результаты](../out/next-run-edge-validation.json),
-[1400 px](../out/next-run-1400.png), [700 px](../out/next-run-700.png),
-[390 px](../out/next-run-390.png).
+трёх размерах. Результаты (`out/next-run-edge-validation.json`),
+1400 px (`out/next-run-1400.png`), 700 px (`out/next-run-700.png`),
+390 px (`out/next-run-390.png`).
 
 В живом браузере Orca: **9 проверок** выбора модели/effort, экспорта, бюджета,
 text-only goal, очистки при редактировании и отказа того же vendor.
-[Результаты](../out/next-run-orca-validation.json). Orca screenshots не использовались
+Результаты (`out/next-run-orca-validation.json`). Orca screenshots не использовались
 для visual acceptance; снимки выше получены Edge с того же URL.
 
 Production smoke выполнил именно экспортированную PowerShell-команду как CLI dry-run
 через production `Main`: exit 0, состав совпал, исходные cwd и config home восстановлены.
 Fixture path содержал апостроф, чтобы проверить shell quoting.
-[Результаты](../out/next-run-cli-validation.json), [лог](../out/next-run-cli.log).
+Результаты (`out/next-run-cli-validation.json`), лог (`out/next-run-cli.log`).
 
 Полный Linux registry: **4735 passed, 0 failed**, 55 suites, exit 0.
 Использовались JRE 25, Git и init для orphan reaping, сеть на время тестов отключена;
 bytecode собран на Windows. Отдельной Linux-компиляции, полного native Windows
-registry и Windows CI не было. [Лог Linux](../out/next-run-linux-full.log).
+registry и Windows CI не было. Лог Linux (`out/next-run-linux-full.log`).
 
-Локальные логи, снимки, [manifest 154 Java sources](../out/next-run-tested-source-sha256.json)
-и [машинное резюме](../out/next-run-validation-summary.json) находятся в gitignored
+Локальные логи, снимки, manifest 154 Java sources (`out/next-run-tested-source-sha256.json`)
+и машинное резюме (`out/next-run-validation-summary.json`) находятся в gitignored
 `out/` этого checkout. Все source hashes совпадают с проверенным состоянием.
 Тестовый контейнер удалён, созданная вкладка Orca закрыта, fixture dashboard
 остановлен. `git diff --check` и repository hygiene (`paths`, `uuids`) проходят.

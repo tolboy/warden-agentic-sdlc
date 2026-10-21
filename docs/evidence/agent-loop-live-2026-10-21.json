@@ -1,0 +1,397 @@
+{
+  "schema_version": 1,
+  "checked_date": "2026-10-21",
+  "source_commit": "94f0c346440c10bc2bb3a074ddeeb2be7d6c4db0",
+  "scope": "Disposable Node fixtures in separate Orca-managed hello-world-test worktrees on Windows; no user application edits.",
+  "claude_selected": false,
+  "paired_experiment": {
+    "experiments": [
+      {
+        "experiment_id": "secondary-review-live",
+        "variants": [
+          "agy-secondary",
+          "deepseek-secondary"
+        ],
+        "pairs": 3,
+        "complete_pairs": 3,
+        "comparable": true,
+        "problems": [],
+        "estimates": {
+          "cost_usd": [
+            {
+              "variant": "deepseek-secondary",
+              "reference": "agy-secondary",
+              "known_pairs": 0,
+              "unknown_pairs": 3,
+              "comparable": false,
+              "mean_delta": null
+            }
+          ],
+          "elapsed_seconds": [
+            {
+              "variant": "deepseek-secondary",
+              "reference": "agy-secondary",
+              "known_pairs": 3,
+              "unknown_pairs": 0,
+              "comparable": true,
+              "mean_delta": -19.666666666666668
+            }
+          ],
+          "operator_minutes": [
+            {
+              "variant": "deepseek-secondary",
+              "reference": "agy-secondary",
+              "known_pairs": 0,
+              "unknown_pairs": 3,
+              "comparable": false,
+              "mean_delta": null
+            }
+          ],
+          "calls": [
+            {
+              "variant": "deepseek-secondary",
+              "reference": "agy-secondary",
+              "known_pairs": 3,
+              "unknown_pairs": 0,
+              "comparable": true,
+              "mean_delta": 0.0
+            }
+          ],
+          "accepted": [
+            {
+              "variant": "deepseek-secondary",
+              "reference": "agy-secondary",
+              "known_pairs": 3,
+              "unknown_pairs": 0,
+              "comparable": true,
+              "mean_delta": 0.0
+            }
+          ]
+        }
+      }
+    ],
+    "pairs": [
+      {
+        "experiment_id": "secondary-review-live",
+        "task_pair_id": "pilot-queue",
+        "repeat": 1,
+        "complete": true,
+        "problems": [],
+        "members": [
+          {
+            "run_id": "live2-agy-r1-measured",
+            "source": "warden",
+            "condition_id": "922344cc052663e35dcfe0b524b0dcffcd8e78a3adddd3b72a47665d7b2bc2a1",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 269,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "agy-secondary",
+            "repeat": 1,
+            "operator_minutes": null
+          },
+          {
+            "run_id": "live2-deepseek-r1-measured",
+            "source": "warden",
+            "condition_id": "159c9156ddf19f7c7a75884ebf6744961304d03e5db333ca5c2cf24c29cb8060",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 251,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "deepseek-secondary",
+            "repeat": 1,
+            "operator_minutes": null
+          }
+        ]
+      },
+      {
+        "experiment_id": "secondary-review-live",
+        "task_pair_id": "pilot-queue",
+        "repeat": 2,
+        "complete": true,
+        "problems": [],
+        "members": [
+          {
+            "run_id": "live2-agy-r2-measured",
+            "source": "warden",
+            "condition_id": "922344cc052663e35dcfe0b524b0dcffcd8e78a3adddd3b72a47665d7b2bc2a1",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 292,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "agy-secondary",
+            "repeat": 2,
+            "operator_minutes": null
+          },
+          {
+            "run_id": "live2-deepseek-r2-measured",
+            "source": "warden",
+            "condition_id": "159c9156ddf19f7c7a75884ebf6744961304d03e5db333ca5c2cf24c29cb8060",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 222,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "deepseek-secondary",
+            "repeat": 2,
+            "operator_minutes": null
+          }
+        ]
+      },
+      {
+        "experiment_id": "secondary-review-live",
+        "task_pair_id": "pilot-queue",
+        "repeat": 3,
+        "complete": true,
+        "problems": [],
+        "members": [
+          {
+            "run_id": "live2-agy-r3-measured",
+            "source": "warden",
+            "condition_id": "922344cc052663e35dcfe0b524b0dcffcd8e78a3adddd3b72a47665d7b2bc2a1",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 217,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "agy-secondary",
+            "repeat": 3,
+            "operator_minutes": null
+          },
+          {
+            "run_id": "live2-deepseek-r3-measured",
+            "source": "warden",
+            "condition_id": "159c9156ddf19f7c7a75884ebf6744961304d03e5db333ca5c2cf24c29cb8060",
+            "requested_conditions_known": true,
+            "base_commit": "191a06780e62caad0d69b90ddf1933cae6c86d5c",
+            "risk": "medium",
+            "outcome": "accepted",
+            "cost_usd": null,
+            "elapsed_seconds": 246,
+            "calls": 3,
+            "experiment_id": "secondary-review-live",
+            "task_pair_id": "pilot-queue",
+            "variant": "deepseek-secondary",
+            "repeat": 3,
+            "operator_minutes": null
+          }
+        ]
+      }
+    ],
+    "issues": [],
+    "unpaired_warden_units": 2,
+    "unpaired_baseline_rows": 0,
+    "incomplete": false
+  },
+  "fixture_acceptance": {
+    "actor": "warden-live-fixture-operator",
+    "is_end_user_judgement": false,
+    "real_vendor_calls": 18,
+    "accepted_runs": 6,
+    "user_judgements": 0,
+    "run_receipts": [
+      {
+        "run_id": "live2-agy-r1-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "10d980764f850fbe340150b49238b2c0143aa4025554c07cdca2fb77da1a0631",
+        "summary_sha256": "07d1a4f273f5dc8e6a8eaa57c776490a74ad318eadded8f3c639e81633605c94",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      },
+      {
+        "run_id": "live2-deepseek-r1-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "4d42d63c0ee644a40fb1d46fa142837d189b231f831a70ca3714cc0a6d250f6b",
+        "summary_sha256": "ba1bc192ee93608c7e00224521c164f50b390f137ff696546458aef504e27cb0",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      },
+      {
+        "run_id": "live2-deepseek-r2-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "dcf0c04c2ed3dbb5641e42adb9f6f2f04e20e24b069166a07510cda0b025fb70",
+        "summary_sha256": "02e7b6cca84cba8d68a42874d5463026423bacd6a493eda75b20a5bc73388793",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      },
+      {
+        "run_id": "live2-agy-r2-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "86181b0f5fdb63d065381ee7d27614d3d730b1ccbd40c5275cda275afbdfcbbf",
+        "summary_sha256": "5a76902318f1432bb93ba71db3880d12477a1e9816abeb695ccd5c9221145b48",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      },
+      {
+        "run_id": "live2-agy-r3-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "f0a98a61e312bcbfbc0d2b950637d6ea9001bc370f802b06912a28e00bb22f16",
+        "summary_sha256": "844b929b677bf00bf33792b74ea3a5e9074997bd4d1674ad48041431c49e8e0e",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      },
+      {
+        "run_id": "live2-deepseek-r3-measured",
+        "run_exit_code": 0,
+        "fixture_outcome": "accept",
+        "reason": "ready_for_human",
+        "module_sha256": "2222a27e22a026ac8133b1075d82358ca91eaef7deedb9954fe411bb9f8ef879",
+        "summary_sha256": "c3a131d9989cb331651a608835a4049cf031d41afe5721fe528e4db6290e914d",
+        "acceptance_stdout": "PILOT_QUEUE_ACCEPTANCE_OK"
+      }
+    ]
+  },
+  "planning": {
+    "initial_draft": "stopped_on_P1_empty_project_check_set",
+    "bounded_calls_before_stop": 3,
+    "remediation": "provision concrete fixture checks; fresh draft",
+    "fresh_draft_vendor_calls": 2,
+    "plan_review": "pass"
+  },
+  "four_vendor_chain": {
+    "run_id": "live-four-vendor-chain-r2",
+    "real_vendor_calls": 4,
+    "synthetic_error_attempts": 1,
+    "attempts_charged_by_warden": 5,
+    "failover": [
+      {
+        "from_profile": "synthetic-quota",
+        "to_profile": "grok-implement",
+        "cause": "role_quota_exhausted",
+        "authorized_by": "policy_auto"
+      }
+    ],
+    "writer_process_tree_settled": true,
+    "reviews": [
+      {
+        "profile": "orca-codex-review",
+        "verdict": "pass",
+        "read_only_check": {
+          "method": "worktree_content_fingerprint",
+          "covers": "tracked edits, deletes, renames and untracked file contents",
+          "does_not_cover": "paths ignored by .gitignore",
+          "since": "role_start",
+          "matched": true
+        }
+      },
+      {
+        "profile": "deepseek-review",
+        "verdict": "pass",
+        "read_only_check": {
+          "method": "worktree_content_fingerprint",
+          "covers": "tracked edits, deletes, renames and untracked file contents",
+          "does_not_cover": "paths ignored by .gitignore",
+          "matched": true
+        }
+      },
+      {
+        "profile": "agy-review",
+        "verdict": "pass",
+        "read_only_check": {
+          "method": "worktree_content_fingerprint",
+          "covers": "tracked edits, deletes, renames and untracked file contents",
+          "does_not_cover": "paths ignored by .gitignore",
+          "matched": true
+        }
+      }
+    ],
+    "independent_assertions": 92,
+    "outcome": "fixture_accepted",
+    "decision_channel": "Orca gate -> warden approve --from-orca",
+    "acceptance_is_end_user_judgement": false,
+    "worker_release_ok": true,
+    "delivery_ack_ok": true,
+    "coordinator_close_ok": true,
+    "operator_prompt_submit_assistance": false,
+    "cost_usd": null,
+    "operator_minutes": null
+  },
+  "recovery": {
+    "controller_hard_kill": true,
+    "original_worker_retained": true,
+    "duplicate_start_refused": true,
+    "unconfirmed_recover_refused": true,
+    "original_worker_done_received": true,
+    "settled_worker_released": true,
+    "confirmed_recover_passed": true,
+    "fresh_image_probe_passed": true,
+    "literal_ctrl_c_tested": false
+  },
+  "dashboard": {
+    "browser": "Orca embedded browser",
+    "approx_viewport_width_px": 737,
+    "horizontal_overflow": false,
+    "console_errors": 0,
+    "stale_rotation_preview_refused": true,
+    "fresh_preview_passed": true,
+    "live_apply_exercised": false
+  },
+  "automated_tests": {
+    "windows_frozen_full": {
+      "passed": 4928,
+      "failed": 0,
+      "scope": "before final small OrcaProbe changes"
+    },
+    "windows_current_focused": {
+      "passed": 247,
+      "failed": 0
+    },
+    "linux_ci_source_commit": {
+      "passed": 4930,
+      "failed": 0
+    },
+    "current_ci": "https://github.com/tolboy/warden-agentic-sdlc/pull/54/checks"
+  },
+  "limitations": [
+    "Three pairs describe this fixture, not model quality or statistical significance.",
+    "Unreported call prices and operator minutes remain unknown.",
+    "Grok Orca adapter rejects launch-time model selection; pinned Grok uses direct CLI.",
+    "One earlier nonce probe required Enter-only operator recovery after input_accepted; fresh probe and full chain completed automatically.",
+    "Synthetic typed quota error is not actual vendor quota exhaustion.",
+    "Requested and CLI-reported model identity are separate; no independent provider identity attestation."
+  ],
+  "private_raw_evidence_sha256": {
+    "live-pairs2/comparison.json": "4515044b267d329803fa5609c3bccb2d650a3c296d2293aa9426ad8e286dd72c",
+    "live-pairs2/receipts.json": "e924f05f3db100bdfed458feab049798ad8631242a404bf7d8ec86a48f454dde",
+    "live-windows-full-suite.log": "f0b227b66f6280565d8829afeca8a5f8e206f18d14acf2ff99baf0da6218abe5",
+    "live-final2-focused.log": "3d92cfa76a758233229db0a7da8439b103b4946b07d6335612d4392a667053ec",
+    "live-ci-linux25.log": "ff6c6da86423493b0211f57776adff6337bd0af3978a5f21e165cbaae05278f7",
+    "live-four-vendor-chain-r2.log": "91ebbc5d7cdd18b3805e608dc69874cd6977904cb21791fcf804f4a4570999cf",
+    "live-chain-independent-acceptance.json": "f1fc2e9efc7ea9b0173b42dedfee446a1a6f641e3a8a6811bef4b83f96961cd8",
+    "live-chain-approve-from-orca.json": "e0fbe2209e57d122784a94b599ab443a4f79997fc49071701dc89029e786698a",
+    "live-chain-orca-workers.json": "dae34c6cd22ced5a534e97fac5f3aeb64c61472b519a0831fa91460cee5ccafa",
+    "live-crash/crash.json": "bb8d09cc21bc6f82768f0b9ad2487737cb68d7e8b12d62330bb5031f0d52f59b",
+    "live-crash/confirmed-recover.json": "463f42af2055e448b530886971993a380cd248a9f67bb6d68146f948381a6cb3",
+    "live-verify-orca-codex-review-retry.log": "16defa2cb8abe64621b919c0e936507b30fb890adfc5945f174f6532c05df5c0",
+    "live-dashboard-orca-stable-preview.json": "0f272d4857438a49921400d9e03f9e9ed8fc1201337958d2b8ac04600fcc3f4d"
+  },
+  "private_raw_evidence_note": "Paths are relative to local ignored out/. Hashes bind observed receipts; raw files and account metadata are intentionally not published."
+}

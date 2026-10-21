@@ -1,5 +1,7 @@
 # Безопасное сохранение настроек — 2026-10-20
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 Продолжение [аудита](AUDIT-AGENT-LOOP-2026-10-19.md) и
 [этапа измерений/evals](AGENT-LOOP-EVALS-FIXES-2026-10-20.md).
 Ветка: `codex/agent-loop-settings`, база: `7e5e8e3`.
@@ -46,7 +48,7 @@ Stamp проходит через тот же writer и сохраняет `*.be
 Финальные native Windows suites: **577 passed, 0 failed**, девять suites:
 `config-file-store`, `roster`, `profile verifier`, `config`, `config-view`,
 `role-resolver`, `run-override`, `launch-settings`, `dashboard`.
-[Лог Windows](../out/settings-windows-verified.log).
+Лог Windows (`out/settings-windows-verified.log`).
 
 Новые проверки покрывают конкуренцию двух писателей с одним digest, lock между
 разными JVM, сохранение OS lock после локального отказа, аварийный halt после
@@ -59,17 +61,17 @@ staging/backup, отказ atomic move, ошибку rename, неизменно�
 Отдельный smoke на production `out/classes`: `setup` и `roster` в изолированном home,
 успешный `set --expected-sha256`, независимая сверка SHA-256 файла и backup,
 повтор со старым digest → exit 1 / `config_conflict`, новые байты не изменены.
-[Лог CLI](../out/settings-cli-production.log).
+Лог CLI (`out/settings-cli-production.log`).
 
 Полный Linux registry: **4688 passed, 0 failed**, 54 suites, exit 0.
-[Лог Linux](../out/settings-linux-verified.log). Bytecode собран на Windows;
+Лог Linux (`out/settings-linux-verified.log`). Bytecode собран на Windows;
 контейнер использовал JRE 25, Git, отключённую сеть и loopback hostname.
 Отдельной Linux-компиляции и полного native Windows registry нет.
 
 Все 152 Java-исходника совпадают с замороженным
-[manifest SHA-256](../out/settings-tested-source-sha256.json); после сборки изменений
+manifest SHA-256 (`out/settings-tested-source-sha256.json`); после сборки изменений
 исходников не было. Тестовый контейнер остановлен и удалён.
-Машинное резюме: [settings-validation-summary.json](../out/settings-validation-summary.json).
+Машинное резюме: settings-validation-summary.json (`out/settings-validation-summary.json`).
 Логи и manifest находятся в gitignored `out/` этого checkout.
 `git diff --check` и repository hygiene (`paths`, `uuids`) проходят.
 

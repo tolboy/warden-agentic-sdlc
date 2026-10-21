@@ -1,5 +1,7 @@
 # Исправления comparison contract и multi-writer preflight
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 База: `58f810a`, завершённая очередь F03–F06. Ветка: `codex/agent-loop-evals`.
 Продолжение выполнено в том же отдельном checkout; ранее существовавшие документы
 Orca в исходном рабочем дереве сохранены.
@@ -27,31 +29,31 @@ effective/reported settings. Декларации оператора о manual o
 Сборка `build.cmd`: JDK 25, `--release 21`, production и tests.
 Windows registry subset: `ledger-compare`, `paired-evaluation`, `config`, `workflow`,
 `role-resolver`, `config-view`, `run-override`: **457 passed, 0 failed**, exit 0.
-[Лог Windows](../out/evals-windows-verified.log).
+Лог Windows (`out/evals-windows-verified.log`).
 
 Отдельно на Windows выполнены реальные методы `multiWriterPreflight` и
 `independenceChecks` из `TaskLoopTest`: **33 passed, 0 failed**, exit 0.
-[Лог preflight](../out/evals-preflight-windows.log). Проверены два автора разных
+Лог preflight (`out/evals-preflight-windows.log`). Проверены два автора разных
 вендоров, отказ до первого вызова, более раннее ревью, третий независимый вендор,
 task pins, rotation и writable planner.
 
 Production build fingerprint проверен отдельно для class directory и JAR;
-digest JAR совпадает с независимым SHA-256. [Лог](../out/evals-build-probe.log).
+digest JAR совпадает с независимым SHA-256. Лог (`out/evals-build-probe.log`).
 CLI прочитал новый example manifest на fixture project, показал отсутствующий run,
 `0/1 complete pairs` и `comparable=false`, exit 0; synthetic template не принят
 за успешный эксперимент.
 
 Полный финальный Linux registry: **4632 passed, 0 failed**, 53 suites, exit 0.
-[Лог Linux](../out/evals-linux-verified.log). Прогон выполнен на замороженных исходниках.
+Лог Linux (`out/evals-linux-verified.log`). Прогон выполнен на замороженных исходниках.
 Manifest всех 150 Java-исходников:
-[evals-tested-source-sha256.json](../out/evals-tested-source-sha256.json).
+evals-tested-source-sha256.json (`out/evals-tested-source-sha256.json`).
 Bytecode собран на Windows; Linux использует JRE 25 и Git в тестовом контейнере
 с отключённой сетью и loopback hostname. Отдельной Linux-компиляции нет.
 Логи и manifest находятся в gitignored `out/` этого checkout.
 Все 150 hashes повторно сверены с текущим `src/`; изменений после сборки нет.
 Тестовый контейнер остановлен и удалён. `git diff --check` и repository hygiene
 (`paths`, `uuids`) проходят.
-Машинное резюме: [evals-validation-summary.json](../out/evals-validation-summary.json).
+Машинное резюме: evals-validation-summary.json (`out/evals-validation-summary.json`).
 
 ## Границы и следующая очередь
 

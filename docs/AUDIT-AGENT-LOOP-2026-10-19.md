@@ -1,5 +1,9 @@
 **Аудит Warden: петля агентов, ограничения, настройки и измерение результата**
 
+Итоговая live-проверка 2026-10-21: [четыре вендора, paired evals и Orca recovery](AGENT-LOOP-LIVE-VALIDATION-2026-10-21.md).
+
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 Дата: 2026-10-19. Срез: `7c7f4083eb5c0a99df891bac39897afb02092039`, ветка `fix/keep-pinned-contract-copy`.
 
 Вывод: у Warden уже есть содержательная основа для управляемой петли: машинные gates, независимость проверяющих, ограниченные исправления, подтверждённое завершение Orca, наследование бюджета и durable evidence. Первый приоритет — исключить два одновременных direct CLI workflow в одном рабочем дереве: такой допуск воспроизведён. Затем нужно закрыть потерю protocol output и deadline backoff, исправить данные измерений и сравнения, после этого расширить существующий локальный dashboard конструктором следующего запуска. Измеренных оснований объявлять текущий набор моделей/effort оптимальным пока нет.
@@ -59,7 +63,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
 Сценарий: два `warden run` с разными run ID направлены в одно рабочее дерево, профили direct с правом записи. Ожидается `worktree_busy` либо изоляция второго workflow. Фактически резервируется только `.warden/runs/<runId>/run.json`; общего execution lease нет. Synthetic probe запустил два настоящих TaskLoop и DirectCliExecutor: оба дочерних Java CLI одновременно дошли до барьера, `simultaneousDirectWriters=2`; после release оба workflow завершились `ready_for_human`. Вендоров не было; столкновения исходников намеренно не устраивались. Подтверждён одновременный допуск, а смешение изменений/ошибочная атрибуция fingerprint — возможные последствия реальных writers.
 
-Исправление: cross-process lease канонического рабочего дерева на всю цепочку, включая gates и readers; аналогичная защита standalone writable `role`. Разные изолированные worktrees должны продолжать работать параллельно. После падения контроллера recovery должен подтвердить остановку прежнего worker до нового writer. Проверки: два разных run ID из двух JVM в одном root; standalone role против workflow; другой worktree того же репозитория; crash/осиротевший child; освобождение lease после безопасного завершения. [Probe](../out/audit-loop-2026-10-19/ConcurrencyProbe.java), [результат](../out/audit-loop-2026-10-19/concurrency-result.json).
+Исправление: cross-process lease канонического рабочего дерева на всю цепочку, включая gates и readers; аналогичная защита standalone writable `role`. Разные изолированные worktrees должны продолжать работать параллельно. После падения контроллера recovery должен подтвердить остановку прежнего worker до нового writer. Проверки: два разных run ID из двух JVM в одном root; standalone role против workflow; другой worktree того же репозитория; crash/осиротевший child; освобождение lease после безопасного завершения. Probe (`out/audit-loop-2026-10-19/ConcurrencyProbe.java`), результат (`out/audit-loop-2026-10-19/concurrency-result.json`).
 
 1. **F01 — backoff не ограничен остатком deadline.**
 
@@ -75,7 +79,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
    Сценарий: CLI выводит больше 4 MiB tool events, затем финальные `item.completed` и `turn.completed`. Probe: `exit=0`, `stdoutLength=4194304`, `truncated=true`, `hasFinalArtifact=false`, `hasUsage=false`. Ожидается: конечный artifact и usage доступны независимо от объёма предшествующего журнала. Фактически сохраняется prefix, из него же пишется raw transcript и извлекаются artifact/telemetry; executor не выводит флаг усечения в отчёт. Это может превратить успешную оплаченную работу в `role_artifact_unparseable` с неизвестной стоимостью.
 
-   Исправление: потоковая запись полного raw в файл и инкрементальный разбор JSONL/финальных envelope; отдельно ограничить память и размер отображаемого текста. Если полный capture ограничивается политикой, явно фиксировать truncation и сохранять protocol tail. Проверки: artifact/usage после 4 MiB; большой stderr; завершение по timeout после промежуточного usage. [Probe и результат](../out/audit-loop-2026-10-19/README.md).
+   Исправление: потоковая запись полного raw в файл и инкрементальный разбор JSONL/финальных envelope; отдельно ограничить память и размер отображаемого текста. Если полный capture ограничивается политикой, явно фиксировать truncation и сохранять protocol tail. Проверки: artifact/usage после 4 MiB; большой stderr; завершение по timeout после промежуточного usage. Probe и результат (`out/audit-loop-2026-10-19/README.md`).
 
 3. **F03 — crash между attempt journal и role summary скрывает локальные расходы.**
 
@@ -83,7 +87,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
    Сценарий: vendor вернул результат; `vendor_attempt` сохранён; процесс оборвался до `role_run`. На одном fixture локальный ledger показывает calls=0 и cost=null без `incomplete`, global corpus показывает calls=1 и cost=$1.25. Ожидается: завершённая попытка учитывается в обоих представлениях либо локальный отчёт явно сообщает неполноту. Фактически localView безусловно удаляет `vendor_attempt`.
 
-   Исправление: локальный и global reader должны использовать одну per-attempt accounting модель; summary дедуплицировать по `vendor_attempt_id`. Проверки: crash до summary, последующее появление summary, повторное чтение без изменения totals. Это подтверждённый дефект отчётности; обход budget/resume этим probe не проверялся. [Результат](../out/audit-metrics-2026-10-19/results.json).
+   Исправление: локальный и global reader должны использовать одну per-attempt accounting модель; summary дедуплицировать по `vendor_attempt_id`. Проверки: crash до summary, последующее появление summary, повторное чтение без изменения totals. Это подтверждённый дефект отчётности; обход budget/resume этим probe не проверялся. Результат (`out/audit-metrics-2026-10-19/results.json`).
 
 4. **F04 — retry A → A отображается как failover.**
 
@@ -91,7 +95,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
    Сценарий: A получает rate limit, повтор A успешен. Ожидается: 2 attempts, 1 retry, 0 failover. Fixture даёт `failovers=1`, переход `same-profile → same-profile`, dashboard `kind=switched`. Все дополнительные attempts трактуются как замена.
 
-   Исправление на актуальной базе: использовать существующие `cause`/`role_failovers`, отдельно обозначать rate-limit retry и считать смену профиля/модели/вендора; не вводить параллельную конкурирующую схему событий. Проверки: A→A; A→B; A→A→B. [Результат](../out/audit-metrics-2026-10-19/results.json).
+   Исправление на актуальной базе: использовать существующие `cause`/`role_failovers`, отдельно обозначать rate-limit retry и считать смену профиля/модели/вендора; не вводить параллельную конкурирующую схему событий. Проверки: A→A; A→B; A→A→B. Результат (`out/audit-metrics-2026-10-19/results.json`).
 
 5. **F05 — partial token telemetry нарушает правило unknown.**
 
@@ -99,13 +103,13 @@ F09, колонки dashboard и подробный preview задачи — в
 
    Сценарий: две попытки сообщают только `tokens: {input: 100}`. Ожидается: input=200, output и total неизвестны. Fixture получает input=200, output=0, total=0, `tokens_unknown_calls=0`. Наличие любого поля делает весь объект «известным».
 
-   Исправление: отдельные known/unknown counters для input/output/total, как в LedgerReader. Проверки: input-only, output-only, без total, смесь полных/неполных ответов. [Результат](../out/audit-metrics-2026-10-19/results.json).
+   Исправление: отдельные known/unknown counters для input/output/total, как в LedgerReader. Проверки: input-only, output-only, без total, смесь полных/неполных ответов. Результат (`out/audit-metrics-2026-10-19/results.json`).
 
 6. **F06 — requested model подменяет неизвестную reported model.**
 
    Источники: [LedgerReader.java:546](../src/main/java/dev/warden/ledger/LedgerReader.java#L546), [RoleRunner.java:1147](../src/main/java/dev/warden/role/RoleRunner.java#L1147), обещание в [METRICS.md:49](METRICS.md#L49).
 
-   Сценарий: CLI не сообщает inference model. Ожидается: reported неизвестна, requested видна отдельно. Фактически `attempt.model` заполняется из профиля, а `by_model` использует это значение при отсутствии `model_reported`. Fixture с requested=`declared-model-only` и effective/reported=`unknown` даёт local/global `by_model: {declared-model-only: 1}`. Для сравнения эффективности такая группа не доказывает, какая модель исполняла запрос. [Результат](../out/audit-metrics-2026-10-19/compare-conditions-results.json).
+   Сценарий: CLI не сообщает inference model. Ожидается: reported неизвестна, requested видна отдельно. Фактически `attempt.model` заполняется из профиля, а `by_model` использует это значение при отсутствии `model_reported`. Fixture с requested=`declared-model-only` и effective/reported=`unknown` даёт local/global `by_model: {declared-model-only: 1}`. Для сравнения эффективности такая группа не доказывает, какая модель исполняла запрос. Результат (`out/audit-metrics-2026-10-19/compare-conditions-results.json`).
 
    Исправление: отдельные dimensions requested/effective/reported со source; использовать уже существующий MeasurementContext. Проверки: declared-only, receipt-only, vendor-reported и mismatch. Без live-подтверждения нельзя выдавать stamp профиля или launch receipt за доказательство inference.
 
@@ -113,7 +117,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
    Источники: [TaskLoop.java:1346](../src/main/java/dev/warden/run/TaskLoop.java#L1346), [TaskLoop.java:1643](../src/main/java/dev/warden/run/TaskLoop.java#L1643), [TaskLoop.java:2220](../src/main/java/dev/warden/run/TaskLoop.java#L2220), [Workflow.java:377](../src/main/java/dev/warden/config/Workflow.java#L377).
 
-   Сценарий: write-A/vendor-A → write-B/vendor-B → review/vendor-B, требуется independent vendor. Несколько implementer stages разрешены. Preview учитывает только A и допускает reader B; runtime накапливает обоих writers и отказывает reader уже после оплаченных стадий. Ожидается бесплатный ранний отказ. Runtime не ослабляет независимость; ошибка относится к preflight и бесполезному расходу. Offline probe подтвердил, что preview допускает reader B против `[writer-a]`, а реальные методы `overlayGap`, `judgeGap`, `toolingGap`, `readerGap` возвращают null. Тот же resolver против обоих writers возвращает `same_vendor_as_writer`. Полный workflow с оплатой не запускался. [Результат](../out/audit-settings-2026-10-19/probe-result.json).
+   Сценарий: write-A/vendor-A → write-B/vendor-B → review/vendor-B, требуется independent vendor. Несколько implementer stages разрешены. Preview учитывает только A и допускает reader B; runtime накапливает обоих writers и отказывает reader уже после оплаченных стадий. Ожидается бесплатный ранний отказ. Runtime не ослабляет независимость; ошибка относится к preflight и бесполезному расходу. Offline probe подтвердил, что preview допускает reader B против `[writer-a]`, а реальные методы `overlayGap`, `judgeGap`, `toolingGap`, `readerGap` возвращают null. Тот же resolver против обоих writers возвращает `same_vendor_as_writer`. Полный workflow с оплатой не запускался. Результат (`out/audit-settings-2026-10-19/probe-result.json`).
 
    Исправление: последовательная симуляция всех write-capable stages теми же правилами writer provenance, которые использует runtime. Проверки: два writers, writer после review, task pins, rotate, failover с новым writer vendor.
 
@@ -131,7 +135,7 @@ F09, колонки dashboard и подробный preview задачи — в
 
    В шапке 6 колонок, в строке кандидата 5 ячеек. В браузере: профиль находится под «Этап», модель под «Кандидат», «да» под «Модель», допуск под «Проверен», сведения о цене под «Допуск», «Стоимость» пуста. Ожидается совпадение заголовков и значений.
 
-   Исправление: согласовать структуру и смысл колонок. Проверка: DOM/header mapping плюс narrow viewport. [Снимок](../out/audit-settings-2026-10-19.png).
+   Исправление: согласовать структуру и смысл колонок. Проверка: DOM/header mapping плюс narrow viewport. Снимок (`out/audit-settings-2026-10-19.png`).
 
 **Ограничения лимитов и fallback, которые интерфейс должен объяснять**
 
@@ -176,7 +180,7 @@ F09, колонки dashboard и подробный preview задачи — в
 - [LedgerCompare.java:453](../src/main/java/dev/warden/ledger/LedgerCompare.java#L453) ставит `comparable=true` по одному условию `units >= 3`. Это размер выборки, а не доказательство одинаковых условий, сложности задач или статистической надёжности.
 - Baseline schema ([LedgerCompare.java:45](../src/main/java/dev/warden/ledger/LedgerCompare.java#L45)) не связывает пары через `task_pair_id` и не хранит Warden operator effort/post-accept defects. Основная гипотеза о снижении труда оператора автоматически не проверяется.
 
-Offline compare probe это подтвердил: два запуска `model-a/low` и `model-b/high` под `stable-profile`, с различиями в cast, role contract и measurement context, объединяются в одну группу `units=2`, `incomplete=false`. [Результат](../out/audit-metrics-2026-10-19/compare-conditions-results.json).
+Offline compare probe это подтвердил: два запуска `model-a/low` и `model-b/high` под `stable-profile`, с различиями в cast, role contract и measurement context, объединяются в одну группу `units=2`, `incomplete=false`. Результат (`out/audit-metrics-2026-10-19/compare-conditions-results.json`).
 
 Нужно два независимых уровня evals:
 
@@ -207,11 +211,11 @@ Offline compare probe это подтвердил: два запуска `model-
 | Проверка | Результат |
 |---|---|
 | Build | `build.cmd`: passed, release 21; host Java 25.0.2 |
-| Полный набор Java suites | Запущен и остановлен аудитором через 1083 секунды (18 минут 3 секунды), без итоговой сводки. Это не установленный test failure и не полный green. Последний stack показывает продвижение TaskLoopTest по Git-backed fixtures; зависание не установлено. [Статус](../out/audit-full-suite-status-2026-10-19.json) |
+| Полный набор Java suites | Запущен и остановлен аудитором через 1083 секунды (18 минут 3 секунды), без итоговой сводки. Это не установленный test failure и не полный green. Последний stack показывает продвижение TaskLoopTest по Git-backed fixtures; зависание не установлено. Статус (`out/audit-full-suite-status-2026-10-19.json`) |
 | Focused suites: config-view, dashboard, ledger, ledger-compare, corpus-reader, roster, run-override, orca-settlement | `650 passed, 0 failed`, exit 0; эти suites пока не ловят найденные probe-сценарии |
 | Routing suites: quota signal, config, workflow, role-resolver, role runner | `386 passed, 0 failed`, exit 0 |
-| Offline metrics probes | 3 сценария воспроизведены, exit 0; [JSON](../out/audit-metrics-2026-10-19/results.json), [исходник](../out/audit-metrics-2026-10-19/AuditMetricsProbe.java) |
-| Offline capture probe | Потеря final artifact/usage после 4 MiB воспроизведена; [результаты](../out/audit-loop-2026-10-19/probe-results.json) |
+| Offline metrics probes | 3 сценария воспроизведены, exit 0; JSON (`out/audit-metrics-2026-10-19/results.json`), исходник (`out/audit-metrics-2026-10-19/AuditMetricsProbe.java`) |
+| Offline capture probe | Потеря final artifact/usage после 4 MiB воспроизведена; результаты (`out/audit-loop-2026-10-19/probe-results.json`) |
 | Offline settings/compare probes | Подтверждены multi-writer preflight gap, смешение model/effort и declared-only by_model; все probes exit 0 |
 | Offline concurrency probe | Два TaskLoop + реальные DirectCliExecutor одновременно допустили два writable Java CLI в один checkout; оба `ready_for_human` |
 | CLI doctor | Gates/config ready; 21 загруженный профиль, 16 со stamp; проблем конфигурации/dangling references не заявлено. Это не live-проверка моделей или подписок |
@@ -223,6 +227,6 @@ Offline compare probe это подтвердил: два запуска `model-
 | Dashboard | Запущен локально, прочитаны API/страница; F09 подтверждён screenshot/AX. Решения и настройки не менялись |
 | Live vendor/failover/evals | Не запускались; финансовая эффективность, актуальная quota и качество выбранных моделей этим аудитом не установлены |
 
-Логи текущих проверок: [tests](../out/audit-tests-2026-10-19.log), [focused tests](../out/audit-focused-tests-2026-10-19.log), [routing tests](../out/audit-routing-tests-2026-10-19.log), [doctor](../out/audit-doctor-2026-10-19.json), [roster](../out/audit-roster-2026-10-19.txt), [compare](../out/audit-compare-2026-10-19.txt), [global ledger](../out/audit-global-ledger-2026-10-19.json). Артефакты под `out/` локальные и gitignored.
+Логи текущих проверок: tests (`out/audit-tests-2026-10-19.log`), focused tests (`out/audit-focused-tests-2026-10-19.log`), routing tests (`out/audit-routing-tests-2026-10-19.log`), doctor (`out/audit-doctor-2026-10-19.json`), roster (`out/audit-roster-2026-10-19.txt`), compare (`out/audit-compare-2026-10-19.txt`), global ledger (`out/audit-global-ledger-2026-10-19.json`). Артефакты под `out/` локальные и gitignored.
 
 Дополнительные риски без достаточного подтверждения для дефекта: удержание исторического orchestration question при истечении ожидания и очистка descendants после выхода родителя в ProcessRunner. Native `agent_wait_checked_clear` сам по себе не доказывает reply на threaded question; QuestionProbe показывает ветку, но не устанавливает неправильность её применения в реальном lifecycle. Эти случаи требуют отдельных fake/runtime сценариев и платформенного process-tree теста.

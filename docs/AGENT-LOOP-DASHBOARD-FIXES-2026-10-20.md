@@ -1,5 +1,7 @@
 # Исправление таблиц dashboard — 2026-10-20
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 Продолжение [аудита](AUDIT-AGENT-LOOP-2026-10-19.md) и
 [безопасного сохранения настроек](AGENT-LOOP-SETTINGS-FIXES-2026-10-20.md).
 Ветка: `codex/agent-loop-dashboard`, база: `7552da6`.
@@ -28,7 +30,7 @@ override. Неуказанные значения обозначены явно;
 Свежая сборка: `build.cmd`, `javac --release 21`, host JDK 25.
 Native Windows: **388 passed, 0 failed** в шести suites: `dashboard`, `config-view`,
 `launch-settings`, `roster`, `profile verifier`, `config-file-store`.
-[Лог](../out/dashboard-windows-verified.log).
+Лог (`out/dashboard-windows-verified.log`).
 
 Production `Main dashboard` запущен на loopback с изолированными fixture home и
 проектом. Fixture включает независимого reviewer, отказ того же vendor, Orca с
@@ -46,15 +48,15 @@ horizontal overflow. Скриншоты Orca содержали повторяю
 Просмотрены корректные снимки широкой таблицы, обоих краёв таблицы при 700 px и
 preview задач:
 
-- [Состав стадий, 1400 px](../out/dashboard-f09-1400-left.png).
-- [Левый край, 700 px](../out/dashboard-f09-700-left.png).
-- [Правый край, 700 px](../out/dashboard-f09-700-right.png).
-- [Preview задач](../out/dashboard-f09-preview.png).
+- Состав стадий, 1400 px (`out/dashboard-f09-1400-left.png`).
+- Левый край, 700 px (`out/dashboard-f09-700-left.png`).
+- Правый край, 700 px (`out/dashboard-f09-700-right.png`).
+- Preview задач (`out/dashboard-f09-preview.png`).
 
-[Результаты Edge](../out/dashboard-f09-edge-validation.json) и
-[машинное резюме](../out/dashboard-validation-summary.json) сохранены в gitignored
+Результаты Edge (`out/dashboard-f09-edge-validation.json`) и
+машинное резюме (`out/dashboard-validation-summary.json`) сохранены в gitignored
 `out/` этого checkout вместе с логами и снимками. Все 152 Java-исходника зафиксированы
-в [manifest SHA-256](../out/dashboard-tested-source-sha256.json); относительно
+в manifest SHA-256 (`out/dashboard-tested-source-sha256.json`); относительно
 проверенного F08 изменён только `Dashboard.java`.
 
 Полный Linux registry проходил на базе `7552da6`: **4688 passed, 0 failed**.

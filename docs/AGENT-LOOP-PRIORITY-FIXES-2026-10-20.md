@@ -1,5 +1,7 @@
 # Приоритетные исправления agent loop
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 База: `106f2a3` (`origin/main` после fetch 2026-10-20). Рабочая ветка:
 `codex/agent-loop-priority`. Учтено [независимое ревью Grok Bot](AUDIT-AGENT-LOOP-2026-10-19-REVIEW.md).
 Старый `7c7f408` не переносился: его заменяет upstream PR #53. Исходная ветка и stash
@@ -41,13 +43,13 @@ Linux registry выполнен в отдельном контейнере: JRE 
 | Проверка | Результат |
 |---|---|
 | Сборка production/tests | `built (release 21)` |
-| Полный Linux registry, 51 suite | **4517 passed, 0 failed**, exit 0; [лог](../out/priority-linux-verified.log) |
-| Windows: lease, capture, роли, next-step | **404 passed, 0 failed**, exit 0; [лог](../out/priority-windows-release-focused.log) |
+| Полный Linux registry, 51 suite | **4517 passed, 0 failed**, exit 0; лог (`out/priority-linux-verified.log`) |
+| Windows: lease, capture, роли, next-step | **404 passed, 0 failed**, exit 0; лог (`out/priority-windows-release-focused.log`) |
 | Windows: последний capture/parser, quota и 403 | **172 passed, 0 failed**, exit 0; включает дополнительный inline-prose regression |
-| Windows: replay chain budget и resume | **49 + 26 passed, 0 failed**; [лог](../out/priority-taskloop-probe.log) |
-| Windows: raw после прежнего cap и настоящий timeout | **16 passed, 0 failed**, exit 0; [лог](../out/priority-windows-taskloop-replay.log) |
+| Windows: replay chain budget и resume | **49 + 26 passed, 0 failed**; лог (`out/priority-taskloop-probe.log`) |
+| Windows: raw после прежнего cap и настоящий timeout | **16 passed, 0 failed**, exit 0; лог (`out/priority-windows-taskloop-replay.log`) |
 | CLI recover | Успешное восстановление fixture и повторный идемпотентный вызов |
-| Исходники после тестового snapshot | SHA-256 совпадают; [manifest](../out/priority-tested-source-sha256.json) |
+| Исходники после тестового snapshot | SHA-256 совпадают; manifest (`out/priority-tested-source-sha256.json`) |
 
 Числа целевых Windows-прогонов пересекаются: их нельзя суммировать как независимые тесты.
 Ранний полный Windows-прогон завершился за 2636 секунд с пятью падениями: цена terminal
@@ -62,7 +64,7 @@ vendor descendants, вывод больше 4 МиБ, byte hashes, malformed UTF
 
 Повтор на локальной машине: `build.cmd`, затем
 `java -cp out/test-classes dev.warden.testing.TestMain`. Машинное резюме этого прогона:
-[priority-validation-summary.json](../out/priority-validation-summary.json).
+priority-validation-summary.json (`out/priority-validation-summary.json`).
 
 Не проверены live vendor CLI, фактическая стоимость/лимиты подписок, live Orca,
 реальная Conductor handoff и Windows Console Ctrl+C. Shutdown hook проверяется через

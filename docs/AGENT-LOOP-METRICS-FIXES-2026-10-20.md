@@ -1,5 +1,7 @@
 # Исправления измерений agent loop
 
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 База: `7d7b4f4`, завершённый этап F10/F02/F01. Ветка: `codex/agent-loop-metrics`.
 Работа продолжена в отдельном чистом checkout: три ранее существовавших документа Orca
 в исходном рабочем дереве сохранены без изменений.
@@ -30,20 +32,20 @@
 Сборка `build.cmd`: JDK 25, `--release 21`, production и tests.
 На Windows выполнены `ledger`, `measurement-accounting`, `ledger-compare`, `home-corpus`,
 `corpus-reader` и `role runner`: **696 passed, 0 failed**, exit 0.
-[Лог Windows](../out/metrics-windows-verified.log).
+Лог Windows (`out/metrics-windows-verified.log`).
 
 Полный финальный Linux registry: **4578 passed, 0 failed**, 52 suites, exit 0.
-[Лог Linux](../out/metrics-linux-verified.log). Прогон выполнен на замороженных исходниках.
+Лог Linux (`out/metrics-linux-verified.log`). Прогон выполнен на замороженных исходниках.
 Bytecode собран
 на Windows; отдельной Linux-компиляции нет. Тестовый контейнер использует JRE 25 и Git,
 сеть отключена, hostname сопоставлен loopback. Progress wrapper повторяет актуальный
 registry TestMain и добавляет только BEGIN/END suite.
 
 Тестовый контейнер остановлен и удалён после проверки. Manifest всех 147 Java-исходников:
-[metrics-tested-source-sha256.json](../out/metrics-tested-source-sha256.json).
+metrics-tested-source-sha256.json (`out/metrics-tested-source-sha256.json`).
 Manifest и логи находятся в gitignored `out/` этого checkout. `git diff --check` и
 обе hygiene-проверки (`paths`, `uuids`) проходят.
-Машинное резюме: [metrics-validation-summary.json](../out/metrics-validation-summary.json).
+Машинное резюме: metrics-validation-summary.json (`out/metrics-validation-summary.json`).
 
 ## Следующая очередь
 

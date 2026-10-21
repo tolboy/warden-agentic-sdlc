@@ -1,5 +1,9 @@
 # Dashboard: Apply, бюджеты и аналитика
 
+Итоговая live-проверка 2026-10-21: [четыре вендора, paired evals и Orca recovery](AGENT-LOOP-LIVE-VALIDATION-2026-10-21.md).
+
+Пути `out/` ниже обозначают локальные gitignored-артефакты проверки; в клоне репозитория их нет.
+
 Дата: 2026-10-20. Продолжение `c1711d7`, ветка `codex/next-run-form`.
 Закрывает этапы 1–3 оставшейся очереди после исправления F01–F10.
 
@@ -92,7 +96,7 @@ Raw output, commands и private decision notes не публикуются; зн
   budgets совпадают, cwd/config home восстанавливаются, dispatch отсутствует.
 
 Итог полного Linux-прогона и машинное резюме находятся в
-[validation summary](../out/settings-analytics-validation-summary.json).
+validation summary (`out/settings-analytics-validation-summary.json`).
 Логи и screenshots сохранены в gitignored `out/settings-analytics-*`.
 
 ## Практические границы
