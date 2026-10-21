@@ -601,7 +601,7 @@ public final class Main {
             root = loaded.root();
             UserConfig user = UserConfig.load();
             Carried carried = continuation(loaded.root(), continueFrom);
-            dev.warden.run.Workspace card = board(args).at(loaded.root());
+            dev.warden.run.Workspace card = observationBoard(args).at(loaded.root());
             java.nio.file.Path narration = narrationFile(loaded.root(), runId);
             TaskLoop loop = new TaskLoop(new ProcessRunner())
                     .withTaskRouting(dev.warden.run.TaskRouting.live())
@@ -609,7 +609,7 @@ public final class Main {
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
-                    .withWatch(hasFlag(args, "--watch") ? narration : null)
+                    .withWatch(hasFlag(args, "--no-workspace-status") ? null : narration)
                     .withOrcaGate(!dryRun && !hasFlag(args, "--no-orca-gate"))
                     .withOverride(dev.warden.config.RunOverride.fromArgs(args));
             // Conductor's inner `warden run` is a new process and cannot see DoCommand's
@@ -862,7 +862,7 @@ public final class Main {
             return report;
         }
         try {
-            dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(board(args).at(root));
+            dev.warden.run.Workspace card = dev.warden.run.Workspace.guarded(observationBoard(args).at(root));
             java.nio.file.Path narration = narrationFile(root, nextId);
             TaskLoop.Preparation preparation = TaskLoop.Preparation.NONE;
             if (replan) {
@@ -916,7 +916,7 @@ public final class Main {
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
-                    .withWatch(hasFlag(args, "--watch") ? narration : null)
+                    .withWatch(hasFlag(args, "--no-workspace-status") ? null : narration)
                     .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                     .withOverride(dev.warden.config.RunOverride.fromArgs(args))
                     .withPreparation(preparation)
@@ -1380,7 +1380,7 @@ public final class Main {
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
                 .withTaskRouting(dev.warden.run.TaskRouting.live())
                 .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
-                .withWorkspace(board(args), hasFlag(args, "--watch"))
+                .withWorkspace(observationBoard(args), !hasFlag(args, "--no-workspace-status"))
                 .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                 .withOverride(dev.warden.config.RunOverride.fromArgs(args))
                 .run(options, user);
@@ -1461,6 +1461,17 @@ public final class Main {
     private static dev.warden.run.Workspace.Source board(String[] args) {
         if (hasFlag(args, "--no-workspace-status")) return dev.warden.run.Workspace.Source.NONE;
         return boards;
+    }
+
+    /** Automatic observation is resolved only once the actual execution worktree is known. */
+    private static dev.warden.run.Workspace.Source observationBoard(String[] args) {
+        if (hasFlag(args, "--no-workspace-status") || hasFlag(args, "--dry-run")) {
+            return dev.warden.run.Workspace.Source.NONE;
+        }
+        if (hasFlag(args, "--watch")) return boards;
+        var policy = dev.warden.execution.orca.OrcaDesktop.Policy.current(hasFlag(args, "--quiet"));
+        return worktree -> dev.warden.execution.orca.OrcaDesktop.attach(
+                new OrcaClient(new ProcessRunner()), worktree, policy, narration(args));
     }
 
     private static boolean hasFlag(String[] args, String name) {
@@ -3018,14 +3029,20 @@ public final class Main {
                 run started from a script, a scheduler or a terminal you have since closed
                 still has one. It is not evidence; the ledger is.
 
-                Inside an Orca worktree the same run writes its state to that worktree's card —
-                stage, cost, and the approve command when it stops for a person — so a run
-                waiting on you is visible from the board, including on a phone.
-                `--no-workspace-status` turns that off.
+                Interactive desktop runs automatically project stage, cost and the approve
+                command to the execution worktree's Orca card when available. A closed Orca
+                gets one bounded startup attempt. Quiet, headless and piped invocations do
+                not open desktop. `--no-workspace-status` opts out of this projection.
+
+                Automatic overview tabs are unavailable with the installed Orca contract:
+                observer terminals lack ownership-checked release after user takeover.
+                The fallback reason is saved in .warden/runs/<run-id>/desktop.json.
+                A card is not a live agent transcript; direct CLI events remain in raw logs.
 
                 `--watch` additionally asks the board to open a window following that log, so
                 the run can be watched from the board while still being launched from anywhere.
                 Warden is not run *by* the board: closing the window does not touch the loop.
+                This explicit legacy view remains open; it has no automatic cleanup guarantee.
 
                 The command to use is `warden do`. Everything else is a piece of that loop.
                 Vendor configuration lives in ~/.warden/, project configuration in .warden/.
