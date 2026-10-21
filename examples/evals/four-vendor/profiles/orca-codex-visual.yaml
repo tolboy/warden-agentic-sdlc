@@ -1,0 +1,24 @@
+version: 1
+profile: orca-codex-visual
+role: visual_qa
+vendor: codex
+model: gpt-6.1-sol
+effort: medium
+command: codex
+runner: orca
+read_only: true
+prompt_delivery: workspace_file
+limits:
+  wall_clock_minutes: 15
+capabilities:
+  vision:
+    delivery: workspace_file
+    verification: required
+prompt_template: prompts/visual-qa.md
+json_schema: schemas/visual-qa.json
+artifact:
+  required_fields: [role, task_id, status, verdict, summary, findings]
+verification:
+  probe: 'warden probe orca --agent codex --model {{model}} --effort {{effort}} --image --worktree {{worktree}} --wait-minutes 4'
+  expect: "probe-answer: matched"
+  what_to_check: ["The worker opens the random nonce image and settles with its exact word."]

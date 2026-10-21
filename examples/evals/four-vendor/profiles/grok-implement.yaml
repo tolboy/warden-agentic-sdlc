@@ -1,0 +1,24 @@
+version: 1
+profile: grok-implement
+role: implementer
+vendor: grok
+model: "grok-4.7"
+effort: high
+command: grok
+runner: direct
+read_only: false
+prompt_delivery: argv
+args: ["--prompt-file", "{{prompt_file}}", "--output-format", "json", "--always-approve", "--reasoning-effort", "{{effort}}", "--max-turns", "60", "--disable-web-search", "--verbatim", "--model", "{{model}}"]
+limits:
+  wall_clock_minutes: 20
+prompt_template: prompts/implementer.md
+json_schema: schemas/implementer.json
+artifact:
+  required_fields: ["role", "task_id", "status", "summary", "files_changed"]
+quota:
+  signatures: []
+verification:
+  probe: "grok --prompt-file verification-fixtures/grok-prompt.txt --output-format json --always-approve --reasoning-effort {{effort}} --max-turns 10 --disable-web-search --verbatim --model {{model}}"
+  expect: "WARDEN_GROK_WRITE_OK"
+  what_to_check: ["The model reads a real local file and returns its title; model/effort in launch flags are requested settings, not vendor receipts."]
+  note: "Configured 2026-10-21. No inferred cost or inherited verification stamp."

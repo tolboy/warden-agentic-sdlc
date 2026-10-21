@@ -1,0 +1,1 @@
+Read schemas/implementer.json and determine its title. Create verification-fixtures/grok-write-ok.txt with exactly WARDEN_GROK_WRITE_OK. Reply with WARDEN_GROK_WRITE_OK followed by the schema title. Do not change anything else.

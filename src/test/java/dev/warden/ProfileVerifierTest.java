@@ -265,7 +265,7 @@ public final class ProfileVerifierTest implements Suite {
             check.eq("it is released afterwards", 1, orca.calls("orchestration worker-release").size());
             check.eq("and its coordinator closed", 1, orca.calls("terminal close").size());
             try (var left = Files.list(worktree)) {
-                check.eq("the word file is gone", 0L, left.count());
+                check.eq("the word file is gone", 0L, left.filter(p -> p.getFileName().toString().startsWith(".warden-probe-")).count());
             }
         }
 
@@ -278,7 +278,11 @@ public final class ProfileVerifierTest implements Suite {
         check.eq("an answer that is not the word fails", 1, wrong.exitCode());
         check.that("and says so rather than matched",
                 wrong.lines().stream().anyMatch(line -> line.startsWith("probe-answer: mismatched")));
-        check.eq("the worker that guessed is stopped", 1, guessing.calls("orchestration worker-stop").size());
+        check.eq("a settled worker is released without stopping it", 0, guessing.calls("orchestration worker-stop").size());
+        check.eq("a wrong answer still owes and receives release", 1, guessing.calls("orchestration worker-release").size());
+        List<String> release = guessing.calls("orchestration worker-release").getFirst();
+        check.eq("release uses only the dispatch; Orca refuses --run/--from on this verb",
+                List.of("orchestration", "worker-release", "--dispatch", guessing.lastDispatch()), release);
 
         // Orca 1.4.209 exits 1 on a turn it could not see start; the agent may still answer.
         FakeOrca unseen = new FakeOrca(worktree).starting(FakeOrca.Start.TURN_UNOBSERVED);
@@ -320,6 +324,77 @@ public final class ProfileVerifierTest implements Suite {
                         vendor: claude
                         command: claude
                         """, "c.yaml"), "w"));
+
+        FakeOrca interrupted = new FakeOrca(worktree);
+        java.util.concurrent.atomic.AtomicReference<OrcaProbe.Outcome> busy = new java.util.concurrent.atomic.AtomicReference<>();
+        try (var held = dev.warden.execution.WorktreeLease.acquire(worktree, "active-workflow")) {
+            Thread contender = new Thread(() -> busy.set(new OrcaProbe(interrupted.client())
+                    .run(new OrcaProbe.Options("codex", null, null, false, worktree, 1))));
+            contender.start(); contender.join(10_000);
+            check.that("busy probe finishes without waiting for the vendor", !contender.isAlive());
+        }
+        check.that("a concurrent probe cannot contaminate an active read-only fingerprint",
+                busy.get() != null && busy.get().lines().stream().anyMatch(l -> l.contains("worktree_busy")));
+        check.eq("busy probe makes no Orca mutation", 0, interrupted.calls().size());
+        var delegate = interrupted.client();
+        var transport = new dev.warden.execution.orca.OrcaClient((directory, timeout, args) -> {
+            if (args.contains("--wait")) throw new IOException("connection lost after launch");
+            return delegate.invoke(directory, timeout, args);
+        });
+        var pending = new OrcaProbe(transport).run(new OrcaProbe.Options("codex", null, null,
+                false, worktree, 1));
+        check.eq("lost wait fails the probe", 1, pending.exitCode());
+        check.eq("lost wait does not prove the worker exited", 0, interrupted.calls("orchestration worker-stop").size());
+        check.eq("an unsettled worker is never released", 0, interrupted.calls("orchestration worker-release").size());
+        check.eq("its coordinator remains available for recovery", 0, interrupted.calls("terminal close").size());
+        check.that("recovery location is printed", pending.lines().stream().anyMatch(l -> l.startsWith("probe-recovery-required:")));
+        try (var paths = Files.walk(worktree)) {
+            Path journal = paths.filter(p -> p.getFileName().toString().equals("recovery.json")).findFirst().orElseThrow();
+            String saved = Files.readString(journal);
+            check.contains("dispatch survives the failed process", saved, interrupted.lastDispatch());
+            check.contains("task survives the failed process", saved, interrupted.lastTask());
+        }
+        check.rejects("unsettled probe leaves a durable checkout fence", "previous worktree owner",
+                () -> dev.warden.execution.WorktreeLease.acquire(worktree, "must-not-race-worker"));
+
+        Path refusedRoot = Files.createDirectories(home.resolve("refused-probe"));
+        FakeOrca refused = new FakeOrca(refusedRoot);
+        var base = refused.client();
+        var refusing = new dev.warden.execution.orca.OrcaClient((directory, timeout, args) -> {
+            if (args.contains("worker-start")) {
+                Map<String, Object> envelope = Map.of("ok", false, "error", Map.of(
+                        "code", "invalid_argument", "message", "Agent grok does not support launch-time model selection."));
+                return new dev.warden.execution.orca.OrcaClient.Rpc(false, 1, false, 0,
+                        envelope, Map.of(), "", "");
+            }
+            return base.invoke(directory, timeout, args);
+        });
+        var refusal = new OrcaProbe(refusing).run(new OrcaProbe.Options("grok", "grok-4.7", "high",
+                false, refusedRoot, 1));
+        check.that("JSON-only refusal exposes both code and actionable message", refusal.lines().stream()
+                .anyMatch(l -> l.contains("invalid_argument") && l.contains("does not support launch-time model")));
+        check.eq("definite preflight refusal can close its own coordinator", 1, refused.calls("terminal close").size());
+        check.eq("an undispatched Task receives an explicit failed outcome", 1, refused.calls("orchestration task-update").size());
+
+        Path releaseRoot = Files.createDirectories(home.resolve("failed-release-probe"));
+        FakeOrca releaseFailure = new FakeOrca(releaseRoot);
+        releaseFailure.answering(args -> FakeOrca.workerDone(releaseFailure.lastTask(), releaseFailure.lastDispatch(),
+                Map.of("answer", readProbeWord(releaseRoot, releaseFailure))));
+        var answering = releaseFailure.client();
+        var noRelease = new dev.warden.execution.orca.OrcaClient((directory, timeout, args) -> {
+            if (args.contains("worker-release")) {
+                return new dev.warden.execution.orca.OrcaClient.Rpc(false, 1, false, 0,
+                        Map.of("ok", false, "error", Map.of("code", "release_unknown", "message", "connection lost")),
+                        Map.of(), "", "");
+            }
+            return answering.invoke(directory, timeout, args);
+        });
+        var unsettledCleanup = new OrcaProbe(noRelease).run(new OrcaProbe.Options("codex", null, null,
+                false, releaseRoot, 1));
+        check.eq("a matching word with failed cleanup cannot stamp the profile", 1, unsettledCleanup.exitCode());
+        check.eq("failed release preserves the coordinator", 0, releaseFailure.calls("terminal close").size());
+        check.that("failed release leaves actionable recovery information", unsettledCleanup.lines().stream()
+                .anyMatch(l -> l.startsWith("probe-recovery-required:")));
     }
 
     /** What the probe wrote for the worker: the one word in its answer file. */
