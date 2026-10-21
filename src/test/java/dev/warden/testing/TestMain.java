@@ -44,6 +44,7 @@ public final class TestMain {
                 new dev.warden.OrcaSettlementTest(),
                 new dev.warden.OrcaLifecycleTest(),
                 new dev.warden.OrcaWorkspaceTest(),
+                new dev.warden.OrcaDesktopTest(),
                 new dev.warden.OrcaRunIdentityTest(),
                 new dev.warden.OrcaRecoveryTest(),
                 new dev.warden.OrcaStartTest(),

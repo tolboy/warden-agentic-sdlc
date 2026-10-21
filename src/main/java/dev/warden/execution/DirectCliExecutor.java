@@ -617,11 +617,16 @@ public final class DirectCliExecutor implements RoleExecutor {
      * happens to print.
      */
     public static String resolveExecutable(String command, Path workingDirectory) {
+        return resolveExecutable(command, workingDirectory, Duration.ofSeconds(10));
+    }
+
+    /** Let bounded UI RPCs include executable discovery in their existing deadline. */
+    public static String resolveExecutable(String command, Path workingDirectory, Duration lookupTimeout) {
         if (command.contains("/") || command.contains("\\")) return command;
         if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return command;
         try {
             ProcessRunner.Result lookup = new ProcessRunner()
-                    .run(List.of("where.exe", command), workingDirectory, Duration.ofSeconds(10));
+                    .run(List.of("where.exe", command), workingDirectory, lookupTimeout);
             if (lookup.ok()) {
                 List<String> candidates = new ArrayList<>();
                 for (String line : lookup.stdout().split("\\R")) {
