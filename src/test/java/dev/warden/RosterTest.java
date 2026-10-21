@@ -122,7 +122,8 @@ public final class RosterTest implements Suite {
         check.that("backup exists", Files.isRegularFile(backup));
         check.eq("backup equals the original bytes", original,
                 Files.readString(backup, StandardCharsets.UTF_8));
-        check.eq("file path is policy.yaml", policy.toString(), outcome.report().get("file"));
+        // The config store reports the canonical path; Windows TEMP may use an 8.3 alias.
+        check.eq("file path is canonical policy.yaml", policy.toRealPath().toString(), outcome.report().get("file"));
     }
 
     private void unknownProfileLeavesTheFileUntouched(Check check, Path home) throws Exception {

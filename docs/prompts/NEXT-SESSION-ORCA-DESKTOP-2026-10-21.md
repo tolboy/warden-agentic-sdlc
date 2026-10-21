@@ -23,11 +23,13 @@
   dashboard или новый оркестратор. Существующие settings/report страницы сохрани
   как вспомогательные инструменты Warden.
 
-Сначала исправь известный красный Windows CI: run `39617900271` имел ровно один
-failure в каждом Windows job — `[roster] file path is policy.yaml`. Test сравнил
-Windows short-path и long-path строки одного файла. Проверь текущую причину;
-исправь тест/контракт identity корректно, не ослабляя containment, atomic writes
-или проверки backup. Быстрый gate после build:
+Сначала проверь актуальный CI baseline. Исторический run `39617900271` имел ровно
+один failure в каждом Windows job — `[roster] file path is policy.yaml`: тест
+сравнил Windows short-path и canonical long-path строки одного файла. Перед
+desktop-этапом этот тест исправлен сравнением с `policy.toRealPath()`, без изменений
+production path handling. Не повторяй уже сделанное исправление, если CI зелёный.
+При новом отказе проверь причину, не ослабляя containment, atomic writes или
+проверки backup. Быстрый gate после build:
 `java -cp out/test-classes dev.warden.testing.TestMain roster`.
 После исправления должен пройти текущий Linux/Windows JDK 21/25 CI.
 

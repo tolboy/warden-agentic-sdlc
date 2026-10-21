@@ -93,11 +93,12 @@ provider adapters и daemon RPC; клиентские расширения до�
 Linux JDK 21/25, demo и hygiene прошли. Оба Windows job: 4935 passed, 1 failed.
 Единственный отказ: `[roster] file path is policy.yaml`,
 [RosterTest.java](../src/test/java/dev/warden/RosterTest.java), проверка сравнивает
-строки Windows short path и canonical long path одного файла. Предлагаемое исправление:
-сравнить identity/canonical path, сохранив production containment и atomic-write checks.
-Эту гипотезу надо подтвердить отдельным Windows regression test; сейчас код не менялся.
+строки Windows short path и canonical long path одного файла. После исследования
+пользователь разрешил подготовить PR к слиянию: ожидаемый путь в тесте приведён
+к `policy.toRealPath()`. Production containment, canonicalization, atomic writes
+и backup checks не изменены. Актуальный результат повторного CI смотри в PR.
 
 Готовый [промпт следующей сессии](prompts/NEXT-SESSION-ORCA-DESKTOP-2026-10-21.md)
-включает исправление CI до основной UI-работы. Android — дополнительная проверка после
+включает проверку CI baseline до основной UI-работы. Android — дополнительная проверка после
 desktop acceptance. Нового интерфейса управления, установки альтернатив и live vendor
 вызовов в этой исследовательской сессии не было.
