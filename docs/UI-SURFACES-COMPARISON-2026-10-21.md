@@ -102,3 +102,8 @@ Linux JDK 21/25, demo и hygiene прошли. Оба Windows job: 4935 passed, 
 включает проверку CI baseline до основной UI-работы. Android — дополнительная проверка после
 desktop acceptance. Нового интерфейса управления, установки альтернатив и live vendor
 вызовов в этой исследовательской сессии не было.
+
+Результат следующего desktop-этапа: [частичная реализация и точный blocker
+Orca](ORCA-DESKTOP-CONTRACT-2026-10-21.md). Автоматическая карточка и явный CLI
+fallback реализованы; overview с безопасным takeover/release пока заблокирован
+контрактом установленной версии. Полная desktop acceptance не объявлена пройденной.
