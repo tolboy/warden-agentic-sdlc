@@ -1,0 +1,91 @@
+{
+  "date": "2026-10-21",
+  "status": "partial_blocked",
+  "orca_version": "1.4.233",
+  "source": "existing_direct_raw_spool",
+  "display": "existing_workspace_card_metadata",
+  "overview_available": false,
+  "live_text_projected": false,
+  "event_payload": "fixed_categories_and_numeric_metadata",
+  "retention_events": 24,
+  "max_record_bytes": 65536,
+  "max_read_bytes_per_poll": 262144,
+  "poll_millis": 200,
+  "ordinary_card_update_interval_millis": 1000,
+  "card_rpc_budget_millis": 2000,
+  "probes": {
+    "kind": "synthetic_adapter_with_real_free_java_version_tool",
+    "watch_flag": false,
+    "paid_vendor_calls": 0,
+    "runs": [
+      {
+        "result": "ready_for_human",
+        "next_action": "human_gate",
+        "vendor_dispatches": 1,
+        "synthetic_adapter_launches": 1,
+        "projection": "workspace_card",
+        "event_kinds_before_completion": [
+          "dispatching",
+          "output",
+          "tool_started",
+          "output",
+          "tool_finished"
+        ],
+        "tool_finished_exit_codes": [
+          0
+        ],
+        "summary_absent_at_inspection": true,
+        "release_absent_at_inspection": true,
+        "inspection_preceded_final_stdout": true,
+        "decision_state": "resolved"
+      },
+      {
+        "result": "ready_for_human",
+        "next_action": "human_gate",
+        "vendor_dispatches": 1,
+        "synthetic_adapter_launches": 1,
+        "projection": "workspace_card",
+        "event_kinds_before_completion": [
+          "dispatching",
+          "output",
+          "tool_started",
+          "tool_finished",
+          "output"
+        ],
+        "tool_finished_exit_codes": [
+          0
+        ],
+        "summary_absent_at_inspection": true,
+        "release_absent_at_inspection": true,
+        "inspection_preceded_final_stdout": true,
+        "decision_state": "resolved"
+      }
+    ],
+    "terminals_before": 1,
+    "terminals_after": 1,
+    "same_operator_terminal": true,
+    "native_pixels_captured": true,
+    "inline_event_visibility_proven": false,
+    "native_comment_surface": "Workspace notes metadata",
+    "full_desktop_acceptance": false
+  },
+  "validation": {
+    "focused_suites": [
+      "direct-capture",
+      "live-cli-output",
+      "orca-desktop",
+      "heartbeat",
+      "run-start-under-orca"
+    ],
+    "focused_passed": 249,
+    "focused_failed": 0,
+    "current_head_ci": "pending_after_push"
+  },
+  "not_verified": [
+    "real paid vendor protocols and current model availability",
+    "automatic overview and live text",
+    "observer ownership takeover and atomic release",
+    "new full visible failover gate continuation and controller crash sequence",
+    "Android"
+  ]
+}

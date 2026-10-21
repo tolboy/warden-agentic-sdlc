@@ -73,11 +73,16 @@ public final class OrcaClient {
 
     public Rpc invoke(Path workingDirectory, Duration timeout, List<String> args) throws Exception {
         if (transport != null) return transport.invoke(workingDirectory, timeout, List.copyOf(args));
+        long started = System.nanoTime();
         List<String> command = new ArrayList<>();
-        command.add(DirectCliExecutor.resolveExecutable("orca", workingDirectory));
+        command.add(DirectCliExecutor.resolveExecutable("orca", workingDirectory, timeout));
         command.addAll(args);
         if (!command.contains("--json")) command.add("--json");
-        ProcessRunner.Result process = processes.run(command, workingDirectory, timeout, 4 * 1024 * 1024);
+        Duration remaining = timeout.minusNanos(System.nanoTime() - started);
+        if (remaining.isNegative() || remaining.isZero()) {
+            return new Rpc(false, -1, true, timeout.toMillis(), Map.of(), Map.of(), "", "");
+        }
+        ProcessRunner.Result process = processes.run(command, workingDirectory, remaining, 4 * 1024 * 1024);
         Map<String, Object> envelope = Json.findLastObject(process.stdout());
         if (envelope == null) envelope = Map.of();
         Map<String, Object> result = OrcaSettlement.resultOf(envelope);

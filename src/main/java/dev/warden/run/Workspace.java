@@ -17,6 +17,8 @@ package dev.warden.run;
  * purpose: the terminal gets every line, the board gets the few a person would act on.
  */
 public interface Workspace {
+    /** Sanitized metadata only; loss of this projection cannot affect a vendor call. */
+    default void activity(dev.warden.execution.ExecutionActivity activity) { }
 
     /**
      * Replace the one-line summary shown on the workspace card.
@@ -170,6 +172,9 @@ public interface Workspace {
     static Workspace guarded(Workspace board) {
         if (board == NONE) return NONE;
         return new Workspace() {
+            @Override public void activity(dev.warden.execution.ExecutionActivity activity) {
+                try { board.activity(activity); } catch (RuntimeException | Error notOurProblem) { }
+            }
             @Override public void note(String text) {
                 try { board.note(text); } catch (RuntimeException | Error notOurProblem) { }
             }

@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-21",
+  "status": "partial_blocked",
+  "orca": {
+    "cli_version": "1.4.233",
+    "runtime_version": "1.4.233",
+    "tag_commit": "c60a9b0a2a8d1aff2da94c2185a6dba238e65755",
+    "ready": true,
+    "latest_release_inspected": "v1.4.237",
+    "updated_or_forked": false
+  },
+  "automatic_surface": "existing_workspace_card",
+  "overview_available": false,
+  "blocker": "observer_ownership_unsupported",
+  "focused_final_source": {"passed": 352, "failed": 0},
+  "zero_call_live_probe": {
+    "runs": 2,
+    "watch_flag": false,
+    "expected_stop": "preflight_outside_scope",
+    "actual_stops": ["preflight_outside_scope", "preflight_outside_scope"],
+    "vendor_calls": 0,
+    "fallback_receipts": 2,
+    "terminals_before": 1,
+    "terminals_after": 1,
+    "same_operator_terminal": true,
+    "native_screenshot_captured": true,
+    "full_desktop_acceptance": false
+  },
+  "not_verified": [
+    "live vendor tool/output projection",
+    "observer takeover and atomic release",
+    "visible typed failover",
+    "new live gate import and continuation",
+    "new live controller crash and UI loss during vendor work",
+    "complete vendor scenario with Orca absent",
+    "current paid model availability and launch settings",
+    "Android"
+  ]
+}

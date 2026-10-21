@@ -50,6 +50,7 @@ public final class RunStartUnderOrcaTest implements Suite {
             stoppedRun(root, "chain-1", "orca-run-chain");
             aContinuationStarts(check, sandbox, root, home);
             aFreshWatchedRunStarts(check, sandbox, root, home);
+            automaticRefusalsKeepCliContract(check, sandbox, root, home);
             aRefusedDuplicateOpensNoTab(check, sandbox, root, home);
             stoppedRun(root, "page-1", "orca-run-page");
             aRetryAnsweredOnThePageStarts(check, root, home);
@@ -69,6 +70,8 @@ public final class RunStartUnderOrcaTest implements Suite {
         check.that("it reserved its own directory", reserved(root, "chain-2"));
         check.eq("and joined the Run of the run it continues", "orca-run-chain",
                 lifecycle(root, "chain-2").orcaRunId());
+        check.eq("quiet automatic continuation saves its refusal without UI", "quiet",
+                Json.parseObject(Files.readString(root.resolve(".warden/runs/chain-2/desktop.json"))).get("reason"));
 
         Cli watched = warden(sandbox, root, home, "run", "hello", "--run-id", "chain-3",
                 "--continue", "chain-1", "--prepare", "off", "--watch",
@@ -78,6 +81,22 @@ public final class RunStartUnderOrcaTest implements Suite {
         check.eq("with its tab on record for the process that answers it", "terminal-1",
                 lifecycle(root, "chain-3").watchTerminal());
         check.eq("and one tab opened", 1, watched.calls("terminal create").size());
+    }
+
+    private void automaticRefusalsKeepCliContract(Check check, Path sandbox, Path root, Path home) throws Exception {
+        Cli piped = warden(sandbox, root, home, "run", "hello", "--run-id", "piped-default",
+                "--prepare", "off", "--no-wait-for-gate", "--no-orca-gate");
+        check.eq("redirected default preserves the task result", STOP, piped.result().get("reason"));
+        check.eq("redirected default creates no Orca terminals", 0, piped.calls("terminal create").size());
+        check.that("redirected default records why desktop was skipped", java.util.Set.of("noninteractive", "headless").contains(
+                Json.parseObject(Files.readString(root.resolve(".warden/runs/piped-default/desktop.json"))).get("reason")));
+        check.that("redirected default adds no desktop status line", !piped.stderr().contains("Orca desktop"));
+        Cli optedOut = warden(sandbox, root, home, "run", "hello", "--run-id", "desktop-opt-out",
+                "--prepare", "off", "--no-wait-for-gate", "--no-orca-gate", "--no-workspace-status", "--quiet");
+        check.eq("explicit UI refusal preserves the task result", STOP, optedOut.result().get("reason"));
+        check.that("explicit refusal performs no board RPC", optedOut.orcaCalls().isEmpty());
+        check.that("explicit refusal creates no desktop receipt", !Files.exists(root.resolve(".warden/runs/desktop-opt-out/desktop.json")));
+        check.eq("quiet opt-out is still silent", "", optedOut.stderr());
     }
 
     /** A first run with `--watch` records its tab and is not refused for having one. */

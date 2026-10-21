@@ -732,7 +732,7 @@ public final class TaskLoop {
             @Override public void release() { budget.releaseRoleRun(); }
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
-                authorizedFailover, progress);
+                authorizedFailover, progress).observing(workspace::activity);
         if (sleeper != null) roles.withSleeper(sleeper);
         if (executors != null) roles.withExecutors(executors);
         if (availability != null) roles.availability(availability);
