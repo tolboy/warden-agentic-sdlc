@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-21",
+  "base_commit": "99e1dc7f8a0b2378e31002dfcb65f0dd2fe474ef",
+  "measurement_scope": "paired local Windows diagnostic, not hosted CI duration",
+  "os": "Windows 11",
+  "jdk": "25.0.2+10-LTS",
+  "bytecode_release": 21,
+  "samples_per_version": 12,
+  "timing_git_trace_enabled": false,
+  "source_fingerprint": {
+    "before_median_ms": 252.8918,
+    "after_median_ms": 195.1025,
+    "median_reduction_percent": 22.85139336269504,
+    "git_processes_before_separately_traced": 4,
+    "git_processes_after_separately_traced": 3
+  },
+  "previous_source_and_readonly_hashes_matched": true,
+  "focused_checks": {"passed": 437, "failed": 0},
+  "full_registry_reduced": false,
+  "fingerprint_cache_added": false,
+  "hosted_ci_speedup_verified": false,
+  "full_ci_on_new_head": "pending",
+  "desktop_acceptance_completed": false
+}

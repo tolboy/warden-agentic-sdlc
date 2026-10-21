@@ -41,14 +41,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          ./build.sh
+          # test.sh builds both production and test classes before running the registry.
           ./test.sh
 
       - name: Build and test (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          call build.cmd || exit /b 1
+          REM test.cmd builds both production and test classes before running the registry.
           call test.cmd || exit /b 1
 
       - name: CLI answers without a config (POSIX)
