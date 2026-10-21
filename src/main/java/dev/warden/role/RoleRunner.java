@@ -113,6 +113,14 @@ public final class RoleRunner {
         default java.time.Duration wallClockCap() { return null; }
 
         /**
+         * Refuse a retry pause that cannot fit before the next call's minimum execution
+         * allowance. Asked after the preceding attempt is journaled and settled, before
+         * sleeping; it must not reserve another dispatch. Standalone roles have no chain
+         * deadline and leave the default unchanged.
+         */
+        default void requireRetryWait(long pauseMillis) { }
+
+        /**
          * The declared per-call bound of the profile about to run. Asked immediately before
          * {@link #requireDispatch} so a strict money cap reserves who routing actually
          * selected — a {@code --use} pin, an Orca twin, a substitution — rather than the
@@ -685,6 +693,16 @@ public final class RoleRunner {
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
                        RoleResolver.Writers writers, Path contextFile, List<Path> attachments,
                        boolean dryRun, int stagePosition) throws Exception {
+        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+                : dev.warden.execution.WorktreeLease.acquire(loaded.root(),
+                        workflowRunId == null ? runId : workflowRunId)) {
+            return runOwned(loaded, user, role, runId, writers, contextFile, attachments, dryRun, stagePosition);
+        }
+    }
+
+    private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String role, String runId,
+                             RoleResolver.Writers writers, Path contextFile, List<Path> attachments,
+                             boolean dryRun, int stagePosition) throws Exception {
         if (writers == null) writers = RoleResolver.Writers.NONE;
         if (user.policy() == null) {
             throw new IllegalStateException("no policy at " + user.home().resolve("policy.yaml")
@@ -866,6 +884,7 @@ public final class RoleRunner {
             report.put("profile", profile.name());
             report.put("vendor", profile.vendor());
             report.put("model", profile.model());
+            report.put("model_requested", profile.model());
             report.put("effort_requested", profile.effort());
             report.put("workflow_run_id", workflowRunId == null ? runId : workflowRunId);
             report.put("stage", stageName == null ? role : stageName);
@@ -959,6 +978,9 @@ public final class RoleRunner {
             // The home corpus is the other choke point: a measurement that cannot be saved
             // refuses a new paid dispatch. Settlement of a worker already running is past
             // this line and is never blocked for analytics.
+            if (!"orca".equals(profile.runner())) {
+                dev.warden.execution.WorktreeLease.requireLocalDispatch(root);
+            }
             if (user.home() != null) HomeCorpus.requireDispatch(user.home(), root);
             gate.reserve(profile.maxCostUsd());
             gate.requireDispatch();
@@ -1002,6 +1024,14 @@ public final class RoleRunner {
                     role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
                     values.get("context"), evidenceName, attachments == null ? List.of() : attachments));
 
+            if (Boolean.FALSE.equals(result.evidence().get("process_tree_settled"))
+                    && !"role_process_unsettled".equals(result.code())) {
+                Map<String, Object> unsettled = new LinkedHashMap<>(result.evidence());
+                unsettled.put("adapter_code", result.code());
+                unsettled.put("failure", "role_process_unsettled");
+                result = new RoleExecutor.Result(false, "role_process_unsettled", result.duration(),
+                        result.rawOutput(), null, unsettled);
+            }
             report.put("dry_run", false);
             report.put("ok", result.ok());
             report.put("code", result.code());
@@ -1045,11 +1075,39 @@ public final class RoleRunner {
             // A transient rate limit is the one failure worth asking the same vendor again
             // for, and only when the policy said how often. The wait honours the seconds the
             // vendor named when it named any, never a clock time it printed without a date.
+            // A second paid writer is forbidden while the previous adapter cannot prove
+            // its process/capture settlement, regardless of quota or failover policy.
+            if (Boolean.FALSE.equals(result.evidence().get("process_tree_settled"))) {
+                dev.warden.execution.WorktreeLease.requireRecovery("previous vendor process did not settle");
+                report.put("failure", "role_process_unsettled");
+                report.put("vendor_attempts", attempts);
+                report.put("attempts_cost_usd", spent);
+                rememberFailovers(report, roleFailovers);
+                Path path = ledger.writeReport("role-" + reportStem, report);
+                ledger.append("role_run", report);
+                return new Outcome(false, "role_process_unsettled", role, profile.name(),
+                        profile.vendor(), resolution.rejected(), path, report);
+            }
             Policy.RateLimitRetry retry = user.policy().rateLimitRetry();
             if ("role_rate_limited".equals(result.code()) && rateLimitRetries < retry.maxAttempts()
                     && gate.hasRoom()) {
+                long pause = retryPauseMillis(result.evidence(), retry, rateLimitRetries + 1);
+                try {
+                    gate.requireRetryWait(pause);
+                } catch (RuntimeException declined) {
+                    // The completed attempt remains a complete role record even though a
+                    // deadline refusal must reach the loop with its original classification.
+                    report.put("rate_limit_retry_declined", Map.of(
+                            "attempt", (long) rateLimitRetries + 1,
+                            "requested_pause_millis", pause,
+                            "reason", String.valueOf(declined.getMessage())));
+                    report.put("vendor_attempts", attempts);
+                    report.put("attempts_cost_usd", spent);
+                    ledger.writeReport("role-" + reportStem, report);
+                    ledger.append("role_run", report);
+                    throw declined;
+                }
                 rateLimitRetries++;
-                long pause = retryPauseMillis(result.evidence(), retry, rateLimitRetries);
                 rateLimitPauses.add(Map.of("attempt", (long) rateLimitRetries,
                         "of", retry.maxAttempts(), "paused_millis", pause));
                 report.put("rate_limit_retry", List.copyOf(rateLimitPauses));
@@ -1550,11 +1608,13 @@ public final class RoleRunner {
         entry.put("vendor", profile.vendor());
         entry.put("runner", profile.runner());
         entry.put("effort_requested", profile.effort());
+        entry.put("model_requested", profile.model());
         if (result.evidence().containsKey("launch")) entry.put("launch", result.evidence().get("launch"));
         Object reportedModel = result.evidence().get("model_reported");
-        Object model = reportedModel != null ? reportedModel
-                : result.evidence().getOrDefault("model", profile.model());
-        if (model != null) entry.put("model", model);
+        if (reportedModel instanceof String value && !value.isBlank()) {
+            entry.put("model_reported", value);
+            entry.put("model", value);
+        }
         entry.put("ok", result.ok());
         entry.put("code", result.code());
         entry.put("duration_millis", result.duration().toMillis());

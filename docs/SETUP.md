@@ -114,6 +114,34 @@ warden roster model grok-review --model grok-4.6-build --effort high
 first as `policy.yaml.before-roster-<timestamp>`. If the role is not in `roles:` yet, a block
 is appended there rather than invented elsewhere.
 
+Both edits validate the candidate in memory, take an exclusive per-file lock, check the
+source SHA-256, save a backup, and atomically replace the file. Invalid YAML never reaches
+the active file. `config_busy` means another Warden editor holds the lock;
+`config_conflict` means the file changed since the edit was prepared. Reload before retrying.
+An unsupported atomic replacement fails with `atomic_replace_unsupported`, preserving the
+active file. Backups remain available after a failed replacement.
+
+For a delayed edit (including a future settings form), JSON `warden roster` returns
+`file_versions`, keyed by `policy.yaml` and `profiles/<name>.yaml`. Each digest belongs to
+the exact bytes parsed for that report. Pass the relevant value to either write command:
+
+```text
+warden roster set reviewer --profiles grok-review,claude-review --expected-sha256 <policy-hash>
+warden roster model grok-review --model <model> --expected-sha256 <profile-hash>
+```
+
+Successful writes return `before_sha256` and `sha256`. Without the optional flag, the CLI
+still checks the version it read while preparing its own edit. A verification probe also
+retains its source digest: an edit made during the probe prevents stamping the changed
+profile. Verification stamps use the same atomic writer and save `*.before-verify-*`.
+
+The small `*.warden-write.lock` sidecar stays on disk; the OS releases its lock on exit or
+crash. Do not delete it while writers are running. These guarantees cover one file at a
+time and writers using this protocol. An external editor that ignores the sidecar can race
+the last digest check and rename. Atomic replacement does not guarantee directory metadata
+survives a power failure. A process killed before rename can leave a `.warden-config-*.tmp`
+file; the live configuration stays complete and the next edit can proceed.
+
 `model` does the same to `profiles/<name>.yaml`. Changing the model invalidates
 `verification.verified_on` — that date stamped a probe against the old model — so the line is
 removed unless you pass `--keep-verified`. The command prints `verify_with` for
@@ -150,6 +178,83 @@ cast  implement      grok-implement        xai/grok-4.6
 
 The same map may live on the task as `use:`, where a replan preserves it and
 `--conductor` carries it into the inner run. Flags win over the task.
+
+### Build the next run in the dashboard
+
+Open `warden dashboard` (or add `--open-orca`) and use **Следующий запуск**. Choose
+an existing project task, then a profile for each role stage. Profile options expose
+vendor, model, effort, runner and verification; the vendor filter only narrows this
+list. Saved task `use:` is populated in the controls; clearing a field removes that
+task pin and inherits the policy/profile. Effort accepts a
+custom value, and the Orca placement option uses the same declared-twin rule as
+`--host`. Mechanical stages have no profile controls; required readers stay governed
+by the contract.
+
+**Проверить состав и бюджет** resolves the effective cast, independence refusals,
+minimum calls and repair reserves through the same TaskLoop code as the CLI.
+Changing an input clears the result. Edits to policy, profiles, project/task YAML or
+rotation invalidate the selected version and require a reload.
+
+Copy the dry-run command first. It checks the remaining workspace and runtime
+conditions without dispatch. The exported commands select this project and config
+home, restore the shell context afterwards, and quote their arguments for the
+server's platform shell (PowerShell on Windows, POSIX shell otherwise).
+After settings checks pass, the form also offers a run command and a complete
+merged task `use:` block. Replace the existing `use:` block when using that export.
+Exported commands read current files: repeat preview and dry-run after editing them.
+
+The budget editor covers vendor calls, USD threshold/strict cap, chain execution
+minutes, repair rounds, call timeout and human-gate lifetime. Zero USD means no money
+limit, as in the CLI; missing chain minutes or gate lifetime is unbounded. Empty
+repair/timeout fields inherit the project. Strict-cap preview rejects missing bounds
+and a ceiling below even the cheapest declared calls; actual dispatch still reserves
+the selected/outstanding bounds and may refuse a later retry or fallback.
+
+Preview shows a diff of the task file. **Apply в файл задачи** saves `use:` and budget
+edits together, with a backup and atomic replacement. Changed budgets or removing a
+stored pin require saving before CLI export: those changes cannot be expressed by
+the invocation flags. The command always reads the current task file.
+
+**Личные настройки по умолчанию** separately edits `policy.yaml` in the displayed
+config home: ordered fallback profiles, first/rotate, per-role vendor-failure mode,
+quota/vendor failover, stage switch limit, rate-limit retries/backoff and repair reserve.
+Profiles expose vendor/model/effort/runner in their labels. Preview checks the policy
+against the selected task; that task's `use:` still takes priority. Other projects
+using the same home inherit the saved policy, and need their own preflight.
+
+Each Apply is one file, never a multi-file transaction. It requires the exact reviewed
+candidate hash and the same project/task, policy, profile inventory and rotation
+revision. A changed file or concurrent edit returns a conflict/busy refusal, requiring
+reload and a fresh diff. Untouched YAML sections remain verbatim; edited sections use
+flow mappings and retain their comments ahead of the section. Backups preserve the
+exact predecessor. External editors that ignore Warden locks can race an optimistic
+check; filesystem atomic-replace support remains required.
+
+The form does not execute commands. Model variants come from declared profiles;
+custom effort does not prove model support or receive a verification stamp. The
+versioned `warden roster` commands remain available for CLI edits.
+
+### Read results in the dashboard
+
+**Аналитика результатов** reads local `evidence.jsonl`, task summaries and decisions.
+Use task/run filters and **Обновить аналитику**. It shows vendor call success separately
+from workflow readiness, review passage and human acceptance; price/token coverage;
+call and recorded human-wait p50/p95; failover, observed same-profile rate retries and
+requested backoff; requested/launch/reported settings; finding transitions; and stage
+timelines. Model settings rows are descriptive, not a model-quality ranking.
+
+The same ledger accounting reconciles journaled attempts and enclosing role summaries.
+Only per-run calls are added; cumulative continuation counters remain context.
+Explicitly uncharged attempts (workers fenced before the first vendor turn) are shown
+separately and do not inflate vendor failures or unknown-price coverage. Older home
+corpus records that omitted this flag cannot establish that distinction.
+Unknown price stays unknown, and cost is labelled as a known subtotal when coverage is
+partial. `closed` is a transition in blocking IDs, not proof of an independently
+adjudicated fix. Missing infrastructure wait, actual backoff duration and escaped
+defects are not inferred. Dry-runs are excluded. Missing call measurements, malformed
+or skipped evidence display an incomplete-data warning. Reads are confined to the
+project's runs directory and bounded to 2,000 directories, 20,000 events, 8 MiB per file
+and 64 MiB total; raw transcripts, commands and private decision notes stay out.
 
 A failure gate also offers `advance`: it closes this run and starts the next id of the same
 task after you dealt with the blocker. The next run keeps this run's `--use`, `--effort` and

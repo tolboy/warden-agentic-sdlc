@@ -190,6 +190,16 @@ public final class Preparation {
     public Outcome run(Path root, ProjectConfig project, UserConfig user, String taskId,
                        String runId, String goal, String scope, String risk,
                        PlannerDraft.Access granted, boolean dryRun) throws Exception {
+        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+                : dev.warden.execution.WorktreeLease.acquire(root, runId)) {
+            if (!dryRun) dev.warden.execution.WorktreeLease.requireLocalDispatch(root);
+            return runOwned(root, project, user, taskId, runId, goal, scope, risk, granted, dryRun);
+        }
+    }
+
+    private Outcome runOwned(Path root, ProjectConfig project, UserConfig user, String taskId,
+                             String runId, String goal, String scope, String risk,
+                             PlannerDraft.Access granted, boolean dryRun) throws Exception {
         if (amendment == null) return prepare(root, project, user, taskId, runId, goal, scope, risk, granted, dryRun);
         // Whatever ends an amendment short of a passed plan review — an unavailable reviewer,
         // a timeout, an unreadable verdict, an exception — ends it with the contract that was
@@ -710,6 +720,9 @@ public final class Preparation {
 
         @Override
         public java.time.Duration wallClockCap() { return chain.wallClockCap(); }
+
+        @Override
+        public void requireRetryWait(long pauseMillis) { chain.requireRetryWait(pauseMillis); }
 
         @Override
         public void reserve(Double declaredBound) { chain.reserve(declaredBound); }

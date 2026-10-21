@@ -1,0 +1,21 @@
+version: 1
+profile: codex-implement
+role: implementer
+vendor: codex
+model: "gpt-6.1-sol"
+effort: medium
+command: codex
+runner: direct
+read_only: false
+prompt_delivery: stdin
+args: ["exec", "-", "--json", "--ephemeral", "--profile", "warden-write", "--skip-git-repo-check", "-s", "workspace-write", "-m", "{{model}}", "-c", "model_reasoning_effort=\"{{effort}}\""]
+limits:
+  wall_clock_minutes: 20
+prompt_template: prompts/implementer.md
+json_schema: schemas/implementer.json
+artifact:
+  required_fields: [role, task_id, status, summary, files_changed]
+verification:
+  probe: 'codex exec "Read schemas/implementer.json and create verification-fixtures/codex-write-ok.txt with exactly WARDEN_CODEX_WRITE_OK. Reply with that token. Do not change any other file." --json --ephemeral --profile warden-write --skip-git-repo-check -s workspace-write -m {{model}} -c model_reasoning_effort="{{effort}}"'
+  expect: "WARDEN_CODEX_WRITE_OK"
+  what_to_check: ["The fixture exists with the requested token; the model writes through the real headless channel."]

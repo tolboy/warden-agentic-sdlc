@@ -155,8 +155,9 @@ public final class RunReport {
                 stage.put("role", body.getOrDefault("role", visualRole ? "visual_qa" : label));
                 stage.put("profile", step.getOrDefault("profile", body.get("profile")));
                 stage.put("vendor", step.getOrDefault("vendor", body.get("vendor")));
-                stage.put("model", body.get("model"));
-                stage.put("model_reported", body.get("model_reported"));
+                stage.put("model", RoleMeasurements.reportedModel(body));
+                stage.put("model_requested", RoleMeasurements.requestedModel(body));
+                stage.put("model_reported", RoleMeasurements.reportedModel(body));
                 stage.put("runner", body.get("runner"));
                 stage.put("read_only", body.get("read_only"));
                 stage.put("duration_millis", body.get("duration_millis"));
@@ -316,8 +317,8 @@ public final class RunReport {
         for (Map<String, Object> stage : stages) {
             if (!"role".equals(stage.get("kind"))) continue;
             for (Map<String, Object> call : callsOf(stage)) {
-                String vendor = text(call.getOrDefault("vendor", "<unknown>"));
-                String model = text(call.getOrDefault("model", "<unknown>"));
+                String vendor = dimension(call.get("vendor"));
+                String model = dimension(RoleMeasurements.reportedModel(call));
                 Map<String, Object> row = byKey.computeIfAbsent(vendor + "\u0000" + model, ignored -> {
                     Map<String, Object> fresh = new LinkedHashMap<>();
                     fresh.put("vendor", vendor);
@@ -332,6 +333,9 @@ public final class RunReport {
                     fresh.put("output_tokens", 0L);
                     fresh.put("total_tokens", 0L);
                     fresh.put("tokens_unknown_calls", 0L);
+                    fresh.put("input_tokens_unknown_calls", 0L);
+                    fresh.put("output_tokens_unknown_calls", 0L);
+                    fresh.put("total_tokens_unknown_calls", 0L);
                     return fresh;
                 });
                 row.put("calls", number(row.get("calls")) + 1);
@@ -343,11 +347,15 @@ public final class RunReport {
                         call.get("duration_millis"));
                 Map<String, Object> tokens = call.get("tokens") instanceof Map<?, ?> map
                         ? cast(map) : Map.of();
-                boolean any = false;
-                any |= accumulateLong(row, "input_tokens", null, tokens.get("input"));
-                any |= accumulateLong(row, "output_tokens", null, tokens.get("output"));
-                any |= accumulateLong(row, "total_tokens", null, tokens.get("total"));
-                if (!any) row.put("tokens_unknown_calls", number(row.get("tokens_unknown_calls")) + 1);
+                boolean input = accumulateLong(row, "input_tokens", "input_tokens_unknown_calls",
+                        token(tokens, "input"));
+                boolean output = accumulateLong(row, "output_tokens", "output_tokens_unknown_calls",
+                        token(tokens, "output"));
+                boolean total = accumulateLong(row, "total_tokens", "total_tokens_unknown_calls",
+                        token(tokens, "total"));
+                if (!input || !output || !total) {
+                    row.put("tokens_unknown_calls", number(row.get("tokens_unknown_calls")) + 1);
+                }
             }
         }
         // A total nobody contributed to is not zero. `$0.0000 across one call` and "the vendor
@@ -357,10 +365,8 @@ public final class RunReport {
             long calls = number(row.get("calls"));
             if (number(row.get("cost_unknown_calls")) == calls) row.put("cost_usd", null);
             if (number(row.get("duration_unknown_calls")) == calls) row.put("duration_millis", null);
-            if (number(row.get("tokens_unknown_calls")) == calls) {
-                row.put("input_tokens", null);
-                row.put("output_tokens", null);
-                row.put("total_tokens", null);
+            for (String field : List.of("input_tokens", "output_tokens", "total_tokens")) {
+                if (number(row.get(field + "_unknown_calls")) == calls) row.put(field, null);
             }
         }
         return List.copyOf(byKey.values());
@@ -396,11 +402,9 @@ public final class RunReport {
                     inherit(call, stage, "duration_millis");
                     inherit(call, stage, "tokens");
                 }
-                Object reported = first(call.get("model_reported"),
-                        finalAttempt ? stage.get("model_reported") : null);
-                Object model = first(reported, first(call.get("model"),
-                        finalAttempt ? stage.get("model") : null));
-                if (model != null) call.put("model", model);
+                if (finalAttempt && call.get("vendor_attempt_id") == null) {
+                    inherit(call, stage, "model_reported");
+                }
             }
             if (!calls.isEmpty()) return calls;
         }
@@ -414,6 +418,14 @@ public final class RunReport {
         }
     }
 
+    private static String dimension(Object value) {
+        return value instanceof String text && !text.isBlank() ? text : "<unknown>";
+    }
+
+    private static Object token(Map<String, Object> tokens, String field) {
+        return first(tokens.get(field), first(tokens.get(field + "_tokens"), tokens.get(field + "Tokens")));
+    }
+
     /**
      * Every point in the run where the vendor doing the work changed. It is recorded per
      * stage, where it happened; it is reported here, because "who wrote this" is a question
@@ -422,80 +434,18 @@ public final class RunReport {
     private static List<Map<String, Object>> failovers(List<Map<String, Object>> stages) {
         List<Map<String, Object>> switches = new ArrayList<>();
         for (Map<String, Object> stage : stages) {
-            List<Map<String, Object>> calls = callsOf(stage);
-            if (calls.size() >= 2) {
-                for (int index = 1; index < calls.size(); index++) {
-                    Map<String, Object> before = calls.get(index - 1);
-                    Map<String, Object> after = calls.get(index);
-                    Map<String, Object> one = new LinkedHashMap<>();
-                    one.put("step", stage.get("step"));
-                    one.put("attempt", stage.get("attempt"));
-                    one.put("from_profile", before.get("profile"));
-                    one.put("from_vendor", before.get("vendor"));
-                    one.put("from_code", before.get("code"));
-                    one.put("cause", failoverCause(before.get("code")));
-                    one.put("to_profile", after.get("profile"));
-                    one.put("to_vendor", after.get("vendor"));
-                    one.put("from", one.get("from_profile"));
-                    one.put("to", one.get("to_profile"));
-                    Map<String, Object> recorded = recordedFailover(stage,
-                            one.get("from_profile"), one.get("to_profile"));
-                    if (recorded != null) {
-                        if (recorded.get("authorized_by") != null) {
-                            one.put("authorized_by", recorded.get("authorized_by"));
-                        }
-                        if (recorded.get("policy_setting") != null) {
-                            one.put("policy_setting", recorded.get("policy_setting"));
-                        }
-                        if (recorded.get("cause") != null) one.put("cause", recorded.get("cause"));
-                    }
-                    switches.add(one);
-                }
+            if (!"role".equals(stage.get("kind"))) continue;
+            for (Map<String, Object> event : RoleMeasurements.failovers(stage)) {
+                Map<String, Object> one = new LinkedHashMap<>(event);
+                one.put("step", stage.get("step"));
+                one.put("attempt", stage.get("attempt"));
+                one.put("from", event.get("from_profile"));
+                one.put("to", event.get("to_profile"));
+                if (one.get("cause") == null) one.put("cause", failoverCause(one.get("from_code")));
+                switches.add(one);
             }
-            // A confirmed continuation pins the approved profile and writes role_failover,
-            // then runs that one profile. Consecutive attempts cannot see the switch.
-            addUnseenRecordedFailovers(switches, stage);
         }
         return List.copyOf(switches);
-    }
-
-    /** Recorded switches this stage did not already reconstruct from its attempts. */
-    private static void addUnseenRecordedFailovers(List<Map<String, Object>> switches,
-                                                   Map<String, Object> stage) {
-        Object raw = stage.get("role_failovers");
-        if (!(raw instanceof List<?> rows)) return;
-        for (Object item : rows) {
-            if (!(item instanceof Map<?, ?> map)) continue;
-            Map<String, Object> event = cast(map);
-            Object from = event.get("from_profile") != null ? event.get("from_profile") : event.get("from");
-            Object to = event.get("to_profile") != null ? event.get("to_profile") : event.get("to");
-            boolean seen = false;
-            for (Map<String, Object> one : switches) {
-                if (String.valueOf(one.get("step")).equals(String.valueOf(stage.get("step")))
-                        && String.valueOf(one.get("attempt")).equals(String.valueOf(stage.get("attempt")))
-                        && String.valueOf(one.get("from_profile")).equals(String.valueOf(from))
-                        && String.valueOf(one.get("to_profile")).equals(String.valueOf(to))) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen) continue;
-            Map<String, Object> one = new LinkedHashMap<>();
-            one.put("step", stage.get("step"));
-            one.put("attempt", stage.get("attempt"));
-            one.put("from_profile", from);
-            one.put("from_vendor", event.get("from_vendor"));
-            Object code = event.get("role_code") != null ? event.get("role_code") : event.get("from_code");
-            one.put("from_code", code);
-            one.put("cause", event.get("cause") != null ? event.get("cause") : failoverCause(code));
-            one.put("to_profile", to);
-            one.put("to_vendor", event.get("to_vendor"));
-            one.put("from", from);
-            one.put("to", to);
-            if (event.get("authorized_by") != null) one.put("authorized_by", event.get("authorized_by"));
-            if (event.get("policy_setting") != null) one.put("policy_setting", event.get("policy_setting"));
-            switches.add(one);
-        }
     }
 
     /**
@@ -522,22 +472,6 @@ public final class RunReport {
             }
         }
         return List.copyOf(all);
-    }
-
-    /** The ledger event for this from/to pair, when the stage recorded one. */
-    private static Map<String, Object> recordedFailover(Map<String, Object> stage,
-                                                        Object from, Object to) {
-        Object raw = stage.get("role_failovers");
-        if (!(raw instanceof List<?> rows)) return null;
-        for (Object item : rows) {
-            if (!(item instanceof Map<?, ?> map)) continue;
-            Map<String, Object> event = cast(map);
-            if (String.valueOf(event.get("from_profile")).equals(String.valueOf(from))
-                    && String.valueOf(event.get("to_profile")).equals(String.valueOf(to))) {
-                return event;
-            }
-        }
-        return null;
     }
 
     /**
@@ -730,7 +664,7 @@ public final class RunReport {
                 long unknownTokens = number(row.get("tokens_unknown_calls"));
                 if (unknownCost > 0 || unknownTokens > 0) {
                     out.append("    not reported by this vendor: cost on ").append(unknownCost)
-                            .append(" call(s), tokens on ").append(unknownTokens).append(" call(s)\n");
+                            .append(" call(s), some token fields on ").append(unknownTokens).append(" call(s)\n");
                 }
             }
         }
@@ -853,7 +787,8 @@ public final class RunReport {
     }
 
     private static void accumulate(Map<String, Object> row, String total, String unknown, Object value) {
-        if (value instanceof Number number && Double.isFinite(number.doubleValue())) {
+        if (value instanceof Number number && Double.isFinite(number.doubleValue())
+                && number.doubleValue() >= 0) {
             row.put(total, ((Number) row.get(total)).doubleValue() + number.doubleValue());
         } else if (unknown != null) {
             row.put(unknown, number(row.get(unknown)) + 1);
@@ -862,7 +797,8 @@ public final class RunReport {
 
     private static boolean accumulateLong(Map<String, Object> row, String total, String unknown,
                                           Object value) {
-        if (value instanceof Number number) {
+        if (value instanceof Number number && Double.isFinite(number.doubleValue())
+                && number.longValue() >= 0 && number.doubleValue() >= 0) {
             row.put(total, number(row.get(total)) + number.longValue());
             return true;
         }

@@ -146,6 +146,7 @@ public final class TaskLoop {
     private java.util.function.LongConsumer sleeper;
     /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
     private Executors.Factory executors;
+    private RoleResolver.Availability availability;
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -189,6 +190,14 @@ public final class TaskLoop {
         return copy;
     }
 
+    /** Program readiness supplied by an embedded adapter or an offline executor fixture. */
+    public TaskLoop withAvailability(RoleResolver.Availability next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.availability = next;
+        return copy;
+    }
+
     /**
      * The same loop, dispatching through {@code next} instead of the profile's own runner.
      *
@@ -220,6 +229,7 @@ public final class TaskLoop {
         copy.sleeper = sleeper;
         copy.watchNarration = watchNarration;
         copy.executors = executors;
+        copy.availability = availability;
         return copy;
     }
 
@@ -392,6 +402,9 @@ public final class TaskLoop {
             "vendor_call_failed",
             "vendor_unavailable",
             "vendor_protocol_failed",
+            "worktree_recovery_required",
+            "output_capture_failed",
+            "output_limit_exceeded",
             "prompt_undeliverable",
             "orca_worker_not_started",
             // The candidate passed; what is being fixed is what it was judged by. The writer's
@@ -430,6 +443,9 @@ public final class TaskLoop {
      */
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
+            Map.entry("role_process_unsettled", "worktree_recovery_required"),
+            Map.entry("role_output_capture_failed", "output_capture_failed"),
+            Map.entry("role_output_limit_exceeded", "output_limit_exceeded"),
             Map.entry("role_command_failed", "vendor_call_failed"),
             Map.entry("role_vendor_unavailable", "vendor_unavailable"),
             Map.entry("role_artifact_unparseable", "vendor_protocol_failed"),
@@ -613,6 +629,20 @@ public final class TaskLoop {
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                        Map<String, String> authorizedFailover, Continuation carried) throws Exception {
+        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+                : dev.warden.execution.WorktreeLease.acquire(loaded.root(), runId)) {
+            // Orca's adapter owns exact attach/reconciliation. With an Orca route available,
+            // defer worker admission to that adapter (local roles and machine gates still
+            // check immediately before execution). A blanket refusal blocks valid resumes.
+            if (!dryRun && user.profiles().values().stream().noneMatch(p -> "orca".equals(p.runner()))) {
+                dev.warden.execution.WorktreeLease.requireLocalDispatch(loaded.root());
+            }
+            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried);
+        }
+    }
+
+    private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
+                             Map<String, String> authorizedFailover, Continuation carried) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
@@ -686,6 +716,8 @@ public final class TaskLoop {
 
             @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
 
+            @Override public void requireRetryWait(long pauseMillis) { budget.requireRetryWait(pauseMillis); }
+
             // Asked before a failover dispatch. Answering no makes the role return the spent
             // call as its outcome, so the loop still charges it; throwing from the next
             // dispatch instead lost that call's cost and its unpriced count.
@@ -703,6 +735,7 @@ public final class TaskLoop {
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
         if (executors != null) roles.withExecutors(executors);
+        if (availability != null) roles.availability(availability);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
             Map<String, Object> previous = Json.parseObject(Files.readString(root.resolve(".warden/runs")
@@ -820,16 +853,12 @@ public final class TaskLoop {
                 user.policy() == null ? 1L : (long) user.policy().maxVendorFailovers());
         if (!authorizedFailover.isEmpty()) summary.put("authorized_failover", authorizedFailover);
         summary.put("workflow", workflow.toList());
-        Map<String, Object> plan = new LinkedHashMap<>(callPlan.toMap(task.budget().maxRoleRuns(),
-                user.policy() == null ? "full" : user.policy().repairReserve()));
-        if (task.budget().maxElapsedMinutes() != null) {
-            plan.put("time_reserve", "not reserved: budgets.max_elapsed_minutes ("
-                    + task.budget().maxElapsedMinutes() + ") bounds the execution time of this "
-                    + "run and every continuation of it. No vendor call starts with less than "
-                    + "a minute left, and each call's wall clock is lowered to what is left. A "
-                    + "call's duration is not predicted, so a repair is never refused in advance "
-                    + "for time; gates and the baseline are bounded by timeout_minutes instead");
-        }
+        RunOverride frozenOverlay = overlay;
+        summary.put("comparison_conditions", dev.warden.ledger.ComparisonConditions.snapshot(
+                workflow, user, task, overlay,
+                stage -> selectableProfiles(stage, user, frozenOverlay, authorizedFailover),
+                stage -> skipReason(stage, user, task, reviewByRisk)));
+        Map<String, Object> plan = budgetPreview(callPlan, user, task);
         if (!budget.inherited().runs().isEmpty()) {
             plan.put("already_spent_by_chain", Map.of(
                     "runs", budget.inherited().runs(),
@@ -1150,6 +1179,10 @@ public final class TaskLoop {
             summary.put("budget_stop", exceeded.getMessage());
             summary.put("budget_limit_hit", exceeded.limit());
             return stop(ledger, summary, "budget_exhausted", steps, engine.attempt(), budget);
+        } catch (dev.warden.execution.WorktreeLease.Refused refused) {
+            summary.put("resolution", refused.getMessage());
+            summary.put("execution_state", refused.report().get("execution_state"));
+            return stop(ledger, summary, refused.code(), steps, engine.attempt(), budget);
         } catch (HomeCorpus.UnavailableException unavailable) {
             summary.put("corpus_status", "error");
             summary.put("corpus_error", unavailable.getMessage());
@@ -1209,10 +1242,10 @@ public final class TaskLoop {
             if (cap > 0 && cap < callPlan.minimumToFinish()) {
                 progress.line("      that cap cannot finish this chain even with no repairs");
             }
-            // Named every time, because the number looks like a cap and is not one: a vendor
-            // that reports no price spends against it nothing at all.
             progress.line("      max_cost_usd " + Progress.money(task.budget().maxCostUsd())
-                    + " is a threshold on the spend vendors report, not a strict cap");
+                    + (task.budget().maxCostUsd() == 0 ? " disables the money limit"
+                    : task.budget().strictCostCap() ? " is a strict cap reserved against declared call bounds"
+                    : " is a threshold on the spend vendors report, not a strict cap"));
             for (Map<String, Object> branch : recoveryBranches(summary)) {
                 progress.line("      if " + branch.get("stage") + " sends the work back: "
                         + branch.get("calls_to_repair_and_finish") + " call(s) to repair and "
@@ -1391,7 +1424,7 @@ public final class TaskLoop {
     }
 
     /**
-     * The first judging stage no reader could fill against the writer the chain would
+     * The first judging stage no reader could fill against its preceding writers, as the chain would
      * dispatch, or null when every one can be. Asked once, before the first paid call.
      *
      * The writer is the profile the roster would actually choose, so a `first` strategy is
@@ -1402,46 +1435,63 @@ public final class TaskLoop {
     private static Map<String, Object> readerGap(Path root, Workflow workflow, UserConfig user,
                                                  TaskSpec.ResolvedTask task, boolean reviewByRisk,
                                                  RoleRunner roles) {
-        Workflow.Stage writerStage = null;
+        RoleResolver.Writers wouldWrite = initialPreviewWriters(task);
         for (Workflow.Stage stage : workflow.stages()) {
-            if (stage.kind() == Workflow.Kind.ROLE && "implementer".equals(stage.role())
-                    && skipReason(stage, user, task, reviewByRisk) == null) {
-                writerStage = stage;
-                break;
-            }
-        }
-        if (writerStage == null) return null;
-        dev.warden.config.Profile writer = roles.peek(root, user, writerStage.name(), "implementer",
-                RoleResolver.Writers.NONE, workflow.rotationPositionOf(writerStage));
-        // A writer nobody can fill is reported by the dispatch itself, with the roster's
-        // own reasons; this check is about the readers.
-        if (writer == null) return null;
-        RoleResolver.Writers wouldWrite = new RoleResolver.Writers(java.util.Set.of(writer.vendor()),
-                java.util.Set.of(writer.name()), true,
-                "same_vendor_peer".equals(task.reviewAssurance()));
-        for (Workflow.Stage stage : workflow.stages()) {
-            if (stage.kind() != Workflow.Kind.ROLE || stage.onFindings() == null) continue;
+            if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
+            int position = workflow.rotationPositionOf(stage);
+            RoleResolver.Writers judgedBy = stage.onFindings() != null
+                    ? wouldWrite : RoleResolver.Writers.NONE;
+            dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                    judgedBy, position);
+            if (chosen != null) {
+                wouldWrite = withPreviewWriter(wouldWrite, chosen);
+                continue;
+            }
+            // A missing writer is a routing failure, not proof that the following readers
+            // are impossible. Neither preflight nor preview advances rotation or dispatches.
+            if (stage.onFindings() == null || wouldWrite.vendors().isEmpty()) continue;
             Map<String, String> refused = roles.explainFill(user, stage.name(), stage.role(),
-                    wouldWrite, workflow.rotationPositionOf(stage));
+                    wouldWrite, position);
             if (refused == null) continue;
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("role", stage.role());
             gap.put("needed_for", stage.name());
             gap.put("blocked_at", "preflight");
             gap.put("rejected_profiles", refused);
-            gap.put("must_differ_from_vendor", writer.vendor());
-            gap.put("writer_profile", writer.name());
+            gap.put("writer_vendors", wouldWrite.vendors().stream().sorted().toList());
+            gap.put("writer_profiles", wouldWrite.profiles().stream().sorted().toList());
+            // Keep the single-writer fields for existing consumers.
+            if (wouldWrite.vendors().size() == 1)
+                gap.put("must_differ_from_vendor", wouldWrite.vendors().iterator().next());
+            if (wouldWrite.profiles().size() == 1)
+                gap.put("writer_profile", wouldWrite.profiles().iterator().next());
             gap.put("exhausted_profiles", List.copyOf(roles.exhaustedProfiles()));
             gap.put("message", "no profile can fill role '" + stage.role() + "' for stage '"
-                    + stage.name() + "' once " + writer.name() + " (" + writer.vendor()
-                    + ") has written the candidate (" + refused + "). Add a profile from another vendor, "
+                    + stage.name() + "' after the preceding writers " + wouldWrite.profiles()
+                    + " (vendors " + wouldWrite.vendors() + ") have written the candidate ("
+                    + refused + "). Add a profile from another vendor, "
                     + "or declare a same_vendor_peer pair in policy.yaml and set "
                     + "review_assurance: same_vendor_peer on the task if that weaker check is "
                     + "acceptable; nothing was dispatched.");
             return gap;
         }
         return null;
+    }
+
+    private static RoleResolver.Writers initialPreviewWriters(TaskSpec.ResolvedTask task) {
+        return new RoleResolver.Writers(new java.util.HashSet<>(task.priorWriters()),
+                java.util.Set.of(), true, "same_vendor_peer".equals(task.reviewAssurance()));
+    }
+
+    private static RoleResolver.Writers withPreviewWriter(RoleResolver.Writers written,
+                                                          dev.warden.config.Profile profile) {
+        if (profile.readOnly()) return written;
+        java.util.Set<String> vendors = new java.util.HashSet<>(written.vendors());
+        java.util.Set<String> profiles = new java.util.HashSet<>(written.profiles());
+        vendors.add(profile.vendor());
+        profiles.add(profile.name());
+        return new RoleResolver.Writers(vendors, profiles, written.known(), written.peerAllowed());
     }
 
     /**
@@ -1558,6 +1608,20 @@ public final class TaskLoop {
                 preparationStages);
     }
 
+    private static Map<String, Object> budgetPreview(CallPlan plan, UserConfig user, TaskSpec.ResolvedTask task) {
+        Map<String, Object> result = new LinkedHashMap<>(plan.toMap(task.budget().maxRoleRuns(),
+                user.policy() == null ? "full" : user.policy().repairReserve()));
+        if (task.budget().maxElapsedMinutes() != null) {
+            result.put("time_reserve", "not reserved: budgets.max_elapsed_minutes ("
+                    + task.budget().maxElapsedMinutes() + ") bounds the execution time of this "
+                    + "run and every continuation of it. No vendor call starts with less than "
+                    + "a minute left, and each call's wall clock is lowered to what is left. A "
+                    + "call's duration is not predicted, so a repair is never refused in advance "
+                    + "for time; gates and the baseline are bounded by timeout_minutes instead");
+        }
+        return result;
+    }
+
     /**
      * Why a stage will not run at all, or null when it will.
      *
@@ -1588,8 +1652,8 @@ public final class TaskLoop {
      * which runner, and whether a `--use` they typed landed on the stage they meant. Finding
      * that out required reading the summary of a run that had already been paid for.
      *
-     * A preview, and honestly labelled as one. Rotation is read without advancing, the writer
-     * set is taken as empty because nobody has written yet, and a mid-run failover can still
+     * A preview, and honestly labelled as one. Rotation is read without advancing, preceding
+     * writable profiles join the declared prior writers, and a mid-run failover can still
      * put a different vendor in a chair — the row says who the roster names now, which is the
      * question being asked now.
      */
@@ -1597,6 +1661,7 @@ public final class TaskLoop {
                                            TaskSpec.ResolvedTask task, boolean reviewByRisk,
                                            RoleRunner roles, RunOverride overlay) {
         List<Map<String, Object>> rows = new ArrayList<>();
+        RoleResolver.Writers written = initialPreviewWriters(task);
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
             if (skipReason(stage, user, task, reviewByRisk) != null) continue;
@@ -1604,11 +1669,13 @@ public final class TaskLoop {
             row.put("stage", stage.name());
             row.put("role", stage.role());
             dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
-                    RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                    stage.onFindings() != null ? written : RoleResolver.Writers.NONE,
+                    workflow.rotationPositionOf(stage));
             if (chosen == null) {
                 row.put("profile", null);
                 Map<String, String> why = roles.explainFill(user, stage.name(), stage.role(),
-                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                        stage.onFindings() != null ? written : RoleResolver.Writers.NONE,
+                        workflow.rotationPositionOf(stage));
                 row.put("unresolved", why == null ? Map.of() : why);
             } else {
                 row.put("profile", chosen.name());
@@ -1623,6 +1690,7 @@ public final class TaskLoop {
                     row.put("from_overlay",
                             overlay.problem(stage.name(), chosen, user.profiles()) == null);
                 }
+                written = withPreviewWriter(written, chosen);
             }
             if (stage.fixWith() != null && ("fix".equals(stage.onFail()) || "fix".equals(stage.onFindings()))) {
                 dev.warden.config.Profile fixer = roles.peek(root, user, stage.name() + "/fix",
@@ -1640,7 +1708,7 @@ public final class TaskLoop {
      *
      * Built from the preflight's own calls, in its order. The task's {@code use:} is pinned
      * and overlaid on the runner as the loop does it, the workflow is the one the task runs
-     * (agent evidence swaps the browser stage), the writer is peeked first and every reader
+     * (agent evidence swaps the browser stage), writable roles accumulate in order and every reader
      * that judges findings is peeked against it with the task's {@code review_assurance}, and
      * an overlay the chosen profile cannot deliver is refused with {@link RunOverride#problem},
      * the check {@code overlayGap} stops a run on. A table built from the policy alone named
@@ -1652,15 +1720,22 @@ public final class TaskLoop {
     public static List<Map<String, Object>> dispatchPreview(Path root, ConfigLoader.Loaded loaded,
                                                             UserConfig user,
                                                             RoleResolver.Availability availability) {
+        return dispatchPreview(root, loaded, user, availability, RunOverride.NONE);
+    }
+
+    public static List<Map<String, Object>> dispatchPreview(Path root, ConfigLoader.Loaded loaded,
+                                                            UserConfig user,
+                                                            RoleResolver.Availability availability,
+                                                            RunOverride invocation) {
         TaskSpec.ResolvedTask task = loaded.resolved();
         Workflow workflow = user.policy() != null ? user.policy().workflow() : Workflow.builtIn();
         if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
         boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
-        RunOverride overlay = loaded.task().use().withWriterFixes(workflow);
+        RunOverride overlay = loaded.task().use().merged(invocation).withWriterFixes(workflow);
         RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
         overlay.pin(roles);
         roles.overlay(overlay);
-        RoleResolver.Writers written = RoleResolver.Writers.NONE;
+        RoleResolver.Writers written = initialPreviewWriters(task);
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Workflow.Stage stage : workflow.stages()) {
             if (stage.kind() != Workflow.Kind.ROLE) continue;
@@ -1699,13 +1774,84 @@ public final class TaskLoop {
                     row.put("message", problem);
                 }
             }
-            if ("implementer".equals(stage.role()) && written == RoleResolver.Writers.NONE) {
-                written = new RoleResolver.Writers(java.util.Set.of(chosen.vendor()),
-                        java.util.Set.of(chosen.name()), true,
-                        "same_vendor_peer".equals(task.reviewAssurance()));
-            }
+            written = withPreviewWriter(written, chosen);
         }
         return rows;
+    }
+
+    /**
+     * Settings-only preview for a fresh invocation. Uses the loop's own resolver, skip
+     * predicate, call arithmetic and settings preflights, without a run reservation,
+     * prompts, probes, rotation advances or dispatch. Workspace and live adapter checks
+     * still belong to the CLI dry run; this is not an authorization to execute.
+     */
+    public static Map<String, Object> settingsPreview(Path root, ConfigLoader.Loaded loaded,
+                                                      UserConfig user, RunOverride invocation,
+                                                      RoleResolver.Availability availability) {
+        TaskSpec.ResolvedTask task = loaded.resolved();
+        Workflow workflow = user.policy() == null ? Workflow.builtIn() : user.policy().workflow();
+        if (task.visualQa().agentEvidence()) workflow = workflow.forAgentEvidence();
+        boolean reviewByRisk = user.policy() != null && user.policy().reviewRequired(task.risk());
+        RunOverride overlay = loaded.task().use().merged(invocation).withWriterFixes(workflow);
+        RoleRunner roles = new RoleRunner(new ProcessRunner()).availability(availability);
+        overlay.pin(roles);
+        roles.overlay(overlay);
+        List<Map<String, Object>> dispatch = dispatchPreview(root, loaded, user, availability, invocation);
+        CallPlan plan = planFor(workflow, user, task, List.of());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("would_run", dispatch);
+        result.put("budget_plan", budgetPreview(plan, user, task));
+        List<Map<String, Object>> problems = new ArrayList<>();
+        if (user.policyPresent() && user.policy() == null) {
+            problems.add(Map.of("code", "policy_invalid", "message", "policy.yaml does not parse"));
+        }
+        TaskLoop loop = new TaskLoop(new ProcessRunner());
+        Map<String, Object> gap = loop.overlayGap(root, workflow, user, task, reviewByRisk, roles, overlay);
+        if (gap != null) problems.add(gap);
+        gap = judgeGap(workflow, user, task, reviewByRisk, roles);
+        if (gap != null) problems.add(gap);
+        gap = loop.toolingGap(root, workflow, user, task, reviewByRisk, roles);
+        if (gap != null) problems.add(gap);
+        gap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        if (gap != null) {
+            gap = new LinkedHashMap<>(gap);
+            gap.put("code", "independent_review_unavailable");
+            problems.add(gap);
+        }
+        if (task.budget().strictCostCap()) {
+            gap = strictCapGap(workflow, user, task, reviewByRisk, overlay, Map.of());
+            if (gap != null) {
+                gap = new LinkedHashMap<>(gap);
+                gap.put("code", "cost_cap_unenforceable");
+                problems.add(gap);
+            } else {
+                // Prove only an impossible cap here: even the cheapest declared option at
+                // every owed stage cannot fit. Actual dispatch still reserves selected and
+                // outstanding worst-case bounds, including later failovers and repairs.
+                double minimum = 0;
+                for (Workflow.Stage stage : workflow.stages()) {
+                    if (stage.kind() != Workflow.Kind.ROLE || skipReason(stage, user, task, reviewByRisk) != null) continue;
+                    minimum += selectableProfiles(stage, user, overlay, Map.of()).stream()
+                            .filter(p -> p.maxCostUsd() != null).mapToDouble(p -> p.maxCostUsd()).min().orElse(0);
+                }
+                result.put("strict_minimum_bound_usd", minimum);
+                if (task.budget().maxCostUsd() > 0 && minimum > task.budget().maxCostUsd())
+                    problems.add(Map.of("code", "budget_insufficient", "message",
+                            "Strict cost cap is below even the minimum declared bounds of required calls: " + minimum));
+            }
+        }
+        for (Map<String, Object> row : dispatch) {
+            if (row.containsKey("skipped") || row.get("profile") != null) continue;
+            problems.add(Map.of("code", "no_eligible_profile", "stage", row.get("stage"),
+                    "message", "No eligible profile: " + row.get("unresolved")));
+        }
+        if (task.budget().maxRoleRuns() > 0 && task.budget().maxRoleRuns() < plan.minimumToFinish()) {
+            problems.add(Map.of("code", "budget_insufficient", "message",
+                    "Call cap is below the minimum needed to finish"));
+        }
+        result.put("problems", problems);
+        result.put("settings_ok", problems.isEmpty());
+        return result;
     }
 
     /** The cast as a person reads it: one stage per line, aligned, with the overlay marked. */
@@ -4350,6 +4496,18 @@ public final class TaskLoop {
             return left != null && left.getSeconds() < MINIMUM_CALL_SECONDS;
         }
 
+        /** Check the wait without consuming the next call's reservation. */
+        void requireRetryWait(long pauseMillis) {
+            if (maxElapsedSeconds == null) return;
+            java.time.Duration left = java.time.Duration.ofSeconds(maxElapsedSeconds - inherited.elapsedSeconds())
+                    .minusNanos(clock.getAsLong() - startedNanos);
+            if (left.minusMillis(pauseMillis).getSeconds() >= MINIMUM_CALL_SECONDS) return;
+            throw new ExceededException("max_elapsed_minutes", "max_elapsed_minutes of "
+                    + (maxElapsedSeconds / 60) + " cannot fit a " + pauseMillis
+                    + " ms rate-limit retry wait and the next call's minimum "
+                    + MINIMUM_CALL_SECONDS + " s: " + left.getSeconds() + " s remain");
+        }
+
         /**
          * Vendor calls that already happened before this loop, counted so preparation is
          * not free. A reservation is never given back: see {@link #requireRoleRun}.
@@ -4519,6 +4677,14 @@ public final class TaskLoop {
             @Override public boolean hasRoom() { return budget.hasRoom(); }
 
             @Override public java.time.Duration wallClockCap() { return budget.wallClockCap(); }
+
+            @Override public void requireRetryWait(long pauseMillis) {
+                try {
+                    budget.requireRetryWait(pauseMillis);
+                } catch (Budget.ExceededException exceeded) {
+                    throw new dev.warden.run.Preparation.Exhausted(exceeded.getMessage());
+                }
+            }
 
             @Override public void settleAttempt(Object costUsd, Double declaredBound) {
                 budget.settleAttempt(costUsd, declaredBound);
@@ -5059,7 +5225,9 @@ public final class TaskLoop {
         progress.line("plan  " + String.join(" -> ", names));
         printCast(cast);
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
-                + Progress.money(task.budget().maxCostUsd()) + " of reported spend, fix rounds <= "
+                + Progress.money(task.budget().maxCostUsd())
+                + (task.budget().maxCostUsd() == 0 ? " (money limit disabled)"
+                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend") + ", fix rounds <= "
                 + task.maxFixAttempts()
                 + (task.budget().maxElapsedMinutes() == null ? ""
                         : ", " + task.budget().maxElapsedMinutes() + " min of execution"));

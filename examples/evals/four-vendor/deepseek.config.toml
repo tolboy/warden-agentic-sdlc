@@ -1,0 +1,11 @@
+model_provider = "openrouter"
+model = "deepseek/deepseek-v4.1-flash-1017"
+model_reasoning_effort = "medium"
+model_reasoning_summary = "none"
+web_search = "disabled"
+
+[features]
+apps = false
+plugins = false
+remote_plugin = false
+memories = false

@@ -1,0 +1,71 @@
+version: 1
+roles:
+  implementer:
+    profiles: [grok-implement, codex-implement]
+    strategy: first
+    require_independent_vendor: false
+  visual_qa:
+    profiles: [orca-codex-visual]
+    strategy: first
+    require_independent_vendor: true
+  reviewer:
+    profiles: [codex-review, deepseek-review, agy-review]
+    strategy: rotate
+    require_independent_vendor: true
+  planner:
+    profiles: [deepseek-planner, codex-planner]
+    strategy: first
+    require_independent_vendor: false
+  plan_reviewer:
+    profiles: [codex-plan-review]
+    strategy: first
+    require_independent_vendor: false
+review:
+  required_for_risk: [medium, high]
+  repair_severities: [P1, P2, P3]
+  contract_gaps: plan
+failover:
+  on_quota_exhausted: auto
+  on_vendor_failure: auto
+  max_per_stage: 2
+workflow:
+  stages:
+    - stage: implement
+      run: role
+      role: implementer
+      on_fail: stop
+
+    - stage: gates
+      run: machine_gates
+      on_fail: fix
+      recheck_after_fix: true
+
+    - stage: review
+      run: role
+      role: reviewer
+      when: [review_required]
+      on_fail: stop
+      on_findings: fix
+      recheck_after_fix: true
+
+    - stage: review-second
+      run: role
+      role: reviewer
+      when: [review_required]
+      on_fail: stop
+      on_findings: fix
+      recheck_after_fix: true
+
+    - stage: browser
+      run: visual_harness
+      when: [visual_qa_required]
+      on_fail: fix
+      recheck_after_fix: true
+
+    - stage: look
+      run: role
+      role: visual_qa
+      when: [visual_qa_required]
+      sees: browser
+      on_fail: stop
+      on_findings: fix

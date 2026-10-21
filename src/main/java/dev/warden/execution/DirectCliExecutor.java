@@ -8,6 +8,8 @@ import dev.warden.process.ProcessRunner;
 import dev.warden.role.PromptRenderer;
 
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,15 +41,16 @@ import java.util.Map;
  */
 public final class DirectCliExecutor implements RoleExecutor {
 
+    private static final int PREVIEW_BYTES = 256 * 1024;
+    // Limit an individual protocol object, rather than the complete transcript. A single
+    // tool event may exceed it; framing continues so the following answer is still found.
+    private static final int MAX_PROTOCOL_CHARS = 4 * 1024 * 1024;
+
     /** Envelope keys vendors use for the model's answer, most specific first. */
     private static final List<String> ENVELOPE_KEYS = List.of(
             "structuredOutput", "structured_output", "result", "output", "response", "content", "data", "text");
 
-    /**
-     * Vendor stdout retained for classification. The capture is a prefix: once this many
-     * bytes have been kept, later turns are gone, and a non-zero exit cannot be treated as
-     * success on the strength of an answer the prefix still holds.
-     */
+    /** Former transcript cap, retained for source-compatible capture regression fixtures. */
     public static final int STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024;
 
     private final ProcessRunner processes;
@@ -137,10 +140,25 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_prompt_undeliverable", Duration.ZERO, "", null, evidence);
         }
 
+        Path rawDirectory = runDirectory.resolve("raw");
+        Files.createDirectories(rawDirectory);
+        Path stdoutFile = rawDirectory.resolve(request.evidenceName() + ".stdout.txt");
+        Path stderrFile = rawDirectory.resolve(request.evidenceName() + ".stderr.txt");
+        evidence.put("raw_stdout", runDirectory.relativize(stdoutFile).toString().replace('\\', '/'));
+        evidence.put("raw_stderr", runDirectory.relativize(stderrFile).toString().replace('\\', '/'));
+
         ProcessRunner.Result process;
         try {
-            process = processes.run(command, request.projectRoot(),
-                    Duration.ofMinutes(profile.wallClockMinutes()), STDOUT_CAPTURE_BYTES, stdinText);
+            process = processes.runVendor(command, request.projectRoot(),
+                    Duration.ofMinutes(profile.wallClockMinutes()), PREVIEW_BYTES, stdinText,
+                    stdoutFile, stderrFile, ProcessRunner.DEFAULT_RAW_BYTES);
+        } catch (ProcessRunner.CaptureException incomplete) {
+            String code = incomplete.settled() ? "role_output_capture_failed" : "role_process_unsettled";
+            evidence.put("failure", code);
+            evidence.put("process_tree_settled", incomplete.settled());
+            evidence.put("raw_capture_complete", false);
+            evidence.put("capture_error", incomplete.getMessage());
+            return new Result(false, code, Duration.ZERO, "", null, evidence);
         } catch (IOException cannotStart) {
             // A vendor that will not start is returned as a role outcome rather than thrown,
             // so the run leaves a report behind instead of a stack trace with nothing recorded.
@@ -148,17 +166,20 @@ public final class DirectCliExecutor implements RoleExecutor {
             // choice (`failover.on_vendor_failure`, default stop), not this adapter's.
             evidence.put("failure", "role_command_failed");
             evidence.put("exit_code", -1L);
+            evidence.put("process_tree_settled", true);
             evidence.put("start_error", String.valueOf(cannotStart.getMessage()));
+            evidence.put("raw_capture_complete", false);
             return new Result(false, "role_command_failed", Duration.ZERO, "", null, evidence);
         }
 
-        Path rawDirectory = runDirectory.resolve("raw");
-        Files.createDirectories(rawDirectory);
-        Path stdoutFile = rawDirectory.resolve(request.evidenceName() + ".stdout.txt");
-        Files.writeString(stdoutFile, process.stdout(), StandardCharsets.UTF_8);
-        Files.writeString(rawDirectory.resolve(request.evidenceName() + ".stderr.txt"),
-                process.stderr(), StandardCharsets.UTF_8);
-        evidence.put("raw_stdout", runDirectory.relativize(stdoutFile).toString().replace('\\', '/'));
+        evidence.put("raw_capture_complete", !process.outputLimitExceeded());
+        evidence.put("process_tree_settled", true);
+        evidence.put("raw_limit_bytes_per_stream", ProcessRunner.DEFAULT_RAW_BYTES);
+        evidence.put("raw_stdout_bytes", Files.size(stdoutFile));
+        evidence.put("raw_stderr_bytes", Files.size(stderrFile));
+        evidence.put("stdout_truncated", process.stdoutTruncated());
+        evidence.put("stderr_truncated", process.stderrTruncated());
+        evidence.put("capture_preview", "head_and_tail");
         evidence.put("exit_code", (long) process.exitCode());
         evidence.put("timed_out", process.timedOut());
         evidence.put("duration_millis", process.durationMillis());
@@ -173,9 +194,21 @@ public final class DirectCliExecutor implements RoleExecutor {
         // the calls that worked, which is the opposite of what a ceiling is for — the run
         // most worth costing is the one that failed. A planner that mutated the worktree is
         // the same: the protocol failure is a verdict, and the call still cost what it cost.
-        Map<String, Object> envelope = Json.findLastObject(process.stdout());
-        if (envelope != null) collectTelemetry(envelope, evidence);
+        Protocol protocol = readProtocol(stdoutFile, evidence, profile.quotaSignatures(), false);
+        Protocol stderrProtocol = readProtocol(stderrFile, new LinkedHashMap<>(), profile.quotaSignatures(), true);
+        QuotaSignal.Detection retainedQuota = strongerQuota(protocol.quota(), stderrProtocol.quota());
+        VendorAvailability.Detection retainedUnavailable = protocol.unavailable().matched()
+                ? protocol.unavailable() : stderrProtocol.unavailable();
+        boolean retainedTurns = protocol.turnsExhausted() || stderrProtocol.turnsExhausted();
+        Map<String, Object> envelope = protocol.envelope();
+        evidence.put("protocol_objects_omitted", protocol.omittedObjects());
+        evidence.put("protocol_object_limit_chars", MAX_PROTOCOL_CHARS);
         noteModelMismatch(profile, evidence);
+
+        if (process.outputLimitExceeded()) {
+            evidence.put("failure", "role_output_limit_exceeded");
+            return new Result(false, "role_output_limit_exceeded", duration, process.stdout(), null, evidence);
+        }
 
         if (profile.readOnly()) {
             String fingerprintAfter = git.fingerprint(mergeBase);
@@ -199,7 +232,7 @@ public final class DirectCliExecutor implements RoleExecutor {
         // then hang until it is killed. That verdict stands. `timed_out` is already on the
         // evidence, so the attempt still records the clock. Only a timeout that left no
         // complete artifact is `role_timeout`, and that one may fail over.
-        Map<String, Object> artifact = readArtifact(process, envelope);
+        Map<String, Object> artifact = readArtifact(protocol.agentMessage(), envelope);
         if (artifact != null) {
             artifact.putIfAbsent("role", request.role());
             artifact.putIfAbsent("task_id", request.task().id());
@@ -213,8 +246,8 @@ public final class DirectCliExecutor implements RoleExecutor {
                 // off at the byte cap can hide the later turn entirely, so a non-zero exit
                 // or a timeout on a truncated transcript is not success either. A child
                 // can exit 0 after SIGTERM; the timeout flag is the fact that matters.
-                if (discardCompleteArtifact(process)) {
-                    return rejectedStaleArtifact(request, process, duration, evidence);
+                if (protocol.superseded() && (process.exitCode() != 0 || process.timedOut() || protocol.turnFailed())) {
+                    return rejectedStaleArtifact(request, process, duration, evidence, retainedQuota, retainedUnavailable, retainedTurns);
                 }
                 String semanticFailure = semanticFailure(request.role(), artifact);
                 if (semanticFailure != null) {
@@ -241,12 +274,12 @@ public final class DirectCliExecutor implements RoleExecutor {
                     // error="Individual quota reached...", no verdict. That used to be
                     // role_artifact_incomplete, so failover never ran. A spent plan that did
                     // not produce the artifact is still a spent plan.
-                    Result quota = quotaFailure(request, process, duration, evidence);
+                    Result quota = quotaFailure(process, duration, evidence, retainedQuota);
                     if (quota != null) return quota;
                     // An exit-0 error envelope (agy: status=ERROR, error=PERMISSION_DENIED)
                     // is not an incomplete answer about the work. A location or eligibility
                     // refusal is named on its own, and the artifact is not returned.
-                    Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+                    Result unavailable = vendorUnavailableFailure(process, duration, evidence, retainedUnavailable);
                     if (unavailable != null) return unavailable;
                     evidence.put("failure", "role_artifact_incomplete");
                     evidence.put("missing_fields", missing);
@@ -265,17 +298,17 @@ public final class DirectCliExecutor implements RoleExecutor {
         }
 
         if (process.exitCode() != 0) {
-            Result quota = quotaFailure(request, process, duration, evidence);
+            Result quota = quotaFailure(process, duration, evidence, retainedQuota);
             if (quota != null) return quota;
             // A non-zero exit is how both measured vendors report a spent turn ceiling:
             // grok writes `Error: max turns reached` to stderr and exits 1, and claude -p
             // exits 1 with subtype `error_max_turns`. Until this check moved here it was
             // only reachable on the exit-0 path, so the code that exists to name the one
             // knob worth turning was never the code a real ceiling reached.
-            Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+            Result ceiling = turnCeilingFailure(profile, process, duration, evidence, retainedTurns);
             if (ceiling != null) return ceiling;
             // After quota. A 403 that also says the plan is spent stays a spent plan.
-            Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+            Result unavailable = vendorUnavailableFailure(process, duration, evidence, retainedUnavailable);
             if (unavailable != null) return unavailable;
             evidence.put("failure", "role_command_failed");
             // Both streams: the Codex usage-limit message arrives on stdout while stderr
@@ -285,15 +318,15 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_command_failed", duration, process.stdout(), null, evidence);
         }
 
-        Result quota = quotaFailure(request, process, duration, evidence);
+        Result quota = quotaFailure(process, duration, evidence, retainedQuota);
         if (quota != null) return quota;
         // A vendor that ran out of turns did not fail at the work; it was interrupted
         // mid-thought by a ceiling the operator set. `role_command_failed` sends someone
         // to read a transcript looking for a defect that is not in it — the same reason
         // a spent subscription is classified apart from an ordinary failure.
-        Result ceiling = turnCeilingFailure(profile, process, duration, evidence);
+        Result ceiling = turnCeilingFailure(profile, process, duration, evidence, retainedTurns);
         if (ceiling != null) return ceiling;
-        Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+        Result unavailable = vendorUnavailableFailure(process, duration, evidence, retainedUnavailable);
         if (unavailable != null) return unavailable;
         evidence.put("failure", "role_artifact_unparseable");
         evidence.put("stdout_tail", tail(process.stdout(), 2000));
@@ -306,9 +339,8 @@ public final class DirectCliExecutor implements RoleExecutor {
      * Codex {@code --json} is JSONL: the last object is usually {@code turn.completed},
      * while the answer is an earlier {@code agent_message}. Lifecycle events are not answers.
      */
-    private static Map<String, Object> readArtifact(ProcessRunner.Result process,
+    private static Map<String, Object> readArtifact(Map<String, Object> fromJsonl,
                                                     Map<String, Object> envelope) {
-        Map<String, Object> fromJsonl = extractJsonlAgentMessage(process.stdout());
         Map<String, Object> artifact = fromJsonl != null ? unwrap(fromJsonl) : unwrap(envelope);
         if (artifact == null || isEventEnvelope(artifact)) artifact = unwrap(envelope);
         if (artifact == null || isEventEnvelope(artifact)) return null;
@@ -341,8 +373,8 @@ public final class DirectCliExecutor implements RoleExecutor {
      * one-line remedy, so all three must reach the same code.
      */
     private static Result turnCeilingFailure(Profile profile, ProcessRunner.Result process,
-                                             Duration duration, Map<String, Object> evidence) {
-        if (!turnsExhausted(process.stdout(), process.stderr())) return null;
+                                             Duration duration, Map<String, Object> evidence, boolean exhausted) {
+        if (!exhausted) return null;
         evidence.put("failure", "role_turns_exhausted");
         evidence.put("stderr_tail", tail(process.stderr(), 500));
         evidence.put("resolution", "the vendor stopped at its turn ceiling before "
@@ -453,10 +485,10 @@ public final class DirectCliExecutor implements RoleExecutor {
      * that already failed: a vendor that produced a usable artifact is never reclassified on
      * the strength of its prose.
      */
-    private static Result quotaFailure(Request request, ProcessRunner.Result process,
-                                       Duration duration, Map<String, Object> evidence) {
-        QuotaSignal.Detection detection = QuotaSignal.detect(
-                request.profile().quotaSignatures(), process.stdout(), process.stderr());
+    private static Result quotaFailure(ProcessRunner.Result process,
+                                       Duration duration, Map<String, Object> evidence,
+                                       QuotaSignal.Detection retainedQuota) {
+        QuotaSignal.Detection detection = retainedQuota;
         if (!detection.matched()) return null;
         evidence.put("failure", detection.roleCode());
         evidence.put("quota", detection.report());
@@ -472,9 +504,8 @@ public final class DirectCliExecutor implements RoleExecutor {
      * never a work verdict. Quota has already been consulted by the caller.
      */
     private static Result vendorUnavailableFailure(ProcessRunner.Result process,
-                                                   Duration duration, Map<String, Object> evidence) {
-        VendorAvailability.Detection detection = VendorAvailability.detect(
-                process.stdout(), process.stderr());
+                                                   Duration duration, Map<String, Object> evidence,
+                                                   VendorAvailability.Detection detection) {
         if (!detection.matched()) return null;
         evidence.put("failure", detection.roleCode());
         evidence.put("vendor_unavailable", detection.report());
@@ -646,56 +677,25 @@ public final class DirectCliExecutor implements RoleExecutor {
     }
 
     /**
-     * A complete artifact that must not be returned as success.
-     *
-     * Two cases. The final turn failed — non-zero exit, a timeout, or {@code turn.failed} —
-     * after an earlier turn had already answered. Or stdout was cut off at
-     * {@link #STDOUT_CAPTURE_BYTES} and the process exited non-zero or was killed for time:
-     * the prefix can hide the later {@code turn.started}, so the answer still in it is not
-     * evidence the final turn produced a verdict. A timeout whose child exits 0 is still a
-     * timeout. A non-zero exit on a complete transcript whose artifact is from the turn
-     * that finished is still that verdict.
-     */
-    private static boolean discardCompleteArtifact(ProcessRunner.Result process) {
-        if (process.stdoutTruncated() && (process.exitCode() != 0 || process.timedOut())) return true;
-        if (!earlierTurnSuperseded(process.stdout())) return false;
-        return process.exitCode() != 0 || process.timedOut() || turnFailed(process.stdout());
-    }
-
-    /** The vendor reported a turn as failed, in the Codex event stream. */
-    private static boolean turnFailed(String stdout) {
-        if (stdout == null || stdout.isBlank()) return false;
-        for (String line : stdout.split("\\R")) {
-            String trimmed = line.strip();
-            if (!trimmed.startsWith("{")) continue;
-            Map<String, Object> event;
-            try {
-                event = Json.parseObject(trimmed);
-            } catch (Json.JsonException ignored) {
-                continue;
-            }
-            if ("turn.failed".equals(event.get("type"))) return true;
-        }
-        return false;
-    }
-
-    /**
      * The failure of a turn that superseded an earlier answer. Quota and a turn ceiling
      * keep their own codes. A wall-clock kill is a timeout. Anything else is a command
      * that produced no final artifact, including a network error and a generic
      * {@code turn.failed}.
      */
     private static Result rejectedStaleArtifact(Request request, ProcessRunner.Result process,
-                                                Duration duration, Map<String, Object> evidence) {
-        Result quota = quotaFailure(request, process, duration, evidence);
+                                                Duration duration, Map<String, Object> evidence,
+                                                QuotaSignal.Detection retainedQuota,
+                                                VendorAvailability.Detection retainedUnavailable,
+                                                boolean retainedTurns) {
+        Result quota = quotaFailure(process, duration, evidence, retainedQuota);
         if (quota != null) return quota;
-        Result ceiling = turnCeilingFailure(request.profile(), process, duration, evidence);
+        Result ceiling = turnCeilingFailure(request.profile(), process, duration, evidence, retainedTurns);
         if (ceiling != null) return ceiling;
         if (process.timedOut()) {
             evidence.put("failure", "role_timeout");
             return new Result(false, "role_timeout", duration, process.stdout(), null, evidence);
         }
-        Result unavailable = vendorUnavailableFailure(process, duration, evidence);
+        Result unavailable = vendorUnavailableFailure(process, duration, evidence, retainedUnavailable);
         if (unavailable != null) return unavailable;
         evidence.put("failure", "role_command_failed");
         evidence.put("stderr_tail", tail(process.stderr(), 2000));
@@ -710,7 +710,7 @@ public final class DirectCliExecutor implements RoleExecutor {
      * gpt-5.4-mini probe, not from documentation.
      *
      * The last usable answer from any turn. A later turn that fails is not applied here;
-     * {@link #discardCompleteArtifact} is what tells the caller to classify that failure
+     * the streaming protocol state is what tells the caller to classify that failure
      * instead of returning the earlier answer.
      */
     public static Map<String, Object> extractJsonlAgentMessage(String stdout) {
@@ -725,16 +725,249 @@ public final class DirectCliExecutor implements RoleExecutor {
             } catch (Json.JsonException ignored) {
                 continue;
             }
-            if (!"item.completed".equals(event.get("type"))) continue;
-            Object item = event.get("item");
-            if (!(item instanceof Map<?, ?> map)) continue;
-            if (!"agent_message".equals(map.get("type"))) continue;
-            Object text = map.get("text");
-            if (!(text instanceof String body) || body.isBlank()) continue;
-            Map<String, Object> parsed = Json.findLastObject(body);
+            Map<String, Object> parsed = agentMessage(event);
             if (parsed != null) last = parsed;
         }
         return last;
+    }
+
+    private static Map<String, Object> agentMessage(Map<String, Object> event) {
+        if (!"item.completed".equals(event.get("type"))) return null;
+        Object item = event.get("item");
+        if (!(item instanceof Map<?, ?> map) || !"agent_message".equals(map.get("type"))) return null;
+        Object text = map.get("text");
+        return text instanceof String body && !body.isBlank() ? Json.findLastObject(body) : null;
+    }
+
+    private record Protocol(Map<String, Object> envelope, Map<String, Object> agentMessage,
+                            long omittedObjects, QuotaSignal.Detection quota, boolean superseded, boolean turnFailed,
+                            VendorAvailability.Detection unavailable, boolean turnsExhausted) {}
+
+    private static QuotaSignal.Detection strongerQuota(QuotaSignal.Detection first,
+                                                       QuotaSignal.Detection second) {
+        if (!first.matched()) return second;
+        if (!second.matched()) return first;
+        if (first.rateLimited() != second.rateLimited()) return first.rateLimited() ? second : first;
+        if (!"structured_error_event".equals(first.detectedBy())
+                && "structured_error_event".equals(second.detectedBy())) return second;
+        return first;
+    }
+
+    /** Only the latest answer/usage and strongest error are retained, never all log events. */
+    private static final class ProtocolState {
+        Map<String, Object> envelope;
+        boolean envelopeAuthoritative;
+        Map<String, Object> message;
+        long turn;
+        long messageTurn = -1;
+        boolean failed;
+        boolean turnsExhausted;
+        VendorAvailability.Detection unavailable = VendorAvailability.detect("", "");
+        final Map<String, Object> telemetry = new LinkedHashMap<>();
+        QuotaSignal.Detection quota = QuotaSignal.detect(List.of(), "", "");
+
+        boolean accept(String text, List<String> signatures) { return accept(text, signatures, true); }
+
+        boolean accept(String text, List<String> signatures, boolean authoritative) {
+            try {
+                Map<String, Object> parsed = Json.parseObject(text);
+                envelope = parsed;
+                envelopeAuthoritative = authoritative;
+                // JSON embedded in answer prose can supply an artifact, but it is not
+                // an independent provider receipt, lifecycle event or quota diagnostic.
+                if (!authoritative) return true;
+                Map<String, Object> answer = agentMessage(parsed);
+                if ("turn.started".equals(parsed.get("type"))) turn++;
+                if ("turn.failed".equals(parsed.get("type"))) failed = true;
+                if (answer != null) {
+                    message = answer;
+                    messageTurn = turn;
+                    failed = false;
+                }
+                if ("turn.completed".equals(parsed.get("type")) || "turn.failed".equals(parsed.get("type"))
+                        || "error".equals(parsed.get("type")) || "result".equals(parsed.get("type"))
+                        || (!isEventEnvelope(parsed) && (parsed.containsKey("structuredOutput")
+                        || parsed.containsKey("structured_output")))) {
+                    collectTelemetry(parsed, telemetry);
+                }
+                // Canonicalize the outer object: a pretty-printed nested example must not
+                // be reinterpreted as an independent top-level vendor error event.
+                String canonical = Json.write(parsed);
+                quota = strongerQuota(quota, QuotaSignal.detect(signatures, canonical, null));
+                if (!unavailable.matched()) unavailable = VendorAvailability.detect(canonical, "");
+                if (!QuotaSignal.structuredErrors(canonical).isEmpty()
+                        || ("result".equals(parsed.get("type")) && Boolean.TRUE.equals(parsed.get("is_error")))) {
+                    turnsExhausted |= turnsExhausted(canonical, "");
+                }
+                return true;
+            } catch (Json.JsonException ignored) {
+                return false;
+            }
+        }
+
+        void merge(ProtocolState other) {
+            if (other.envelope != null) {
+                envelope = other.envelope;
+                envelopeAuthoritative = other.envelopeAuthoritative;
+            }
+            if (other.message != null) {
+                message = other.message;
+                messageTurn = turn + other.messageTurn;
+                failed = other.failed;
+            } else if (other.failed) failed = true;
+            turn += other.turn;
+            telemetry.putAll(other.telemetry);
+            quota = strongerQuota(quota, other.quota);
+            if (!unavailable.matched()) unavailable = other.unavailable;
+            turnsExhausted |= other.turnsExhausted;
+        }
+
+        void diagnostic(String text, boolean stderr) {
+            if (stderr && !unavailable.matched()) unavailable = VendorAvailability.detect("", text);
+            turnsExhausted |= turnsExhausted(stderr ? "" : text, stderr ? text : "");
+        }
+    }
+
+    /**
+     * Reads concatenated JSON/JSONL or a pretty-printed final envelope using constant space
+     * per object. Never readLine(): a tool's single JSONL record can be the entire 100 MB log.
+     * A bounded whole-line candidate runs alongside brace framing: unmatched braces in
+     * ordinary chatter cannot swallow the following valid JSONL events. Line candidates
+     * inside a complete pretty envelope are discarded, preventing a nested example error
+     * from being mistaken for a vendor error. Oversized records are skipped explicitly.
+     */
+    private static Protocol readProtocol(Path stdoutFile, Map<String, Object> evidence,
+                                         List<String> signatures, boolean stderr) throws IOException {
+        ProtocolState result = new ProtocolState();
+        ProtocolState tentative = new ProtocolState();
+        long omitted = 0;
+        StringBuilder object = new StringBuilder();
+        StringBuilder line = new StringBuilder();
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        boolean oversized = false;
+        boolean lineOversized = false;
+        boolean lineCovered = false;
+        boolean awaitingFirstKey = false;
+        boolean protocolBoundary = true;
+        boolean objectAuthoritative = true;
+        try (Reader reader = new InputStreamReader(Files.newInputStream(stdoutFile), StandardCharsets.UTF_8)) {
+            char[] chunk = new char[8192];
+            int read;
+            while ((read = reader.read(chunk)) >= 0) {
+                for (int index = 0; index < read; index++) {
+                    char current = chunk[index];
+                    if (current == '\n' || current == '\r') {
+                        protocolBoundary = true;
+                        if (!lineCovered && !lineOversized
+                                && !tentative.accept(line.toString().strip(), signatures)) {
+                            tentative.diagnostic(line.toString(), stderr);
+                        }
+                        if (stderr) result.diagnostic(line.toString(), true);
+                        if (stderr) result.quota = strongerQuota(result.quota,
+                                QuotaSignal.detect(signatures, "", line.toString()));
+                        line.setLength(0);
+                        lineCovered = false;
+                        lineOversized = false;
+                    } else if (!lineOversized) {
+                        if (line.length() < MAX_PROTOCOL_CHARS) line.append(current);
+                        else {
+                            // stderr is itself an admitted diagnostic source. Scan chunks
+                            // with overlap so a message in a giant line survives the bound.
+                            if (stderr) {
+                                result.diagnostic(line.toString(), true);
+                                result.quota = strongerQuota(result.quota,
+                                        QuotaSignal.detect(signatures, "", line.toString()));
+                                line.delete(0, line.length() - 1024);
+                                line.append(current);
+                            } else {
+                                line.setLength(0);
+                                lineOversized = true;
+                                tentative.envelope = null;
+                                tentative.message = null;
+                            }
+                        }
+                    }
+                    if (depth == 0) {
+                        if (current != '{') {
+                            if (!Character.isWhitespace(current)) protocolBoundary = false;
+                            continue;
+                        }
+                        objectAuthoritative = protocolBoundary;
+                        result.merge(tentative);
+                        tentative = new ProtocolState();
+                        object.setLength(0);
+                        oversized = false;
+                        inString = false;
+                        escaped = false;
+                        awaitingFirstKey = true;
+                    } else if (awaitingFirstKey && !Character.isWhitespace(current)) {
+                        // An opening brace in prose is not even a JSON prefix unless its
+                        // first key is quoted (or the object is empty). Reject it early so
+                        // following pretty envelopes have the same recovery as JSONL.
+                        awaitingFirstKey = false;
+                        if (current != '"' && current != '}') {
+                            depth = 0;
+                            object.setLength(0);
+                            continue;
+                        }
+                    }
+                    if (!oversized) {
+                        if (object.length() == MAX_PROTOCOL_CHARS) {
+                            oversized = true;
+                            object.setLength(0);
+                            omitted++;
+                            result.envelope = null;
+                            result.message = null;
+                        } else object.append(current);
+                    }
+                    if (inString) {
+                        if (escaped) escaped = false;
+                        else if (current == '\\') escaped = true;
+                        else if (current == '"') inString = false;
+                    } else if (current == '"') inString = true;
+                    else if (current == '{') depth++;
+                    else if (current == '}') depth--;
+                    if (depth != 0) continue;
+                    if (oversized) {
+                        // Nested examples in an oversized but balanced envelope do not
+                        // become standalone provider errors merely because it was skipped.
+                        tentative = new ProtocolState();
+                        continue;
+                    }
+                    if (result.accept(object.toString(), signatures, objectAuthoritative)) {
+                        lineCovered = true;
+                        protocolBoundary = objectAuthoritative;
+                    } else {
+                        protocolBoundary = false;
+                        result.merge(tentative);
+                    }
+                    // A complete outer object supersedes any nested line candidates.
+                    tentative = new ProtocolState();
+                }
+            }
+        }
+        if (!lineCovered && !lineOversized && !tentative.accept(line.toString().strip(), signatures)) {
+            tentative.diagnostic(line.toString(), stderr);
+        }
+        if (stderr) result.diagnostic(line.toString(), true);
+        if (stderr) result.quota = strongerQuota(result.quota, QuotaSignal.detect(signatures, "", line.toString()));
+        result.merge(tentative);
+        // Non-streaming vendors report usage in their final result/error envelope only.
+        // Tool events and arbitrary JSON lines cannot override the provider receipt.
+        if (result.envelopeAuthoritative && result.envelope != null && !isEventEnvelope(result.envelope)) {
+            if ("result".equals(result.envelope.get("type"))
+                    || result.envelope.containsKey("structuredOutput")
+                    || result.envelope.containsKey("structured_output")
+                    || ENVELOPE_KEYS.stream().anyMatch(result.envelope::containsKey)) {
+                collectTelemetry(result.envelope, result.telemetry);
+            }
+        }
+        evidence.putAll(result.telemetry);
+        return new Protocol(result.envelope, result.message, omitted, result.quota,
+                result.messageTurn >= 0 && result.turn > result.messageTurn, result.failed,
+                result.unavailable, result.turnsExhausted);
     }
 
     /** JSONL lifecycle events must not be accepted as the role artifact. */

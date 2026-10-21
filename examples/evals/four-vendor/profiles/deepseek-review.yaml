@@ -1,0 +1,24 @@
+version: 1
+profile: deepseek-review
+role: reviewer
+vendor: deepseek
+model: "deepseek/deepseek-v4.1-flash-1017"
+effort: medium
+command: codex
+runner: direct
+read_only: true
+prompt_delivery: stdin
+args: ["exec", "-", "--json", "--ephemeral", "--profile", "deepseek", "--skip-git-repo-check", "-s", "read-only", "-m", "{{model}}", "-c", "model_reasoning_effort=\"{{effort}}\""]
+limits:
+  wall_clock_minutes: 20
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+artifact:
+  required_fields: ["role", "task_id", "status", "verdict", "summary", "findings"]
+quota:
+  signatures: []
+verification:
+  probe: "codex exec \"Read schemas/reviewer.json in the current directory and reply with only its top-level title field. Do not change files.\" --json --ephemeral --profile deepseek --skip-git-repo-check -s read-only -m {{model}} -c model_reasoning_effort=\"{{effort}}\""
+  expect: "Reviewer artifact"
+  what_to_check: ["The model reads a real local file and returns its title; model/effort in launch flags are requested settings, not vendor receipts."]
+  note: "Configured 2026-10-21. No inferred cost or inherited verification stamp."

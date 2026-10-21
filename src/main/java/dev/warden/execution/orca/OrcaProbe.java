@@ -1,6 +1,8 @@
 package dev.warden.execution.orca;
 
 import dev.warden.process.ProcessRunner;
+import dev.warden.json.Json;
+import dev.warden.execution.WorktreeLease;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -29,8 +31,8 @@ import java.util.Map;
  * file Warden has just written into the worktree — as text, or with {@code --image} drawn
  * in a picture — and the word is new on every probe, so a pass proves launch, tool access
  * and settlement rather than a process that ran or a model that guessed. The file is removed
- * afterwards, and the worker, the Task's terminal and the coordinator are released whatever
- * happened.
+ * afterwards on accepted settlement. An uncertain worker keeps its coordinator, fixture and
+ * recovery journal; losing a wait response must never authorize stopping a live agent.
  *
  * Prints {@code probe-answer: matched} only when the answer is that word. Bounded by
  * {@code --wait-minutes}. Every Orca call goes through {@link OrcaClient}, so it runs the
@@ -106,6 +108,22 @@ public final class OrcaProbe {
     }
 
     public Outcome run(Options options) {
+        try (WorktreeLease.Scope lease = WorktreeLease.acquire(options.worktree(),
+                "probe-orca-" + java.util.UUID.randomUUID())) {
+            WorktreeLease.requireLocalDispatch(options.worktree());
+            Outcome outcome = runOwned(options);
+            // finally may discover a failed release after an otherwise correct answer.
+            // Such a probe must not stamp the profile as verified.
+            return outcome.lines().stream().anyMatch(line -> line.startsWith("probe-recovery-required:"))
+                    ? new Outcome(1, outcome.lines()) : outcome;
+        } catch (WorktreeLease.Refused refused) {
+            return new Outcome(1, List.of("probe-failed: " + refused.code() + ": " + refused.getMessage()));
+        } catch (IOException failed) {
+            return new Outcome(1, List.of("probe-failed: " + failed.getMessage()));
+        }
+    }
+
+    private Outcome runOwned(Options options) {
         List<String> lines = new ArrayList<>();
         String word = WORDS.get(random.nextInt(WORDS.size()));
         String nonce = Long.toHexString(random.nextLong() & Long.MAX_VALUE);
@@ -113,7 +131,11 @@ public final class OrcaProbe {
         String handle = null;
         String dispatch = null;
         String runId = null;
+        String taskId = null;
+        String requestId = java.util.UUID.randomUUID().toString();
         boolean matched = false;
+        boolean settled = false;
+        boolean startUncertain = false;
         try {
             OrcaClient.Rpc current = call(lines, options.worktree(), CALL, List.of("worktree", "current"));
             String found = OrcaSettlement.worktreeSelector(current.envelope());
@@ -156,7 +178,7 @@ public final class OrcaProbe {
 
             OrcaClient.Rpc task = call(lines, options.worktree(), CALL, List.of("orchestration", "task-create",
                     "--spec", spec, "--task-title", "warden profile probe", "--run", runId, "--from", handle));
-            String taskId = OrcaSettlement.taskId(task.envelope());
+            taskId = OrcaSettlement.taskId(task.envelope());
             if (!task.ok() || taskId == null) return failed(lines, "no orchestration task");
 
             List<String> start = new ArrayList<>(List.of("orchestration", "worker-start",
@@ -164,9 +186,19 @@ public final class OrcaProbe {
             if (options.model() != null) start.addAll(List.of("--model", options.model()));
             if (options.effort() != null) start.addAll(List.of("--effort", options.effort()));
             start.addAll(List.of("--run", runId, "--from", handle,
+                    "--retry-request", requestId,
                     "--timeout-ms", String.valueOf(START.toMillis())));
+            journal(fixture, handle, runId, taskId, null, requestId, "starting");
+            WorktreeLease.startingVendor();
+            startUncertain = true;
             OrcaClient.Rpc started = call(lines, options.worktree(), START.plusSeconds(30), start);
             dispatch = OrcaSettlement.dispatchId(started.envelope());
+            Files.writeString(fixture.resolve("start-receipt.json"), Json.write(started.envelope()), StandardCharsets.UTF_8);
+            // A definite preflight refusal has no worker. A lost/partial receipt may have one.
+            if (dispatch == null && !started.timedOut()
+                    && started.envelope().get("error") instanceof Map<?, ?> error
+                    && "invalid_argument".equals(error.get("code"))) startUncertain = false;
+            journal(fixture, handle, runId, taskId, dispatch, requestId, "waiting");
             // Orca 1.4.209 exits 1 when it could not see the agent's turn begin, and settles
             // the dispatch normally if the agent then answers; the wait below is what decides.
             boolean unobserved = OrcaSettlement.turnUnobserved(started.envelope());
@@ -188,6 +220,8 @@ public final class OrcaProbe {
                             "--ack", seen.deliveryId(), "--terminal", handle, "--run", runId));
                 }
                 if (seen.kind() == OrcaSettlement.Kind.COMPLETED || seen.kind() == OrcaSettlement.Kind.FAILED) {
+                    settled = true;
+                    journal(fixture, handle, runId, taskId, dispatch, requestId, "settled");
                     Object answer = seen.payload() == null ? null : seen.payload().get("answer");
                     String said = answer == null ? "" : String.valueOf(answer).strip()
                             .toUpperCase(Locale.ROOT).replaceAll("[^A-Z]", "");
@@ -210,16 +244,50 @@ public final class OrcaProbe {
         } catch (Exception failure) {
             return failed(lines, failure.getClass().getSimpleName() + ": " + failure.getMessage());
         } finally {
-            if (dispatch != null) {
-                if (!matched) quietly(lines, options.worktree(), List.of("orchestration", "worker-stop",
-                        "--dispatch", dispatch));
-                quietly(lines, options.worktree(), List.of("orchestration", "worker-release",
-                        "--dispatch", dispatch));
+            boolean cleaned = !startUncertain;
+            if (cleaned && taskId != null && !settled) {
+                try {
+                    OrcaClient.Rpc cancelled = call(lines, options.worktree(), CALL,
+                            List.of("orchestration", "task-update", "--id", taskId,
+                                    "--status", "failed", "--result", "probe did not start a worker",
+                                    "--run", runId, "--from", handle));
+                    cleaned = cancelled.ok();
+                } catch (Exception unavailable) {
+                    cleaned = false;
+                    lines.add("probe-cleanup: task cancellation uncertain: " + unavailable.getMessage());
+                }
             }
-            if (handle != null) {
-                quietly(lines, options.worktree(), List.of("terminal", "close", "--terminal", handle, "--tab"));
+            if (dispatch != null && settled) {
+                try {
+                    OrcaClient.Rpc released = call(lines, options.worktree(), CALL,
+                            List.of("orchestration", "worker-release", "--dispatch", dispatch));
+                    cleaned = released.ok()
+                            && !List.of("release_pending", "release_unknown").contains(
+                                    String.valueOf(released.result().get("state")));
+                } catch (Exception unavailable) {
+                    lines.add("probe-cleanup: release uncertain: " + unavailable.getMessage());
+                }
             }
-            deleteTree(fixture);
+            if (cleaned && handle != null) {
+                try {
+                    cleaned = call(lines, options.worktree(), CALL,
+                            List.of("terminal", "close", "--terminal", handle, "--tab")).ok();
+                } catch (Exception unavailable) {
+                    cleaned = false;
+                    lines.add("probe-cleanup: coordinator close uncertain: " + unavailable.getMessage());
+                }
+            }
+            if (cleaned) {
+                try { WorktreeLease.vendorNotStarted(); }
+                catch (IOException failed) { lines.add("probe-cleanup: cannot clear launch intent: " + failed.getMessage()); }
+                deleteTree(fixture);
+            }
+            else {
+                WorktreeLease.requireRecovery("Orca probe has unsettled resources: " + fixture.resolve("recovery.json"));
+                lines.add("probe-recovery-required: preserved " + fixture.resolve("recovery.json")
+                        + "; coordinator=" + handle + ", run=" + runId + ", dispatch=" + dispatch
+                        + ". Inspect the worker before stopping or retrying; a timeout does not prove exit.");
+            }
         }
     }
 
@@ -227,15 +295,32 @@ public final class OrcaProbe {
             throws Exception {
         OrcaClient.Rpc rpc = orca.invoke(worktree, timeout, args);
         lines.add("orca " + String.join(" ", args.subList(0, Math.min(2, args.size())))
-                + (rpc.ok() ? " ok" : " failed " + (rpc.stderr() == null ? "" : rpc.stderr().strip())));
+                + (rpc.ok() ? " ok" : " failed " + failure(rpc)));
         return rpc;
     }
 
-    private void quietly(List<String> lines, Path worktree, List<String> args) {
+    private static String failure(OrcaClient.Rpc rpc) {
+        if (rpc.envelope().get("error") instanceof Map<?, ?> error) {
+            return String.valueOf(error.get("code")) + ": " + String.valueOf(error.get("message"));
+        }
+        return "exit=" + rpc.exitCode() + (rpc.timedOut() ? " timeout" : "")
+                + (rpc.stderr() == null ? "" : " " + rpc.stderr().strip());
+    }
+
+    private static void journal(Path fixture, String handle, String run, String task,
+                                String dispatch, String request, String state) throws IOException {
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("schema_version", 1); data.put("state", state);
+        data.put("coordinator", handle); data.put("run_id", run);
+        data.put("task_id", task); data.put("dispatch_id", dispatch);
+        data.put("start_request_id", request);
+        Path temporary = fixture.resolve("recovery.json.tmp");
+        Files.writeString(temporary, Json.write(data), StandardCharsets.UTF_8);
         try {
-            call(lines, worktree, CALL, args);
-        } catch (Exception ignored) {
-            lines.add("orca " + String.join(" ", args.subList(0, 2)) + " failed");
+            Files.move(temporary, fixture.resolve("recovery.json"),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+            Files.move(temporary, fixture.resolve("recovery.json"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

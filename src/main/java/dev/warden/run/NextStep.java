@@ -89,6 +89,9 @@ public final class NextStep {
     static String kindOf(String reason, Map<String, Object> summary) {
         if (reason == null) return "read_report";
         return switch (reason) {
+            case "worktree_busy" -> "wait_for_worktree";
+            case "worktree_recovery_required", "role_process_unsettled" -> "recover_worktree";
+            case "output_capture_failed", "output_limit_exceeded" -> "inspect_output_capture";
             case "ready_for_human" -> "accept_or_reject";
             case "budget_exhausted", "budget_insufficient_to_finish" -> switch (
                     String.valueOf(summary.get("budget_limit_hit"))) {
@@ -154,6 +157,9 @@ public final class NextStep {
                                    String runId, String taskId, String taskFile,
                                    List<String> acceptance, List<Map<String, Object>> findings) {
         return switch (kind) {
+            case "wait_for_worktree" -> "Wait for the controller that owns this checkout, or use a separate worktree.";
+            case "recover_worktree" -> "Run warden recover to inspect stopped vendor processes; reconcile retained Orca workers through their exact role/run.";
+            case "inspect_output_capture" -> "Inspect raw output and disk availability; an incomplete transcript cannot supply a verdict or trigger automatic failover.";
             case "accept_or_reject" ->
                     "Accept or reject run " + runId + "; nothing is landed either way.";
             case "raise_call_budget" -> {
@@ -307,6 +313,9 @@ public final class NextStep {
                                          List<Map<String, Object>> findings) {
         String newId = newRunId(taskId, runId);
         return switch (kind) {
+            case "wait_for_worktree" -> List.of();
+            case "recover_worktree" -> List.of("warden recover");
+            case "inspect_output_capture" -> List.of("warden report " + runId);
             case "accept_or_reject" -> List.of(
                     "warden approve " + runId + " --decision accept",
                     "warden approve " + runId + " --decision reject");

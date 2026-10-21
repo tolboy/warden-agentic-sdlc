@@ -42,27 +42,55 @@ nothing priced itself can spend every allowed call and charge $0.00 against a $4
 
 | Field | Meaning |
 |---|---|
-| `total` | Vendor attempts recorded across every run in this project; a failover adds another attempt |
+| `total` | Chargeable vendor attempts recorded across every run; a failover adds another attempt |
+| `uncharged_attempts` | Deduplicated attempts explicitly marked `budget_charged: false`, outside `total` and its splits |
 | `by_role` | Split by `implementer`, `reviewer`, `architect`, `visual_qa`, `planner` |
 | `by_profile` | Split by the concrete configured profile used for each attempt |
 | `by_vendor` | Split by the vendor that answered, so independence is auditable after the fact |
 | `by_model` | Split by the model as the vendor reported it, not as the profile requested it |
+| `by_requested_model` | Split by the separately recorded profile request; never fills a missing reported model |
 | `by_runner` | Split by `direct`, `orca` or `local` — which adapter dispatched the call |
 | `by_outcome` | Split by outcome code: `ok`, `role_artifact_schema_violation`, `role_quota_exhausted`, and so on |
 
 A dimension the evidence did not carry is counted under `<unknown>` rather than dropped, so
 the splits always sum to `total`.
 
-One `role_run` can contain several `vendor_attempts` when quota failover occurred. Those
+One `role_run` can contain several `vendor_attempts` when retry or failover occurred. Those
 attempts, rather than only the final successful vendor, are the unit of every split and every
 telemetry count. Historical ledgers without `vendor_attempts` remain one attempt per
 `role_run`; older sparse attempt arrays inherit final-attempt fields from the enclosing event
-and keep unavailable fields for earlier attempts under `<unknown>`.
+and keep unavailable fields for earlier attempts under `<unknown>`. A historical bare
+`model` field has no reliable provenance and establishes neither requested nor reported
+model. The original field stays in the evidence; grouping uses `model_requested`,
+`model_reported` or the corresponding labelled values in `measurement_context`.
+
+An Orca worker fenced before its first vendor turn returns its budget reservation.
+When evidence explicitly records `budget_charged: false`, the attempt remains in
+`uncharged_attempts`, outside vendor success/failure, cost/token coverage and call timing.
+This flag is preserved on both journal and nested attempts in new corpus projections.
+Older corpus records that dropped it cannot establish that the reservation was returned;
+absence is not evidence that a call was uncharged.
+
+Modern `vendor_attempt` journal events count even if a crash prevented the final `role_run`.
+The local ledger and home corpus both reconcile the nested summary by `vendor_attempt_id`,
+so a partial journal preserves uncovered calls and a late or repeated journal entry does
+not charge the same attempt again. A relationship that cannot be proved is marked
+`ambiguous_coverage` / `incomplete`, with exact spend withheld. The local run verdict and
+visible event count retain their historical presentation: an orphan call does not invent
+a completed run. `warden report` still requires a task summary; use the ledger to inspect
+attempt accounting when a crash prevented that summary.
 
 ### `telemetry` — cost, tokens, wall clock
 
 `cost_usd`, `tokens.input`, `tokens.output`, `tokens.total` and `duration_millis`, each in the
 three-field shape above; `duration_millis` also carries `p50` and `p95`.
+
+The joined `warden report` vendor rows also preserve coverage independently for input,
+output and total tokens: `input_tokens_unknown_calls`, `output_tokens_unknown_calls` and
+`total_tokens_unknown_calls`. Each total is `null` when no call reported that field. A
+reported zero remains known; input alone cannot establish output or total. The existing
+`tokens_unknown_calls` field now counts calls missing **any** of these fields, and the
+terminal describes that partial coverage beside the reported sums.
 
 Cost is only ever what a vendor printed. Warden has no price list and does not want one:
 a table of per-model prices in this repository would be wrong within a month, and it would be
@@ -72,11 +100,20 @@ wrong silently.
 
 | Field | Meaning |
 |---|---|
-| `failovers` | Vendor-to-vendor transitions, counted per transition |
+| `failovers` | Recorded profile/vendor switches, counted per transition; a same-profile retry is not a switch |
 | `failover_role_runs` | Role runs that involved at least one, so one run that switched twice is not read as two runs that switched |
 | `vendor_failure_failovers` | `role_failover` events whose cause is not a spent subscription: a call that produced no artifact |
 | `fix_rounds` | Fix attempts consumed, from each task run's `attempts_used` |
 | `fix_rounds_unknown_runs` | Task runs whose attempt count could not be read, kept separate rather than assumed to be 0 |
+
+`role_failover` journal events and `role_failovers` in the role summary describe the same
+switches and are reconciled by role invocation. Recorded switches take precedence over
+inference from historical adjacent attempts. A confirmed continuation with one new call
+still counts its switch; A→A counts zero, A→B and A→A→B count one each. An attempt count
+without profile/vendor identities cannot establish a switch. A switch journaled before a
+crash remains visible even without the final role summary.
+When only part of a switch journal reached the corpus, the summary's recorded transitions
+complete its count instead of being discarded merely because one journal row exists.
 
 ### `failures` — what refused, split by who could act on it
 
@@ -266,11 +303,31 @@ output.
 
 ### Grouping
 
-Warden units are grouped by a condition key recorded on the group: `prepare`
-(`off` / `auto` / `always`), `risk`, `workflow_sha256` (SHA-256 of the JSON of
-the summary's `workflow` list, or `unknown` when that list is missing), and
-`roster` (sorted distinct profile names from `steps` rows that name a `profile`;
-preview step rows are skipped).
+Comparison output uses `schema_version: 2`. Warden freezes `comparison_conditions`
+before workflow dispatch, including stages a stopped run never reaches. It records
+requested models and effort, runners, ordered rosters, routing, overrides, grants,
+limits, retry/failover/escalation settings, prompt/schema/MCP digests and Warden
+version, executable build digest and Java/OS/architecture. The build digest comes
+from the loaded code source (class tree or archive), independently of the task's
+Git checkout; unavailable build identity blocks comparability. Policy role defaults
+also cover preparation and repair profiles. Launch
+arguments and endpoints enter only as a digest. Requested settings do not establish
+effective or vendor-reported identity; those retain their separate call-level provenance.
+
+`condition_id` hashes all distinct recorded configurations in a chain, including
+`prepare` and `risk`. JSON object key order is canonical; ordered stages and rosters
+remain ordered. Repeating an unchanged configuration in a continuation does not
+create a new condition. Changing the model or effort under the same profile name
+does. A preflight stop belongs to the intended cohort even if `steps` is empty;
+successful fallback does not erase the original treatment from the denominator.
+
+Groups expose `requested_conditions_known`, safe `requested_conditions` projections,
+`workflow_sha256` (canonical JSON), and sorted candidate `roster`. Missing chain links,
+unavailable configured templates, invalid snapshots and historical summaries lacking
+frozen intent cannot establish known requested conditions. Historical recorded
+contracts/models/effort still separate groups; current profile files never rewrite
+history. Full configuration content remains in local task summaries; report projections
+omit arbitrary extra fields, prompt/goal/finding text and launch details.
 
 A continued chain is one unit of work. `chain.runs` on a later run lists the
 earlier ones; the report keeps only runs that are not listed inside another
@@ -301,13 +358,16 @@ only. A missing number stays `null`. It never becomes a zero.
 | `open_blocking_findings` | Recorded blocker count |
 | `candidate_review_passed` | How many units recorded a true candidate review, as a total over known booleans |
 
-`sample_size` is `units`. A group with fewer than three units is marked
-`comparable: false` with the reason `fewer than 3 units`, so one run cannot be
-read as a trend.
+`sample_size` is `units`; `sample_size_sufficient` means at least three units.
+Unpaired groups always have `comparable: false`. Three unrelated tasks establish
+neither matching difficulty nor a valid comparator. Explicit comparisons live under
+`paired_evaluation`. Warden `operator_minutes` comes only from operator annotations;
+gate wait and elapsed time cannot stand in for operator work.
 
 ### Baseline file
 
-`--baseline-file PATH` is a JSON object `{"rows":[...]}`. Each row is one
+`--baseline-file PATH` accepts `rows`, `runs` and `experiments` arrays; all default
+to empty. Existing `{"rows":[...]}` files remain valid. Each baseline row is one
 manually observed task done **without** Warden:
 
 ```json
@@ -316,9 +376,9 @@ manually observed task done **without** Warden:
 ```
 
 Unknown keys are refused. `completed` must be a boolean. Numbers must be
-numbers or `null`; a missing number is unknown, not zero. Rows form their own
+non-negative finite numbers or `null`; a missing number is unknown, not zero. Rows form their own
 groups with `source: "manual_baseline"`, keyed by `label`, `task_kind` and
-`risk`. `elapsed_minutes` is converted to seconds so it sits beside Warden's
+`risk`, plus experiment/variant when supplied. `elapsed_minutes` is converted to seconds so it sits beside Warden's
 `elapsed_seconds`. The `note` is accepted as input and is not copied to the
 report.
 
@@ -327,3 +387,40 @@ accepted/ready/stopped, fix-round mean, call mean, cost known/unknown, elapsed
 known/unknown, operator wait, and the comparable marker. The same note as the
 JSON — identical conditions do not prove equal task difficulty, and a stopped
 task is not a success — is printed under the table.
+
+### Explicit paired evals
+
+Use [paired-baseline.json](../examples/evals/paired-baseline.json) as the input shape.
+Declare an experiment's `id` and ordered `variants` (at least two); the first variant
+is the reference. Attach `experiment_id`, `task_pair_id`, `variant` and a positive
+integer `repeat` to both a manual row and a `runs` annotation. Annotate the **final**
+run of a continued chain. Each run may have only one annotation. `operator_minutes`
+may be supplied even without pairing fields, and remains unknown when omitted.
+Baseline rows additionally declare `base_commit`; Warden takes it from the recorded
+`diff_base_commit`. Base and risk must agree inside each pair. Task equivalence,
+manual outcomes, base and effort are operator declarations, not independently verified.
+
+```sh
+warden ledger --compare --baseline-file examples/evals/paired-baseline.json
+warden ledger --compare --baseline-file examples/evals/paired-baseline.json --text
+```
+
+The join key is `(experiment_id, task_pair_id, repeat)`. Every declared variant must
+occur exactly once. Missing/duplicate members, unknown intent or base, pending human
+decisions and risk/base mismatches remain visible as incomplete pairs. Missing,
+preview or absorbed run annotations and undeclared experiments produce input issues.
+Unknown keys, malformed metadata and duplicate run annotations are refused.
+
+At least three complete pairs, no incomplete pairs/input issues, and a stable
+`condition_id` within each variant are required for experiment `comparable: true`.
+Manual `label` declares its frozen condition. A model/effort change within a Warden
+variant is condition drift and blocks pooled comparison. Every pair and unpaired
+unit count remains visible; interrupted and rejected tasks remain in the denominator.
+
+Descriptive `estimates` report mean **variant minus reference** deltas for acceptance,
+cost, elapsed seconds, calls and operator minutes over complete pairs. Each metric
+has its own `known_pairs`, `unknown_pairs` and `comparable` (at least three fully known
+pairs plus experiment eligibility). Zero is known; unknown spend is never zero. A
+metric may show a descriptive mean while `comparable: false`; inspect its denominator.
+These are declared experiment summaries, without significance claims, automatic
+rankings, randomization enforcement or post-acceptance defect follow-up.

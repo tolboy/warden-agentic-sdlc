@@ -44,10 +44,10 @@ public final class MeasurementProjector {
             "stage", "role", "role_invocation_id", "task_id", "task_kind", "risk",
             "vendor_attempt", "vendor_attempt_id", "candidate_fingerprint",
             "ok", "code", "reason", "next_action", "verdict",
-            "profile", "vendor", "model", "model_reported", "runner",
+            "profile", "vendor", "model", "model_requested", "model_reported", "runner",
             "effort_requested", "read_only", "strategy", "independence_required",
             "rotation_counter", "workflow_run_id",
-            "duration_millis", "duration_ms", "cost_usd", "attempts_cost_usd",
+            "duration_millis", "duration_ms", "cost_usd", "attempts_cost_usd", "budget_charged",
             "tokens", "num_turns", "timed_out", "exit_code", "stop_reason",
             "dry_run", "prepare", "attachment_count",
             "attempts_used", "role_runs", "total_cost_usd", "unpriced_calls",
@@ -94,9 +94,9 @@ public final class MeasurementProjector {
             "workspace_write", "network", "land", "source");
 
     private static final Set<String> ATTEMPT = Set.of(
-            "attempt", "profile", "vendor", "runner", "model", "model_reported",
+            "attempt", "profile", "vendor", "runner", "model", "model_requested", "model_reported",
             "effort_requested", "ok", "code", "duration_millis", "duration_ms",
-            "cost_usd", "tokens", "inherited_unfinished_work",
+            "cost_usd", "tokens", "inherited_unfinished_work", "budget_charged",
             "vendor_attempt_id");
 
     private static final Set<String> FINDING = Set.of(

@@ -283,6 +283,25 @@ public final class DoCommand {
         }
         Path root = placement.path();
 
+        // `do --dry-run` still initializes/drafts the task contract. It must not change
+        // another workflow's pinned terms, even though it never pays a vendor.
+        try (var execution = dev.warden.execution.WorktreeLease.acquire(root, runId)) {
+            dev.warden.execution.WorktreeLease.requireLocalDispatch(root);
+            return runOwned(options, user, requested, root, placement, backend, taskId, runId,
+                    isolateFrom, execution);
+        } catch (dev.warden.execution.WorktreeLease.Refused refused) {
+            Outcome outcome = fail(refused.code(), requested, root, taskId, refused.getMessage());
+            outcome.report().putAll(refused.report());
+            outcome.report().put("next_step", NextStep.of(refused.code(), outcome.report(), root));
+            return outcome;
+        }
+    }
+
+    private Outcome runOwned(Options options, UserConfig user, Path requested, Path root,
+                             Isolation.Placement placement, String backend, String taskId, String runId,
+                             String isolateFrom, dev.warden.execution.WorktreeLease.Scope execution)
+            throws Exception {
+
         if (!Files.isRegularFile(root.resolve(".warden/project.yaml"))) {
             try {
                 new ProjectInitializer().initialize(root, options.baseRef());
@@ -583,6 +602,9 @@ public final class DoCommand {
             }
         }
         if (options.conductor()) {
+            // Its inner Warden is a different process. The prepared evidence is durable;
+            // release admission before dispatching that process so it can acquire the lease.
+            execution.close();
             return runWithConductor(options, requested, root, placement, backend, drafted, loaded, taskId,
                     runId, scope, risk, isolateFrom);
         }

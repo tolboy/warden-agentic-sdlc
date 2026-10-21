@@ -57,6 +57,19 @@ own setup when Orca made the worktree.
 `--in-place` skips isolation entirely and lets the implementer edit the tree you are standing
 in — fine for a throwaway repository, and the wrong choice for anything else.
 
+Warden admits one execution controller per checkout, including standalone roles and machine
+gates. A different run id does not bypass that lock. After a crash, run `warden recover` from
+that checkout: it releases the fence only after the recorded vendor PID/start-time identities
+have stopped. Incomplete receipts require inspection followed by
+`warden recover --confirm-stopped`; known live processes still refuse recovery. Retained Orca
+workers must be reconciled through their Orca role/run. Build daemons started by gates do not
+hold the vendor fence.
+
+Direct CLI transcripts are spooled as raw bytes with a 64 MiB ceiling per stream. The
+controller keeps a bounded preview and parses the full spool for final artifacts, provider
+usage and errors. Reaching the raw ceiling stops the call with `role_output_limit_exceeded`;
+failed capture or unsettled processes also stop automatic failover.
+
 **Before you pay.** `warden do --draft-only` stops as soon as the worktree exists and a draft
 contract has been written, and prints the path to it. Warden does not invent browser
 scenarios: for a task whose goal names no control at all, the draft leaves only "the page
@@ -280,6 +293,14 @@ run with its stage timeline, verdicts, cost and decision. Its first table is the
 still waiting for you. A button there opens that decision's page, or puts it back up when
 the run that asked has stopped waiting, so a question left unanswered never needs
 `warden decide` typed in the worktree.
+
+The same panel has a **Следующий запуск** form: select a task and role profiles,
+inspect model/effort/runner and the call budget, then copy a CLI dry-run, run command
+or task `use:` block. Save task choices and budgets, or personal fallback/retry policy,
+through a reviewed diff and versioned **Apply**. Stale settings require a reload.
+The **Аналитика результатов** section separates vendor success, workflow readiness and
+human acceptance, with cost/token coverage, retries, failovers and continuation context.
+See [the setup guide](docs/SETUP.md#build-the-next-run-in-the-dashboard).
 
 ```text
 run   chapter-hearth-4

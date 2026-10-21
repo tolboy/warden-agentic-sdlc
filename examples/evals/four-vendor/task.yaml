@@ -1,0 +1,22 @@
+version: 1
+id: pilot-queue
+goal: "Implement pickRunnable(jobs, limit) in pilot-queue.mjs. Return pending job IDs in descending numeric priority, preserving input order for equal priorities, up to limit. Do not mutate inputs. Validate limit first: it must be a nonnegative safe integer, otherwise throw RangeError. Validate all jobs even when limit is zero: jobs must be an array, each element a non-null object with a nonempty string id, state pending/running/done and finite numeric priority; IDs must be unique across all states. Malformed jobs throw TypeError. Only edit pilot-queue.mjs."
+non_goals: ["Do not change tests, configuration, dependencies, UI or other project files."]
+risk: medium
+scope: ["pilot-queue.mjs"]
+checks: ["node pilot-queue.test.mjs"]
+acceptance:
+  - "node pilot-queue.test.mjs"
+authority:
+  workspace_write: true
+  network: false
+  land: false
+visual_qa:
+  required: false
+budgets:
+  max_role_runs: 5
+  max_cost_usd: 1.0
+  max_elapsed_minutes: 15
+  cost_cap: threshold
+max_fix_attempts: 1
+timeout_minutes: 10

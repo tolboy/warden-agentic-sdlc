@@ -6,15 +6,12 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -36,15 +33,18 @@ import java.util.TreeSet;
  */
 public final class LedgerCompare {
 
-    public static final long SCHEMA_VERSION = 1L;
+    public static final long SCHEMA_VERSION = 2L;
 
     static final String NOTE = "Identical conditions do not prove equal task difficulty. "
             + "A stopped task is not a success. Preparation, servicing, operator wait, "
-            + "stops and unknown spend remain in the denominator.";
+            + "stops and unknown spend remain in the denominator. Group size alone is not "
+            + "comparability. Paired estimates describe declared experiments, not statistical "
+            + "significance or verified model identity.";
 
     private static final Set<String> BASELINE_KEYS = Set.of(
             "label", "task_kind", "risk", "completed", "operator_minutes",
-            "elapsed_minutes", "cost_usd", "calls", "note");
+            "elapsed_minutes", "cost_usd", "calls", "note", "experiment_id", "task_pair_id",
+            "variant", "repeat", "base_commit");
     private static final Set<String> PREPARE_MODES = Set.of("off", "auto", "always");
 
     private LedgerCompare() {}
@@ -54,16 +54,23 @@ public final class LedgerCompare {
         List<Map<String, Object>> skipped = new ArrayList<>();
         List<Loaded> loaded = loadRuns(projectRoot, skipped);
         List<Loaded> units = foldChains(loaded);
+        Map<String, Loaded> byId = new LinkedHashMap<>();
+        for (Loaded run : loaded) byId.put(run.runId, run);
+        for (Loaded unit : units) unit.conditions = conditions(unit, byId);
+        Map<String, Object> input = baselineFile == null ? Map.of() : readInput(baselineFile);
+        List<Map<String, Object>> baselineRows = readBaseline(input);
+        Map<String, Map<String, Object>> annotations = PairedEvaluation.annotations(input);
         Map<String, Group> warden = new LinkedHashMap<>();
         for (Loaded unit : units) {
             Group group = warden.computeIfAbsent(unit.conditionKey(), ignored -> Group.warden(unit));
             group.acceptWarden(unit, physicalRuns(unit, loaded));
+            group.operatorMinutes.accept(annotations.getOrDefault(unit.runId, Map.of()).get("operator_minutes"));
         }
 
         List<Group> baselines = new ArrayList<>();
         if (baselineFile != null) {
             Map<String, Group> byKey = new LinkedHashMap<>();
-            for (Map<String, Object> row : readBaseline(baselineFile)) {
+            for (Map<String, Object> row : baselineRows) {
                 Group group = byKey.computeIfAbsent(baselineKey(row), ignored -> Group.baseline(row));
                 group.acceptBaseline(row);
             }
@@ -83,8 +90,11 @@ public final class LedgerCompare {
         report.put("schema_version", SCHEMA_VERSION);
         report.put("groups", groups);
         report.put("baseline_groups", baselineGroups);
+        Map<String, Object> paired = PairedEvaluation.report(input, units.stream()
+                .map(Loaded::evaluationRow).toList(), baselineRows, annotations, !skipped.isEmpty());
+        report.put("paired_evaluation", paired);
         report.put("skipped", List.copyOf(skipped));
-        report.put("incomplete", !skipped.isEmpty());
+        report.put("incomplete", !skipped.isEmpty() || Boolean.TRUE.equals(paired.get("incomplete")));
         report.put("note", NOTE);
         return report;
     }
@@ -95,16 +105,17 @@ public final class LedgerCompare {
      */
     public static String render(Map<String, Object> report) {
         StringBuilder out = new StringBuilder();
-        out.append("prepare  risk    workflow      roster          units  acc/rdy/stp  "
+        out.append("prepare  risk    workflow      condition     roster          units  acc/rdy/stp  "
                 + "fix    calls  cost              elapsed         wait       comparable\n");
         for (Object item : list(report.get("groups"))) {
             if (!(item instanceof Map<?, ?> raw)) continue;
             Map<String, Object> group = cast(raw);
             out.append(String.format(Locale.ROOT,
-                    "%-8s %-7s %-13s %-15s %5s  %-11s  %-6s %-6s %-17s %-15s %-10s %s%n",
+                    "%-8s %-7s %-13s %-13s %-15s %5s  %-11s  %-6s %-6s %-17s %-15s %-10s %s%n",
                     clip(text(group.get("prepare")), 8),
                     clip(text(group.get("risk")), 7),
                     clip(text(group.get("workflow_sha256")), 13),
+                    clip(text(group.get("condition_id")), 13),
                     clip(rosterText(group.get("roster")), 15),
                     text(group.get("units")),
                     outcomesCell(object(group.get("outcomes"))),
@@ -140,7 +151,7 @@ public final class LedgerCompare {
         }
 
         List<Object> skipped = list(report.get("skipped"));
-        if (!skipped.isEmpty() || Boolean.TRUE.equals(report.get("incomplete"))) {
+        if (!skipped.isEmpty()) {
             out.append('\n').append("skipped  ").append(skipped.size())
                     .append(" file(s); report incomplete\n");
             for (Object item : skipped) {
@@ -151,6 +162,7 @@ public final class LedgerCompare {
                 }
             }
         }
+        out.append(PairedEvaluation.render(object(report.get("paired_evaluation"))));
         out.append('\n').append("note     ").append(report.get("note")).append('\n');
         return out.toString();
     }
@@ -179,6 +191,13 @@ public final class LedgerCompare {
                     continue;
                 }
                 if (isPreview(summary)) continue;
+                Object chainRuns = object(summary.get("chain")).get("runs");
+                if (chainRuns instanceof List<?> ids && !ids.isEmpty()
+                        && (!runId.equals(ids.get(ids.size() - 1)) || new HashSet<>(ids).size() != ids.size()
+                        || ids.stream().anyMatch(id -> !(id instanceof String text) || text.isBlank()))) {
+                    skipped.add(skip(runId, relative, "invalid_chain"));
+                    continue;
+                }
                 loaded.add(new Loaded(runId, summary, readDecision(directory)));
             }
         }
@@ -237,9 +256,110 @@ public final class LedgerCompare {
         return count == 0 ? 1L : count;
     }
 
+    private record Conditions(String id, boolean known, List<Object> snapshots) {}
+
+    private static Conditions conditions(Loaded unit, Map<String, Loaded> runs) {
+        List<Object> snapshots = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        boolean known = true;
+        for (String id : unit.chainRuns()) {
+            Loaded link = runs.get(id);
+            Map<String, Object> snapshot = link == null ? Map.of("source", "missing_chain_link")
+                    : object(link.summary.get("comparison_conditions"));
+            Map<String, Object> data = object(snapshot.get("data"));
+            boolean frozen = number(snapshot.get("schema_version")) == 1
+                    && "frozen_requested_configuration".equals(snapshot.get("source"))
+                    && data.get("warden_version") instanceof String
+                    && data.get("workflow") instanceof List<?> && data.get("stages") instanceof List<?>
+                    && ComparisonConditions.hash(data).equals(snapshot.get("sha256"));
+            if (!frozen) {
+                known = false;
+                snapshot = link == null ? snapshot : legacyConditions(link);
+            }
+            if (frozen && (!Boolean.TRUE.equals(data.get("configuration_complete"))
+                    || !(object(data.get("warden_build")).get("sha256") instanceof String build)
+                    || !build.matches("[0-9a-f]{64}"))) known = false;
+            Map<String, Object> terms = new LinkedHashMap<>();
+            terms.put("source", frozen ? "frozen_requested_configuration" : "historical_or_missing");
+            terms.put("prepare", link == null ? "unknown" : link.prepare());
+            terms.put("risk", link == null ? "unknown" : link.risk());
+            terms.put("workflow_sha256", link == null ? "unknown" : link.workflowSha());
+            terms.put("configuration_sha256", ComparisonConditions.hash(frozen ? data : snapshot));
+            if (frozen) {
+                for (String key : List.of("warden_version", "java_version", "os", "arch"))
+                    terms.put(key, data.get(key));
+                Map<String, Object> build = object(data.get("warden_build"));
+                terms.put("warden_build_sha256", build.get("sha256"));
+            }
+            terms.put("requested_dispatch", frozen ? requestedDispatch(data) : snapshot);
+            // Repeating an unchanged run after a stop is still the same condition. Include
+            // every distinct condition in a chain, never only its successful last link.
+            if (seen.add(ComparisonConditions.hash(terms))) snapshots.add(terms);
+        }
+        return new Conditions(ComparisonConditions.hash(snapshots), known, List.copyOf(snapshots));
+    }
+
+    /** Only named configuration fields are printable, even if an input contains extra text. */
+    private static List<Map<String, Object>> requestedDispatch(Map<String, Object> data) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list(data.get("stages"))) {
+            Map<String, Object> stage = object(item);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stage", stage.get("stage"));
+            row.put("skipped", stage.get("skipped"));
+            List<Map<String, Object>> candidates = new ArrayList<>();
+            for (Object candidate : list(stage.get("candidates"))) {
+                Map<String, Object> profile = object(candidate), safe = new LinkedHashMap<>();
+                for (String key : List.of("profile", "role", "vendor", "model", "effort", "runner", "read_only"))
+                    if (profile.containsKey(key)) safe.put(key, profile.get(key));
+                candidates.add(safe);
+            }
+            row.put("candidates", candidates);
+            result.add(row);
+        }
+        return result;
+    }
+
+    private static Map<String, Object> legacyConditions(Loaded link) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("roster", link.roster());
+        Map<String, Object> distinct = new java.util.TreeMap<>();
+        for (Object item : list(link.summary.get("steps"))) {
+            Map<String, Object> step = object(item);
+            if (Boolean.TRUE.equals(step.get("dry_run"))) continue;
+            List<Object> attempts = list(step.get("vendor_attempts"));
+            if (attempts.isEmpty()) attempts = List.of(step);
+            for (Object attempt : attempts) {
+                Map<String, Object> terms = new LinkedHashMap<>();
+                Map<String, Object> row = object(attempt);
+                for (String key : List.of("stage", "role", "profile", "vendor", "model_requested",
+                        "effort_requested", "model_reported", "effort_reported")) {
+                    if (row.containsKey(key)) terms.put(key, row.get(key));
+                }
+                Map<String, Object> contract = object(step.get("role_contract"));
+                for (String key : List.of("model", "effort", "runner", "read_only", "prompt_template_sha256",
+                        "json_schema_sha256", "mcp_config_sha256")) {
+                    if (contract.containsKey(key)) {
+                        Object value = contract.get(key);
+                        if (key.endsWith("_sha256") && value instanceof String digest
+                                && !digest.matches("[0-9a-f]{64}")) value = "unavailable";
+                        terms.put("contract_" + key, value);
+                    }
+                }
+                Map<String, Object> context = object(row.get("measurement_context"));
+                for (String key : List.of("model", "effort")) {
+                    if (context.containsKey(key)) terms.put(key + "_with_provenance", context.get(key));
+                }
+                distinct.put(ComparisonConditions.hash(terms), terms);
+            }
+        }
+        result.put("observed_terms", new ArrayList<>(distinct.values()));
+        return result;
+    }
+
     // ----------------------------------------------------------------------- baseline
 
-    private static List<Map<String, Object>> readBaseline(Path file) throws IOException {
+    private static Map<String, Object> readInput(Path file) throws IOException {
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("ledger --baseline-file is not a file: " + file);
         }
@@ -252,12 +372,16 @@ public final class LedgerCompare {
                     unreadable);
         }
         for (String key : document.keySet()) {
-            if (!"rows".equals(key)) {
+            if (!Set.of("rows", "runs", "experiments").contains(key)) {
                 throw new IllegalArgumentException(
                         "ledger --baseline-file refuses unknown key '" + key + "'");
             }
         }
-        Object rows = document.get("rows");
+        return document;
+    }
+
+    private static List<Map<String, Object>> readBaseline(Map<String, Object> document) {
+        Object rows = document.getOrDefault("rows", List.of());
         if (!(rows instanceof List<?> list)) {
             throw new IllegalArgumentException("ledger --baseline-file must have a rows array");
         }
@@ -294,6 +418,7 @@ public final class LedgerCompare {
         requireNumberOrNull(row, index, "elapsed_minutes");
         requireNumberOrNull(row, index, "cost_usd");
         requireNumberOrNull(row, index, "calls");
+        PairedEvaluation.validateMetadata(row, "rows[" + index + "]");
         if (!(row.get("label") instanceof String label) || label.isBlank()) {
             throw new IllegalArgumentException(
                     "ledger --baseline-file rows[" + index + "] label must be a non-blank string");
@@ -311,15 +436,16 @@ public final class LedgerCompare {
 
     private static void requireNumberOrNull(Map<String, Object> row, int index, String key) {
         Object value = row.get(key);
-        if (value != null && !(value instanceof Number)) {
+        if (value != null && (!(value instanceof Number number)
+                || !Double.isFinite(number.doubleValue()) || number.doubleValue() < 0)) {
             throw new IllegalArgumentException("ledger --baseline-file rows[" + index + "] "
-                    + key + " must be a number or null");
+                    + key + " must be a non-negative finite number or null");
         }
     }
 
     private static String baselineKey(Map<String, Object> row) {
         return text(row.get("label")) + "\0" + text(row.get("task_kind")) + "\0"
-                + text(row.get("risk"));
+                + text(row.get("risk")) + "\0" + text(row.get("experiment_id")) + "\0" + text(row.get("variant"));
     }
 
     // -------------------------------------------------------------------------- group
@@ -332,6 +458,9 @@ public final class LedgerCompare {
         private final List<String> roster;
         private final String label;
         private final String taskKind;
+        private String experimentId;
+        private String variant;
+        private Conditions conditions;
         private long units;
         private long runs;
         private final Map<String, Long> reasons = new LinkedHashMap<>();
@@ -353,7 +482,8 @@ public final class LedgerCompare {
                 .comparing((Group group) -> group.prepare)
                 .thenComparing(group -> group.risk)
                 .thenComparing(group -> group.workflowSha)
-                .thenComparing(group -> String.join(",", group.roster));
+                .thenComparing(group -> String.join(",", group.roster))
+                .thenComparing(group -> group.conditions.id());
 
         static final Comparator<Group> BASELINE_ORDER = Comparator
                 .comparing((Group group) -> group.label)
@@ -372,16 +502,21 @@ public final class LedgerCompare {
         }
 
         static Group warden(Loaded unit) {
-            return new Group("warden", unit.prepare(), unit.risk(), unit.workflowSha(),
+            Group group = new Group("warden", unit.prepare(), unit.risk(), unit.workflowSha(),
                     unit.roster(), null, null);
+            group.conditions = unit.conditions;
+            return group;
         }
 
         static Group baseline(Map<String, Object> row) {
-            return new Group("manual_baseline", null,
+            Group group = new Group("manual_baseline", null,
                     row.get("risk") instanceof String text ? text : "unknown",
                     null, List.of(),
                     String.valueOf(row.get("label")),
                     row.get("task_kind") instanceof String text ? text : null);
+            group.experimentId = row.get("experiment_id") instanceof String text ? text : null;
+            group.variant = row.get("variant") instanceof String text ? text : null;
+            return group;
         }
 
         void acceptWarden(Loaded unit, long physicalRuns) {
@@ -441,18 +576,24 @@ public final class LedgerCompare {
                 group.put("label", label);
                 group.put("task_kind", taskKind);
                 group.put("risk", risk);
+                if (experimentId != null) group.put("experiment_id", experimentId);
+                if (variant != null) group.put("variant", variant);
             } else {
                 group.put("prepare", prepare);
                 group.put("risk", risk);
                 group.put("workflow_sha256", workflowSha);
                 group.put("roster", roster);
+                group.put("condition_id", conditions.id());
+                group.put("requested_conditions_known", conditions.known());
+                group.put("requested_conditions", conditions.snapshots());
             }
             group.put("units", units);
             group.put("runs", runs);
             group.put("sample_size", units);
-            boolean comparable = units >= 3;
-            group.put("comparable", comparable);
-            if (!comparable) group.put("comparable_reason", "fewer than 3 units");
+            group.put("sample_size_sufficient", units >= 3);
+            group.put("comparable", false);
+            group.put("comparable_reason", units < 3 ? "fewer than 3 units"
+                    : "unpaired group; see paired_evaluation");
             Map<String, Object> outcomes = new LinkedHashMap<>();
             outcomes.put("reasons", new LinkedHashMap<>(reasons));
             outcomes.put("ready_for_human", ready);
@@ -475,6 +616,7 @@ public final class LedgerCompare {
                 group.put("cost_usd", costMap);
                 group.put("elapsed_seconds", elapsed.toMap());
                 group.put("human_wait_millis", wait.toMap());
+                group.put("operator_minutes", operatorMinutes.toMap());
                 group.put("open_blocking_findings", blockers.toMap());
                 group.put("candidate_review_passed", reviewPassed.toMap());
             }
@@ -496,7 +638,7 @@ public final class LedgerCompare {
         void addUnknown() { unknown++; }
 
         void accept(Object value) {
-            if (value instanceof Number number && Double.isFinite(number.doubleValue())) {
+            if (value instanceof Number number && Double.isFinite(number.doubleValue()) && number.doubleValue() >= 0) {
                 known++;
                 total += number.doubleValue();
             } else {
@@ -528,6 +670,7 @@ public final class LedgerCompare {
         final String runId;
         final Map<String, Object> summary;
         final Map<String, Object> decision;
+        Conditions conditions;
 
         Loaded(String runId, Map<String, Object> summary, Map<String, Object> decision) {
             this.runId = runId;
@@ -536,8 +679,22 @@ public final class LedgerCompare {
         }
 
         String conditionKey() {
-            return prepare() + "\0" + risk() + "\0" + workflowSha() + "\0"
-                    + String.join(",", roster());
+            return conditions.id();
+        }
+
+        Map<String, Object> evaluationRow() {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("run_id", runId);
+            row.put("source", "warden");
+            row.put("condition_id", conditions.id());
+            row.put("requested_conditions_known", conditions.known());
+            row.put("base_commit", summary.get("diff_base_commit"));
+            row.put("risk", risk());
+            row.put("outcome", outcomeBucket());
+            row.put("cost_usd", number(unpricedCalls()) > 0 ? null : costUsd());
+            row.put("elapsed_seconds", elapsedSeconds());
+            row.put("calls", roleRuns());
+            return row;
         }
 
         String prepare() {
@@ -553,10 +710,21 @@ public final class LedgerCompare {
         String workflowSha() {
             Object workflow = summary.get("workflow");
             if (!(workflow instanceof List<?>)) return "unknown";
-            return sha256(Json.write(workflow));
+            return ComparisonConditions.hash(workflow);
         }
 
         List<String> roster() {
+            Map<String, Object> frozen = object(object(summary.get("comparison_conditions")).get("data"));
+            TreeSet<String> candidates = new TreeSet<>();
+            for (Object item : list(frozen.get("stages"))) {
+                Map<String, Object> stage = object(item);
+                if (stage.get("skipped") != null) continue;
+                for (Object candidate : list(stage.get("candidates"))) {
+                    Object profile = object(candidate).get("profile");
+                    if (profile instanceof String name && !name.isBlank()) candidates.add(name);
+                }
+            }
+            if (!frozen.isEmpty()) return List.copyOf(candidates);
             Object steps = summary.get("steps");
             if (!(steps instanceof List<?> rows)) return List.of();
             TreeSet<String> names = new TreeSet<>();
@@ -733,16 +901,6 @@ public final class LedgerCompare {
         row.put("path", path);
         row.put("reason", reason);
         return row;
-    }
-
-    private static String sha256(String material) {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException(impossible);
-        }
-        return HexFormat.of().formatHex(digest.digest(material.getBytes(StandardCharsets.UTF_8)));
     }
 
     private static long number(Object value) {

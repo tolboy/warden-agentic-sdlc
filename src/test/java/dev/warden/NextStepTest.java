@@ -27,6 +27,10 @@ public final class NextStepTest implements Suite {
         blockersThatAreNotTheContract(check);
         reportRendersTheBlockAndFallsBack(check);
         aMutatedContractNamesTheFiles(check);
+        check.eq("busy worktree waits without suggesting another local writer", "wait_for_worktree",
+                NextStep.of("worktree_busy", Map.of(), null).get("kind"));
+        check.eq("crashed worktree has an actionable recovery command", List.of("warden recover"),
+                NextStep.of("worktree_recovery_required", Map.of(), null).get("commands"));
     }
 
     /** The stop named "a file under .warden"; the operator then diffed the tree by hand. */

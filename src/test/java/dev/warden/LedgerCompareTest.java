@@ -32,7 +32,7 @@ public final class LedgerCompareTest implements Suite {
                     """, StandardCharsets.UTF_8);
 
             List<Map<String, Object>> workflow = workflow();
-            String workflowSha = sha256(Json.write(workflow));
+            String workflowSha = dev.warden.ledger.ComparisonConditions.hash(workflow);
             List<Map<String, Object>> rosterSteps = List.of(
                     step("implementer", "codex"),
                     step("reviewer", "grok"),
@@ -106,7 +106,7 @@ public final class LedgerCompareTest implements Suite {
             String rendered = LedgerCompare.render(report);
             String blob = Json.write(report);
 
-            check.eq("schema version is 1", 1L, report.get("schema_version"));
+            check.eq("comparison schema version is 2", 2L, report.get("schema_version"));
             check.eq("corrupt file marks the report incomplete", true, report.get("incomplete"));
             check.that("the note refuses to treat identical conditions as equal difficulty",
                     String.valueOf(report.get("note")).contains(
@@ -140,7 +140,9 @@ public final class LedgerCompareTest implements Suite {
             check.eq("a chain is one unit", 3L, group.get("units"));
             check.eq("physical runs count the folded first link", 4L, group.get("runs"));
             check.eq("sample_size follows units", 3L, group.get("sample_size"));
-            check.eq("three units are comparable", true, group.get("comparable"));
+            check.eq("three unrelated units do not establish comparability", false, group.get("comparable"));
+            check.eq("sample size is reported separately", true, group.get("sample_size_sufficient"));
+            check.eq("historical settings remain unproven", false, group.get("requested_conditions_known"));
 
             Map<String, Object> outcomes = object(group.get("outcomes"));
             check.eq("accepted is the resolved accept", 1L, outcomes.get("accepted"));
@@ -219,7 +221,7 @@ public final class LedgerCompareTest implements Suite {
 
             check.contains("text names the prepare condition", rendered, "off");
             check.contains("text names accepted/ready/stopped", rendered, "1/1/1");
-            check.contains("text marks the warden group comparable", rendered, "yes");
+            check.contains("text marks the warden group unpaired", rendered, "unpaired group");
             check.contains("text renders the baseline label", rendered, "hermes+grok");
             check.contains("text marks the baseline incomparable", rendered, "fewer than 3 units");
             check.contains("text keeps the stopped-is-not-success note", rendered,
@@ -236,7 +238,7 @@ public final class LedgerCompareTest implements Suite {
                     () -> LedgerCompare.compare(project, writeJson(root.resolve("bad-completed.json"),
                             Map.of("rows", List.of(Map.of(
                                     "label", "x", "completed", "yes"))))));
-            check.rejects("cost must be a number or null", "cost_usd must be a number or null",
+            check.rejects("cost must be a number or null", "cost_usd must be a non-negative finite number or null",
                     () -> LedgerCompare.compare(project, writeJson(root.resolve("bad-cost.json"),
                             Map.of("rows", List.of(Map.of(
                                     "label", "x", "completed", true, "cost_usd", "$1"))))));

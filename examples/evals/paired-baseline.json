@@ -1,0 +1,33 @@
+{
+  "experiments": [
+    {"id": "pilot", "variants": ["manual", "warden"]}
+  ],
+  "rows": [
+    {
+      "label": "manual-frozen-condition-v1",
+      "experiment_id": "pilot",
+      "task_pair_id": "example-task",
+      "variant": "manual",
+      "repeat": 1,
+      "base_commit": "replace-with-the-recorded-diff-base-commit",
+      "task_kind": "fix",
+      "risk": "medium",
+      "completed": false,
+      "operator_minutes": null,
+      "elapsed_minutes": null,
+      "cost_usd": null,
+      "calls": null,
+      "note": "Template only: replace with observations for the matching manual task."
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "replace-with-final-warden-run-id",
+      "experiment_id": "pilot",
+      "task_pair_id": "example-task",
+      "variant": "warden",
+      "repeat": 1,
+      "operator_minutes": null
+    }
+  ]
+}
