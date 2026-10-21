@@ -264,6 +264,7 @@ public final class RuntimeTest implements Suite {
             deleteTree(repository);
         }
         committedCandidateChecks(check, runner);
+        rawDiffPathChecks(check, runner);
         untrackedExecutableChecks(check, runner);
     }
 
@@ -402,6 +403,44 @@ public final class RuntimeTest implements Suite {
             command(repository, "git", "config", "core.fileMode", "false");
             check.eq("with core.fileMode off an untracked executable is added, and fingerprinted, "
                     + "as a plain file", plain, git.sourceFingerprint(base));
+        } finally {
+            deleteTree(repository);
+        }
+    }
+
+    /** Reusing raw names must retain HEAD-cancelled changes and treat path bytes as data. */
+    private static void rawDiffPathChecks(Check check, ProcessRunner runner) throws Exception {
+        Path repository = fixture();
+        try {
+            GitRepository git = new GitRepository(repository, runner);
+            String base = git.mergeBase("HEAD");
+            String pristine = git.sourceFingerprint(base);
+            Files.writeString(repository.resolve("src/value.txt"), "committed change\n");
+            command(repository, "git", "add", "src/value.txt");
+            command(repository, "git", "-c", "user.name=Warden Tests", "-c", "user.email=warden@example.invalid",
+                    "commit", "-m", "change tracked source");
+            Files.writeString(repository.resolve("src/value.txt"), "initial\n");
+            check.eq("fixture cancels the committed edit relative to the base", "",
+                    git.git(List.of("diff", "--raw", "--no-renames", "-z", base, "--")).stdout());
+            check.that("HEAD-relative changed paths survive an empty raw base diff",
+                    !pristine.equals(git.sourceFingerprint(base)));
+
+            Path spaced = repository.resolve("src/spaced ' Unicode-λ.txt");
+            Files.writeString(spaced, "before\n");
+            command(repository, "git", "add", "--", "src/spaced ' Unicode-λ.txt");
+            String before = git.sourceFingerprint(base);
+            Files.writeString(spaced, "after\n");
+            check.that("raw diff paths preserve spaces, quotes and Unicode content identity",
+                    !before.equals(git.sourceFingerprint(base)));
+            if (!System.getProperty("os.name").toLowerCase().contains("win")) {
+                Path unusual = repository.resolve("src/:metadata-like\nname.txt");
+                Files.writeString(unusual, "before\n");
+                command(repository, "git", "add", "--", "src/:metadata-like\nname.txt");
+                before = git.sourceFingerprint(base);
+                Files.writeString(unusual, "after\n");
+                check.that("NUL framing preserves newlines and metadata-like path contents",
+                        !before.equals(git.sourceFingerprint(base)));
+            }
         } finally {
             deleteTree(repository);
         }

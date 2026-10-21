@@ -54,6 +54,11 @@ public final class GitRepository {
         String[] committedAndWorking = git(List.of("diff", "--name-only", "--no-renames", "-z", mergeBase, "--"))
                 .stdout().split("\0", -1);
         for (String path : committedAndWorking) if (!path.isBlank()) addChangedPath(paths, path);
+        return changes(paths);
+    }
+
+    /** The caller owns this set; HEAD-relative and untracked changes are always added. */
+    private Changes changes(Set<String> paths) throws IOException, InterruptedException {
         paths.addAll(changedSinceHead());
         Set<String> untracked = untracked();
         paths.addAll(untracked);
@@ -119,7 +124,11 @@ public final class GitRepository {
         // `A new` wherever the new side sits, and the deletion is still in the shape.
         String raw = git(List.of("diff", "--raw", "--no-renames", "-z", mergeBase, "--")).stdout();
         digest.update(shapeOf(raw, sourceOnly).getBytes(StandardCharsets.UTF_8));
-        Changes changes = changes(mergeBase);
+        // The raw diff already carries every merge-base-relative name. Asking Git for
+        // --name-only again added a process to every fingerprint (many thousands in tests).
+        // Keep the separate HEAD diff: a committed edit can be undone in the working tree,
+        // leaving an empty merge-base diff while the HEAD-relative path still matters.
+        Changes changes = changes(rawPaths(raw));
         Set<String> paths = evidenceRemoved(changes.all());
         if (sourceOnly) paths = dev.warden.config.WardenTree.sourcePaths(paths);
         Map<String, String> additions = sourceOnly ? additionModes(raw) : Map.of();
@@ -241,6 +250,28 @@ public final class GitRepository {
                     .append(status).append('\0');
         }
         return shape.toString();
+    }
+
+    /** Paths from Git's NUL-delimited raw records, without interpreting path contents as headers. */
+    private static Set<String> rawPaths(String raw) throws IOException {
+        Set<String> paths = new LinkedHashSet<>();
+        String[] records = raw.split("\0", -1);
+        for (int index = 0; index < records.length;) {
+            String record = records[index++];
+            if (record.isEmpty()) continue;
+            String[] fields = record.startsWith(":") ? record.substring(1).trim().split("\\s+") : new String[0];
+            if (fields.length != 5) throw new IOException("unrecognized Git raw diff record");
+            String status = fields[4];
+            int pathCount = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+            for (int offset = 0; offset < pathCount; offset++) {
+                if (index >= records.length || records[index].isEmpty()) {
+                    throw new IOException("incomplete Git raw diff path");
+                }
+                String path = records[index++];
+                if (!path.isBlank()) addChangedPath(paths, path);
+            }
+        }
+        return paths;
     }
 
     /** The mode git gives a plain file; an addition with it adds nothing to the fingerprint. */
