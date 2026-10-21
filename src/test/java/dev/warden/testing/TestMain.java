@@ -21,6 +21,7 @@ public final class TestMain {
                 new dev.warden.RuntimeTest(),
                 new dev.warden.WorktreeLeaseTest(),
                 new dev.warden.DirectCaptureTest(),
+                new dev.warden.LiveCliOutputTest(),
                 new dev.warden.ProfileVerifierTest(),
                 new dev.warden.ModelCheckTest(),
                 new dev.warden.ModelSettingsTest(),

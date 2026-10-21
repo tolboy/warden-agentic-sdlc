@@ -808,7 +808,7 @@ public final class TaskLoop {
             @Override public void release() { budget.releaseRoleRun(); }
         };
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
-                authorizedFailover, progress);
+                authorizedFailover, progress).observing(workspace::activity);
         if (sleeper != null) roles.withSleeper(sleeper);
         roles.withExecutors((profile, runner, repository) -> {
             dev.warden.execution.Executors.Factory factory = executors == null

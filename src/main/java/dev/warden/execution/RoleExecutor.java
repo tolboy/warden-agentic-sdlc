@@ -23,4 +23,10 @@ public interface RoleExecutor {
                   Map<String, Object> artifact, Map<String, Object> evidence) {}
 
     Result execute(Request request) throws Exception;
+
+    /** Optional lossy UI stream. Existing adapters keep their original execution contract. */
+    default Result execute(Request request, java.util.function.Consumer<ExecutionActivity.Update> activity)
+            throws Exception {
+        return execute(request);
+    }
 }

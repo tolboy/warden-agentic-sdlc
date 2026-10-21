@@ -1,6 +1,7 @@
 package dev.warden.execution.orca;
 
 import dev.warden.json.JsonFile;
+import dev.warden.execution.ExecutionActivity;
 import dev.warden.run.Progress;
 import dev.warden.run.Workspace;
 
@@ -24,6 +25,7 @@ import java.util.Map;
  */
 public final class OrcaDesktop implements Workspace {
     private static final Duration PROBE = Duration.ofSeconds(1);
+    private static final Duration PROJECT = Duration.ofSeconds(2);
     private static final Duration OPEN = Duration.ofSeconds(3);
     private static final String OVERVIEW_LIMIT = "observer_ownership_unsupported";
 
@@ -60,6 +62,13 @@ public final class OrcaDesktop implements Workspace {
     private Path journal;
     private String lastNote = "";
     private boolean stopped;
+    private final java.util.ArrayDeque<Map<String, Object>> activityEvents = new java.util.ArrayDeque<>();
+    private long activityEventsSeen;
+    private long lastActivityProjection;
+    private ExecutionActivity latestActivity;
+    private ExecutionActivity pendingActivity;
+    private ExecutionActivity displayedActivity;
+    private boolean activityFlushScheduled;
     private final java.util.Set<String> warnings = new java.util.LinkedHashSet<>();
 
     private OrcaDesktop(OrcaClient client, Path root, Progress progress) {
@@ -164,11 +173,14 @@ public final class OrcaDesktop implements Workspace {
 
     @Override public synchronized void note(String text) {
         lastNote = clip(text);
+        displayedActivity = null;
+        pendingActivity = null;
         project(List.of("--comment", lastNote));
     }
 
     @Override public synchronized void state(State state) {
         stopped = state != State.RUNNING;
+        if (stopped) pendingActivity = null;
         receipt.put("last_requested_state", state.name().toLowerCase(java.util.Locale.ROOT));
         String column = switch (state) {
             case RUNNING -> "in-progress";
@@ -181,8 +193,79 @@ public final class OrcaDesktop implements Workspace {
 
     @Override public synchronized void working(String who, long millis) {
         if (!stopped && !lastNote.isEmpty()) {
-            project(List.of("--comment", clip(lastNote + " · " + Progress.elapsed(millis))));
+            project(List.of("--comment", clip((displayedActivity == null ? lastNote : displayedActivity.summary())
+                    + " · " + Progress.elapsed(millis))));
         }
+    }
+
+    @Override public synchronized void activity(ExecutionActivity event) {
+        if (stopped) return;
+        // A callback already in transport may outlive its attempt. Never let it replace
+        // a later attempt or restore an earlier attempt after its final event.
+        if (latestActivity != null) {
+            var previous = latestActivity.attempt();
+            var next = event.attempt();
+            if (previous.equals(next)
+                    && latestActivity.update().kind() == ExecutionActivity.Kind.ATTEMPT_FINISHED) return;
+            if (!previous.equals(next) && event.update().kind() != ExecutionActivity.Kind.DISPATCHING) return;
+        }
+        latestActivity = event;
+        activityEventsSeen++;
+        if (activityEvents.size() == 24) activityEvents.removeFirst();
+        activityEvents.addLast(event.toMap());
+        long now = System.nanoTime();
+        boolean boundary = event.update().kind() == ExecutionActivity.Kind.DISPATCHING
+                || event.update().kind() == ExecutionActivity.Kind.ATTEMPT_FINISHED;
+        if (!boundary && now - lastActivityProjection < 1_000_000_000L) {
+            // Keep a meaningful tool/message event ahead of generic byte progress.
+            if (pendingActivity == null || event.update().kind() != ExecutionActivity.Kind.OUTPUT) pendingActivity = event;
+            if (!activityFlushScheduled) {
+                activityFlushScheduled = true;
+                Thread.ofVirtual().name("warden-desktop-projection").start(this::flushActivity);
+            }
+            return;
+        }
+        pendingActivity = null;
+        projectActivity(event, now);
+    }
+
+    private void flushActivity() {
+        try {
+            while (true) {
+                long wait;
+                synchronized (this) {
+                    if (stopped || pendingActivity == null) return;
+                    wait = 1_000_000_000L - (System.nanoTime() - lastActivityProjection);
+                    if (wait <= 0) {
+                        ExecutionActivity event = pendingActivity;
+                        pendingActivity = null;
+                        projectActivity(event, System.nanoTime());
+                        return;
+                    }
+                }
+                java.util.concurrent.TimeUnit.NANOSECONDS.sleep(wait);
+            }
+        } catch (InterruptedException closed) {
+            Thread.currentThread().interrupt();
+        } finally {
+            synchronized (this) {
+                activityFlushScheduled = false;
+                if (!stopped && pendingActivity != null) {
+                    activityFlushScheduled = true;
+                    Thread.ofVirtual().name("warden-desktop-projection").start(this::flushActivity);
+                }
+            }
+        }
+    }
+
+    private void projectActivity(ExecutionActivity event, long now) {
+        lastActivityProjection = now;
+        displayedActivity = event;
+        receipt.put("activity_events_seen", activityEventsSeen);
+        receipt.put("activity_events_retained", List.copyOf(activityEvents));
+        receipt.put("activity_projection", "lossy_metadata_only");
+        project(List.of("--comment", clip(event.summary() + " · " + Progress.elapsed(event.elapsedMillis()))));
+        persist();
     }
 
     @Override public synchronized void answered(String decision) {
@@ -195,8 +278,14 @@ public final class OrcaDesktop implements Workspace {
         var args = new java.util.ArrayList<>(List.of("worktree", "set", "--worktree", selector));
         args.addAll(fields);
         try {
-            if (!client.invoke(root, PROBE, args).ok()) fail("projection_failed");
+            OrcaClient.Rpc result = client.invoke(root, PROJECT, args);
+            if (!result.ok()) {
+                receipt.put("projection_failure", Map.of("timed_out", result.timedOut(),
+                        "exit_code", result.exitCode(), "duration_millis", result.durationMillis()));
+                fail("projection_failed");
+            }
         } catch (Exception failure) {
+            receipt.put("projection_failure", Map.of("kind", "transport_exception"));
             fail("projection_failed");
         }
     }
