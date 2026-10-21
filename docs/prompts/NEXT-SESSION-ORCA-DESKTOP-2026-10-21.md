@@ -8,12 +8,16 @@
 
 ## Контекст и исходная точка
 
-- Найди существующий worktree ветки `codex/next-run-form` через `git worktree list`.
-  Не работай по ошибке в основном checkout или в старом тестовом дереве.
-- При подготовке этого задания HEAD был `08f197f`, предыдущие source commits —
-  `94f0c34` и `7893d78`; draft PR #54 уже существует. Документационный commit с этим
-  промптом может быть новее. Прочитай status/log/fetch, сохрани чужие изменения и
-  не предполагай, что main или состояние CI остались прежними.
+- PR #54 уже слит пользователем в `main` 2026-10-21. Проверенный merge commit —
+  `99e1dc7f8a0b2378e31002dfcb65f0dd2fe474ef`. Старую ветку
+  `codex/next-run-form` и закрытый PR #54 для новой реализации не продолжай.
+- Для desktop-этапа подготовлена отдельная ветка `codex/orca-desktop-visibility`
+  от этого `origin/main`. Найди её worktree через `git worktree list`: путь к
+  checkout мог сохранить старое имя каталога. Если ветки ещё нет в текущей среде,
+  создай отдельную feature branch от актуального `origin/main`.
+- До изменений прочитай status/log, обнови remote refs и проверь состояние base/CI.
+  Сохрани чужие изменения; не делай reset/rebase поверх неизвестной работы.
+  Документационный commit с этим промптом может быть новее merge commit.
 - Прочитай [сравнение интерфейсов](../UI-SURFACES-COMPARISON-2026-10-21.md),
   [live validation](../AGENT-LOOP-LIVE-VALIDATION-2026-10-21.md) и
   [описание настроек/аналитики](../AGENT-LOOP-UI-SETTINGS-ANALYTICS-2026-10-20.md).
@@ -23,15 +27,16 @@
   dashboard или новый оркестратор. Существующие settings/report страницы сохрани
   как вспомогательные инструменты Warden.
 
-Сначала проверь актуальный CI baseline. Исторический run `39617900271` имел ровно
-один failure в каждом Windows job — `[roster] file path is policy.yaml`: тест
-сравнил Windows short-path и canonical long-path строки одного файла. Перед
-desktop-этапом этот тест исправлен сравнением с `policy.toRealPath()`, без изменений
-production path handling. Не повторяй уже сделанное исправление, если CI зелёный.
-При новом отказе проверь причину, не ослабляя containment, atomic writes или
-проверки backup. Быстрый gate после build:
+CI перед слиянием PR #54 полностью прошёл на `e961638`:
+[run 39650511355](https://github.com/tolboy/warden-agentic-sdlc/actions/runs/39650511355).
+Linux JDK 21/25 — 4930 passed / 0 failed; Windows JDK 21/25 — по 4936 passed / 0
+failed; demo и hygiene также зелёные. Ошибка сравнения Windows short-path и
+canonical long-path уже исправлена в `RosterTest` через `policy.toRealPath()`.
+Не повторяй закрытое исправление и не считай старый failed run текущим baseline.
+Перепроверь актуальный main CI; при новом отказе исследуй причину, сохраняя
+containment, atomic writes и проверки backup. Быстрый gate после build:
 `java -cp out/test-classes dev.warden.testing.TestMain roster`.
-После исправления должен пройти текущий Linux/Windows JDK 21/25 CI.
+После реализации должен пройти текущий Linux/Windows JDK 21/25 CI.
 
 ## Что пользователь хочет видеть
 
@@ -203,8 +208,9 @@ counts разных suites как уникальные тесты. Не назы
 
 ## Результат
 
-Доведи изменения до reviewable commits и обнови существующий PR, если он ещё
-актуален; не создавай дубликат. Conventional subjects, подробная мотивация,
+Доведи desktop-этап до reviewable commits и отдельного PR в `main`. Если для этого
+этапа уже открыт PR, обнови его без дубликата. Закрытый PR #54 не переоткрывай.
+Conventional subjects, подробная мотивация,
 совместимость и проверка в body; `Co-Authored-By` с точной активной моделью Codex.
 Без merge/публикации продукта и без массовой уборки чужих ресурсов.
 
