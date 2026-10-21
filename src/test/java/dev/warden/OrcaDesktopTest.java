@@ -2,6 +2,7 @@ package dev.warden;
 
 import dev.warden.execution.orca.OrcaClient;
 import dev.warden.execution.orca.OrcaDesktop;
+import dev.warden.execution.ExecutionActivity;
 import dev.warden.json.Json;
 import dev.warden.run.Workspace;
 import dev.warden.testing.Check;
@@ -120,6 +121,61 @@ public final class OrcaDesktopTest implements Suite {
         // preserved by construction. This is containment, not proof of supported cleanup.
         check.that("no automatic terminal close, including after disconnect", List.of(ready, wrongPath, cold, refused, lost).stream()
                 .flatMap(f -> f.calls.stream()).noneMatch(a -> a.contains("close")));
+        liveActivity(check, root, interactive);
+    }
+
+    private void liveActivity(Check check, Path root, OrcaDesktop.Policy policy) throws Exception {
+        Fake fake = new Fake(root);
+        var board = OrcaDesktop.attach(fake.client(), root, policy, text -> {});
+        board.watch(root, "activity");
+        board.note("implement running");
+        board.state(Workspace.State.RUNNING);
+        var attempt = new ExecutionActivity.Attempt("implement", "implementer", "grok-implement", "grok",
+                "grok-4.7", "high", 1, "implementer");
+        board.activity(new ExecutionActivity(attempt, ExecutionActivity.Update.of(ExecutionActivity.Kind.DISPATCHING), 0));
+        int beforeBurst = fake.calls.size();
+        for (int index = 0; index < 100; index++) {
+            board.activity(new ExecutionActivity(attempt,
+                    new ExecutionActivity.Update(ExecutionActivity.Kind.TOOL_STARTED, "shell", null, index, 0), index));
+        }
+        board.activity(new ExecutionActivity(attempt,
+                new ExecutionActivity.Update(ExecutionActivity.Kind.OUTPUT, null, null, 1000, 0), 500));
+        check.eq("burst does not launch one CLI update per event", beforeBurst, fake.calls.size());
+        long flushDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (fake.calls.size() == beforeBurst && System.nanoTime() < flushDeadline) Thread.sleep(20);
+        // The fake records the RPC before the observer saves its atomic receipt.
+        synchronized (board) { }
+        check.eq("one pending update is flushed even without later output", beforeBurst + 1, fake.calls.size());
+        check.that("tool event is kept ahead of generic output progress", fake.calls.get(fake.calls.size() - 1).stream()
+                .anyMatch(value -> value.contains("tool shell started")));
+        Map<String, Object> saved = receipt(root, "activity");
+        check.eq("the bounded ring reports all observed metadata events", 102L, saved.get("activity_events_seen"));
+        check.eq("event retention is bounded", 24, ((List<?>) saved.get("activity_events_retained")).size());
+        check.eq("receipt describes a lossy projection", "lossy_metadata_only", saved.get("activity_projection"));
+        Map<?, ?> event = (Map<?, ?>) ((List<?>) saved.get("activity_events_retained")).get(0);
+        check.eq("requested model remains requested", "grok-4.7", event.get("model_requested"));
+        check.eq("resolved profile is retained separately", "grok-implement", event.get("profile"));
+        check.that("no reported model or price is invented", !event.containsKey("model_reported") && !event.containsKey("cost_usd"));
+
+        var next = new ExecutionActivity.Attempt("implement", "implementer", "reserve", "codex",
+                "gpt-6.1-sol", "medium", 2, "implementer.attempt-2");
+        board.activity(new ExecutionActivity(next, ExecutionActivity.Update.of(ExecutionActivity.Kind.DISPATCHING), 0));
+        int currentCalls = fake.calls.size();
+        board.activity(new ExecutionActivity(attempt, ExecutionActivity.Update.of(ExecutionActivity.Kind.OUTPUT), 2000));
+        check.eq("late output from an earlier attempt is dropped", currentCalls, fake.calls.size());
+        board.activity(new ExecutionActivity(next, ExecutionActivity.Update.of(ExecutionActivity.Kind.ATTEMPT_FINISHED), 100));
+        board.note("gates running");
+        board.working("gates", 1000);
+        check.that("a machine stage cannot inherit the previous vendor heartbeat", fake.calls.get(fake.calls.size() - 1)
+                .stream().anyMatch(value -> value.contains("gates running") && !value.contains("codex")));
+        currentCalls = fake.calls.size();
+        board.activity(new ExecutionActivity(next, ExecutionActivity.Update.of(ExecutionActivity.Kind.OUTPUT), 5000));
+        check.eq("finished attempt cannot resume its live projection", currentCalls, fake.calls.size());
+        board.state(Workspace.State.WAITING_FOR_HUMAN);
+        currentCalls = fake.calls.size();
+        board.activity(new ExecutionActivity(attempt, ExecutionActivity.Update.of(ExecutionActivity.Kind.DISPATCHING), 9000));
+        Thread.sleep(1100);
+        check.eq("human wait cannot be overwritten by a queued update", currentCalls, fake.calls.size());
     }
 
     private static Map<String, Object> receipt(Path root, String id) throws Exception {
@@ -128,8 +184,8 @@ public final class OrcaDesktopTest implements Suite {
 
     private static final class Fake {
         final Path root;
-        final List<List<String>> calls = new ArrayList<>();
-        final List<Duration> timeouts = new ArrayList<>();
+        final List<List<String>> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<Duration> timeouts = new java.util.concurrent.CopyOnWriteArrayList<>();
         boolean running = true;
         boolean failOpen;
         boolean failProjection;

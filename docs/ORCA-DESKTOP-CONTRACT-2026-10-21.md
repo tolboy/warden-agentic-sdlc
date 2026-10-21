@@ -12,11 +12,16 @@ receives the existing card comment and status. An absent or failing UI does not
 change the runner, retry a vendor, settle a worker, or change the command's outcome.
 Stdout remains the existing JSON result.
 
+The follow-up [direct activity projection](ORCA-LIVE-ACTIVITY-2026-10-21.md) adds
+bounded live metadata from the existing CLI spool. Native card comments still
+render as Workspace notes, so this does not satisfy the requested live overview.
+
 Detection has one-second RPC budgets, including Windows executable discovery.
 Only an interactive local invocation may attempt `orca open`, once, with a
 three-second command budget. There is no startup retry loop. The first failed
-card update disables further projection calls for that observer instance; the
-failure is reported on stderr and saved locally. These are child-command budgets,
+card update disables further projection calls for that observer instance; card
+mutations now have a two-second budget. The failure is reported on stderr and saved
+locally. These are child-command budgets,
 not a real-time guarantee for OS process creation or filesystem calls.
 
 Quiet invocations, redirected invocations without a Java console, CI markers,

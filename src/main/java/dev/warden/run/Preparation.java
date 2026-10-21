@@ -101,6 +101,12 @@ public final class Preparation {
     private String amendedText;
     /** The ceilings of a chain this preparation spends for; none for a first plan. */
     private RoleRunner.DispatchGate chain = () -> { };
+    private Workspace workspace = Workspace.NONE;
+
+    public Preparation withWorkspace(Workspace workspace) {
+        this.workspace = workspace == null ? Workspace.NONE : Workspace.guarded(workspace);
+        return this;
+    }
     /** Every vendor call this preparation made, in order, for the run summary. */
     private final List<Map<String, Object>> calls = new ArrayList<>();
 
@@ -262,7 +268,8 @@ public final class Preparation {
             baseline = null;
         }
         Bootstrap gate = new Bootstrap(chain);
-        RoleRunner roles = new RoleRunner(processes, gate).atStage("prepare");
+        if (!dryRun) workspace.state(Workspace.State.RUNNING);
+        RoleRunner roles = new RoleRunner(processes, gate).atStage("prepare").observing(workspace::activity);
 
         Spend spent = new Spend(0, 0, 0);
         int protocolAttempts = 0;
@@ -558,6 +565,7 @@ public final class Preparation {
 
     private Outcome done(boolean ok, String code, String message, RoleRunner.Outcome role,
                          TaskDraft.Written written, Spend spent, Map<String, Object> planReview) {
+        if (!ok) workspace.state(Workspace.State.WAITING_FOR_HUMAN);
         return new Outcome(ok, code, message, role, written, spent.runs, spent.cost, spent.unpriced,
                 planReview, List.copyOf(calls));
     }

@@ -8,6 +8,7 @@ import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.execution.Executors;
 import dev.warden.execution.RoleExecutor;
+import dev.warden.execution.ExecutionActivity;
 import dev.warden.git.GitRepository;
 import dev.warden.json.Json;
 import dev.warden.ledger.EvidenceLedger;
@@ -171,6 +172,12 @@ public final class RoleRunner {
     private final Map<String, String> authorizedFailover;
     private final dev.warden.run.Progress progress;
     private Occupied occupied = NOBODY;
+    private java.util.function.Consumer<ExecutionActivity> activity = event -> { };
+
+    public RoleRunner observing(java.util.function.Consumer<ExecutionActivity> sink) {
+        activity = sink == null ? event -> { } : sink;
+        return this;
+    }
     private String stageName;
     /** How the runner waits between rate-limit retries; the suite replaces it. */
     private java.util.function.LongConsumer sleeper = millis -> {
@@ -1019,10 +1026,23 @@ public final class RoleRunner {
 
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
             RoleExecutor executor = executors.forProfile(profile, processes, git);
+            var liveAttempt = new ExecutionActivity.Attempt(stageName, role,
+                    profile.name(), profile.vendor(), profile.model(), profile.effort(), attempt, evidenceName);
+            long liveStarted = System.nanoTime();
+            java.util.function.Consumer<ExecutionActivity.Update> live = update -> {
+                try {
+                    activity.accept(new ExecutionActivity(liveAttempt, update,
+                            (System.nanoTime() - liveStarted) / 1_000_000));
+                } catch (RuntimeException | Error ignored) { /* Projection cannot change execution. */ }
+            };
+            live.accept(ExecutionActivity.Update.of(
+                    ExecutionActivity.Kind.DISPATCHING));
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
                     runId, workflowRunId != null ? workflowRunId : runId,
                     role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
-                    values.get("context"), evidenceName, attachments == null ? List.of() : attachments));
+                    values.get("context"), evidenceName, attachments == null ? List.of() : attachments), live);
+            live.accept(ExecutionActivity.Update.of(
+                    ExecutionActivity.Kind.ATTEMPT_FINISHED));
 
             if (Boolean.FALSE.equals(result.evidence().get("process_tree_settled"))
                     && !"role_process_unsettled".equals(result.code())) {

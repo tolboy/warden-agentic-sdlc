@@ -741,8 +741,9 @@ public final class Main {
                 reservation.put("prepare", "always");
                 new EvidenceLedger(root, nextId, user.home())
                         .reserveWorkflowRun(resolved.taskId(), reservation);
+                if (!hasFlag(args, "--no-workspace-status")) card.watch(narration, nextId);
                 Preparation.Outcome prepared = new Preparation(new ProcessRunner(),
-                        narration(args)).run(root, loaded.project(), user, resolved.taskId(),
+                        narration(args)).withWorkspace(card).run(root, loaded.project(), user, resolved.taskId(),
                         nextId, loaded.task().goal(), scope, loaded.task().risk(),
                         PlannerDraft.Access.DO_DEFAULT, false);
                 if (!prepared.ok()) {

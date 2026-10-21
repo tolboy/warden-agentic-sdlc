@@ -502,7 +502,9 @@ public final class PlannerTest implements Suite {
         // What the board was asked to show. A compiled contract that only exists as a path in
         // a terminal is the run's most consequential artifact and its least visible one.
         List<String> shown = new ArrayList<>();
+        List<dev.warden.execution.ExecutionActivity> planningActivity = new java.util.concurrent.CopyOnWriteArrayList<>();
         dev.warden.run.Workspace.Source board = worktree -> new dev.warden.run.Workspace() {
+            @Override public void activity(dev.warden.execution.ExecutionActivity event) { planningActivity.add(event); }
             @Override public void note(String text) { shown.add("note: " + text); }
             @Override public void state(State state) { shown.add("state: " + state); }
             @Override public void show(Path file, String runId, String title) {
@@ -515,6 +517,9 @@ public final class PlannerTest implements Suite {
                         "HEAD", true, false, false, false, false, true, null, "always"),
                 user);
         check.eq("--prepare always --draft-only runs the planner", "drafted", outcome.code());
+        check.that("planning publishes the resolved attempt before the loop starts", planningActivity.stream().anyMatch(event ->
+                "planner".equals(event.attempt().role()) && "prepare".equals(event.attempt().stage())
+                        && event.update().kind() == dev.warden.execution.ExecutionActivity.Kind.DISPATCHING));
         check.eq("and reports corpus delivery on the planning-only completion", "ok",
                 outcome.report().get("corpus_status"));
         check.eq("and says the tree is safe to delete after a confirmed write", true,

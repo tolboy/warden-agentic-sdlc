@@ -63,6 +63,12 @@ public final class DirectCliExecutor implements RoleExecutor {
 
     @Override
     public Result execute(Request request) throws Exception {
+        return execute(request, null);
+    }
+
+    @Override
+    public Result execute(Request request, java.util.function.Consumer<ExecutionActivity.Update> activity)
+            throws Exception {
         Profile profile = request.profile();
         Path runDirectory = request.runDirectory();
         Map<String, Object> evidence = new LinkedHashMap<>();
@@ -148,7 +154,7 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("raw_stderr", runDirectory.relativize(stderrFile).toString().replace('\\', '/'));
 
         ProcessRunner.Result process;
-        try {
+        try (LiveCliOutput live = LiveCliOutput.follow(stdoutFile, stderrFile, activity)) {
             process = processes.runVendor(command, request.projectRoot(),
                     Duration.ofMinutes(profile.wallClockMinutes()), PREVIEW_BYTES, stdinText,
                     stdoutFile, stderrFile, ProcessRunner.DEFAULT_RAW_BYTES);
