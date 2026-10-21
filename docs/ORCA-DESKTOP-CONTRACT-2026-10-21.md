@@ -75,6 +75,18 @@ automatic overview is refused with `observer_ownership_unsupported`.
 
 The inspected command schema offers agent launch and supervised worker surfaces,
 but no external-process transcript import with an observer ownership lifecycle.
+The advertised `agent-session.structured.cli-source.v1` capability was traced in
+the native API too. Its [source resolver](https://github.com/stablyai/orca/blob/c60a9b0a2a8d1aff2da94c2185a6dba238e65755/src/main/native-chat/structured-agent-cli-source.ts)
+requires host-observed workspace, pane and provider-conversation identity; it
+does not accept an arbitrary external process or stdout path. Native
+[history adoption](https://github.com/stablyai/orca/blob/c60a9b0a2a8d1aff2da94c2185a6dba238e65755/src/main/native-chat/structured-agent-session-history-adoption.ts)
+reserves a provider conversation for a new structured chat and checks writer
+ownership. The [adopted import](https://github.com/stablyai/orca/blob/c60a9b0a2a8d1aff2da94c2185a6dba238e65755/src/main/native-chat/agent-session-wire/structured-agent-session-adopted-import.ts)
+seeds the initial journal and preserves subsequent journal writes on replay; it
+is not a live read-only subscription to Warden's external stdout. Using that
+adoption contract as a generic activity sink would misrepresent conversation
+ownership. No native create/adopt/send mutation was attempted for a direct worker.
+
 Streaming a bounded, sanitized projection from the existing direct spool is still
 implementable; it is deferred until its surface can meet the release requirements.
 No second agent, direct-to-Orca profile switch, raw-log replay, or substitute
@@ -118,7 +130,7 @@ heartbeats, connection loss without further mutations, and no terminal/worker
 creation or close. These checks establish containment, not supported takeover
 cleanup of an observer that the runtime cannot own.
 
-Two real CLI runs without `--watch` were executed in a new disposable
+Two real CLI runs on the final implementation without `--watch` were executed in a new disposable
 `hello-world-test` worktree inside the installed Orca terminal. Both deliberately
 stopped at `preflight_outside_scope` before any vendor call. Both reported the
 overview limitation and saved card/fallback receipts. The terminal inventory stayed
