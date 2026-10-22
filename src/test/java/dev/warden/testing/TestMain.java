@@ -75,14 +75,25 @@ public final class TestMain {
                 throw new IllegalArgumentException("Unknown suite: " + requested);
             }
         }
+        long registryStarted = System.nanoTime();
         for (Suite suite : suites) {
             if (args.length > 0 && java.util.Arrays.stream(args).noneMatch(suite.name()::equals)) continue;
             check.beginSuite(suite.name());
+            int passedBefore = check.passed();
+            int failedBefore = check.failures().size();
+            long suiteStarted = System.nanoTime();
+            System.out.println("[suite] " + suite.name() + " starting");
+            System.out.flush();
             try {
                 suite.run(check);
             } catch (Exception failure) {
                 check.that(suite.name() + " threw " + failure, false);
             }
+            System.out.printf(java.util.Locale.ROOT,
+                    "[suite] %s: %d passed, %d failed; elapsed_ms=%.1f%n",
+                    suite.name(), check.passed() - passedBefore,
+                    check.failures().size() - failedBefore,
+                    (System.nanoTime() - suiteStarted) / 1_000_000.0);
         }
 
         System.out.println();
@@ -90,6 +101,8 @@ public final class TestMain {
             System.out.println("  FAIL  [" + failure.suite() + "] " + failure.description());
             System.out.println("        " + failure.detail());
         }
+        System.out.printf(java.util.Locale.ROOT, "test_elapsed_ms=%.1f%n",
+                (System.nanoTime() - registryStarted) / 1_000_000.0);
         System.out.printf("%nchecks: %d passed, %d failed%n", check.passed(), check.failures().size());
         if (!check.failures().isEmpty()) System.exit(1);
     }
