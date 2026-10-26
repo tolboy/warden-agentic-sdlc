@@ -13,6 +13,10 @@ public final class ApiConnectionCheck {
     private ApiConnectionCheck() { }
 
     public static Map<String, Object> check(Connection connection, Function<String, String> environment) {
+        return check(connection, new CredentialResolver(environment));
+    }
+
+    public static Map<String, Object> check(Connection connection, CredentialResolver resolver) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("connection", connection.id());
         result.put("provider", connection.provider());
@@ -26,7 +30,7 @@ public final class ApiConnectionCheck {
         }
         String token;
         try {
-            token = new CredentialResolver(environment).resolve(connection);
+            token = resolver.resolve(connection);
         } catch (RuntimeException unavailable) {
             result.put("ok", false);
             result.put("credential_configured", false);

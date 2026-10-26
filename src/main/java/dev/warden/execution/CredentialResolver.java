@@ -6,25 +6,35 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 
-/** Resolves only the explicitly named environment credential, immediately before dispatch. */
+/**
+ * Resolves the connection's own credential immediately before dispatch.
+ * An OS-store reference is never satisfied from the environment, and an env reference
+ * is never read from the vault.
+ */
 public final class CredentialResolver {
     private final Function<String, String> environment;
+    private final OsCredentialStore store;
 
     public CredentialResolver() { this(System::getenv); }
 
     public CredentialResolver(Function<String, String> environment) {
+        this(environment, OsCredentialStores.platform());
+    }
+
+    public CredentialResolver(Function<String, String> environment, OsCredentialStore store) {
         this.environment = Objects.requireNonNull(environment);
+        this.store = store == null ? OsCredentialStores.unavailable() : store;
     }
 
     /** The result is transient dispatch data: never put it in a command, record, or log. */
     public String resolve(Connection connection) {
         if (!connection.enabled()) throw new IllegalStateException("connection is disabled");
-        if (connection.apiKeyEnv() == null) return null;
-        String value = read(connection.apiKeyEnv());
+        if (connection.credentialRef() == null) return null;
+        String value = read(connection);
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("connection credential is missing; set its referenced environment variable");
+            throw new IllegalStateException("connection credential is missing; set its referenced environment variable or OS store entry");
         }
-        if (!isHeaderSafe(value)) {
+        if (!acceptable(value)) {
             throw new IllegalStateException("connection credential contains unsupported characters");
         }
         return value;
@@ -34,12 +44,12 @@ public final class CredentialResolver {
     public Map<String, Object> status(Connection connection) {
         boolean present = false;
         String state;
-        if (connection.apiKeyEnv() == null) state = "not_required";
+        if (connection.credentialRef() == null) state = "not_required";
         else {
             try {
-                String value = read(connection.apiKeyEnv());
+                String value = read(connection);
                 present = value != null && !value.isBlank();
-                state = !present ? "missing" : isHeaderSafe(value) ? "ready" : "invalid";
+                state = !present ? "missing" : acceptable(value) ? "ready" : "invalid";
             } catch (IllegalStateException failure) {
                 state = "unavailable";
             }
@@ -50,16 +60,28 @@ public final class CredentialResolver {
                 "state", state);
     }
 
-    private String read(String name) {
+    /** Printable ASCII, short enough for a Credential Manager blob and an HTTP header. */
+    public static boolean acceptable(String value) {
+        return value != null && !value.isEmpty() && value.length() <= 2048
+                && value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
+    }
+
+    private String read(Connection connection) {
+        if (connection.apiKeyEnv() != null) {
+            try {
+                return environment.apply(connection.apiKeyEnv());
+            } catch (RuntimeException failure) {
+                throw new IllegalStateException("connection credential source could not be read");
+            }
+        }
+        String target = connection.osStoreTarget();
+        if (target == null || !store.available()) {
+            throw new IllegalStateException("connection credential source is unavailable");
+        }
         try {
-            return environment.apply(name);
+            return store.read(target);
         } catch (RuntimeException failure) {
             throw new IllegalStateException("connection credential source could not be read");
         }
-    }
-
-    private static boolean isHeaderSafe(String value) {
-        // Reject before an HTTP library can include an invalid header value in its exception.
-        return value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
     }
 }

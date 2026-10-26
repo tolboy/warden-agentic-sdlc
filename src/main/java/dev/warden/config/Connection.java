@@ -62,9 +62,12 @@ public record Connection(String id, String provider, String protocol, String bas
             if (!"custom".equals(provider) || !loopback) {
                 throw invalid("auth none is allowed only for a custom loopback connection");
             }
-        } else if (!credentialRef.startsWith("env:")
-                || !ENV.matcher(credentialRef.substring(4)).matches()) {
-            throw invalid("auth.credential_ref must be env: followed by a valid environment variable name");
+        } else if (credentialRef.startsWith("env:")) {
+            if (!ENV.matcher(credentialRef.substring(4)).matches()) {
+                throw invalid("auth.credential_ref must be env: followed by a valid environment variable name");
+            }
+        } else if (!credentialRef.equals("os-store:warden/" + id)) {
+            throw invalid("auth.credential_ref must be env:NAME or os-store:warden/<id> for this connection");
         }
     }
 
@@ -104,7 +107,16 @@ public record Connection(String id, String provider, String protocol, String bas
     /** The only protocol supported by the first connection implementation. */
     public String endpoint() { return baseUrl + "/chat/completions"; }
 
-    public String apiKeyEnv() { return credentialRef == null ? null : credentialRef.substring(4); }
+    /** Environment name for an {@code env:} reference. An OS-store connection has none. */
+    public String apiKeyEnv() {
+        return credentialRef != null && credentialRef.startsWith("env:") ? credentialRef.substring(4) : null;
+    }
+
+    /** Vault target {@code warden/<id>} when the reference is {@code os-store:warden/<id>}. */
+    public String osStoreTarget() {
+        if (credentialRef == null || !credentialRef.startsWith("os-store:")) return null;
+        return credentialRef.substring("os-store:".length());
+    }
 
     /** A secret rotation does not change the configuration fingerprint. */
     public String fingerprint() {
