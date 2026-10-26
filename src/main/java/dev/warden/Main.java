@@ -373,9 +373,11 @@ public final class Main {
 
     private static int connections(String[] args) throws Exception {
         java.io.InputStream input = System.in;
-        if (args.length >= 2 && "auth-set".equals(args[1]) && System.console() != null) {
-            char[] password = System.console().readPassword(
-                    "Credential (hidden; it is not an argument and is not written to the connection file): ");
+        boolean hiddenCode = args.length >= 2 && "auth-login".equals(args[1]) && java.util.List.of(args).contains("--headless");
+        if (args.length >= 2 && ("auth-set".equals(args[1]) || hiddenCode) && System.console() != null) {
+            char[] password = System.console().readPassword(hiddenCode
+                    ? "Authorization code (hidden; it is not written to the connection file): "
+                    : "Credential (hidden; it is not an argument and is not written to the connection file): ");
             if (password == null) throw new IllegalArgumentException("credential input was closed");
             byte[] bytes = new String(password).getBytes(java.nio.charset.StandardCharsets.UTF_8);
             java.util.Arrays.fill(password, '\0');
@@ -2710,6 +2712,10 @@ public final class Main {
                                            read the key from stdin (hidden when a console is attached)
                   warden connections auth-remove ID
                                            delete the local vault entry; the provider key is not revoked
+                  warden connections auth-login ID
+                                           OpenRouter PKCE on 127.0.0.1; the issued key goes to the OS vault
+                  warden connections auth-login ID --headless
+                                           print the URL and read the pasted code from stdin
                   warden connections check ID  native auth check where supported; no inference or model stamp
                   warden connections enable|disable|remove ID
                   warden profiles --verify N   run profile N's own probe; stamps verified_on

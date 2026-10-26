@@ -2,12 +2,15 @@ package dev.warden.config;
 
 import dev.warden.execution.ApiConnectionCheck;
 import dev.warden.execution.CredentialResolver;
+import dev.warden.execution.OpenRouterLogin;
 import dev.warden.execution.OsCredentialStore;
 import dev.warden.execution.OsCredentialStores;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -18,17 +21,25 @@ import java.util.function.Function;
 public final class ConnectionCommand {
     private final Function<String, String> environment;
     private final OsCredentialStore credentials;
+    private final OpenRouterLogin.Exchanger exchanger;
 
-    public ConnectionCommand() { this(System::getenv, OsCredentialStores.platform()); }
+    public ConnectionCommand() { this(System::getenv, OsCredentialStores.platform(), null); }
 
     /** Callers that only inject an environment do not probe the OS vault. */
     public ConnectionCommand(Function<String, String> environment) {
-        this(environment, OsCredentialStores.unavailable());
+        this(environment, OsCredentialStores.unavailable(), null);
     }
 
     public ConnectionCommand(Function<String, String> environment, OsCredentialStore credentials) {
+        this(environment, credentials, null);
+    }
+
+    /** A null exchanger uses the documented OpenRouter token endpoint. */
+    public ConnectionCommand(Function<String, String> environment, OsCredentialStore credentials,
+                             OpenRouterLogin.Exchanger exchanger) {
         this.environment = environment;
         this.credentials = credentials == null ? OsCredentialStores.unavailable() : credentials;
+        this.exchanger = exchanger == null ? OpenRouterLogin::exchangeLive : exchanger;
     }
 
     public Map<String, Object> run(Path home, String[] argv) throws IOException {
@@ -85,6 +96,16 @@ public final class ConnectionCommand {
             return Map.of("ok", true, "code", "connection_added", "file", file.toString(),
                     "connection", view(connection, resolver()), "profiles_activated", false);
         }
+        if ("auth-login".equals(operation)) {
+            boolean headless = false;
+            for (int i = 3; i < argv.length; i++) {
+                if (!"--headless".equals(argv[i]) || headless) {
+                    throw new IllegalArgumentException("connections auth-login accepts only an id and optional --headless");
+                }
+                headless = true;
+            }
+            return login(home, id, headless, stdin);
+        }
         if (argv.length != 3) throw new IllegalArgumentException("this connection operation accepts only an id");
         if ("remove".equals(operation)) {
             store.remove(id);
@@ -108,7 +129,91 @@ public final class ConnectionCommand {
             if ("auth-set".equals(operation)) payload.put("secret", readSecret(stdin));
             return new ConnectionService(home, environment, credentials).apply(operation, payload).report();
         }
-        throw new IllegalArgumentException("connections supports list, add, check, enable, disable, remove, auth-set and auth-remove");
+        throw new IllegalArgumentException(
+                "connections supports list, add, check, enable, disable, remove, auth-set, auth-remove and auth-login");
+    }
+
+    /**
+     * PKCE into the connection's existing OS-store target. The connection file and policy
+     * stay unchanged. A key that cannot be saved is not written anywhere else.
+     */
+    private Map<String, Object> login(Path home, String id, boolean headless, InputStream stdin) throws IOException {
+        ConnectionStore.Versioned current = new ConnectionStore(home).versioned(id);
+        Connection connection = current.connection();
+        if (!openRouterApi(connection)) {
+            throw new IllegalArgumentException("OpenRouter login is only available for the OpenRouter HTTPS connection");
+        }
+        if (connection.osStoreTarget() == null) {
+            throw new IllegalArgumentException("OpenRouter login stores a key only in the OS credential store");
+        }
+        if (!credentials.available()) {
+            throw new IllegalArgumentException("OS credential store is unavailable; no authorization was requested");
+        }
+        String verifier = OpenRouterLogin.verifier();
+        String challenge = OpenRouterLogin.challenge(verifier);
+        if (headless) {
+            System.err.println("Open the URL, approve a Warden key, and paste the authorization code.");
+            System.err.println(OpenRouterLogin.authorizeUrl(null, challenge, null));
+            return storeIssued(home, id, current.revision(), exchanger.exchange(readAuthorizationCode(stdin), verifier));
+        }
+        String state = OpenRouterLogin.verifier();
+        try (OpenRouterLogin.Callback callback = OpenRouterLogin.Callback.bind(state)) {
+            String url = OpenRouterLogin.authorizeUrl(callback.port(), challenge, state);
+            System.err.println("Open the URL and approve a Warden key. Waiting up to 3 minutes.");
+            System.err.println(url);
+            OpenRouterLogin.open(url);
+            return storeIssued(home, id, current.revision(),
+                    exchanger.exchange(callback.await(Duration.ofMinutes(3)), verifier));
+        }
+    }
+
+    private Map<String, Object> storeIssued(Path home, String id, String revision, String key) {
+        if (!CredentialResolver.acceptable(key)) {
+            throw new IllegalArgumentException(
+                    "OpenRouter returned a key Warden will not store. Revoke it in the OpenRouter account.");
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("id", id);
+        payload.put("revision", revision);
+        payload.put("secret", key);
+        Map<String, Object> report = new LinkedHashMap<>(
+                new ConnectionService(home, environment, credentials).apply("auth-set", payload).report());
+        if (!Boolean.TRUE.equals(report.get("ok"))) {
+            report.put("message",
+                    "OpenRouter issued a key, but it was not saved. Revoke it in the OpenRouter account if you do not retry.");
+            report.put("profiles_activated", false);
+            report.put("service_key_revoked", false);
+        }
+        return report;
+    }
+
+    private static boolean openRouterApi(Connection connection) {
+        if (!"openrouter".equals(connection.provider())) return false;
+        URI uri = URI.create(connection.baseUrl());
+        return "https".equalsIgnoreCase(uri.getScheme())
+                && "openrouter.ai".equalsIgnoreCase(uri.getHost())
+                && "/api/v1".equals(uri.getPath())
+                && (uri.getPort() == -1 || uri.getPort() == 443);
+    }
+
+    private static String readAuthorizationCode(InputStream stdin) throws IOException {
+        if (stdin == null) throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
+        byte[] buffered = stdin.readNBytes(259);
+        if (buffered.length > 258) {
+            throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
+        }
+        int end = buffered.length;
+        while (end > 0 && (buffered[end - 1] == '\n' || buffered[end - 1] == '\r')) end--;
+        String code;
+        try {
+            code = new String(buffered, 0, end, StandardCharsets.UTF_8);
+        } finally {
+            Arrays.fill(buffered, (byte) 0);
+        }
+        if (!OpenRouterLogin.authorizationCode(code)) {
+            throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
+        }
+        return code;
     }
 
     private CredentialResolver resolver() { return new CredentialResolver(environment, credentials); }
