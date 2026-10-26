@@ -445,7 +445,12 @@ public final class RoleRunner {
         Map<String, String> rejected = new LinkedHashMap<>();
         if (profile == null) rejected.put(pinned, "profile_not_found");
         else if (!profile.role().equals(role)) rejected.put(pinned, "role_mismatch");
-        else if (RoleResolver.judges(role) && !profile.readOnly()) {
+        else if (profile.connectionRef() != null && (profile.apiConnection() == null
+                || !profile.apiConnection().enabled())) {
+            rejected.put(pinned, "connection_unavailable");
+        } else if (profile.harness() != null) {
+            rejected.put(pinned, "harness_coding_unproven");
+        } else if (RoleResolver.judges(role) && !profile.readOnly()) {
             rejected.put(pinned, RoleResolver.JUDGE_NOT_READ_ONLY);
         } else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
             rejected.put(pinned, "vision_capability_unverified");
@@ -908,6 +913,10 @@ public final class RoleRunner {
             report.put("stage", stageName == null ? role : stageName);
             report.put("read_only", profile.readOnly());
             report.put("runner", profile.runner());
+            if (profile.harness() != null) {
+                report.put("harness", profile.harness());
+                report.put("coding_tools_verified", false);
+            }
             // What the roster chose, beside what the overlay made of it. Recorded because a
             // reading is a reading by a named profile on a named channel, and "the operator
             // asked for this stage on Orca" is not visible from the dispatched profile alone.
@@ -948,6 +957,9 @@ public final class RoleRunner {
             report.put("wall_clock_minutes", profile.wallClockMinutes());
             if ("local".equals(profile.runner()) || "api".equals(profile.runner())) {
                 report.put("dispatch_preview", dispatchPreview(profile));
+            } else if (profile.harness() != null) {
+                report.put("connection", profile.connectionRef());
+                report.put("command_preview", List.of("opencode", "run", "--format", "json"));
             } else if ("orca".equals(profile.runner())) {
                 List<String> preview = new ArrayList<>(List.of("orca", "orchestration", "worker-start",
                         "--task", "<orca-task-id>", "--worktree", "<current-worktree>"));
@@ -1039,6 +1051,16 @@ public final class RoleRunner {
             Set<String> connectionVariables = user.connections().values().stream()
                     .map(dev.warden.config.Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
                     .collect(java.util.stream.Collectors.toSet());
+            // Registration may change in the panel while a long-running loop holds its
+            // initial user snapshot. Remove both old and newly registered names.
+            if (user.home() != null) {
+                Path connectionDirectory = user.home().resolve("connections");
+                if (!Files.exists(connectionDirectory) || Files.isDirectory(connectionDirectory)) {
+                    new dev.warden.config.ConnectionStore(user.home()).load().connections().values().stream()
+                            .map(dev.warden.config.Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                            .forEach(connectionVariables::add);
+                }
+            }
             RoleExecutor executor = executors.forProfile(profile, processes.withoutEnvironment(connectionVariables), git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
                     runId, workflowRunId != null ? workflowRunId : runId,
@@ -1942,6 +1964,9 @@ public final class RoleRunner {
             return "ready".equals(state) || "not_required".equals(state);
         }
         if ("local".equals(profile.runner())) return true;
+        // Coding harnesses stay ineligible until a real tool loop is proven. Do not probe
+        // a null command, and do not treat a binary on PATH as that proof.
+        if (profile.harness() != null || profile.command() == null) return false;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command.contains("/") || command.contains("\\")) return Files.isExecutable(Path.of(command));
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");

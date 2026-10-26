@@ -231,9 +231,15 @@ public final class RoleResolver {
             Profile profile = profiles.get(name);
             if (profile == null) { verdicts.add(new Candidate(name, "profile_not_found", null)); continue; }
             if (!profile.role().equals(role)) { verdicts.add(new Candidate(name, "role_mismatch", null)); continue; }
-            if ("api".equals(profile.runner()) && (profile.apiConnection() == null
+            if (profile.connectionRef() != null && (profile.apiConnection() == null
                     || !profile.apiConnection().enabled())) {
                 verdicts.add(new Candidate(name, "connection_unavailable", null));
+                continue;
+            }
+            // An offline harness contract is not a coding-tool proof. A written stamp cannot
+            // make it eligible, and a fake CLI must not be treated as one.
+            if (profile.harness() != null) {
+                verdicts.add(new Candidate(name, "harness_coding_unproven", null));
                 continue;
             }
             // A judge that may write can change what it is judging: refused before anything

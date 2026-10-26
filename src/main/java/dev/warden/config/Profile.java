@@ -16,8 +16,12 @@ import java.util.Set;
  * worktree fingerprint taken around the run. Two vendor permission flags were tried and both
  * silently ended the run at the first tool call; a flag is a claim, a check is a fact.
  *
- * `command` is the executable for the runners that start one, and is null for `runner: local`,
- * which starts nothing. Anything that reaches for it must know which runner it is holding.
+ * `command` is the executable for the runners that start one, and is null for `runner: local`
+ * and for `harness: opencode`, which the adapter launches itself. Anything that reaches for
+ * it must know which runner it is holding.
+ *
+ * `harness` names an external coding CLI. It is not a verified implementer: routing stays
+ * closed until a real tool loop proves the contract.
  */
 public record Profile(
         String name,
@@ -46,6 +50,7 @@ public record Profile(
         boolean verified,
         String mcpConfig,
         String verificationExpect,
+        String harness,
         ApiSettings apiSettings) {
 
     /** Connection metadata contains references only; never a credential value. */
@@ -64,7 +69,7 @@ public record Profile(
         this(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, null);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, null, null);
     }
 
     public String connectionRef() { return apiSettings == null ? null : apiSettings.connection(); }
@@ -72,6 +77,8 @@ public record Profile(
     public int maxOutputTokens() { return apiSettings == null ? 2048 : apiSettings.maxOutputTokens(); }
     public Connection apiConnection() { return apiSettings == null ? null : apiSettings.resolved(); }
     @Override public boolean verified() {
+        // A hand-written stamp cannot make a coding harness eligible. Tool-loop proof is separate.
+        if (harness != null) return false;
         return verified && (apiSettings == null || (apiConnection() != null
                 && java.util.Objects.equals(apiSettings.verificationFingerprint(), apiFingerprint())));
     }
@@ -84,7 +91,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, false, mcpConfig, verificationExpect, probe);
+                verificationProbe, verificationChecks, false, mcpConfig, verificationExpect, harness, probe);
     }
 
     /** Effective identity for independence; the legacy label remains in historical evidence. */
@@ -110,32 +117,41 @@ public record Profile(
     }
 
     public Profile withConnection(Connection connection, java.nio.file.Path home) {
-        if (!"api".equals(runner) || !connection.id().equals(connectionRef())) {
+        if (apiSettings == null || (!"api".equals(runner) && harness == null)
+                || !connection.id().equals(connectionRef())) {
             throw new IllegalArgumentException("connection does not match API profile");
         }
+        // The HTTP adapter posts to chat/completions. A harness needs the API root instead.
+        String boundEndpoint = harness == null ? connection.endpoint() : connection.baseUrl();
         ApiSettings settings = new ApiSettings(connectionRef(), modelVendor(), maxOutputTokens(),
                 apiSettings.verificationFingerprint(), connection, home.toAbsolutePath().normalize());
         Profile bound = new Profile(name, role, vendor, model, effort, command, args, readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
-                runner, connection.endpoint(), connection.apiKeyEnv(), verificationProbe,
-                verificationChecks, verified, mcpConfig, verificationExpect, settings);
-        boolean checked = verified && bound.apiFingerprint().equals(settings.verificationFingerprint());
+                runner, boundEndpoint, connection.apiKeyEnv(), verificationProbe,
+                verificationChecks, verified, mcpConfig, verificationExpect, harness, settings);
+        boolean checked = harness == null && verified
+                && bound.apiFingerprint().equals(settings.verificationFingerprint());
         return new Profile(name, role, vendor, model, effort, command, args, readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
-                runner, connection.endpoint(), connection.apiKeyEnv(), verificationProbe,
-                verificationChecks, checked, mcpConfig, verificationExpect, settings);
+                runner, boundEndpoint, connection.apiKeyEnv(), verificationProbe,
+                verificationChecks, checked, mcpConfig, verificationExpect, harness, settings);
     }
 
     /** Changes to model, endpoint, adapter or output bound invalidate API verification. */
     public String apiFingerprint() {
         if (apiConnection() == null) return null;
-        String contract = String.join("\n", "api-chat-v1", "api-context-v1", apiConnection().fingerprint(),
+        String contract = String.join("\n", harness == null ? "api-chat-v1" : "harness-" + harness + "-v1",
+                "api-context-v1", apiConnection().fingerprint(),
                 role, model, independenceVendor(), Integer.toString(maxOutputTokens()),
                 String.valueOf(promptTemplate), String.valueOf(jsonSchema),
                 Boolean.toString(enforceSchema), requiredArtifactFields.toString(),
                 apiResourceDigest(promptTemplate), apiResourceDigest(jsonSchema));
+        if (harness != null) {
+            // Tool policy is part of the contract. A read-only change must drop an old stamp.
+            contract = String.join("\n", contract, harness, Boolean.toString(readOnly), "opencode-tools-v1");
+        }
         try {
             return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
                     .digest(contract.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
@@ -185,7 +201,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, resolved, verificationExpect, apiSettings);
+                verificationProbe, verificationChecks, verified, resolved, verificationExpect, harness, apiSettings);
     }
 
     /** Effort for one dispatch. Does not rewrite the home file or drop {@code verified_on}. */
@@ -193,7 +209,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, next, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, apiSettings);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings);
     }
 
     /**
@@ -207,6 +223,7 @@ public record Profile(
      * worktree fingerprint's guarantee, as on every other channel.
      */
     public Profile hostedOnOrca() {
+        if (harness != null) throw new IllegalArgumentException("harness profiles cannot be hosted on Orca");
         if ("api".equals(runner)) throw new IllegalArgumentException("API connections cannot be hosted on Orca");
         if ("orca".equals(runner)) return this;
         return new Profile(name, role, vendor, model, effort, command, List.of(), readOnly,
@@ -220,7 +237,7 @@ public record Profile(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
-            "verification", "notes", "mcp", "connection", "model_vendor");
+            "verification", "notes", "mcp", "connection", "model_vendor", "harness");
     private static final Set<String> MCP = Set.of("config", "note");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd", "max_output_tokens");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
@@ -285,7 +302,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, apiSettings);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings);
     }
 
     public boolean hasVerifiedVision() {
@@ -306,12 +323,22 @@ public record Profile(
 
         // Read before `command`, because it decides whether there is a command at all.
         String runner = root.requireEnum("runner", RUNNERS, "direct");
+        String harness = root.optString("harness", null);
+        if (harness != null && harness.isBlank()) harness = null;
+        if (harness != null && !"opencode".equals(harness)) {
+            root.collector().add("harness must be opencode");
+        }
+        boolean opencode = "opencode".equals(harness);
+        if (opencode && !"direct".equals(runner)) {
+            root.collector().add("harness: opencode requires runner: direct");
+        }
 
         // `local` starts no process, so there is no executable to name. Requiring one would
         // make every local profile invent a dummy — and the moment the `runner` line is
         // deleted or misspelt, Warden would try to spawn that dummy as a Direct CLI vendor.
+        // A harness names no command either: the adapter owns that process.
         boolean http = "local".equals(runner) || "api".equals(runner);
-        String command = http
+        String command = http || opencode
                 ? root.optString("command", null)
                 : root.requireString("command");
         List<String> args = root.optStringList("args", List.of());
@@ -327,7 +354,7 @@ public record Profile(
             if ("orca".equals(runner) && (model == null || model.isBlank())) {
                 root.collector().add("runner: orca effort requires an explicit model");
             }
-            if ("direct".equals(runner) && args.stream().noneMatch(a -> a.contains("{{effort}}"))) {
+            if ("direct".equals(runner) && !opencode && args.stream().noneMatch(a -> a.contains("{{effort}}"))) {
                 root.collector().add("runner: direct effort requires {{effort}} in args; replace the literal effort value");
             }
         } else if (args.stream().anyMatch(a -> a.contains("{{effort}}"))) {
@@ -349,7 +376,7 @@ public record Profile(
         if (usesMcp && mcpConfig == null) {
             root.collector().add("{{mcp_config}} in args requires mcp.config naming the configuration file");
         }
-        if (mcpConfig != null && !usesMcp && "direct".equals(runner)) {
+        if (mcpConfig != null && !usesMcp && "direct".equals(runner) && !opencode) {
             root.collector().add("mcp.config is declared but no args entry passes {{mcp_config}} to the "
                     + "vendor, so the servers would never be reached");
         }
@@ -366,6 +393,8 @@ public record Profile(
         Double maxCostUsd = limits.has("max_cost_usd")
                 ? limits.optDouble("max_cost_usd", 1.0, 0.0, 10000.0) : null;
         int maxOutputTokens = (int) limits.optInt("max_output_tokens", 2048, 1, 16384);
+        // An omitted cap is not a promise of 2048. API keeps its historical default.
+        if (opencode && !limits.has("max_output_tokens")) maxOutputTokens = 0;
 
         String promptTemplate = root.optString("prompt_template", null);
         String jsonSchema = root.optString("json_schema", null);
@@ -387,6 +416,9 @@ public record Profile(
         }
         if ("orca".equals(runner) && !"workspace_file".equals(promptDelivery)) {
             root.collector().add("runner: orca requires prompt_delivery: workspace_file; stdin/argv are not forwarded");
+        }
+        if (opencode && !"argv".equals(promptDelivery)) {
+            root.collector().add("harness: opencode reads the prompt from the dispatch file; prompt_delivery cannot change that");
         }
 
         // How a file the role must LOOK at reaches the vendor. Screenshots are the case that
@@ -431,8 +463,42 @@ public record Profile(
                 }
             }
             vendor = canonicalVendor(modelVendor);
+        } else if (opencode) {
+            if (connection == null || !connection.matches("[a-z][a-z0-9_-]{0,63}")) {
+                root.collector().add("harness: opencode requires a valid connection id");
+            }
+            if (model == null) root.collector().add("harness: opencode requires an explicit model");
+            if (modelVendor == null || !modelVendor.matches("[a-z][a-z0-9_-]{0,63}")
+                    || Set.of("openrouter", "gonkarouter", "codex", "claude", "opencode").contains(modelVendor)) {
+                root.collector().add("harness: opencode requires model_vendor naming the model developer");
+            }
+            if (command != null || !args.isEmpty() || mcpConfig != null) {
+                root.collector().add("harness: opencode cannot take command, args or MCP; the adapter owns the process");
+            }
+            if (endpoint != null || apiKeyEnv != null) {
+                root.collector().add("harness: opencode uses connection; endpoint/api_key_env belong to runner: local");
+            }
+            if (maxCostUsd != null) {
+                root.collector().add("harness: opencode cannot prove a strict max_cost_usd bound");
+            }
+            if (effort != null) root.collector().add("harness: opencode does not support effort");
+            if (!"implementer".equals(role) && !readOnly) {
+                root.collector().add("harness: opencode allows writes only for role implementer");
+            }
+            if (modelVendor != null && vendor != null
+                    && !canonicalVendor(modelVendor).equals(canonicalVendor(vendor))) {
+                root.collector().add("harness vendor must match model_vendor, not the router");
+            }
+            if (model != null && model.contains("/") && modelVendor != null) {
+                String prefix = canonicalVendor(model.substring(0, model.indexOf('/')));
+                if (Set.of("openai", "anthropic", "x-ai", "google", "deepseek", "z-ai", "minimax").contains(prefix)
+                        && !prefix.equals(canonicalVendor(modelVendor))) {
+                    root.collector().add("model_vendor does not match the known model id prefix");
+                }
+            }
+            if (modelVendor != null) vendor = canonicalVendor(modelVendor);
         } else if (connection != null || modelVendor != null || limits.has("max_output_tokens")) {
-            root.collector().add("connection, model_vendor and max_output_tokens currently require runner: api");
+            root.collector().add("connection, model_vendor and max_output_tokens require runner: api or harness: opencode");
         }
         if ("local".equals(runner) && endpoint == null) {
             root.collector().add("endpoint is required when runner is local");
@@ -490,6 +556,9 @@ public record Profile(
             root.collector().add("runner: " + runner + " does not support capabilities.vision; "
                     + "the HTTP adapter sends only text");
         }
+        if (opencode && (declaresVision || vision != null || attachmentFlag != null)) {
+            root.collector().add("harness: opencode does not support vision or attachments");
+        }
 
         Values verification = root.optMap("verification").rejectUnknownKeys(VERIFICATION);
         boolean verified = verification.has("verified_on");
@@ -509,11 +578,12 @@ public record Profile(
         }
 
         root.throwIfAny();
+        boolean connects = "api".equals(runner) || opencode;
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClock,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                probe, whatToCheck, verified, mcpConfig, expect,
-                "api".equals(runner) ? new ApiSettings(connection, canonicalVendor(modelVendor),
+                probe, whatToCheck, verified, mcpConfig, expect, harness,
+                connects ? new ApiSettings(connection, canonicalVendor(modelVendor),
                         maxOutputTokens, connectionFingerprint, null, null) : null);
     }
 

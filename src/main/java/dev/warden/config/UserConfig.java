@@ -82,7 +82,7 @@ public record UserConfig(
                     if (profile.connectionRef() != null) {
                         Connection connection = connections.get(profile.connectionRef());
                         if (connection == null) {
-                            problems.put(key, "API profile references an unavailable connection: " + profile.connectionRef());
+                            problems.put(key, "profile references an unavailable connection: " + profile.connectionRef());
                             continue;
                         }
                         profile = profile.withConnection(connection, home);

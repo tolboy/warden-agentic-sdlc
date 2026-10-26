@@ -329,9 +329,16 @@ public final class Main {
             }
             row.put("read_only", profile.readOnly());
             row.put("verified", profile.verified());
-            row.put("eligible", profile.verified() && (!"api".equals(profile.runner())
+            row.put("eligible", profile.verified() && profile.harness() == null && (!"api".equals(profile.runner())
                     || RoleRunner.executableFound(new ProcessRunner(), profile)));
-            if (!profile.verified()) {
+            if (profile.harness() != null) {
+                row.put("harness", profile.harness());
+                row.put("connection", profile.connectionRef());
+                row.put("model_vendor", profile.modelVendor());
+                row.put("coding_tools_verified", false);
+                row.put("eligible", false);
+                row.put("blocked_because", "harness coding tools are not proven; a probe cannot stamp this profile");
+            } else if (!profile.verified()) {
                 row.put("blocked_because", "profile is unverified; fill verification.verified_on "
                         + "only after running its probe");
                 // The exact command that would settle it, next to the reason it is blocked.

@@ -1,6 +1,6 @@
 # API-подключения и авторизация моделей в Warden
 
-Статус: исследование и поэтапная реализация, 2026-10-26. Исходная архитектура изучена на `7d7b4f4`; предложения ниже описывают полный целевой объём. Первый increment реализует Connections/env references, CLI управления, диагностику в панели, read-only API transport и native probes. Инструкция по уже доступным возможностям — [API-CONNECTIONS.md](API-CONNECTIONS.md). OS vault, UI editor, OAuth и coding harness пока остаются планом. Пользовательские настройки и login не менялись; авторизованные внешние запросы и coding smoke не выполнялись.
+Статус: исследование и поэтапная реализация, 2026-10-26. Исходная архитектура изучена на `7d7b4f4`; предложения ниже описывают полный целевой объём. Первый increment реализует Connections/env references, CLI управления, диагностику в панели, read-only API transport и native probes. Инструкция по уже доступным возможностям — [API-CONNECTIONS.md](API-CONNECTIONS.md). Офлайн-контракт OpenCode разбирает `runner: direct` и `harness: opencode`, но не делает профиль допустимым implementer и не подтверждает GonkaRouter. OS vault, UI editor и OAuth пока остаются планом. Пользовательские настройки и login не менялись; авторизованные внешние запросы и coding smoke не выполнялись.
 
 ## 1. Рекомендуемое решение
 

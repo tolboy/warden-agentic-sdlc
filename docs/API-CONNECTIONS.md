@@ -1,8 +1,8 @@
 # API connections
 
-Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. API connections do not supply coding tools or an API implementer.
+Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. An OpenCode profile can name a connection, but it is not an eligible implementer until a live tool loop is proven.
 
-Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and environment variable references, never key values. This first increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. OS vault, OAuth, UI editing and external coding-agent adapters remain future work.
+Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and environment variable references, never key values. This first increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. OS vault, OAuth and UI editing remain future work.
 
 ## Configure a connection
 
@@ -65,6 +65,12 @@ HTTP response size is bounded to 4 MiB and the deadline includes the response bo
 Input/output/cache/reasoning tokens and request/model receipts are recorded when supplied. OpenRouter-reported `usage.cost` is authoritative for its connection; model-written artifact cost is ignored. GonkaRouter/custom cost remains unknown. Unknown cost is never zero. `runner: api` refuses declared `limits.max_cost_usd`, so strict task budgets cannot mistake an unenforced declaration for a proven spend bound. Advisory budgets retain the usual post-call accounting semantics.
 
 Known credential values are redacted before raw responses, diagnostics, artifacts or verification receipts are persisted. Credentials are resolved inside the HTTP executor and are never installed in a CLI's global configuration. Registered connection environment variables are removed from CLI dispatches and shell verification probes launched by Warden. Existing external Orca processes retain their own environment; API credential forwarding through Orca is not implemented.
+
+## Offline OpenCode profile
+
+`examples/api/opencode-implementer.yaml` is the offline contract for a later coding adapter. It uses `runner: direct` and `harness: opencode` with a connection, an explicit model and `model_vendor`. It is not eligible for a role. `warden profiles --verify` refuses to stamp it, and a hand-written `verified_on` does not make it eligible. Copying it into `profiles/` does not add it to policy.
+
+The adapter restores only that connection's environment variable after removing every connection variable, writes `{env:NAME}` into the generated config, and requires `opencode debug config` to show the base URL and requested model before `run`. Exit 0 without the Warden artifact does not complete the role. A served model that is missing or different fails closed. Read-only is still the worktree fingerprint; permission flags are only a claim. GonkaRouter is refused before any process because the no-fallback header is not a proven config option. Harness-reported cost is not billing, unknown cost is not zero, and `limits.max_cost_usd` is rejected. No live OpenCode or provider call was run for this contract.
 
 ## Disable or remove
 

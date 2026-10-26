@@ -54,6 +54,7 @@ public final class TestMain {
                 new dev.warden.ConnectionTest(),
                 new dev.warden.ApiExecutorTest(),
                 new dev.warden.ApiConfigTest(),
+                new dev.warden.OpenCodeHarnessTest(),
                 new dev.warden.ApiContextTest(),
                 new dev.warden.ProcessEnvironmentTest(),
                 new dev.warden.execution.ApiReceiptTest(),
