@@ -2,7 +2,7 @@
 
 Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. An OpenCode profile can name a connection, but it is not an eligible implementer until a live tool loop is proven.
 
-Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and environment variable references, never key values. This first increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. OS vault, OAuth and UI editing remain future work.
+Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. Env mode does not require the vault. OAuth remains future work.
 
 ## Configure a connection
 
@@ -12,7 +12,14 @@ warden connections add gonkarouter-personal --provider gonkarouter --env GONKARO
 warden connections list
 ```
 
-Set the referenced variable through your existing secret/environment mechanism in the process that runs Warden. Do not paste a key into YAML, command arguments, prompt templates or shell verification probes. Adding a connection does not activate a profile or change policy.
+Set an environment variable through your existing secret mechanism in the process that runs Warden, or store the key in Windows Credential Manager:
+
+```text
+warden connections add openrouter-personal --provider openrouter --os-store
+warden connections auth-set openrouter-personal
+```
+
+`auth-set` reads the key from stdin. A console prompt hides it. Do not pass the key as an argument. `auth-remove` deletes that local vault entry and does not revoke the key at the provider. If Credential Manager cannot be locked and probed, `--os-store` is refused and nothing is written to a file instead. Do not paste a key into YAML, command arguments, prompt templates or shell verification probes. Adding a connection or storing a key does not activate a profile or change policy.
 
 ```yaml
 version: 1
@@ -32,7 +39,13 @@ Preset providers bind credentials to their documented HTTPS API endpoint. Custom
 warden connections add local-test --provider custom --base-url http://127.0.0.1:11434/v1 --no-auth
 ```
 
-`connections list`, `profiles`, `doctor` and Dashboard Settings show local credential presence without returning its value or sending inference. Missing, invalid and disabled credentials cannot make a runnable API profile. These states do not assert that the service has accepted a key.
+`connections list`, `profiles`, `doctor` and the dashboard show local credential presence without returning its value or sending inference. Missing, invalid and disabled credentials cannot make a runnable API profile. These states do not assert that the service has accepted a key.
+
+## Edit in the dashboard
+
+The Agents page has a connections editor. It is available from `warden dashboard` and from the page opened by `warden decide`. The form asks for an environment variable name. A key field is shown only after the Windows vault probe succeeds; the value is posted once, cleared from the form, and is not returned by GET or stored in browser storage. Saving, enabling, disabling, or storing a key does not add a profile to policy.
+
+Each change carries the file revision from the row you opened. If the file changed in another window or command, the panel keeps the draft, asks you to reload, and accepts the new revision only after you choose «Изменить» on that row again. Unfamiliar YAML layouts and files that are not UTF-8 are left unchanged. Remove is refused while any profile references the connection, and it does not revoke the key at the provider. Check uses the same rules as `warden connections check` and does not stamp a model or a role.
 
 ```text
 warden connections check openrouter-personal

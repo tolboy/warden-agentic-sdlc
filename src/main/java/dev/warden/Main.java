@@ -209,11 +209,11 @@ public final class Main {
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", url)).ok());
         try (var dashboard = new dev.warden.dashboard.Dashboard(project, port, opener)) {
             dashboard.start();
-            // Read-only except for one action: putting up the page for a pending decision.
-            // The answer is given on that page, through the same path as `warden approve`.
+            // Decision answers stay on the decision page, through the same path as `warden approve`.
+            // Connection files are edited here through the same service as `warden connections`.
             System.out.println(Json.write(Map.of("ok", true, "url", dashboard.url(),
                     "project", project.toString(), "read_only", false,
-                    "actions", List.of("open_decision_page"))));
+                    "actions", List.of("open_decision_page", "manage_connections"))));
             if (hasFlag(args, "--open-orca")) {
                 var opened = new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", dashboard.url()));
@@ -372,8 +372,17 @@ public final class Main {
     }
 
     private static int connections(String[] args) throws Exception {
+        java.io.InputStream input = System.in;
+        if (args.length >= 2 && "auth-set".equals(args[1]) && System.console() != null) {
+            char[] password = System.console().readPassword(
+                    "Credential (hidden; it is not an argument and is not written to the connection file): ");
+            if (password == null) throw new IllegalArgumentException("credential input was closed");
+            byte[] bytes = new String(password).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            java.util.Arrays.fill(password, '\0');
+            input = new java.io.ByteArrayInputStream(bytes);
+        }
         Map<String, Object> report = new dev.warden.config.ConnectionCommand()
-                .run(UserConfig.defaultHome(), args);
+                .run(UserConfig.defaultHome(), args, input);
         System.out.println(Json.write(report));
         return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
@@ -2694,6 +2703,12 @@ public final class Main {
                   warden profiles              which profiles load, which are eligible, and why not
                   warden connections list      configured API endpoints and credential presence (no inference)
                   warden connections add ID --provider openrouter|gonkarouter --env VARIABLE
+                  warden connections add ID --provider openrouter --os-store
+                                           reference Windows Credential Manager; the key is not an argument
+                  warden connections auth-set ID
+                                           read the key from stdin (hidden when a console is attached)
+                  warden connections auth-remove ID
+                                           delete the local vault entry; the provider key is not revoked
                   warden connections check ID  native auth check where supported; no inference or model stamp
                   warden connections enable|disable|remove ID
                   warden profiles --verify N   run profile N's own probe; stamps verified_on

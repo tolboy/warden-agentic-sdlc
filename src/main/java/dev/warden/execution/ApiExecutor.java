@@ -61,6 +61,20 @@ public final class ApiExecutor implements RoleExecutor {
                 && !profile.apiSettings().verificationFingerprint().equals(dispatchedFingerprint)) {
             return failure("role_api_profile_changed", started, "", evidence);
         }
+        if (profile.apiSettings().verificationFingerprint() != null) {
+            // A panel edit applies before the next dispatch, without rewriting an in-flight
+            // attempt's frozen endpoint or authorizing a new route implicitly.
+            try {
+                Connection current = new dev.warden.config.ConnectionStore(profile.apiSettings().home())
+                        .versioned(connection.id()).connection();
+                if (!current.enabled()) return failure("role_api_connection_disabled", started, "", evidence);
+                if (!current.fingerprint().equals(connection.fingerprint())) {
+                    return failure("role_api_connection_changed", started, "", evidence);
+                }
+            } catch (IOException | RuntimeException unavailable) {
+                return failure("role_api_connection_missing", started, "", evidence);
+            }
+        }
         evidence.put("connection", connection.id());
         evidence.put("connection_fingerprint", connection.fingerprint());
         evidence.put("provider", connection.provider());

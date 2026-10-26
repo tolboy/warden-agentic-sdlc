@@ -114,14 +114,18 @@ public final class DashboardTest implements Suite {
             check.eq("dashboard reachable over loopback", 200, page.statusCode());
             check.contains("UI treats configured fields as text", page.body(), "td.textContent");
             check.contains("runs section is on the page", page.body(), "Запуски");
-            check.contains("connections section is on the page", page.body(), "<h2>Подключения</h2>");
+            check.contains("connections section is on the page", page.body(), "id=\"connection-editor-title\">Подключения</h2>");
             check.contains("authorization is not inferred from key presence", page.body(), "не подтверждает авторизацию");
-            check.contains("API text completion does not claim coding tools", page.body(), "coding tools в этом режиме не подключены");
+            check.contains("API text completion does not claim coding tools", page.body(), "инструменты кодинга пока не подключены");
             check.contains("connection setup names the CLI entry point", page.body(), "warden connections add");
             check.contains("connection setup uses an environment reference", page.body(), "env:OPENROUTER_API_KEY");
-            check.contains("invalid credential formats have their own UI state", page.body(), "некорректный формат");
-            check.contains("unavailable credential sources have their own UI state", page.body(), "источник недоступен");
-            check.that("the read-only panel offers no API key input", !page.body().contains("type=\"password\""));
+            check.contains("invalid credential formats have their own UI state", page.body(), "неверный формат ключа");
+            check.contains("unavailable credential sources have their own UI state", page.body(), "источник ключа недоступен");
+            check.that("the editor has no api_key value parameter", !page.body().contains("name=\"api_key\""));
+            if (page.body().contains("type=\"password\"")) {
+                check.contains("a password input is the Windows vault field", page.body(), "name=\"secret\"");
+                check.that("the vault field is not prefilled", !page.body().contains("type=\"password\" value="));
+            }
             check.contains("run timeline is a details element", page.body(), "createElement('details')");
             check.that("page script never assigns innerHTML from data", !page.body().contains("innerHTML"));
             var state = client.send(HttpRequest.newBuilder(URI.create(dashboard.url() + "api/state")).build(), HttpResponse.BodyHandlers.ofString());
@@ -134,7 +138,7 @@ public final class DashboardTest implements Suite {
             check.eq("other web origins cannot read state", 403, crossOrigin.statusCode());
             var write = client.send(HttpRequest.newBuilder(URI.create(dashboard.url() + "api/state"))
                     .POST(HttpRequest.BodyPublishers.ofString("{}" )).build(), HttpResponse.BodyHandlers.ofString());
-            check.eq("dashboard has no mutation API", 405, write.statusCode());
+            check.eq("state projection remains read-only", 405, write.statusCode());
             var file = client.send(HttpRequest.newBuilder(URI.create(dashboard.url() + "profiles/test.yaml")).build(), HttpResponse.BodyHandlers.ofString());
             check.eq("dashboard cannot serve arbitrary config files", 404, file.statusCode());
         }

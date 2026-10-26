@@ -157,6 +157,26 @@ public final class ApiConfigTest implements Suite {
         check.that("the unchanged bound profile becomes eligible after stamping", verified.verified());
         String verifiedFingerprint = verified.apiFingerprint();
         check.eq("the receipt fingerprint matches the bound configuration", verifiedFingerprint, receipt.get("profile_fingerprint"));
+        var store = new dev.warden.config.ConnectionStore(home);
+        Path connectionPath = home.resolve("connections/probe-api.yaml");
+        String savedConnection = Files.readString(connectionPath);
+        var pending = new dev.warden.execution.RoleExecutor.Request("runtime", "runtime", "reviewer", verified,
+                null, null, home, home.resolve("runtime"), template, schema, "", "reviewer", List.of());
+        int beforeRecheck = api.calls.get();
+        store.setEnabled("probe-api", false);
+        var disabledPending = new dev.warden.execution.ApiExecutor().execute(pending);
+        check.eq("a running loop sees a newly disabled connection before its next dispatch",
+                "role_api_connection_disabled", disabledPending.code());
+        check.eq("disabled cached profiles send no HTTP request", beforeRecheck, api.calls.get());
+        check.eq("the refused cached dispatch is not a vendor turn", false, disabledPending.evidence().get("vendor_turn_started"));
+        Files.writeString(connectionPath, savedConnection.replace(api.base(), api.base() + "/changed"));
+        check.eq("a running loop never silently switches to an edited endpoint",
+                "role_api_connection_changed", new dev.warden.execution.ApiExecutor().execute(pending).code());
+        check.eq("edited cached routes send no HTTP request", beforeRecheck, api.calls.get());
+        Files.delete(connectionPath);
+        check.eq("a removed cached connection cannot dispatch", "role_api_connection_missing",
+                new dev.warden.execution.ApiExecutor().execute(pending).code());
+        Files.writeString(connectionPath, savedConnection);
         String stamped = Files.readString(file);
         String connectionText = Files.readString(home.resolve("connections/probe-api.yaml"));
         String templateText = Files.readString(template);
