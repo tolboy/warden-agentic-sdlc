@@ -53,7 +53,8 @@ public final class ProcessEnvironmentTest implements Suite {
         for (String assertion : List.of("default_inherits", "first_copy_removes_only_one",
                 "union_removes_both", "unrelated_preserved", "normal_environment_preserved",
                 "parent_unchanged", "base_runner_unchanged", "preview_clean", "raw_clean",
-                "vendor_path_clean", "empty_copy_preserves_default")) {
+                "vendor_path_clean", "empty_copy_preserves_default", "restored_one",
+                "restored_keep", "restored_other_absent", "union_unchanged_after_restore")) {
             check.eq(assertion.replace('_', ' '), true, report.get(assertion));
         }
         check.that("creating a fixture environment does not change the test JVM",
@@ -88,6 +89,9 @@ public final class ProcessEnvironmentTest implements Suite {
         Path vendorErr = directory.resolve("vendor.stderr.txt");
         ProcessRunner.Result vendor = union.runVendor(probe, directory, Duration.ofSeconds(15),
                 ProcessRunner.DEFAULT_CAPTURE_BYTES, null, vendorOut, vendorErr, ProcessRunner.DEFAULT_RAW_BYTES);
+        ProcessRunner restored = union.withEnvironment(Map.of(ONE, VALUE_ONE));
+        ProcessRunner.Result restoredResult = restored.run(probe, directory, Duration.ofSeconds(15));
+        ProcessRunner.Result unionAfter = union.run(probe, directory, Duration.ofSeconds(15));
         ProcessRunner.Result originalAgain = original.run(probe, directory, Duration.ofSeconds(15));
         ProcessRunner.Result emptyCopy = original.withoutEnvironment(Set.of())
                 .run(probe, directory, Duration.ofSeconds(15));
@@ -108,6 +112,15 @@ public final class ProcessEnvironmentTest implements Suite {
                 + Files.readString(vendorOut) + Files.readString(vendorErr))
                 && vendor.stdout().contains("KEEP=" + VALUE_KEEP));
         report.put("empty_copy_preserves_default", emptyCopy.ok() && hasBoth(emptyCopy.stdout()));
+        report.put("restored_one", restoredResult.ok()
+                && restoredResult.stdout().contains("ONE=" + VALUE_ONE)
+                && restoredResult.stdout().contains("TWO=<absent>"));
+        report.put("restored_keep", restoredResult.stdout().contains("KEEP=" + VALUE_KEEP));
+        report.put("restored_other_absent", !restoredResult.stdout().contains(VALUE_TWO)
+                && !restoredResult.stderr().contains(VALUE_TWO));
+        report.put("union_unchanged_after_restore", unionAfter.ok()
+                && unionAfter.stdout().contains("ONE=<absent>")
+                && unionAfter.stdout().contains("TWO=<absent>"));
         // Only booleans cross back to the test runner; fixture credentials never enter an
         // assertion failure detail or the outer test's terminal output.
         System.out.print(Json.write(report));
