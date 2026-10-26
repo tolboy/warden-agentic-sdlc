@@ -28,6 +28,7 @@ public final class Executors {
             case "orca" -> new OrcaExecutor(processes, git);
             // git, so a read_only local role is held to the same fingerprint as a CLI one.
             case "local" -> new LocalHttpExecutor(System::getenv, null, git);
+            case "api" -> new ApiExecutor(System::getenv, git);
             default -> new DirectCliExecutor(processes, git);
         };
     }

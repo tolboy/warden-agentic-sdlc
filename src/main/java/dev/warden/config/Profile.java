@@ -45,7 +45,112 @@ public record Profile(
         List<String> verificationChecks,
         boolean verified,
         String mcpConfig,
-        String verificationExpect) {
+        String verificationExpect,
+        ApiSettings apiSettings) {
+
+    /** Connection metadata contains references only; never a credential value. */
+    public record ApiSettings(String connection, String modelVendor, int maxOutputTokens,
+                              String verificationFingerprint, Connection resolved, java.nio.file.Path home) {}
+
+    /** Source compatibility for existing CLI/local callers. */
+    public Profile(String name, String role, String vendor, String model, String effort,
+                   String command, List<String> args, boolean readOnly, long wallClockMinutes,
+                   Double maxCostUsd, String promptTemplate, String jsonSchema, boolean enforceSchema,
+                   List<String> requiredArtifactFields, List<String> quotaSignatures,
+                   String promptDelivery, String attachmentFlag, VisionCapability vision,
+                   String runner, String endpoint, String apiKeyEnv, String verificationProbe,
+                   List<String> verificationChecks, boolean verified, String mcpConfig,
+                   String verificationExpect) {
+        this(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, null);
+    }
+
+    public String connectionRef() { return apiSettings == null ? null : apiSettings.connection(); }
+    public String modelVendor() { return apiSettings == null ? vendor : apiSettings.modelVendor(); }
+    public int maxOutputTokens() { return apiSettings == null ? 2048 : apiSettings.maxOutputTokens(); }
+    public Connection apiConnection() { return apiSettings == null ? null : apiSettings.resolved(); }
+    @Override public boolean verified() {
+        return verified && (apiSettings == null || (apiConnection() != null
+                && java.util.Objects.equals(apiSettings.verificationFingerprint(), apiFingerprint())));
+    }
+
+    /** An explicit native probe may test a stale or absent stamp without authorizing routing. */
+    public Profile forApiProbe() {
+        if (apiConnection() == null) throw new IllegalArgumentException("API probe requires a bound connection");
+        ApiSettings probe = new ApiSettings(connectionRef(), modelVendor(), maxOutputTokens(), null,
+                apiConnection(), apiSettings.home());
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, false, mcpConfig, verificationExpect, probe);
+    }
+
+    /** Effective identity for independence; the legacy label remains in historical evidence. */
+    public static String canonicalVendor(String value) {
+        if (value == null) return null;
+        return switch (value.toLowerCase(java.util.Locale.ROOT)) {
+            case "codex", "openai" -> "openai";
+            case "claude", "anthropic" -> "anthropic";
+            case "grok", "xai", "x-ai" -> "x-ai";
+            case "gemini", "google" -> "google";
+            case "zai", "zai-org", "z-ai" -> "z-ai";
+            case "deepseek-ai", "deepseek" -> "deepseek";
+            case "minimaxai", "minimax" -> "minimax";
+            default -> value;
+        };
+    }
+
+    public String independenceVendor() { return canonicalVendor(modelVendor()); }
+
+    /** Bind a snapshot of the user's connection before routing, not a secret. */
+    public Profile withConnection(Connection connection) {
+        return withConnection(connection, java.nio.file.Path.of("."));
+    }
+
+    public Profile withConnection(Connection connection, java.nio.file.Path home) {
+        if (!"api".equals(runner) || !connection.id().equals(connectionRef())) {
+            throw new IllegalArgumentException("connection does not match API profile");
+        }
+        ApiSettings settings = new ApiSettings(connectionRef(), modelVendor(), maxOutputTokens(),
+                apiSettings.verificationFingerprint(), connection, home.toAbsolutePath().normalize());
+        Profile bound = new Profile(name, role, vendor, model, effort, command, args, readOnly,
+                wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
+                requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
+                runner, connection.endpoint(), connection.apiKeyEnv(), verificationProbe,
+                verificationChecks, verified, mcpConfig, verificationExpect, settings);
+        boolean checked = verified && bound.apiFingerprint().equals(settings.verificationFingerprint());
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly,
+                wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
+                requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
+                runner, connection.endpoint(), connection.apiKeyEnv(), verificationProbe,
+                verificationChecks, checked, mcpConfig, verificationExpect, settings);
+    }
+
+    /** Changes to model, endpoint, adapter or output bound invalidate API verification. */
+    public String apiFingerprint() {
+        if (apiConnection() == null) return null;
+        String contract = String.join("\n", "api-chat-v1", "api-context-v1", apiConnection().fingerprint(),
+                role, model, independenceVendor(), Integer.toString(maxOutputTokens()),
+                String.valueOf(promptTemplate), String.valueOf(jsonSchema),
+                Boolean.toString(enforceSchema), requiredArtifactFields.toString(),
+                apiResourceDigest(promptTemplate), apiResourceDigest(jsonSchema));
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(contract.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private String apiResourceDigest(String reference) {
+        if (reference == null) return "none";
+        java.nio.file.Path path = java.nio.file.Path.of(reference);
+        if (!path.isAbsolute()) path = apiSettings.home().resolve(path);
+        try { return dev.warden.git.GitRepository.sha256(path); }
+        catch (java.io.IOException unavailable) { return "unavailable"; }
+    }
 
     /** A profile with an MCP configuration and no expected probe answer. */
     public Profile(String name, String role, String vendor, String model, String effort,
@@ -80,7 +185,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, resolved, verificationExpect);
+                verificationProbe, verificationChecks, verified, resolved, verificationExpect, apiSettings);
     }
 
     /** Effort for one dispatch. Does not rewrite the home file or drop {@code verified_on}. */
@@ -88,7 +193,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, next, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, apiSettings);
     }
 
     /**
@@ -102,6 +207,7 @@ public record Profile(
      * worktree fingerprint's guarantee, as on every other channel.
      */
     public Profile hostedOnOrca() {
+        if ("api".equals(runner)) throw new IllegalArgumentException("API connections cannot be hosted on Orca");
         if ("orca".equals(runner)) return this;
         return new Profile(name, role, vendor, model, effort, command, List.of(), readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
@@ -114,16 +220,16 @@ public record Profile(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
-            "verification", "notes", "mcp");
+            "verification", "notes", "mcp", "connection", "model_vendor");
     private static final Set<String> MCP = Set.of("config", "note");
-    private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd");
+    private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd", "max_output_tokens");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
     private static final Set<String> QUOTA = Set.of("signatures");
     private static final Set<String> ATTACHMENTS = Set.of("flag");
     private static final Set<String> CAPABILITIES = Set.of("vision");
     private static final Set<String> VISION = Set.of("delivery", "verification", "acquires");
     private static final Set<String> VERIFICATION = Set.of(
-            "verified_on", "status", "probe", "what_to_check", "note", "expect");
+            "verified_on", "status", "probe", "what_to_check", "note", "expect", "connection_fingerprint");
 
     public static final Set<String> ROLES = Set.of(
             "implementer", "reviewer", "architect", "visual_qa", "planner", "plan_reviewer");
@@ -146,7 +252,7 @@ public record Profile(
      * {@code api_key_env} names an environment variable holding a bearer token, read at
      * dispatch and never written to evidence.
      */
-    public static final Set<String> RUNNERS = Set.of("direct", "orca", "local");
+    public static final Set<String> RUNNERS = Set.of("direct", "orca", "local", "api");
     public static final Set<String> VISION_DELIVERIES = Set.of("cli_attachment", "workspace_file");
     public static final Set<String> CAPABILITY_VERIFICATION = Set.of("required");
 
@@ -179,7 +285,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, apiSettings);
     }
 
     public boolean hasVerifiedVision() {
@@ -194,7 +300,9 @@ public record Profile(
         String name = root.requireString("profile");
         String role = root.requireEnum("role", ROLES, null);
         if (role == null) root.collector().add("role is required and must be one of " + ROLES);
-        String vendor = root.requireString("vendor");
+        String modelVendor = root.optString("model_vendor", null);
+        String vendor = root.optString("vendor", modelVendor);
+        if (vendor == null) root.collector().add("vendor or model_vendor is required");
 
         // Read before `command`, because it decides whether there is a command at all.
         String runner = root.requireEnum("runner", RUNNERS, "direct");
@@ -202,7 +310,8 @@ public record Profile(
         // `local` starts no process, so there is no executable to name. Requiring one would
         // make every local profile invent a dummy — and the moment the `runner` line is
         // deleted or misspelt, Warden would try to spawn that dummy as a Direct CLI vendor.
-        String command = "local".equals(runner)
+        boolean http = "local".equals(runner) || "api".equals(runner);
+        String command = http
                 ? root.optString("command", null)
                 : root.requireString("command");
         List<String> args = root.optStringList("args", List.of());
@@ -212,8 +321,8 @@ public record Profile(
             if (!effort.matches("[a-z][a-z0-9_-]*")) {
                 root.collector().add("effort must be a provider effort level, not a command or blank value");
             }
-            if ("local".equals(runner)) {
-                root.collector().add("runner: local does not support effort; it cannot silently drop it");
+            if (http) {
+                root.collector().add("runner: " + runner + " does not support effort; it cannot silently drop it");
             }
             if ("orca".equals(runner) && (model == null || model.isBlank())) {
                 root.collector().add("runner: orca effort requires an explicit model");
@@ -256,6 +365,7 @@ public record Profile(
         // no price cannot honestly declare one, and a strict cap then refuses the roster.
         Double maxCostUsd = limits.has("max_cost_usd")
                 ? limits.optDouble("max_cost_usd", 1.0, 0.0, 10000.0) : null;
+        int maxOutputTokens = (int) limits.optInt("max_output_tokens", 2048, 1, 16384);
 
         String promptTemplate = root.optString("prompt_template", null);
         String jsonSchema = root.optString("json_schema", null);
@@ -288,6 +398,42 @@ public record Profile(
         String attachmentFlag = attachments.optString("flag", null);
         String endpoint = root.optString("endpoint", null);
         String apiKeyEnv = root.optString("api_key_env", null);
+        String connection = root.optString("connection", null);
+        if ("api".equals(runner)) {
+            if (connection == null || !connection.matches("[a-z][a-z0-9_-]{0,63}")) {
+                root.collector().add("runner: api requires a valid connection id");
+            }
+            if (model == null) root.collector().add("runner: api requires an explicit model");
+            if (modelVendor == null || !modelVendor.matches("[a-z][a-z0-9_-]{0,63}")
+                    || Set.of("openrouter", "gonkarouter", "codex", "claude", "opencode").contains(modelVendor)) {
+                root.collector().add("runner: api requires model_vendor naming the model developer");
+            }
+            if (!readOnly || "implementer".equals(role)) {
+                root.collector().add("runner: api supports read-only text roles only; coding tools are not connected");
+            }
+            if (endpoint != null || apiKeyEnv != null) {
+                root.collector().add("runner: api uses connection; endpoint/api_key_env belong to runner: local");
+            }
+            if (command != null || !args.isEmpty() || mcpConfig != null || attachmentFlag != null) {
+                root.collector().add("runner: api cannot execute a command, args, MCP or attachments");
+            }
+            if (maxCostUsd != null) root.collector().add("runner: api cannot prove a strict max_cost_usd bound");
+            // Legacy vendor is used throughout writer accounting; API routes must name the developer.
+            if (modelVendor != null && vendor != null
+                    && !canonicalVendor(modelVendor).equals(canonicalVendor(vendor))) {
+                root.collector().add("API vendor must match model_vendor, not the router");
+            }
+            if (model != null && model.contains("/") && modelVendor != null) {
+                String prefix = canonicalVendor(model.substring(0, model.indexOf('/')));
+                if (Set.of("openai", "anthropic", "x-ai", "google", "deepseek", "z-ai", "minimax").contains(prefix)
+                        && !prefix.equals(canonicalVendor(modelVendor))) {
+                    root.collector().add("model_vendor does not match the known model id prefix");
+                }
+            }
+            vendor = canonicalVendor(modelVendor);
+        } else if (connection != null || modelVendor != null || limits.has("max_output_tokens")) {
+            root.collector().add("connection, model_vendor and max_output_tokens currently require runner: api");
+        }
         if ("local".equals(runner) && endpoint == null) {
             root.collector().add("endpoint is required when runner is local");
         }
@@ -340,8 +486,8 @@ public record Profile(
         }
         // The local adapter POSTs text. A vision claim would let visual QA pass without
         // pixels ever leaving the workspace, so refuse it here rather than at dispatch.
-        if ("local".equals(runner) && declaresVision) {
-            root.collector().add("runner: local does not support capabilities.vision; "
+        if (http && declaresVision) {
+            root.collector().add("runner: " + runner + " does not support capabilities.vision; "
                     + "the HTTP adapter sends only text");
         }
 
@@ -356,6 +502,7 @@ public record Profile(
         // it the stamp is exit code alone — and a headless CLI whose tool call was refused
         // exited 0 with an empty answer and was stamped verified. Measured 2026-09-18.
         String expect = verification.optString("expect", null);
+        String connectionFingerprint = verification.optString("connection_fingerprint", null);
         if (expect != null && expect.isBlank()) {
             root.collector().add("verification.expect must be a non-empty string when present");
             expect = null;
@@ -365,7 +512,9 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClock,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredFields, quotaSignatures,
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                probe, whatToCheck, verified, mcpConfig, expect);
+                probe, whatToCheck, verified, mcpConfig, expect,
+                "api".equals(runner) ? new ApiSettings(connection, canonicalVendor(modelVendor),
+                        maxOutputTokens, connectionFingerprint, null, null) : null);
     }
 
     /**

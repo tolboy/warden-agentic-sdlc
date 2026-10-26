@@ -82,6 +82,7 @@ public final class ProfileVerifier {
      */
     public Probe run(Profile profile, Path home, Duration timeout, Path worktree)
             throws IOException, InterruptedException {
+        if ("api".equals(profile.runner())) return new ApiProfileVerifier().run(profile, home, timeout);
         String declared = profile.verificationProbe();
         if (declared == null || declared.isBlank()) {
             throw new IllegalStateException("profile '" + profile.name() + "' declares no "
@@ -106,7 +107,15 @@ public final class ProfileVerifier {
                 throw new IOException(failed.getMessage(), failed);
             }
         } else {
-            result = processes.run(shell(command), home, timeout, 256 * 1024);
+            java.util.Set<String> connectionVariables;
+            try {
+                connectionVariables = new ConnectionStore(home).load().connections().values().stream()
+                        .map(Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                        .collect(java.util.stream.Collectors.toSet());
+            } catch (IOException unavailable) {
+                throw new IOException("cannot inspect connection credential references before a CLI probe");
+            }
+            result = processes.withoutEnvironment(connectionVariables).run(shell(command), home, timeout, 256 * 1024);
         }
 
         Path directory = home.resolve("verification");
@@ -160,6 +169,30 @@ public final class ProfileVerifier {
                     "no `verification:` block at the start of a line in " + profileFile
                             + "; add one with a probe rather than having Warden invent its shape",
                     profileFile, null);
+        }
+        if ("api".equals(profile.runner())) {
+            if (profile.apiFingerprint() == null) throw new IOException("API connection must be resolved before stamping");
+            int end = header + 1;
+            while (end < lines.size() && (lines.get(end).isBlank()
+                    || Character.isWhitespace(lines.get(end).charAt(0)))) end++;
+            for (int index = end - 1; index > header; index--) {
+                String content = lines.get(index).stripLeading();
+                if (content.startsWith("verified_on:") || content.startsWith("connection_fingerprint:")) lines.remove(index);
+            }
+            lines.add(header + 1, "  connection_fingerprint: \"" + profile.apiFingerprint() + "\"");
+            lines.add(header + 1, "  verified_on: \"" + date + "\"");
+            // Validate before replacement; a stale stamp must not produce duplicate YAML keys.
+            String updated = String.join(System.lineSeparator(), lines) + System.lineSeparator();
+            Profile.parse(updated, profileFile.toString());
+            Path temporary = Files.createTempFile(profileFile.getParent(), ".api-profile-", ".tmp");
+            try {
+                Files.writeString(temporary, updated, StandardCharsets.UTF_8);
+                Files.move(temporary, profileFile, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
+            return new Stamp(true, "verified", "API text artifact transport verified for this configuration", profileFile, date.toString());
         }
         // Match the indentation the operator already used inside the block, and append at its
         // end rather than at its top: a comment sits above the key it explains, so inserting

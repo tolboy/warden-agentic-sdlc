@@ -1,6 +1,8 @@
 package dev.warden.dashboard;
 
 import dev.warden.config.ConfigLoader;
+import dev.warden.config.Connection;
+import dev.warden.execution.CredentialResolver;
 import dev.warden.config.Policy;
 import dev.warden.config.Profile;
 import dev.warden.config.TaskSpec;
@@ -20,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * The settings a run would start with, as the panel shows them: who can fill each stage and
@@ -42,11 +45,26 @@ public final class ConfigView {
 
     public static Map<String, Object> of(Path project, UserConfig user, RoleResolver.Availability availability)
             throws IOException {
+        return of(project, user, availability, System::getenv);
+    }
+
+    /** Environment injection checks secret presence without returning a credential to the panel. */
+    public static Map<String, Object> of(Path project, UserConfig user, RoleResolver.Availability availability,
+                                          Function<String, String> environment) throws IOException {
+        CredentialResolver credentials = new CredentialResolver(environment);
         // One probe per program, however many profiles name it: the panel asks on every
         // refresh, and each probe is a process.
         Map<String, Boolean> found = new LinkedHashMap<>();
         RoleResolver.Availability cached = profile -> found.computeIfAbsent(
-                profile.runner() + "|" + profile.command(), ignored -> availability.available(profile));
+                profile.runner() + "|" + ("api".equals(profile.runner())
+                        ? profile.connectionRef() + "|" + profile.name() : profile.command()),
+                ignored -> {
+                    if (!"api".equals(profile.runner())) return availability.available(profile);
+                    Connection connection = profile.apiConnection();
+                    if (connection == null || !connection.enabled()) return false;
+                    Object state = credentials.status(connection).get("state");
+                    return "ready".equals(state) || "not_required".equals(state);
+                });
 
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("config_home", user.home().toString());
@@ -58,16 +76,36 @@ public final class ConfigView {
         view.put("policy_loaded", policy != null);
         view.put("workflow_source", policy != null && policy.workflowDeclared() ? "personal" : "default");
         view.put("stages_basis", "policy");
-        view.put("stages", stages(workflow, user, cached));
+        view.put("connections", connections(user, credentials));
+        view.put("stages", stages(workflow, user, cached, credentials));
         view.put("limits", limits(user));
         view.put("tasks", tasks(project, user, cached));
         return view;
     }
 
+    private static List<Map<String, Object>> connections(UserConfig user, CredentialResolver credentials) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Connection connection : user.connections().values()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", connection.id());
+            row.put("provider", connection.provider());
+            row.put("protocol", connection.protocol());
+            row.put("base_url", connection.baseUrl());
+            row.put("enabled", connection.enabled());
+            row.put("auth", credentials.status(connection));
+            // Presence is a local observation. Rendering settings must never make a paid request.
+            row.put("authentication", "not_verified");
+            row.put("execution", "text_completion_only");
+            rows.add(row);
+        }
+        return rows;
+    }
+
     // ------------------------------------------------------------------ stages
 
     private static List<Map<String, Object>> stages(Workflow workflow, UserConfig user,
-                                                    RoleResolver.Availability availability) {
+                                                    RoleResolver.Availability availability,
+                                                    CredentialResolver credentials) {
         List<Map<String, Object>> rows = new ArrayList<>();
         Policy policy = user.policy();
         // The writer the chain would dispatch, so a reader is judged as the preflight judges it:
@@ -120,7 +158,7 @@ public final class ConfigView {
             List<Map<String, Object>> candidates = new ArrayList<>();
             for (int index = 0; index < alone.size(); index++) {
                 RoleResolver.Candidate verdict = alone.get(index);
-                Map<String, Object> candidate = candidate(verdict.profile(), user);
+                Map<String, Object> candidate = candidate(verdict.profile(), user, credentials);
                 candidate.put("eligible", verdict.eligible());
                 candidate.put("rejected", verdict.rejected());
                 if (afterWriter != null) {
@@ -160,12 +198,13 @@ public final class ConfigView {
         return null;
     }
 
-    private static Map<String, Object> candidate(String name, UserConfig user) {
+    private static Map<String, Object> candidate(String name, UserConfig user, CredentialResolver credentials) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("profile", name);
         Profile profile = user.profiles().get(name);
         if (profile == null) return row;
         row.put("vendor", profile.vendor());
+        if ("api".equals(profile.runner())) row.put("model_vendor", profile.modelVendor());
         row.put("model", profile.model());
         row.put("effort", profile.effort());
         row.put("runner", profile.runner());
@@ -175,6 +214,18 @@ public final class ConfigView {
         row.put("max_cost_usd", profile.maxCostUsd());
         row.put("source", "personal");
         row.put("file", user.home().resolve("profiles").resolve(name + ".yaml").toString());
+        if (profile.connectionRef() != null) {
+            row.put("connection", profile.connectionRef());
+            Connection connection = user.connections().get(profile.connectionRef());
+            if (connection != null) {
+                row.put("endpoint", connection.endpoint());
+                row.put("auth", credentials.status(connection));
+                row.put("authentication", "not_verified");
+                row.put("execution", "text_completion_only");
+            } else {
+                row.put("connection_problem", "connection_not_found");
+            }
+        }
         // Orca workers report no price and no tokens, and an Orca profile with no model runs
         // whatever the agent's TUI defaults to. Both are said, not left as blanks.
         if ("orca".equals(profile.runner())) {

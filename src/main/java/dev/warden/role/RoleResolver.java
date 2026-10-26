@@ -37,7 +37,8 @@ public final class RoleResolver {
         public static final Writers NONE = new Writers(Set.of(), Set.of(), true, false);
 
         public Writers {
-            vendors = Set.copyOf(vendors);
+            vendors = vendors.stream().map(Profile::canonicalVendor)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
             profiles = Set.copyOf(profiles);
         }
 
@@ -52,7 +53,7 @@ public final class RoleResolver {
         }
 
         public boolean contains(String vendor) {
-            return vendor != null && vendors.contains(vendor);
+            return vendor != null && vendors.contains(Profile.canonicalVendor(vendor));
         }
     }
 
@@ -230,6 +231,11 @@ public final class RoleResolver {
             Profile profile = profiles.get(name);
             if (profile == null) { verdicts.add(new Candidate(name, "profile_not_found", null)); continue; }
             if (!profile.role().equals(role)) { verdicts.add(new Candidate(name, "role_mismatch", null)); continue; }
+            if ("api".equals(profile.runner()) && (profile.apiConnection() == null
+                    || !profile.apiConnection().enabled())) {
+                verdicts.add(new Candidate(name, "connection_unavailable", null));
+                continue;
+            }
             // A judge that may write can change what it is judging: refused before anything
             // else is asked of it, pinned or rotated. See JUDGING_ROLES.
             if (judges(role) && !profile.readOnly()) {
@@ -262,7 +268,8 @@ public final class RoleResolver {
             // "unavailable or quota exhausted" claimed knowledge Warden did not have; a spent
             // subscription is only ever learned by running, and is reported separately.
             if (!availability.available(profile)) {
-                verdicts.add(new Candidate(name, "executable_not_found", null));
+                verdicts.add(new Candidate(name, "api".equals(profile.runner())
+                        ? "connection_credential_unavailable" : "executable_not_found", null));
                 continue;
             }
             verdicts.add(new Candidate(name, null, assurance));
@@ -289,14 +296,14 @@ public final class RoleResolver {
         if (judges(spec.role()) && !profile.readOnly()) return "refused:" + JUDGE_NOT_READ_ONLY;
         if (!profile.readOnly()) return NONE;
         if (!writers.known()) return UNPROVEN;
-        if (!writers.contains(profile.vendor())) return INDEPENDENT;
+        if (!writers.contains(profile.independenceVendor())) return INDEPENDENT;
         if (spec.requireIndependentVendor()) return "refused:same_vendor_as_writer";
         Policy.PeerPair pair = spec.peer();
         if (pair == null) return "refused:shares_vendor_with_writer";
         String invalid = pair.problem(profiles, spec.role());
         if (invalid != null) return "refused:peer_pair_invalid:" + invalid;
         if (!pair.reviewer().equals(profile.name())) return "refused:shares_vendor_with_writer";
-        if (!writers.vendors().equals(Set.of(profile.vendor()))) {
+        if (!writers.vendors().equals(Set.of(profile.independenceVendor()))) {
             return "refused:shares_vendor_with_writer";
         }
         // The pair names one writer. A tree that a second profile of the same vendor also

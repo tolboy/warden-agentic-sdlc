@@ -871,6 +871,24 @@ public final class RoleRunner {
             String prompt = PromptRenderer.render(template, values, templateFile.toString());
             boolean backfilled = backfillNeeded(role, task, template);
             if (backfilled) prompt = prompt + browserScenarioSection(values.get("visual_scenarios"));
+            if ("api".equals(profile.runner())) {
+                try {
+                    prompt += "\n\n" + dev.warden.execution.ApiContextBuilder.build(root, mergeBase, processes);
+                } catch (java.io.IOException unavailableContext) {
+                    Map<String, Object> refusal = new LinkedHashMap<>();
+                    refusal.put("ok", false);
+                    refusal.put("code", "role_api_context_unavailable");
+                    refusal.put("role", role);
+                    refusal.put("profile", profile.name());
+                    refusal.put("vendor", profile.vendor());
+                    refusal.put("vendor_turn_started", false);
+                    refusal.put("message", unavailableContext.getMessage());
+                    Path path = ledger.writeReport("role-" + role + "-context-refused", refusal);
+                    ledger.append("role_api_context_unavailable", refusal);
+                    return new Outcome(false, "role_api_context_unavailable", role, profile.name(),
+                            profile.vendor(), resolution.rejected(), path, refusal);
+                }
+            }
 
             Path promptDirectory = ledger.runDirectory().resolve("prompts");
             Files.createDirectories(promptDirectory);
@@ -927,7 +945,7 @@ public final class RoleRunner {
             report.put("prompt_sha256", GitRepository.sha256(promptFile));
             report.put("diff_base_commit", mergeBase);
             report.put("wall_clock_minutes", profile.wallClockMinutes());
-            if ("local".equals(profile.runner())) {
+            if ("local".equals(profile.runner()) || "api".equals(profile.runner())) {
                 report.put("dispatch_preview", dispatchPreview(profile));
             } else if ("orca".equals(profile.runner())) {
                 List<String> preview = new ArrayList<>(List.of("orca", "orchestration", "worker-start",
@@ -1017,7 +1035,10 @@ public final class RoleRunner {
             }
 
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
-            RoleExecutor executor = executors.forProfile(profile, processes, git);
+            Set<String> connectionVariables = user.connections().values().stream()
+                    .map(dev.warden.config.Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toSet());
+            RoleExecutor executor = executors.forProfile(profile, processes.withoutEnvironment(connectionVariables), git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
                     runId, workflowRunId != null ? workflowRunId : runId,
                     role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
@@ -1876,6 +1897,13 @@ public final class RoleRunner {
         preview.put("method", "POST");
         preview.put("endpoint", profile.endpoint());
         preview.put("model", profile.model());
+        if ("api".equals(profile.runner())) {
+            preview.put("connection", profile.connectionRef());
+            preview.put("model_vendor", profile.modelVendor());
+            preview.put("max_output_tokens", (long) profile.maxOutputTokens());
+            preview.put("auth", new dev.warden.execution.CredentialResolver().status(profile.apiConnection()));
+            preview.put("execution", "text_completion_only");
+        }
         return preview;
     }
 
@@ -1904,6 +1932,12 @@ public final class RoleRunner {
     public static boolean executableFound(ProcessRunner processes, Profile profile) {
         // A local profile has no process to find: the model is already listening on HTTP.
         // Probing `command` would skip every local profile whose command is a label.
+        if ("api".equals(profile.runner())) {
+            if (profile.apiConnection() == null || !profile.apiConnection().enabled()) return false;
+            String state = String.valueOf(new dev.warden.execution.CredentialResolver()
+                    .status(profile.apiConnection()).get("state"));
+            return "ready".equals(state) || "not_required".equals(state);
+        }
         if ("local".equals(profile.runner())) return true;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command.contains("/") || command.contains("\\")) return Files.isExecutable(Path.of(command));

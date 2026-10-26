@@ -27,7 +27,13 @@ public record UserConfig(
         Policy policy,
         Map<String, Profile> profiles,
         Map<String, String> problems,
-        boolean policyPresent) {
+        boolean policyPresent,
+        Map<String, Connection> connections) {
+
+    public UserConfig(Path home, Policy policy, Map<String, Profile> profiles,
+                      Map<String, String> problems, boolean policyPresent) {
+        this(home, policy, profiles, problems, policyPresent, Map.of());
+    }
 
     /**
      * Deliberately NOT `WARDEN_HOME`: the launcher scripts already use that name for the
@@ -48,6 +54,13 @@ public record UserConfig(
     public static UserConfig load(Path home) throws IOException {
         Map<String, Profile> profiles = new LinkedHashMap<>();
         Map<String, String> problems = new LinkedHashMap<>();
+        ConnectionStore.Snapshot connectionState;
+        try { connectionState = new ConnectionStore(home).load(); }
+        catch (IOException unavailable) {
+            connectionState = new ConnectionStore.Snapshot(Map.of(), Map.of("directory", "connections directory could not be read"));
+        }
+        Map<String, Connection> connections = connectionState.connections();
+        connectionState.problems().forEach((name, problem) -> problems.put("connections/" + name, problem));
 
         Path profileDirectory = home.resolve("profiles");
         if (Files.isDirectory(profileDirectory)) {
@@ -59,6 +72,14 @@ public record UserConfig(
                 String key = stripExtension(file.getFileName().toString());
                 try {
                     Profile profile = Profile.parse(Files.readString(file), file.toString());
+                    if (profile.connectionRef() != null) {
+                        Connection connection = connections.get(profile.connectionRef());
+                        if (connection == null) {
+                            problems.put(key, "API profile references an unavailable connection: " + profile.connectionRef());
+                            continue;
+                        }
+                        profile = profile.withConnection(connection, home);
+                    }
                     if (!profile.name().equals(key)) {
                         problems.put(key, "profile name '" + profile.name()
                                 + "' does not match the file name; rename one so they agree");
@@ -81,7 +102,7 @@ public record UserConfig(
                 problems.put("policy.yaml", String.valueOf(failure.getMessage()));
             }
         }
-        return new UserConfig(home, policy, profiles, problems, policyPresent);
+        return new UserConfig(home, policy, profiles, problems, policyPresent, connections);
     }
 
     /** Names referenced by the policy that no loadable profile provides. */

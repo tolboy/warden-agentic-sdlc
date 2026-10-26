@@ -21,6 +21,10 @@ chain in behind it — and it should build with no network.
 Compiled with `--release 21` — a floor, not a ceiling: the bytecode runs on any newer JVM.
 Override with `WARDEN_JAVA_RELEASE`.
 
+API-backed read-only text roles can share OpenRouter, GonkaRouter or custom connections
+alongside CLI subscriptions. See [API connections](docs/API-CONNECTIONS.md) for environment
+credential references, native verification and the current execution limits.
+
 ## Try it in ten seconds, spending nothing
 
 ```bash

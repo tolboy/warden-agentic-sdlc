@@ -650,7 +650,7 @@ public final class PilotPrepareCommand {
      * interpolating the name into {@code sh -c} would run {@code git; touch marker}.
      */
     private boolean executableObserved(Profile profile, List<String> unresolved) {
-        if ("local".equals(profile.runner())) return true;
+        if ("local".equals(profile.runner()) || "api".equals(profile.runner())) return true;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command == null || command.isBlank()) {
             unresolved.add("profile " + profile.name() + " has no command to resolve");
