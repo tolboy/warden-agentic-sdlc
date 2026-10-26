@@ -82,6 +82,10 @@ public final class ProfileVerifier {
      */
     public Probe run(Profile profile, Path home, Duration timeout, Path worktree)
             throws IOException, InterruptedException {
+        if (profile.harness() != null) {
+            throw new IllegalStateException("profile '" + profile.name() + "' uses harness "
+                    + profile.harness() + "; coding tools are not proven and a probe cannot stamp them");
+        }
         if ("api".equals(profile.runner())) return new ApiProfileVerifier().run(profile, home, timeout);
         String declared = profile.verificationProbe();
         if (declared == null || declared.isBlank()) {
@@ -154,6 +158,12 @@ public final class ProfileVerifier {
      * established by running them, and are the most valuable thing in the file.
      */
     public Stamp stamp(Path profileFile, Profile profile, LocalDate date) throws IOException {
+        if (profile.harness() != null) {
+            return new Stamp(false, "harness_coding_unproven",
+                    "profile '" + profile.name() + "' uses harness " + profile.harness()
+                            + "; coding tools are not proven and a probe cannot stamp them",
+                    profileFile, null);
+        }
         if (profile.verified()) {
             return new Stamp(false, "already_verified",
                     "profile '" + profile.name() + "' already carries verification.verified_on",

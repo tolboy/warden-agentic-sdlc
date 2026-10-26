@@ -89,9 +89,13 @@ public final class RoleContract {
         // The tools a reader may reach are a term of its reading: a reviewer that could drive
         // a browser yesterday and cannot today is a different reviewer.
         contract.put("mcp_config_sha256", digestOf(user, profile.mcpConfig()));
-        if ("api".equals(profile.runner())) {
+        if ("api".equals(profile.runner()) || profile.harness() != null) {
             contract.put("api_connection_fingerprint", profile.apiFingerprint());
             contract.put("model_vendor", profile.modelVendor());
+        }
+        if (profile.harness() != null) {
+            contract.put("harness", profile.harness());
+            contract.put("coding_tools_verified", false);
         }
         return contract;
     }
