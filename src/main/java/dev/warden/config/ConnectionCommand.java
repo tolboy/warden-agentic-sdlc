@@ -2,11 +2,14 @@ package dev.warden.config;
 
 import dev.warden.execution.ApiConnectionCheck;
 import dev.warden.execution.CredentialResolver;
+import dev.warden.execution.OsCredentialStore;
+import dev.warden.execution.OsCredentialStores;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -14,19 +17,32 @@ import java.util.function.Function;
 /** User-owned connections; no command argument accepts a credential value. */
 public final class ConnectionCommand {
     private final Function<String, String> environment;
-    public ConnectionCommand() { this(System::getenv); }
-    public ConnectionCommand(Function<String, String> environment) { this.environment = environment; }
+    private final OsCredentialStore credentials;
+
+    public ConnectionCommand() { this(System::getenv, OsCredentialStores.platform()); }
+
+    /** Callers that only inject an environment do not probe the OS vault. */
+    public ConnectionCommand(Function<String, String> environment) {
+        this(environment, OsCredentialStores.unavailable());
+    }
+
+    public ConnectionCommand(Function<String, String> environment, OsCredentialStore credentials) {
+        this.environment = environment;
+        this.credentials = credentials == null ? OsCredentialStores.unavailable() : credentials;
+    }
 
     public Map<String, Object> run(Path home, String[] argv) throws IOException {
+        return run(home, argv, InputStream.nullInputStream());
+    }
+
+    public Map<String, Object> run(Path home, String[] argv, InputStream stdin) throws IOException {
         String operation = argv.length < 2 ? "list" : argv[1];
         ConnectionStore store = new ConnectionStore(home);
         if ("list".equals(operation)) {
             if (argv.length > 2) throw new IllegalArgumentException("connections list accepts no options");
-            ConnectionStore.Snapshot snapshot = store.load();
-            List<Map<String, Object>> rows = new ArrayList<>();
-            snapshot.connections().values().forEach(connection -> rows.add(view(connection, environment)));
-            return Map.of("ok", snapshot.problems().isEmpty(), "home", home.toString(),
-                    "connections", rows, "problems", snapshot.problems());
+            Map<String, Object> result = new LinkedHashMap<>(new ConnectionService(home, environment, credentials).list());
+            result.put("home", home.toString());
+            return result;
         }
         if (argv.length < 3) throw new IllegalArgumentException("connections requires an operation and connection id");
         String id = argv[2];
@@ -39,10 +55,12 @@ public final class ConnectionCommand {
                 if ("--no-auth".equals(option)) {
                     if (noAuth) throw new IllegalArgumentException("duplicate --no-auth");
                     noAuth = true;
+                } else if ("--os-store".equals(option)) {
+                    if (options.put(option, "true") != null) throw new IllegalArgumentException("duplicate connection option");
                 } else {
                     if (!Set.of("--provider", "--base-url", "--env").contains(option)
                             || i + 1 >= argv.length || argv[i + 1].startsWith("--")) {
-                        throw new IllegalArgumentException("connections add accepts --provider, --base-url, --env or --no-auth; key values are not accepted");
+                        throw new IllegalArgumentException("connections add accepts --provider, --base-url, --env, --os-store or --no-auth; key values are not accepted");
                     }
                     if (options.put(option, argv[++i]) != null) throw new IllegalArgumentException("duplicate connection option");
                 }
@@ -55,12 +73,17 @@ public final class ConnectionCommand {
                 default -> throw new IllegalArgumentException("custom connections require --base-url");
             };
             String variable = options.get("--env");
-            if (noAuth == (variable != null)) throw new IllegalArgumentException("choose --env NAME or --no-auth explicitly");
-            Connection connection = new Connection(id, provider, "openai_chat", base,
-                    variable == null ? null : "env:" + variable, true);
+            boolean osStore = options.containsKey("--os-store");
+            int modes = (noAuth ? 1 : 0) + (variable != null ? 1 : 0) + (osStore ? 1 : 0);
+            if (modes != 1) throw new IllegalArgumentException("choose --env NAME, --os-store or --no-auth explicitly");
+            if (osStore && !credentials.available()) {
+                throw new IllegalArgumentException("OS credential store is unavailable; use --env NAME");
+            }
+            String reference = noAuth ? null : osStore ? "os-store:warden/" + id : "env:" + variable;
+            Connection connection = new Connection(id, provider, "openai_chat", base, reference, true);
             Path file = store.add(connection);
             return Map.of("ok", true, "code", "connection_added", "file", file.toString(),
-                    "connection", view(connection, environment), "profiles_activated", false);
+                    "connection", view(connection, resolver()), "profiles_activated", false);
         }
         if (argv.length != 3) throw new IllegalArgumentException("this connection operation accepts only an id");
         if ("remove".equals(operation)) {
@@ -69,17 +92,49 @@ public final class ConnectionCommand {
         }
         if ("enable".equals(operation) || "disable".equals(operation)) {
             Connection connection = store.setEnabled(id, "enable".equals(operation));
-            return Map.of("ok", true, "code", "connection_updated", "connection", view(connection, environment));
+            return Map.of("ok", true, "code", "connection_updated", "connection", view(connection, resolver()));
         }
         if ("check".equals(operation)) {
             Connection connection = store.load().connections().get(id);
             if (connection == null) return Map.of("ok", false, "code", "connection_not_found", "connection", id);
-            return ApiConnectionCheck.check(connection, environment);
+            return ApiConnectionCheck.check(connection, resolver());
         }
-        throw new IllegalArgumentException("connections supports list, add, check, enable, disable and remove");
+        if ("auth-set".equals(operation) || "auth-remove".equals(operation)) {
+            if (argv.length != 3) throw new IllegalArgumentException("this connection operation accepts only an id");
+            ConnectionStore.Versioned current = store.versioned(id);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("id", id);
+            payload.put("revision", current.revision());
+            if ("auth-set".equals(operation)) payload.put("secret", readSecret(stdin));
+            return new ConnectionService(home, environment, credentials).apply(operation, payload).report();
+        }
+        throw new IllegalArgumentException("connections supports list, add, check, enable, disable, remove, auth-set and auth-remove");
+    }
+
+    private CredentialResolver resolver() { return new CredentialResolver(environment, credentials); }
+
+    /** Stdin only. A trailing newline from a pipe is removed; the value is never an argument. */
+    private static String readSecret(InputStream stdin) throws IOException {
+        if (stdin == null) throw new IllegalArgumentException("credential input was closed");
+        byte[] buffered = stdin.readNBytes(2049);
+        if (buffered.length > 2048) throw new IllegalArgumentException("credential input was rejected");
+        int end = buffered.length;
+        while (end > 0 && (buffered[end - 1] == '\n' || buffered[end - 1] == '\r')) end--;
+        String secret;
+        try {
+            secret = new String(buffered, 0, end, StandardCharsets.UTF_8);
+        } finally {
+            Arrays.fill(buffered, (byte) 0);
+        }
+        if (!CredentialResolver.acceptable(secret)) throw new IllegalArgumentException("credential input was rejected");
+        return secret;
     }
 
     public static Map<String, Object> view(Connection connection, Function<String, String> environment) {
+        return view(connection, new CredentialResolver(environment));
+    }
+
+    public static Map<String, Object> view(Connection connection, CredentialResolver resolver) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", connection.id());
         row.put("provider", connection.provider());
@@ -87,7 +142,7 @@ public final class ConnectionCommand {
         row.put("base_url", connection.baseUrl());
         row.put("enabled", connection.enabled());
         row.put("fingerprint", connection.fingerprint());
-        row.put("auth", new CredentialResolver(environment).status(connection));
+        row.put("auth", resolver.status(connection));
         row.put("auth_verified", false);
         row.put("execution", "text_completion_only");
         return row;

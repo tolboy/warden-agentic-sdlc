@@ -240,14 +240,12 @@ public final class OpenCodeExecutor implements RoleExecutor {
         return evidence;
     }
 
-    /** The saved connection is read again before dispatch. An in-flight process is not rewritten. */
+    /** A panel edit applies before the next dispatch. An in-flight process is not rewritten. */
     private static String recheck(Profile profile, Connection connection) {
         if (profile.apiSettings() == null || profile.apiSettings().home() == null) return null;
         try {
-            dev.warden.config.ConnectionStore.Snapshot snapshot =
-                    new dev.warden.config.ConnectionStore(profile.apiSettings().home()).load();
-            Connection current = snapshot.connections().get(connection.id());
-            if (current == null) return "role_api_connection_missing";
+            Connection current = new dev.warden.config.ConnectionStore(profile.apiSettings().home())
+                    .versioned(connection.id()).connection();
             if (!current.enabled()) return "role_api_connection_disabled";
             if (!current.fingerprint().equals(connection.fingerprint())) return "role_api_connection_changed";
             return null;
