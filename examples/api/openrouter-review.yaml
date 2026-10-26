@@ -1,0 +1,18 @@
+version: 1
+profile: openrouter-review
+role: reviewer
+runner: api
+connection: openrouter-personal
+model_vendor: z-ai
+# Catalog snapshot 2026-10-26; use a model available to your account.
+model: z-ai/glm-5.3-flash
+read_only: true
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+enforce_schema: true
+limits:
+  wall_clock_minutes: 5
+  max_output_tokens: 2048
+verification:
+  status: unverified
+  note: Native profiles --verify performs one bounded paid text/artifact probe, not a coding test.

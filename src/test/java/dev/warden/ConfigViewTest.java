@@ -5,6 +5,7 @@ import dev.warden.config.RosterCommand;
 import dev.warden.config.UserConfig;
 import dev.warden.dashboard.ConfigView;
 import dev.warden.dashboard.Dashboard;
+import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleResolver;
 import dev.warden.role.RoleRunner;
@@ -50,6 +51,7 @@ public final class ConfigViewTest implements Suite {
             attemptsAndFailovers(check);
             servedOnDemand(check, project);
             aTaskResolvesItsOwnDispatch(check, sandbox);
+            connectionDiagnosticsDoNotExposeCredentials(check, sandbox, project);
         } finally {
             deleteTree(sandbox);
         }
@@ -203,10 +205,110 @@ public final class ConfigViewTest implements Suite {
                     .build(), HttpResponse.BodyHandlers.ofString());
             check.eq("the settings are served on their own route", 200, config.statusCode());
             check.contains("as the stage view", config.body(), "\"stages\"");
+            check.contains("the connection diagnostics share the settings route", config.body(), "\"connections\"");
             HttpResponse<String> page = client.send(HttpRequest.newBuilder(URI.create(dashboard.url())).build(),
                     HttpResponse.BodyHandlers.ofString());
             check.contains("and the page has a place for them", page.body(), "Состав по стадиям");
         }
+    }
+
+    private void connectionDiagnosticsDoNotExposeCredentials(Check check, Path sandbox, Path project)
+            throws Exception {
+        Path home = home(sandbox.resolve("connections-home"));
+        check.eq("a subscription-only home has no API connections", List.of(),
+                ConfigView.of(project, UserConfig.load(home), ConfigViewTest::available,
+                        ignored -> null).get("connections"));
+        Files.createDirectories(home.resolve("connections"));
+        String connection = """
+                version: 1
+                connection: %s
+                provider: openrouter
+                protocol: openai_chat
+                base_url: https://openrouter.ai/api/v1
+                auth:
+                  type: api_key
+                  credential_ref: env:PANEL_TEST_API_KEY
+                enabled: %s
+                """;
+        Files.writeString(home.resolve("connections/api-main.yaml"), connection.formatted("api-main", true));
+        Files.writeString(home.resolve("connections/api-disabled.yaml"), connection.formatted("api-disabled", false));
+        Files.writeString(home.resolve("profiles/api-review.yaml"), """
+                version: 1
+                profile: api-review
+                role: reviewer
+                vendor: deepseek
+                model_vendor: deepseek
+                model: deepseek/test-model
+                runner: api
+                connection: api-main
+                read_only: true
+                limits: { max_output_tokens: 128 }
+                """);
+        Files.writeString(home.resolve("policy.yaml"), Files.readString(home.resolve("policy.yaml"))
+                .replace("rev-ok, rev-orca]", "rev-ok, rev-orca, api-review]"));
+        UserConfig user = UserConfig.load(home);
+        check.eq("connection diagnostics fixture parses without hidden errors", Map.of(), user.problems());
+        String secret = "RAW_API_CREDENTIAL_MARKER_NEVER_SERIALIZE";
+        Map<String, Object> view = ConfigView.of(project, user, ConfigViewTest::available,
+                name -> "PANEL_TEST_API_KEY".equals(name) ? secret : null);
+        Map<?, ?> main = connection(view, "api-main");
+        Map<?, ?> disabled = connection(view, "api-disabled");
+        check.eq("the API endpoint is visible before a request", "https://openrouter.ai/api/v1", main.get("base_url"));
+        check.eq("configured credentials are distinct from verified authorization", true,
+                ((Map<?, ?>) main.get("auth")).get("credential_present"));
+        check.eq("a locally usable key reports ready rather than authenticated", "ready",
+                ((Map<?, ?>) main.get("auth")).get("state"));
+        check.eq("the credential source is its reference only", "env:PANEL_TEST_API_KEY",
+                ((Map<?, ?>) main.get("auth")).get("source"));
+        check.eq("rendering settings never claims an authenticated request", "not_verified", main.get("authentication"));
+        check.eq("text completion never claims coding tools", "text_completion_only", main.get("execution"));
+        check.eq("a disabled connection stays visible", false, disabled.get("enabled"));
+        check.eq("disabled is preserved as the resolver state", "disabled",
+                ((Map<?, ?>) disabled.get("auth")).get("state"));
+        Map<?, ?> api = ((List<?>) stage(view, "review").get("candidates")).stream()
+                .map(value -> (Map<?, ?>) value).filter(value -> "api-review".equals(value.get("profile")))
+                .findFirst().orElseThrow();
+        check.eq("the profile names its connection", "api-main", api.get("connection"));
+        check.eq("profile diagnostics name the complete dispatch endpoint",
+                "https://openrouter.ai/api/v1/chat/completions", api.get("endpoint"));
+        check.eq("the profile distinguishes model developer from router", "deepseek", api.get("model_vendor"));
+        check.eq("profile diagnostics share the credential presence observation", true,
+                ((Map<?, ?>) api.get("auth")).get("credential_present"));
+        check.that("JSON settings contain no credential value", !Json.write(view).contains(secret));
+        Map<String, Object> absent = ConfigView.of(project, user, ConfigViewTest::available, ignored -> null);
+        check.eq("missing credentials remain missing in the panel", false,
+                ((Map<?, ?>) connection(absent, "api-main").get("auth")).get("credential_present"));
+        check.eq("missing is preserved as the resolver state", "missing",
+                ((Map<?, ?>) connection(absent, "api-main").get("auth")).get("state"));
+        Map<String, Object> blank = ConfigView.of(project, user, ConfigViewTest::available, ignored -> "   ");
+        check.eq("blank credentials are not reported as configured", false,
+                ((Map<?, ?>) connection(blank, "api-main").get("auth")).get("credential_present"));
+        Map<String, Object> invalid = ConfigView.of(project, user, ConfigViewTest::available,
+                ignored -> secret + "\n");
+        check.eq("invalid header credentials remain distinct from usable keys", "invalid",
+                ((Map<?, ?>) connection(invalid, "api-main").get("auth")).get("state"));
+        check.that("invalid credentials are absent from JSON too", !Json.write(invalid).contains(secret));
+        Path apiFile = home.resolve("profiles/api-review.yaml");
+        Files.writeString(apiFile, Files.readString(apiFile) + "verification:\n"
+                + "  verified_on: \"2026-10-26\"\n  connection_fingerprint: \""
+                + user.profiles().get("api-review").apiFingerprint() + "\"\n");
+        Files.writeString(home.resolve("policy.yaml"), Files.readString(home.resolve("policy.yaml"))
+                .replace("[rev-same, rev-unverified, rev-missing, rev-ok, rev-orca, api-review]", "[api-review]"));
+        UserConfig verified = UserConfig.load(home);
+        check.that("the credential eligibility fixture is verified", verified.profiles().get("api-review").verified());
+        Map<String, Object> ready = ConfigView.of(project, verified, ignored -> true, ignored -> secret);
+        check.eq("injected credential readiness permits the verified API candidate", "api-review",
+                stage(ready, "review").get("would_run"));
+        Map<String, Object> notReady = ConfigView.of(project, verified, ignored -> true, ignored -> null);
+        check.eq("an executable callback cannot admit an API profile with no credential", "no_eligible_profile",
+                stage(notReady, "review").get("unresolved"));
+        check.eq("the panel preserves the resolver's credential rejection", "connection_credential_unavailable",
+                ((Map<?, ?>) ((List<?>) stage(notReady, "review").get("candidates")).getFirst()).get("rejected"));
+    }
+
+    private static Map<?, ?> connection(Map<String, Object> view, String id) {
+        return ((List<?>) view.get("connections")).stream().map(value -> (Map<?, ?>) value)
+                .filter(value -> id.equals(value.get("id"))).findFirst().orElseThrow();
     }
 
     /**
@@ -297,7 +399,7 @@ public final class ConfigViewTest implements Suite {
 
     /** Absolute commands only, so availability is a file check here and in the resolver alike. */
     private static boolean available(dev.warden.config.Profile profile) {
-        if ("orca".equals(profile.runner())) return true;
+        if ("orca".equals(profile.runner()) || "api".equals(profile.runner())) return true;
         return Files.isExecutable(Path.of(profile.command()));
     }
 

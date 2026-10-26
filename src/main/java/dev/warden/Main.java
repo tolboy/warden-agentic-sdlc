@@ -69,6 +69,7 @@ public final class Main {
                 case "visual-qa" -> visualQa(args);
                 case "setup" -> setup();
                 case "profiles" -> profiles(args);
+                case "connections" -> connections(args);
                 case "roster" -> roster(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
@@ -318,10 +319,18 @@ public final class Main {
             // operator would have looked at the command for, so it is listed beside it.
             row.put("command", profile.command());
             row.put("runner", profile.runner());
-            if ("local".equals(profile.runner())) row.put("endpoint", profile.endpoint());
+            if ("local".equals(profile.runner()) || "api".equals(profile.runner())) row.put("endpoint", profile.endpoint());
+            if ("api".equals(profile.runner())) {
+                row.put("connection", profile.connectionRef());
+                row.put("model_vendor", profile.modelVendor());
+                row.put("api_fingerprint", profile.apiFingerprint());
+                row.put("auth", new dev.warden.execution.CredentialResolver().status(profile.apiConnection()));
+                row.put("execution", "text_completion_only");
+            }
             row.put("read_only", profile.readOnly());
             row.put("verified", profile.verified());
-            row.put("eligible", profile.verified());
+            row.put("eligible", profile.verified() && (!"api".equals(profile.runner())
+                    || RoleRunner.executableFound(new ProcessRunner(), profile)));
             if (!profile.verified()) {
                 row.put("blocked_because", "profile is unverified; fill verification.verified_on "
                         + "only after running its probe");
@@ -353,6 +362,13 @@ public final class Main {
         if (outcome.text() != null) System.out.print(outcome.text());
         else System.out.println(Json.write(outcome.report()));
         return outcome.exitCode();
+    }
+
+    private static int connections(String[] args) throws Exception {
+        Map<String, Object> report = new dev.warden.config.ConnectionCommand()
+                .run(UserConfig.defaultHome(), args);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     /**
@@ -405,6 +421,18 @@ public final class Main {
         }
 
         Path file = user.home().resolve("profiles").resolve(name + ".yaml");
+        if ("api".equals(profile.runner())) {
+            Profile current = UserConfig.load(user.home()).profiles().get(name);
+            Object checked = dev.warden.json.Json.parseObject(java.nio.file.Files.readString(probe.transcript()))
+                    .get("profile_fingerprint");
+            if (current == null || !java.util.Objects.equals(checked, current.apiFingerprint())) {
+                result.put("ok", false);
+                result.put("code", "role_api_profile_changed");
+                result.put("message", "API configuration changed during verification; nothing was stamped");
+                System.out.println(Json.write(result));
+                return 1;
+            }
+        }
         ProfileVerifier.Stamp stamp = verifier.stamp(file, profile, LocalDate.now(), sources.get(file).sha256());
         result.put("ok", stamp.written());
         result.put("code", stamp.code());
@@ -1342,7 +1370,8 @@ public final class Main {
         boolean machineGatesReady = javaSupported && projectConfig;
         UserConfig user = UserConfig.load();
         List<String> eligible = user.profiles().values().stream()
-                .filter(Profile::verified).map(Profile::name).toList();
+                .filter(Profile::verified).filter(profile -> !"api".equals(profile.runner())
+                        || RoleRunner.executableFound(new ProcessRunner(), profile)).map(Profile::name).toList();
         List<String> unverified = user.profiles().values().stream()
                 .filter(profile -> !profile.verified()).map(Profile::name).toList();
         boolean roleExecutionReady = user.policyPresent() && user.policy() != null
@@ -1378,6 +1407,8 @@ public final class Main {
         userSummary.put("unverified_profiles", unverified);
         userSummary.put("problems", user.problems());
         userSummary.put("dangling_policy_references", user.danglingProfileReferences());
+        userSummary.put("connections", user.connections().values().stream()
+                .map(connection -> dev.warden.config.ConnectionCommand.view(connection, System::getenv)).toList());
         result.put("user_config", userSummary);
         // The chain that will actually run, so an operator can read it back before paying
         // for a run rather than discovering the order from a summary afterwards.
@@ -1391,7 +1422,9 @@ public final class Main {
             result.put("role_execution_blocked_by", !user.policyPresent()
                     ? "no ~/.warden/policy.yaml — run `warden setup`"
                     : eligible.isEmpty()
-                        ? "every profile is unverified; run its probe, then set verification.verified_on"
+                        ? (unverified.size() == user.profiles().size()
+                            ? "every profile is unverified; run its verification probe"
+                            : "verified API profiles have unavailable connection credentials; inspect connections list")
                         : "policy references profiles that do not load: " + user.danglingProfileReferences());
         }
         result.put("direct_cli_ready", roleExecutionReady);
@@ -2653,6 +2686,10 @@ public final class Main {
                                                a pending decision; an answer given there that
                                                continues the loop runs it from this process
                   warden profiles              which profiles load, which are eligible, and why not
+                  warden connections list      configured API endpoints and credential presence (no inference)
+                  warden connections add ID --provider openrouter|gonkarouter --env VARIABLE
+                  warden connections check ID  native auth check where supported; no inference or model stamp
+                  warden connections enable|disable|remove ID
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway

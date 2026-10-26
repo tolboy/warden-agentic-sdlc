@@ -2135,7 +2135,7 @@ public final class TaskLoop {
     /** True when another implementer call cannot safely repair the role runner itself. */
     public static boolean roleFailureRequiresOperator(String code) {
         return code != null && (ROLE_OPERATOR_MUST_RESOLVE.contains(code)
-                || code.startsWith("role_orca_"));
+                || code.startsWith("role_orca_") || code.startsWith("role_api_"));
     }
 
     /**

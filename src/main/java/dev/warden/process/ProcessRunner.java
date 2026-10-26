@@ -13,12 +13,40 @@ import java.time.Duration;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.LinkedHashSet;
 import java.util.concurrent.TimeUnit;
 
 /** Runs a bounded child process and always settles, including when descendants keep pipes open. */
 public final class ProcessRunner {
     public static final int DEFAULT_CAPTURE_BYTES = 64 * 1024;
     public static final long DEFAULT_RAW_BYTES = 64L * 1024 * 1024;
+
+    private final Set<String> removedEnvironment;
+
+    public ProcessRunner() { this(Set.of()); }
+
+    private ProcessRunner(Set<String> removedEnvironment) {
+        this.removedEnvironment = Set.copyOf(removedEnvironment);
+    }
+
+    /** A dispatch-scoped copy; neither this runner nor the JVM's environment is changed. */
+    public ProcessRunner withoutEnvironment(Set<String> names) {
+        Set<String> combined = new LinkedHashSet<>(removedEnvironment);
+        combined.addAll(names);
+        return new ProcessRunner(combined);
+    }
+
+    private void removeEnvironment(Map<String, String> environment) {
+        if (removedEnvironment.isEmpty()) return;
+        if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")) {
+            // Windows environment names are case-insensitive; inherited spelling need not
+            // match the connection's reference. Never log names' associated values.
+            environment.keySet().removeIf(name -> removedEnvironment.stream().anyMatch(name::equalsIgnoreCase));
+        } else {
+            removedEnvironment.forEach(environment::remove);
+        }
+    }
 
     public static final class CaptureException extends IOException {
         private final boolean settled;
@@ -160,9 +188,11 @@ public final class ProcessRunner {
                                int captureBytes, String stdinText, OutputStream stdoutFile,
                                OutputStream stderrFile, long rawBytes, boolean vendor) throws IOException, InterruptedException {
         long started = System.nanoTime();
+        ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
+        removeEnvironment(builder.environment());
         if (vendor) WorktreeLease.startingVendor();
         Process process;
-        try { process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start(); }
+        try { process = builder.start(); }
         catch (IOException cannotStart) {
             if (vendor) WorktreeLease.vendorNotStarted();
             throw cannotStart;

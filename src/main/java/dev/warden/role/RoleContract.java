@@ -41,6 +41,7 @@ public final class RoleContract {
             "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
             "profile", "vendor", "model", "effort", "runner", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
+            "api_connection_fingerprint", "model_vendor",
             // The stage's own routing. A stage name is stable across a workflow edit, so
             // `review` can keep its identity while changing what a finding from it does —
             // and a verdict reached under `on_findings: fix` is not evidence for a stage that
@@ -88,6 +89,10 @@ public final class RoleContract {
         // The tools a reader may reach are a term of its reading: a reviewer that could drive
         // a browser yesterday and cannot today is a different reviewer.
         contract.put("mcp_config_sha256", digestOf(user, profile.mcpConfig()));
+        if ("api".equals(profile.runner())) {
+            contract.put("api_connection_fingerprint", profile.apiFingerprint());
+            contract.put("model_vendor", profile.modelVendor());
+        }
         return contract;
     }
 

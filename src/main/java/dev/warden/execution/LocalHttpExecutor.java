@@ -80,7 +80,7 @@ public final class LocalHttpExecutor implements RoleExecutor {
      * `semanticFailure` live on {@link DirectCliExecutor} and are called, not copied: two
      * adapters that judge an artifact differently would be two definitions of a valid answer.
      */
-    private Result settle(Request request, Profile profile, Duration duration, String rawResponse,
+    Result settle(Request request, Profile profile, Duration duration, String rawResponse,
                           String answer, Map<String, Object> evidence, String token,
                           String fingerprintBefore) throws Exception {
         Path rawDirectory = request.runDirectory().resolve("raw");
@@ -165,7 +165,7 @@ public final class LocalHttpExecutor implements RoleExecutor {
         Map<String, Object> tokens = new LinkedHashMap<>();
         if (usage.get("prompt_tokens") instanceof Number in) tokens.put("input", in.longValue());
         if (usage.get("completion_tokens") instanceof Number out) tokens.put("output", out.longValue());
-        if (!tokens.isEmpty()) evidence.put("tokens", tokens);
+        if (!tokens.isEmpty()) evidence.putIfAbsent("tokens", tokens);
     }
 
     @Override

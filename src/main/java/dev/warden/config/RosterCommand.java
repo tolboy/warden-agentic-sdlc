@@ -663,7 +663,7 @@ public final class RosterCommand {
                     "effort must be a provider effort level, not a command or blank value",
                     file, null, null);
         }
-        if ("local".equals(profile.runner())) {
+        if ("local".equals(profile.runner()) || "api".equals(profile.runner())) {
             return fail("effort_invalid",
                     "runner: local does not support effort; it cannot silently drop it",
                     file, null, null);

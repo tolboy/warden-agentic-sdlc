@@ -207,7 +207,7 @@ public final class RunOverride {
     private static boolean effortReaches(Profile profile, String effort) {
         if (!effort.matches("[a-z][a-z0-9_-]*")) return false;
         return switch (profile.runner()) {
-            case "local" -> false;
+            case "local", "api" -> false;
             case "orca" -> profile.model() != null && !profile.model().isBlank();
             default -> profile.args().stream().anyMatch(argument -> argument.contains("{{effort}}"));
         };
@@ -215,7 +215,7 @@ public final class RunOverride {
 
     private static String effortRefusal(String stage, Profile profile, String effort) {
         String why = switch (profile.runner()) {
-            case "local" -> "runner: local starts no process and cannot carry an effort level";
+            case "local", "api" -> "HTTP text runners cannot carry an effort level";
             case "orca" -> "runner: orca needs an explicit model before an effort means anything";
             default -> "profile '" + profile.name() + "' has no {{effort}} in its args, so the "
                     + "level would be recorded and never sent";
@@ -238,6 +238,7 @@ public final class RunOverride {
      * profile's verification never transfers to a different transport, even without args.
      */
     private static Profile onOrca(Profile chosen, Map<String, Profile> roster) {
+        if ("api".equals(chosen.runner())) return null;
         if ("orca".equals(chosen.runner())) return chosen;
         Profile twin = twinOf(chosen, roster, true);
         if (twin != null) return twin;

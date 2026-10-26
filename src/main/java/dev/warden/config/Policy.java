@@ -188,7 +188,7 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
             if (!readerRole.equals(reader.role())) {
                 return "'" + reviewer + "' fills role '" + reader.role() + "', not '" + readerRole + "'";
             }
-            if (!writer.vendor().equals(reader.vendor())) {
+            if (!writer.independenceVendor().equals(reader.independenceVendor())) {
                 return "the pair spans two vendors (" + writer.vendor() + ", " + reader.vendor()
                         + "); that is ordinary independence, not a same-vendor peer";
             }
