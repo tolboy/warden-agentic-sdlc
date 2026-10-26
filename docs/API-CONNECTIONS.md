@@ -2,7 +2,7 @@
 
 Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. An OpenCode profile can name a connection, but it is not an eligible implementer until a live tool loop is proven.
 
-Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. Env mode does not require the vault. OAuth remains future work.
+Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. OpenRouter can mint a user key through PKCE into that vault. Env mode does not require the vault.
 
 ## Configure a connection
 
@@ -20,6 +20,15 @@ warden connections auth-set openrouter-personal
 ```
 
 `auth-set` reads the key from stdin. A console prompt hides it. Do not pass the key as an argument. `auth-remove` deletes that local vault entry and does not revoke the key at the provider. If Credential Manager cannot be locked and probed, `--os-store` is refused and nothing is written to a file instead. Do not paste a key into YAML, command arguments, prompt templates or shell verification probes. Adding a connection or storing a key does not activate a profile or change policy.
+
+OpenRouter login is a separate command. The connection must already use `os-store:warden/<id>`, and the vault must be available. Warden sends the user to `https://openrouter.ai/auth` with an S256 challenge. The default flow listens on `127.0.0.1` for up to three minutes. `--headless` prints that URL and reads the pasted code from stdin, hidden when a console is attached. The code is exchanged at `https://openrouter.ai/api/v1/auth/keys`. A redirect is not followed. The issued key uses the same vault write as `auth-set` and is not placed in the connection file, the command report, or policy. If the file changes before that write, or the vault rejects the key, nothing is saved; revoke the new key in the OpenRouter account. This command does not call a model. GonkaRouter and environment-variable connections are refused before any authorization request.
+
+```text
+warden connections auth-login openrouter-personal
+warden connections auth-login openrouter-personal --headless
+```
+
+The local test exchanges the code with a loopback stub. A live browser login was not run.
 
 ```yaml
 version: 1
