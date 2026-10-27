@@ -34,12 +34,37 @@ public final class OsCredentialStoreTest implements Suite {
     @Override public String name() { return "os-credential"; }
 
     @Override public void run(Check check) throws Exception {
+        qualifiedAclPrincipals(check);
         references(check);
         resolverStaysOnItsSource(check);
         commandRoundTrip(check);
         dashboardRoundTrip(check);
         harnessNamesTheIssuedVariable(check);
         windowsVault(check);
+    }
+
+    private void qualifiedAclPrincipals(Check check) throws Exception {
+        java.nio.file.attribute.UserPrincipal domainOwner = () -> "DOMAIN\\alice";
+        java.nio.file.attribute.UserPrincipal localAccount = () -> "MACHINE\\alice";
+        java.nio.file.attribute.UserPrincipal sameOwner = () -> "domain\\ALICE";
+        java.nio.file.attribute.UserPrincipal shortAccount = () -> "alice";
+        java.nio.file.attribute.GroupPrincipal administrators = () -> "BUILTIN\\Administrators";
+        check.eq("ACL grants the full owner account", "DOMAIN\\alice",
+                WindowsOsCredentialStore.aclGrantPrincipal(domainOwner));
+        check.eq("ACL grants numeric owner SIDs explicitly", "*S-1-5-21-123-456-789-1001",
+                WindowsOsCredentialStore.aclGrantPrincipal(() -> "S-1-5-21-123-456-789-1001"));
+        check.that("a local account cannot match a domain owner by basename",
+                !WindowsOsCredentialStore.samePrincipal(domainOwner, localAccount));
+        check.that("a short account cannot match a qualified owner",
+                !WindowsOsCredentialStore.samePrincipal(domainOwner, shortAccount));
+        check.that("full principal names match case insensitively",
+                WindowsOsCredentialStore.samePrincipal(domainOwner, sameOwner));
+        check.rejects("an ambiguous owner cannot be granted helper access", "fully qualified", () ->
+                WindowsOsCredentialStore.aclGrantPrincipal(shortAccount));
+        check.rejects("an elevated group owner cannot be granted helper access", "individual user", () ->
+                WindowsOsCredentialStore.aclGrantPrincipal(administrators));
+        check.that("a group principal is never accepted as the current user",
+                !WindowsOsCredentialStore.samePrincipal(administrators, administrators));
     }
 
     private void references(Check check) {
@@ -242,13 +267,14 @@ public final class OsCredentialStoreTest implements Suite {
         try {
             var view = Files.getFileAttributeView(dir, java.nio.file.attribute.AclFileAttributeView.class);
             if (view == null) return false;
-            String owner = Files.getOwner(dir).getName();
-            String simple = owner.substring(Math.max(owner.lastIndexOf('\\'), owner.lastIndexOf('/')) + 1);
+            var owner = Files.getOwner(dir);
+            if (owner instanceof java.nio.file.attribute.GroupPrincipal) return false;
             for (var entry : view.getAcl()) {
                 if (entry.type() != java.nio.file.attribute.AclEntryType.ALLOW) return false;
-                String name = entry.principal().getName();
-                String entrySimple = name.substring(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
-                if (!name.equalsIgnoreCase(owner) && !entrySimple.equalsIgnoreCase(simple)) return false;
+                if (entry.principal() instanceof java.nio.file.attribute.GroupPrincipal) return false;
+                // Compare complete Windows identities independently of production's helper.
+                if (!entry.principal().equals(owner)
+                        && !entry.principal().getName().equalsIgnoreCase(owner.getName())) return false;
             }
             return !view.getAcl().isEmpty();
         } catch (Exception failure) {

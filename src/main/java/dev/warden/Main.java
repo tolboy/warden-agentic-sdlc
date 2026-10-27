@@ -372,19 +372,23 @@ public final class Main {
     }
 
     private static int connections(String[] args) throws Exception {
-        java.io.InputStream input = System.in;
         boolean hiddenCode = args.length >= 2 && "auth-login".equals(args[1]) && java.util.List.of(args).contains("--headless");
-        if (args.length >= 2 && ("auth-set".equals(args[1]) || hiddenCode) && System.console() != null) {
-            char[] password = System.console().readPassword(hiddenCode
-                    ? "Authorization code (hidden; it is not written to the connection file): "
-                    : "Credential (hidden; it is not an argument and is not written to the connection file): ");
-            if (password == null) throw new IllegalArgumentException("credential input was closed");
-            byte[] bytes = new String(password).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            java.util.Arrays.fill(password, '\0');
-            input = new java.io.ByteArrayInputStream(bytes);
-        }
+        // Headless login prints its PKCE URL before opening the console prompt.
+        java.util.function.Supplier<java.io.InputStream> input = () -> {
+            if (args.length >= 2 && ("auth-set".equals(args[1]) || hiddenCode) && System.console() != null) {
+                char[] password = System.console().readPassword(hiddenCode
+                        ? "Authorization code (hidden; it is not written to the connection file): "
+                        : "Credential (hidden; it is not an argument and is not written to the connection file): ");
+                if (password == null) throw new IllegalArgumentException("credential input was closed");
+                byte[] bytes;
+                try { bytes = new String(password).getBytes(java.nio.charset.StandardCharsets.UTF_8); }
+                finally { java.util.Arrays.fill(password, '\0'); }
+                return new java.io.ByteArrayInputStream(bytes);
+            }
+            return System.in;
+        };
         Map<String, Object> report = new dev.warden.config.ConnectionCommand()
-                .run(UserConfig.defaultHome(), args, input);
+                .runWithInput(UserConfig.defaultHome(), args, input);
         System.out.println(Json.write(report));
         return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }

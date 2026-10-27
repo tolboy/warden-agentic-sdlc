@@ -116,7 +116,8 @@ public final class ConnectionService {
             }
             ConnectionStore.Versioned current = store.versioned(id);
             if (!revision.equals(current.revision())) throw new ConnectionStore.Conflict();
-            Map<String, Object> check = new LinkedHashMap<>(ApiConnectionCheck.check(current.connection(), environment));
+            Map<String, Object> check = new LinkedHashMap<>(ApiConnectionCheck.check(current.connection(),
+                    new CredentialResolver(environment, credentials)));
             if (!revision.equals(store.versioned(id).revision())) throw new ConnectionStore.Conflict();
             check.put("revision", current.revision());
             return new Outcome(200, check);
@@ -141,11 +142,16 @@ public final class ConnectionService {
     }
 
     private Outcome credential(String operation, String id, String revision, Object supplied) throws IOException {
+        if ("auth-set".equals(operation)
+                && (!(supplied instanceof String secret) || !CredentialResolver.acceptable(secret))) {
+            return error(400, "credential_rejected", "The credential was rejected. It was not stored.");
+        }
+        return store.withRevision(id, revision, current -> credential(operation, current, supplied));
+    }
+
+    private Outcome credential(String operation, ConnectionStore.Versioned current, Object supplied) {
         if ("auth-set".equals(operation)) {
-            if (!(supplied instanceof String secret) || !CredentialResolver.acceptable(secret)) {
-                return error(400, "credential_rejected", "The credential was rejected. It was not stored.");
-            }
-            ConnectionStore.Versioned current = versioned(id, revision);
+            String secret = (String) supplied;
             String target = current.connection().osStoreTarget();
             if (target == null) {
                 return error(400, "credential_store_not_selected",
@@ -165,7 +171,6 @@ public final class ConnectionService {
                     "profiles_activated", false, "source", current.connection().credentialRef(),
                     "service_key_revoked", false));
         }
-        ConnectionStore.Versioned current = versioned(id, revision);
         String target = current.connection().osStoreTarget();
         if (target == null) {
             return error(400, "credential_store_not_selected",
@@ -183,12 +188,6 @@ public final class ConnectionService {
         }
         return new Outcome(200, Map.of("ok", true, "code", "credential_removed",
                 "profiles_activated", false, "service_key_revoked", false));
-    }
-
-    private ConnectionStore.Versioned versioned(String id, String revision) throws IOException {
-        ConnectionStore.Versioned current = store.versioned(id);
-        if (!revision.equals(current.revision())) throw new ConnectionStore.Conflict();
-        return current;
     }
 
     private Map<String, Object> view(ConnectionStore.Versioned value) {
