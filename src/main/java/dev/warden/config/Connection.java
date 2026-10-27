@@ -17,14 +17,14 @@ public record Connection(String id, String provider, String protocol, String bas
 
     private static final Pattern ID = Pattern.compile("[a-z][a-z0-9_-]{0,63}");
     private static final Pattern ENV = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
-    private static final Set<String> PROVIDERS = Set.of("openrouter", "gonkarouter", "custom");
+    private static final Set<String> PROVIDERS = Set.of("openrouter", "gonkarouter", "joingonka", "custom");
     private static final Set<String> FIELDS = Set.of(
             "version", "connection", "provider", "protocol", "base_url", "auth", "enabled");
 
     public Connection {
         requireId(id);
         if (!PROVIDERS.contains(provider == null ? "" : provider)) {
-            throw invalid("provider must be openrouter, gonkarouter, or custom");
+            throw invalid("provider must be openrouter, gonkarouter, joingonka, or custom");
         }
         if (!"openai_chat".equals(protocol)) throw invalid("protocol must be openai_chat");
         if (baseUrl == null || baseUrl.isBlank()) throw invalid("base_url must be a non-empty URL");
@@ -50,7 +50,12 @@ public record Connection(String id, String provider, String protocol, String bas
             throw invalid("base_url port must be between 1 and 65535");
         }
         if (!"custom".equals(provider)) {
-            String expectedHost = "openrouter".equals(provider) ? "openrouter.ai" : "api.gonkarouter.io";
+            String expectedHost = switch (provider) {
+                case "openrouter" -> "openrouter.ai";
+                case "gonkarouter" -> "api.gonkarouter.io";
+                case "joingonka" -> "gate.joingonka.ai";
+                default -> throw invalid("unknown provider");
+            };
             String expectedPath = "openrouter".equals(provider) ? "/api/v1" : "/v1";
             if (!"https".equalsIgnoreCase(scheme) || !expectedHost.equalsIgnoreCase(host)
                     || !expectedPath.equals(uri.getRawPath())

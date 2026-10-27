@@ -14,6 +14,8 @@ public final class ConnectionSettingsUiTest implements Suite {
         String html = ConnectionSettingsUi.html();
         check.contains("the editor has an accessible section label", html, "aria-labelledby=\"connection-editor-title\"");
         check.contains("the section offers connection creation", html, "Добавить подключение");
+        check.contains("JoinGonka can be selected separately from GonkaRouter", html,
+                "<option value=\"joingonka\">JoinGonka Gateway</option>");
         check.contains("the form asks for a variable name, not a credential", html, "Укажите имя переменной, не значение ключа");
         check.contains("native check is described without implying model verification", html, "Проверка подключения не вызывает модель");
         check.contains("deleting a connection is distinguished from key revocation", html, "Удаление подключения не отзывает ключ");

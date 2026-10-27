@@ -50,6 +50,7 @@ public final class TestMain {
                 new dev.warden.ConnectionTest(),
                 new dev.warden.execution.OsCredentialStoreTest(),
                 new dev.warden.execution.OpenRouterLoginTest(),
+                new dev.warden.execution.CodingRelayTest(),
                 new dev.warden.ConnectionServiceTest(),
                 new dev.warden.ConnectionSettingsUiTest(),
                 new dev.warden.DashboardConnectionsTest(),

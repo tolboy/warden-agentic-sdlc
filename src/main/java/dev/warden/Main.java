@@ -2708,7 +2708,8 @@ public final class Main {
                                                continues the loop runs it from this process
                   warden profiles              which profiles load, which are eligible, and why not
                   warden connections list      configured API endpoints and credential presence (no inference)
-                  warden connections add ID --provider openrouter|gonkarouter --env VARIABLE
+                  warden connections add ID --provider openrouter|gonkarouter|joingonka --env VARIABLE
+                  warden connections coding-check ID --project DISPOSABLE_PROJECT --opencode EXE --model MODEL
                   warden connections add ID --provider openrouter --os-store
                                            reference Windows Credential Manager; the key is not an argument
                   warden connections auth-set ID

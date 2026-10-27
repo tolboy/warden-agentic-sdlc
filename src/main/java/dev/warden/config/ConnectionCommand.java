@@ -64,6 +64,9 @@ public final class ConnectionCommand {
         if (argv.length < 3) throw new IllegalArgumentException("connections requires an operation and connection id");
         String id = argv[2];
         Connection.requireId(id);
+        if ("coding-check".equals(operation)) {
+            return dev.warden.execution.CodingProbe.run(home, id, argv, resolver());
+        }
         if ("add".equals(operation)) {
             Map<String, String> options = new LinkedHashMap<>();
             boolean noAuth = false;
@@ -87,6 +90,7 @@ public final class ConnectionCommand {
             if (base == null) base = switch (provider) {
                 case "openrouter" -> "https://openrouter.ai/api/v1";
                 case "gonkarouter" -> "https://api.gonkarouter.io/v1";
+                case "joingonka" -> "https://gate.joingonka.ai/v1";
                 default -> throw new IllegalArgumentException("custom connections require --base-url");
             };
             String variable = options.get("--env");
@@ -136,7 +140,7 @@ public final class ConnectionCommand {
             return new ConnectionService(home, environment, credentials).apply(operation, payload).report();
         }
         throw new IllegalArgumentException(
-                "connections supports list, add, check, enable, disable, remove, auth-set, auth-remove and auth-login");
+                "connections supports list, add, check, coding-check, enable, disable, remove, auth-set, auth-remove and auth-login");
     }
 
     /**
