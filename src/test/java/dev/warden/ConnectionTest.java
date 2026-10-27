@@ -2,6 +2,7 @@ package dev.warden;
 
 import dev.warden.config.ConfigException;
 import dev.warden.config.Connection;
+import dev.warden.config.ConnectionCommand;
 import dev.warden.config.ConnectionStore;
 import dev.warden.execution.CredentialResolver;
 import dev.warden.testing.Check;
@@ -57,6 +58,22 @@ public final class ConnectionTest implements Suite {
                 "https://api.gonkarouter.io/v1", "env:GONKA_KEY", true);
         check.eq("GonkaRouter has its own fixed endpoint", "https://api.gonkarouter.io/v1/chat/completions",
                 gonka.endpoint());
+        Connection join = new Connection("join", "joingonka", "openai_chat",
+                "https://gate.joingonka.ai/v1", "env:JOINGONKA_API_KEY", true);
+        check.eq("JoinGonka has its own fixed endpoint", "https://gate.joingonka.ai/v1/chat/completions",
+                join.endpoint());
+        check.eq("JoinGonka references round trip through YAML", join,
+                Connection.parse(join.toYaml(), "join.yaml"));
+        check.eq("JoinGonka may use its own vault reference", "warden/join",
+                new Connection("join", "joingonka", "openai_chat", join.baseUrl(),
+                        "os-store:warden/join", true).osStoreTarget());
+        for (String destination : new String[]{"https://api.gonkarouter.io/v1",
+                "https://gate.joingonka.ai/api/v1", "https://gate.joingonka.ai:444/v1"}) {
+            check.rejects("JoinGonka credentials remain bound to the selected endpoint", "selected provider", () ->
+                    new Connection("join", "joingonka", "openai_chat", destination, "env:JOINGONKA_API_KEY", true));
+        }
+        check.rejects("JoinGonka cannot silently omit credentials", "auth none", () ->
+                new Connection("join", "joingonka", "openai_chat", join.baseUrl(), null, true));
         check.rejects("preset cannot send its credential to a different host", "selected provider",
                 () -> Connection.parse(OPENROUTER.replace("openrouter.ai", "example.com"), "wrong-host.yaml"));
         check.rejects("preset cannot send its credential to a different API path", "selected provider",
@@ -145,6 +162,16 @@ public final class ConnectionTest implements Suite {
     private void store(Check check) throws Exception {
         Path home = Files.createTempDirectory("warden-connections-");
         try {
+            Path presetHome = home.resolve("preset");
+            ConnectionCommand command = new ConnectionCommand(ignored -> null);
+            Map<String, Object> added = command.run(presetHome, new String[]{"connections", "add", "join",
+                    "--provider", "joingonka", "--env", "JOINGONKA_API_KEY"});
+            Connection preset = new ConnectionStore(presetHome).load().connections().get("join");
+            check.eq("CLI JoinGonka preset selects its documented URL", "https://gate.joingonka.ai/v1", preset.baseUrl());
+            check.eq("CLI JoinGonka preset does not activate profiles", false, added.get("profiles_activated"));
+            Map<String, Object> checked = command.run(presetHome, new String[]{"connections", "check", "join"});
+            check.eq("missing JoinGonka credential fails locally", "role_api_key_missing", checked.get("code"));
+            check.eq("JoinGonka credential check performs no inference", false, checked.get("inference_performed"));
             ConnectionStore store = new ConnectionStore(home);
             check.eq("an empty home has no connections", Map.of(), store.load().connections());
             check.that("read-only load does not create the connections directory", !Files.exists(home.resolve("connections")));

@@ -437,7 +437,7 @@ public record Profile(
             }
             if (model == null) root.collector().add("runner: api requires an explicit model");
             if (modelVendor == null || !modelVendor.matches("[a-z][a-z0-9_-]{0,63}")
-                    || Set.of("openrouter", "gonkarouter", "codex", "claude", "opencode").contains(modelVendor)) {
+                    || Set.of("openrouter", "gonkarouter", "joingonka", "codex", "claude", "opencode").contains(modelVendor)) {
                 root.collector().add("runner: api requires model_vendor naming the model developer");
             }
             if (!readOnly || "implementer".equals(role)) {
@@ -469,7 +469,7 @@ public record Profile(
             }
             if (model == null) root.collector().add("harness: opencode requires an explicit model");
             if (modelVendor == null || !modelVendor.matches("[a-z][a-z0-9_-]{0,63}")
-                    || Set.of("openrouter", "gonkarouter", "codex", "claude", "opencode").contains(modelVendor)) {
+                    || Set.of("openrouter", "gonkarouter", "joingonka", "codex", "claude", "opencode").contains(modelVendor)) {
                 root.collector().add("harness: opencode requires model_vendor naming the model developer");
             }
             if (command != null || !args.isEmpty() || mcpConfig != null) {

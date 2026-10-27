@@ -2,13 +2,14 @@
 
 Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. An OpenCode profile can name a connection, but it is not an eligible implementer until a live tool loop is proven.
 
-Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. OpenRouter can mint a user key through PKCE into that vault. Env mode does not require the vault.
+Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter, JoinGonka Gateway and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. OpenRouter can mint a user key through PKCE into that vault. Env mode does not require the vault.
 
 ## Configure a connection
 
 ```text
 warden connections add openrouter-personal --provider openrouter --env OPENROUTER_API_KEY
 warden connections add gonkarouter-personal --provider gonkarouter --env GONKAROUTER_API_KEY
+warden connections add joingonka-personal --provider joingonka --os-store
 warden connections list
 ```
 
@@ -60,7 +61,7 @@ Each change carries the file revision from the row you opened. If the file chang
 warden connections check openrouter-personal
 ```
 
-The OpenRouter check calls its key metadata endpoint without inference. GonkaRouter/custom checks report local credential configuration and `auth_verified: false`; Warden does not invent an undocumented auth endpoint or call a model to check a key.
+The OpenRouter check calls its key metadata endpoint without inference. GonkaRouter/JoinGonka/custom checks report local credential configuration and `auth_verified: false`; Warden does not invent an undocumented auth endpoint or call a model to check a key. JoinGonka binds to `https://gate.joingonka.ai/v1`. It has its own key and account; a GonkaRouter key is not reused there. No JoinGonka fallback control or strict spend cap is claimed.
 
 ## Configure and verify a text profile
 
@@ -94,6 +95,22 @@ Known credential values are redacted before raw responses, diagnostics, artifact
 
 The adapter restores only that connection's environment variable after removing every connection variable, writes `{env:NAME}` into the generated config, and requires `opencode debug config` to show the base URL and requested model before `run`. Exit 0 without the Warden artifact does not complete the role. A served model that is missing or different fails closed. Read-only is still the worktree fingerprint; permission flags are only a claim. GonkaRouter is refused before any process because the no-fallback header is not a proven config option. Harness-reported cost is not billing, unknown cost is not zero, and `limits.max_cost_usd` is rejected. No live OpenCode or provider call was run for this contract.
 
+## Explicit live coding check
+
+`coding-check` is a separate, potentially paid experiment, available without activating a profile. It supports the pinned native OpenCode **1.19.4** executable. For example, install it locally with `npm install --prefix out/opencode-runtime --no-audit --no-fund opencode-ai@1.19.4`, then use the packaged `node_modules/opencode-windows-x64/bin/opencode.exe`. Warden records the binary hash and checks its version. Use a disposable working copy: the command creates a new `warden-coding-probe-*` directory there and lets the coding agent run shell commands. This is not an OS sandbox.
+
+```text
+warden connections coding-check joingonka-personal --project C:\path\to\disposable-worktree --opencode C:\path\to\opencode.exe --model zai-org/GLM-5.3-Flash
+```
+
+Each check creates a failing greeting test, asks OpenCode to read/edit/run it and write an artifact, then independently reruns the original unchanged test. A plain text answer, missing observed read/edit/bash tool results, an altered test, incomplete output or a substituted model cannot pass. A failed check is retained, not silently retried. Receipts, redacted event output and effective config checks remain in that fixture directory.
+
+A run-scoped loopback relay keeps the upstream key in Warden. OpenCode receives a random temporary relay credential; it does not receive the service key in arguments, environment or config. The relay permits only the selected model and Chat Completions route, at most eight requests, a four-minute window, 2048 output tokens per request, 512 KiB request bodies and the existing 4 MiB/45-second upstream response bound. It requests a complete nonstreaming upstream response, validates its model identity before releasing content/tools, and converts it into SSE for OpenCode. GonkaRouter's no-fallback header is sent by Warden's HTTP client. JoinGonka fallback behavior remains unproven. Usage from all observed calls is retained; this is not a strict monetary cap.
+
+OpenCode uses fresh XDG config/data/cache/state and database paths, project config is disabled and pure mode excludes external plugins. Warden checks the effective provider, model, permissions, plugins, commands and MCP configuration before inference. This protects this probe's configuration; it does not prove arbitrary agent code is confined to the fixture directory.
+
+**A successful coding check does not stamp a profile or enable a loop role.** The general OpenCode adapter above still uses the earlier offline contract. Routing requires a subsequent adapter integration and a capability receipt bound to its configuration and binary. Live checks of this dedicated probe were performed on 2026-10-27; consult their receipts for the exact connection/model pair and outcome.
+
 ## Disable or remove
 
 ```text
@@ -104,4 +121,4 @@ warden connections remove openrouter-personal
 
 Add refuses to overwrite an existing file. Enable/disable preserves comments in supported YAML layouts and refuses unfamiliar layouts. A running loop rechecks a verified API profile's connection before its next dispatch: a disabled, missing or changed connection stops that dispatch before HTTP. A request already sent finishes against its original connection. Removing a connection is refused while any profile references it. These operations manage local configuration; revoke an actual API key in the service's account settings when needed. Removing a local reference does not revoke a remote key.
 
-The full roadmap is in `DESIGN-API-CONNECTIONS-2026-10-26.md`. Provider-backed live inference and billing have not been verified as part of the implementation's local test suite.
+The full roadmap is in `DESIGN-API-CONNECTIONS-2026-10-26.md`. Live probe results are separate from the offline test suite. Reported usage/cost is provider evidence, not independently reconciled billing.

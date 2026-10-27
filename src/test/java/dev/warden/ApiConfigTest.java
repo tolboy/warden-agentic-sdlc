@@ -92,6 +92,8 @@ public final class ApiConfigTest implements Suite {
         check.that("binding does not stamp a newly added profile", !profile.verified());
 
         String original = Files.readString(profileFile);
+        check.rejects("a gateway cannot be used as the model developer", "model_vendor naming the model developer",
+                () -> Profile.parse(original.replace("model_vendor: deepseek", "model_vendor: joingonka"), "gateway-identity"));
         Files.writeString(profileFile, original.replace("connection: local-api", "connection: missing-api"));
         UserConfig missing = UserConfig.load(home);
         check.that("a dangling API connection cannot enter the roster", !missing.profiles().containsKey("api-review"));
