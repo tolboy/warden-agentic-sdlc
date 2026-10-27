@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /** User-owned connections; no command argument accepts a credential value. */
 public final class ConnectionCommand {
@@ -47,6 +48,11 @@ public final class ConnectionCommand {
     }
 
     public Map<String, Object> run(Path home, String[] argv, InputStream stdin) throws IOException {
+        return runWithInput(home, argv, () -> stdin);
+    }
+
+    /** Open hidden console input only when the validated operation is ready to consume it. */
+    public Map<String, Object> runWithInput(Path home, String[] argv, Supplier<InputStream> input) throws IOException {
         String operation = argv.length < 2 ? "list" : argv[1];
         ConnectionStore store = new ConnectionStore(home);
         if ("list".equals(operation)) {
@@ -104,7 +110,7 @@ public final class ConnectionCommand {
                 }
                 headless = true;
             }
-            return login(home, id, headless, stdin);
+            return login(home, id, headless, input);
         }
         if (argv.length != 3) throw new IllegalArgumentException("this connection operation accepts only an id");
         if ("remove".equals(operation)) {
@@ -126,7 +132,7 @@ public final class ConnectionCommand {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("id", id);
             payload.put("revision", current.revision());
-            if ("auth-set".equals(operation)) payload.put("secret", readSecret(stdin));
+            if ("auth-set".equals(operation)) payload.put("secret", readSecret(input.get()));
             return new ConnectionService(home, environment, credentials).apply(operation, payload).report();
         }
         throw new IllegalArgumentException(
@@ -137,7 +143,7 @@ public final class ConnectionCommand {
      * PKCE into the connection's existing OS-store target. The connection file and policy
      * stay unchanged. A key that cannot be saved is not written anywhere else.
      */
-    private Map<String, Object> login(Path home, String id, boolean headless, InputStream stdin) throws IOException {
+    private Map<String, Object> login(Path home, String id, boolean headless, Supplier<InputStream> input) throws IOException {
         ConnectionStore.Versioned current = new ConnectionStore(home).versioned(id);
         Connection connection = current.connection();
         if (!openRouterApi(connection)) {
@@ -154,7 +160,8 @@ public final class ConnectionCommand {
         if (headless) {
             System.err.println("Open the URL, approve a Warden key, and paste the authorization code.");
             System.err.println(OpenRouterLogin.authorizeUrl(null, challenge, null));
-            return storeIssued(home, id, current.revision(), exchanger.exchange(readAuthorizationCode(stdin), verifier));
+            System.err.flush();
+            return storeIssued(home, id, current.revision(), exchanger.exchange(readAuthorizationCode(input.get()), verifier));
         }
         String state = OpenRouterLogin.verifier();
         try (OpenRouterLogin.Callback callback = OpenRouterLogin.Callback.bind(state)) {
@@ -197,19 +204,8 @@ public final class ConnectionCommand {
     }
 
     private static String readAuthorizationCode(InputStream stdin) throws IOException {
-        if (stdin == null) throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
-        byte[] buffered = stdin.readNBytes(259);
-        if (buffered.length > 258) {
-            throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
-        }
-        int end = buffered.length;
-        while (end > 0 && (buffered[end - 1] == '\n' || buffered[end - 1] == '\r')) end--;
-        String code;
-        try {
-            code = new String(buffered, 0, end, StandardCharsets.UTF_8);
-        } finally {
-            Arrays.fill(buffered, (byte) 0);
-        }
+        String code = readInputLine(stdin, 256,
+                "OpenRouter authorization code was rejected. Nothing was stored.");
         if (!OpenRouterLogin.authorizationCode(code)) {
             throw new IllegalArgumentException("OpenRouter authorization code was rejected. Nothing was stored.");
         }
@@ -218,21 +214,28 @@ public final class ConnectionCommand {
 
     private CredentialResolver resolver() { return new CredentialResolver(environment, credentials); }
 
-    /** Stdin only. A trailing newline from a pipe is removed; the value is never an argument. */
+    /** One bounded stdin line. The value is never an argument and does not require EOF. */
     private static String readSecret(InputStream stdin) throws IOException {
-        if (stdin == null) throw new IllegalArgumentException("credential input was closed");
-        byte[] buffered = stdin.readNBytes(2049);
-        if (buffered.length > 2048) throw new IllegalArgumentException("credential input was rejected");
-        int end = buffered.length;
-        while (end > 0 && (buffered[end - 1] == '\n' || buffered[end - 1] == '\r')) end--;
-        String secret;
+        String secret = readInputLine(stdin, 2048, "credential input was rejected");
+        if (!CredentialResolver.acceptable(secret)) throw new IllegalArgumentException("credential input was rejected");
+        return secret;
+    }
+
+    private static String readInputLine(InputStream stdin, int limit, String failure) throws IOException {
+        if (stdin == null) throw new IllegalArgumentException(failure);
+        byte[] buffered = new byte[limit];
+        int end = 0;
         try {
-            secret = new String(buffered, 0, end, StandardCharsets.UTF_8);
+            while (true) {
+                int next = stdin.read();
+                if (next < 0 || next == '\n' || next == '\r') break;
+                if (end == limit) throw new IllegalArgumentException(failure);
+                buffered[end++] = (byte) next;
+            }
+            return new String(buffered, 0, end, StandardCharsets.UTF_8);
         } finally {
             Arrays.fill(buffered, (byte) 0);
         }
-        if (!CredentialResolver.acceptable(secret)) throw new IllegalArgumentException("credential input was rejected");
-        return secret;
     }
 
     public static Map<String, Object> view(Connection connection, Function<String, String> environment) {

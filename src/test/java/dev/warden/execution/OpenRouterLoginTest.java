@@ -8,6 +8,9 @@ import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -22,6 +25,8 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -39,6 +44,7 @@ public final class OpenRouterLoginTest implements Suite {
         endpoints(check);
         callback(check);
         exchange(check);
+        boundedExchange(check);
         command(check);
     }
 
@@ -226,8 +232,30 @@ public final class OpenRouterLoginTest implements Suite {
             command.run(home, new String[] {"connections", "add", "personal", "--provider", "openrouter", "--os-store"});
             Path file = home.resolve("connections/personal.yaml");
             String stored = Files.readString(file);
-            Map<String, Object> saved = command.run(home, new String[] {"connections", "auth-login", "personal", "--headless"},
-                    new ByteArrayInputStream((CODE + "\n").getBytes(StandardCharsets.UTF_8)));
+            ByteArrayOutputStream instructions = new ByteArrayOutputStream();
+            PrintStream previousError = System.err;
+            AtomicBoolean urlBeforeInput = new AtomicBoolean();
+            Map<String, Object> saved;
+            try (PrintStream captured = new PrintStream(instructions, true, StandardCharsets.UTF_8)) {
+                System.setErr(captured);
+                saved = command.runWithInput(home, new String[] {"connections", "auth-login", "personal", "--headless"}, () -> {
+                    urlBeforeInput.set(instructions.toString(StandardCharsets.UTF_8).contains("https://openrouter.ai/auth?"));
+                    byte[] line = (CODE + "\n").getBytes(StandardCharsets.UTF_8);
+                    return new InputStream() {
+                        private int offset;
+                        @Override public int read() {
+                            if (offset == line.length) throw new AssertionError("authorization input read past its newline");
+                            return line[offset++];
+                        }
+                    };
+                });
+            } finally {
+                System.setErr(previousError);
+            }
+            check.that("headless URL is printed before console input is opened", urlBeforeInput.get());
+            check.that("headless instructions omit the code and issued key",
+                    !instructions.toString(StandardCharsets.UTF_8).contains(CODE)
+                            && !instructions.toString(StandardCharsets.UTF_8).contains(KEY));
             String report = Json.write(saved);
             check.eq("headless login stores the issued key", true, saved.get("ok"));
             check.eq("login does not activate profiles", false, saved.get("profiles_activated"));
@@ -240,6 +268,21 @@ public final class OpenRouterLoginTest implements Suite {
                             && !report.contains(issuedVerifier)
                             && stored.equals(Files.readString(file)) && !Files.readString(file).contains(KEY));
             check.that("the vault received only the issued key", KEY.equals(store.values.get("warden/personal")));
+            Map<String, Object> pasted = command.run(home, new String[] {"connections", "auth-set", "personal"},
+                    oneLine(KEY));
+            check.that("a pasted credential completes at its newline without requiring EOF",
+                    Boolean.TRUE.equals(pasted.get("ok")) && KEY.equals(store.values.get("warden/personal")));
+            String largest = "s".repeat(2048);
+            Map<String, Object> maximum = command.run(home, new String[] {"connections", "auth-set", "personal"},
+                    oneLine(largest));
+            check.that("the full allowed credential length accepts a trailing newline",
+                    Boolean.TRUE.equals(maximum.get("ok")) && largest.equals(store.values.get("warden/personal")));
+            check.rejects("an oversized credential line is rejected", "credential input was rejected", () -> command.run(home,
+                    new String[] {"connections", "auth-set", "personal"},
+                    new ByteArrayInputStream((largest + "x\n").getBytes(StandardCharsets.UTF_8))));
+            check.that("a rejected oversized line leaves the prior vault entry unchanged",
+                    largest.equals(store.values.get("warden/personal")));
+            command.run(home, new String[] {"connections", "auth-set", "personal"}, oneLine(KEY));
             String listed = Json.write(command.run(home, new String[] {"connections", "list"}));
             check.that("list omits the key and shows the vault source",
                     !listed.contains(KEY) && listed.contains("os-store:warden/personal"));
@@ -306,9 +349,98 @@ public final class OpenRouterLoginTest implements Suite {
         }
     }
 
+    private void boundedExchange(Check check) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean headersSent = new AtomicBoolean();
+        server.createContext("/api/v1/auth/keys", exchange -> {
+            exchange.getRequestBody().readNBytes(4096);
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write("{\"key\":\"".getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            headersSent.set(true);
+            try { release.await(3, TimeUnit.SECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        });
+        server.start();
+        long started = System.nanoTime();
+        try {
+            OpenRouterLogin.exchange(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/api/v1/auth/keys"),
+                    CODE, VERIFIER, Duration.ofMillis(700));
+            check.that("a response that stalls after headers does not issue a key", false);
+        } catch (IllegalArgumentException rejected) {
+            check.that("the token deadline covers a stalled response body",
+                    headersSent.get() && Duration.ofNanos(System.nanoTime() - started).toMillis() < 2500);
+            check.that("a stalled token response has a static failure",
+                    rejected.getCause() == null && rejected.getMessage().contains("did not issue a key")
+                            && !rejected.getMessage().contains(CODE) && !rejected.getMessage().contains(VERIFIER));
+        } finally {
+            release.countDown();
+            server.stop(0);
+        }
+
+        HttpServer oversized = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        oversized.createContext("/api/v1/auth/keys", exchange -> {
+            byte[] body = ("{\"key\":\"" + KEY + "\",\"padding\":\"" + "x".repeat(8192) + "\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try { exchange.getResponseBody().write(body); }
+            finally { exchange.close(); }
+        });
+        oversized.start();
+        try {
+            OpenRouterLogin.exchange(URI.create("http://127.0.0.1:" + oversized.getAddress().getPort() + "/api/v1/auth/keys"),
+                    CODE, VERIFIER);
+            check.that("an oversized token response is refused", false);
+        } catch (IllegalArgumentException rejected) {
+            check.that("an oversized token response does not expose the key",
+                    rejected.getCause() == null && rejected.getMessage().contains("did not issue a key")
+                            && !rejected.getMessage().contains(KEY));
+        } finally {
+            oversized.stop(0);
+        }
+
+        HttpServer malformed = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        malformed.createContext("/api/v1/auth/keys", exchange -> {
+            ByteArrayOutputStream body = new ByteArrayOutputStream();
+            body.writeBytes(("{\"key\":\"" + KEY + "\",\"ignored\":\"").getBytes(StandardCharsets.UTF_8));
+            body.write(0xc3);
+            body.write(0x28); // An invalid UTF-8 continuation in otherwise ignored metadata.
+            body.writeBytes("\"}".getBytes(StandardCharsets.UTF_8));
+            byte[] bytes = body.toByteArray();
+            exchange.sendResponseHeaders(200, bytes.length);
+            try { exchange.getResponseBody().write(bytes); }
+            finally { exchange.close(); }
+        });
+        malformed.start();
+        try {
+            OpenRouterLogin.exchange(URI.create("http://127.0.0.1:" + malformed.getAddress().getPort() + "/api/v1/auth/keys"),
+                    CODE, VERIFIER);
+            check.that("a valid key inside malformed UTF-8 is refused", false);
+        } catch (IllegalArgumentException rejected) {
+            check.that("malformed token metadata rejects the whole response without exposing its key",
+                    rejected.getCause() == null && rejected.getMessage().contains("did not issue a key")
+                            && !rejected.getMessage().contains(KEY));
+        } finally {
+            malformed.stop(0);
+        }
+    }
+
     private static HttpClient client() {
         return HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(5)).build();
+    }
+
+    private static InputStream oneLine(String value) {
+        byte[] line = (value + "\n").getBytes(StandardCharsets.UTF_8);
+        return new InputStream() {
+            private int offset;
+            @Override public int read() {
+                if (offset == line.length) throw new AssertionError("secret input read past its newline");
+                return line[offset++];
+            }
+        };
     }
 
     private static HttpRequest request(OpenRouterLogin.Callback callback, String query) {

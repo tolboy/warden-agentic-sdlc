@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.AclEntry;
 import java.nio.file.attribute.AclEntryType;
 import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.UserPrincipal;
 import java.util.ArrayList;
 import java.util.List;
@@ -278,10 +279,9 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
     }
 
     private static void lockToOwner(Path dir) throws IOException, InterruptedException {
-        String user = System.getProperty("user.name");
-        if (user == null || user.isBlank() || user.indexOf('"') >= 0 || user.indexOf('\r') >= 0 || user.indexOf('\n') >= 0) {
-            throw new IOException("credential helper directory cannot be locked");
-        }
+        // A short user.name can resolve to a different local/domain account with the same
+        // basename. Bind the ACL to the owner of this newly created directory instead.
+        String user = aclGrantPrincipal(Files.getOwner(dir, LinkOption.NOFOLLOW_LINKS));
         String root = System.getenv("SystemRoot");
         if (root == null || root.isBlank()) throw new IOException("credential helper directory cannot be locked");
         Path icacls = Path.of(root, "System32", "icacls.exe");
@@ -300,6 +300,9 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         AclFileAttributeView view = Files.getFileAttributeView(dir, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
         if (view == null) throw new IOException("credential helper directory has no ACL");
         UserPrincipal owner = Files.getOwner(dir);
+        if (owner instanceof GroupPrincipal) {
+            throw new IOException("credential helper directory owner is not an individual user");
+        }
         List<AclEntry> entries = view.getAcl();
         if (entries.isEmpty()) throw new IOException("credential helper directory ACL is empty");
         for (AclEntry entry : entries) {
@@ -309,18 +312,32 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         }
     }
 
-    private static boolean samePrincipal(UserPrincipal owner, UserPrincipal entry) {
-        if (owner == null || entry == null) return false;
+    static String aclGrantPrincipal(UserPrincipal owner) throws IOException {
+        if (owner instanceof GroupPrincipal) {
+            throw new IOException("credential helper directory owner is not an individual user");
+        }
+        String name = owner == null ? null : owner.getName();
+        if (!qualifiedPrincipalName(name)) {
+            throw new IOException("credential helper directory owner is not fully qualified");
+        }
+        // icacls requires '*' before a numeric SID instead of resolving it as an account name.
+        return name.matches("(?i)S-\\d+(?:-\\d+)+") ? "*" + name : name;
+    }
+
+    private static boolean qualifiedPrincipalName(String name) {
+        if (name == null || name.isBlank() || name.indexOf('"') >= 0 || name.indexOf(':') >= 0
+                || name.indexOf('\r') >= 0 || name.indexOf('\n') >= 0 || name.indexOf('/') >= 0) return false;
+        if (name.matches("(?i)S-\\d+(?:-\\d+)+")) return true;
+        int slash = name.indexOf('\\');
+        return slash > 0 && slash == name.lastIndexOf('\\') && slash < name.length() - 1;
+    }
+
+    static boolean samePrincipal(UserPrincipal owner, UserPrincipal entry) {
+        if (owner == null || entry == null || owner instanceof GroupPrincipal || entry instanceof GroupPrincipal) return false;
         if (owner.equals(entry)) return true;
         String left = owner.getName();
         String right = entry.getName();
-        if (left == null || right == null) return false;
-        if (left.equalsIgnoreCase(right)) return true;
-        int leftSlash = Math.max(left.lastIndexOf('\\'), left.lastIndexOf('/'));
-        int rightSlash = Math.max(right.lastIndexOf('\\'), right.lastIndexOf('/'));
-        String leftName = leftSlash >= 0 ? left.substring(leftSlash + 1) : left;
-        String rightName = rightSlash >= 0 ? right.substring(rightSlash + 1) : right;
-        return leftName.equalsIgnoreCase(rightName) && !leftName.isBlank();
+        return qualifiedPrincipalName(left) && qualifiedPrincipalName(right) && left.equalsIgnoreCase(right);
     }
 
     private static Path powershell() {

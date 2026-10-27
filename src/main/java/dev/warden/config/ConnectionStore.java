@@ -107,6 +107,23 @@ public final class ConnectionStore {
         return loaded.value();
     }
 
+    /**
+     * Keep a credential side effect ordered with edits to its connection reference.
+     * The revision describes the connection file only; changing a vault value does
+     * not rewrite the file or claim to advance a credential revision.
+     */
+    <T> T withRevision(String id, String expectedRevision,
+                       java.util.function.Function<Versioned, T> operation) throws IOException {
+        requireRevision(expectedRevision);
+        Path target = path(id);
+        return JsonFile.underExclusiveLock(target, ".connections.lock", () -> {
+            Loaded current = readLoaded(target);
+            requireMatchingId(id, current.value().connection());
+            checkRevision(expectedRevision, current.value().revision());
+            return operation.apply(current.value());
+        });
+    }
+
     public Versioned update(Connection next, String expectedRevision) throws IOException {
         requireRevision(expectedRevision);
         Path target = path(next.id());

@@ -19,7 +19,7 @@ warden connections add openrouter-personal --provider openrouter --os-store
 warden connections auth-set openrouter-personal
 ```
 
-`auth-set` reads the key from stdin. A console prompt hides it. Do not pass the key as an argument. `auth-remove` deletes that local vault entry and does not revoke the key at the provider. If Credential Manager cannot be locked and probed, `--os-store` is refused and nothing is written to a file instead. Do not paste a key into YAML, command arguments, prompt templates or shell verification probes. Adding a connection or storing a key does not activate a profile or change policy.
+`auth-set` reads one bounded line from stdin; pressing Enter completes input without requiring EOF. A console prompt hides it. Do not pass the key as an argument. `auth-remove` deletes that local vault entry and does not revoke the key at the provider. If Credential Manager cannot be locked and probed, `--os-store` is refused and nothing is written to a file instead. The helper directory must belong to an individual user, and its ACL must name that full Windows identity; ambiguous names and group owners are refused. Do not paste a key into YAML, command arguments, prompt templates or shell verification probes. Adding a connection or storing a key does not activate a profile or change policy.
 
 OpenRouter login is a separate command. The connection must already use `os-store:warden/<id>`, and the vault must be available. Warden sends the user to `https://openrouter.ai/auth` with an S256 challenge. The default flow listens on `127.0.0.1` for up to three minutes. `--headless` prints that URL and reads the pasted code from stdin, hidden when a console is attached. The code is exchanged at `https://openrouter.ai/api/v1/auth/keys`. A redirect is not followed. The issued key uses the same vault write as `auth-set` and is not placed in the connection file, the command report, or policy. If the file changes before that write, or the vault rejects the key, nothing is saved; revoke the new key in the OpenRouter account. This command does not call a model. GonkaRouter and environment-variable connections are refused before any authorization request.
 
@@ -28,7 +28,7 @@ warden connections auth-login openrouter-personal
 warden connections auth-login openrouter-personal --headless
 ```
 
-The local test exchanges the code with a loopback stub. A live browser login was not run.
+The authorization URL is printed before Warden asks for a headless code. The exchange has a 30-second deadline covering the complete response and refuses bodies larger than 8 KiB or malformed UTF-8. Local tests exchange the code with a loopback stub, including stalled and oversized responses. A live browser login was not run.
 
 ```yaml
 version: 1
@@ -54,7 +54,7 @@ warden connections add local-test --provider custom --base-url http://127.0.0.1:
 
 The Agents page has a connections editor. It is available from `warden dashboard` and from the page opened by `warden decide`. The form asks for an environment variable name. A key field is shown only after the Windows vault probe succeeds; the value is posted once, cleared from the form, and is not returned by GET or stored in browser storage. Saving, enabling, disabling, or storing a key does not add a profile to policy.
 
-Each change carries the file revision from the row you opened. If the file changed in another window or command, the panel keeps the draft, asks you to reload, and accepts the new revision only after you choose «Изменить» on that row again. Unfamiliar YAML layouts and files that are not UTF-8 are left unchanged. Remove is refused while any profile references the connection, and it does not revoke the key at the provider. Check uses the same rules as `warden connections check` and does not stamp a model or a role.
+Each change carries the file revision from the row you opened. If the file changed in another window or command, the panel keeps the draft, asks you to reload, and accepts the new revision only after you choose «Изменить» on that row again. Unfamiliar YAML layouts and files that are not UTF-8 are left unchanged. Vault writes and deletes hold the connection lock from the revision check through the vault operation, so a simultaneous reference edit cannot redirect a stale key operation. This revision describes the YAML file: separate rotations of the same vault entry serialize, but do not have a separate credential revision. Remove is refused while any profile references the connection, and it does not revoke the key at the provider. Check uses the same selected credential source as the list and does not stamp a model or a role. Cancelling the form clears its key field.
 
 ```text
 warden connections check openrouter-personal
@@ -102,6 +102,6 @@ warden connections enable openrouter-personal
 warden connections remove openrouter-personal
 ```
 
-Add refuses to overwrite an existing file. Enable/disable preserves comments in supported YAML layouts and refuses unfamiliar layouts. Removing a connection is refused while any profile references it. These operations manage local configuration; revoke an actual API key in the service's account settings when needed. Removing a local reference does not revoke a remote key.
+Add refuses to overwrite an existing file. Enable/disable preserves comments in supported YAML layouts and refuses unfamiliar layouts. A running loop rechecks a verified API profile's connection before its next dispatch: a disabled, missing or changed connection stops that dispatch before HTTP. A request already sent finishes against its original connection. Removing a connection is refused while any profile references it. These operations manage local configuration; revoke an actual API key in the service's account settings when needed. Removing a local reference does not revoke a remote key.
 
 The full roadmap is in `DESIGN-API-CONNECTIONS-2026-10-26.md`. Provider-backed live inference and billing have not been verified as part of the implementation's local test suite.

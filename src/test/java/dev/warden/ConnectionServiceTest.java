@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.warden.config.Connection;
 import dev.warden.config.ConnectionService;
 import dev.warden.config.ConnectionStore;
+import dev.warden.execution.OsCredentialStore;
 import dev.warden.json.Json;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
@@ -22,7 +23,9 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Two settings editors share file revisions, not mutable in-memory connection state. */
 public final class ConnectionServiceTest implements Suite {
@@ -34,6 +37,9 @@ public final class ConnectionServiceTest implements Suite {
         try {
             revisionsAndComments(check, home.resolve("edits"));
             explicitAuthentication(check, home.resolve("auth"));
+            injectedVaultCheck(check, home.resolve("vault-check"));
+            vaultEditsHoldConnectionRevision(check, home.resolve("vault-write"), "auth-set");
+            vaultEditsHoldConnectionRevision(check, home.resolve("vault-delete"), "auth-remove");
             rejectedPayloads(check, home.resolve("invalid"));
             referencesAndRaces(check, home.resolve("race"));
             unreadableAndMissing(check, home.resolve("missing"));
@@ -151,6 +157,89 @@ public final class ConnectionServiceTest implements Suite {
             check.eq("stored noauth is explicit", null, new ConnectionStore(home).versioned("local").connection().credentialRef());
             check.that("API secrets are absent from successful action reports", !Json.write(checked.report()).contains(SECRET));
         } finally { server.stop(0); }
+    }
+
+    private static void injectedVaultCheck(Check check, Path home) throws Exception {
+        AtomicInteger reads = new AtomicInteger();
+        OsCredentialStore vault = new OsCredentialStore() {
+            @Override public boolean available() { return true; }
+            @Override public String read(String target) { reads.incrementAndGet(); return SECRET; }
+            @Override public void write(String target, String secret) { throw new AssertionError("check must not write"); }
+            @Override public void delete(String target) { throw new AssertionError("check must not delete"); }
+        };
+        ConnectionService service = new ConnectionService(home, ignored -> null, vault);
+        var added = service.apply("add", settings("local", "custom", "https://example.com/v1",
+                "os-store:warden/local", true));
+        reads.set(0);
+        var checked = service.apply("check", action("local", revision(added)));
+        check.eq("settings check uses the same injected vault as settings list", 1, reads.get());
+        check.eq("the injected vault credential is configured", true, checked.report().get("credential_configured"));
+        check.eq("a custom vault check does not assert remote authentication", false, checked.report().get("auth_verified"));
+        check.eq("a custom vault check sends no inference", false, checked.report().get("inference_performed"));
+        check.that("the injected vault check report contains no credential", !Json.write(checked.report()).contains(SECRET));
+    }
+
+    private static void vaultEditsHoldConnectionRevision(Check check, Path home, String operation) throws Exception {
+        CountDownLatch mutationEntered = new CountDownLatch(1);
+        CountDownLatch allowMutation = new CountDownLatch(1);
+        AtomicReference<String> value = new AtomicReference<>(SECRET);
+        AtomicInteger mutations = new AtomicInteger();
+        OsCredentialStore vault = new OsCredentialStore() {
+            @Override public boolean available() { return true; }
+            @Override public String read(String target) { return value.get(); }
+            private void block() {
+                mutations.incrementAndGet();
+                mutationEntered.countDown();
+                try {
+                    if (!allowMutation.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("test mutation timed out");
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("test mutation interrupted");
+                }
+            }
+            @Override public void write(String target, String secret) { block(); value.set(secret); }
+            @Override public void delete(String target) { block(); value.set(null); }
+        };
+        ConnectionService service = new ConnectionService(home, ignored -> null, vault);
+        var added = service.apply("add", settings("personal", "custom", "https://example.com/v1",
+                "os-store:warden/personal", true));
+        String originalRevision = revision(added);
+        Path file = home.resolve("connections/personal.yaml");
+        String originalYaml = Files.readString(file);
+        Map<String, Object> credential = new LinkedHashMap<>(action("personal", originalRevision));
+        if ("auth-set".equals(operation)) credential.put("secret", "synthetic-replacement-credential");
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var mutation = pool.submit(() -> service.apply(operation, credential));
+            check.that(operation + " reaches the vault", mutationEntered.await(10, TimeUnit.SECONDS));
+            CountDownLatch editorStarted = new CountDownLatch(1);
+            var editor = pool.submit(() -> {
+                editorStarted.countDown();
+                Map<String, Object> update = settings("personal", "custom", "https://example.com/v1", "env:NEW_KEY", true);
+                update.put("revision", originalRevision);
+                return service.apply("update", update);
+            });
+            check.that(operation + " concurrent editor starts", editorStarted.await(10, TimeUnit.SECONDS));
+            boolean blocked = false;
+            try { editor.get(200, TimeUnit.MILLISECONDS); }
+            catch (TimeoutException waitingForMutation) { blocked = true; }
+            check.that(operation + " holds the connection edit lock through the vault side effect", blocked);
+            check.eq(operation + " leaves the file unchanged while its vault mutation runs", originalYaml, Files.readString(file));
+            allowMutation.countDown();
+            check.eq(operation + " completes before a queued reference edit", 200, mutation.get(10, TimeUnit.SECONDS).status());
+            check.eq(operation + " queued reference edit can then save", 200, editor.get(10, TimeUnit.SECONDS).status());
+            check.that(operation + " performs its intended vault side effect",
+                    "auth-set".equals(operation) ? "synthetic-replacement-credential".equals(value.get()) : value.get() == null);
+            check.eq(operation + " stale vault edit is refused after a reference change", 409,
+                    service.apply(operation, credential).status());
+            check.eq(operation + " stale request does not touch the vault", 1, mutations.get());
+            check.eq(operation + " final reference belongs to the later editor", "env:NEW_KEY",
+                    new ConnectionStore(home).versioned("personal").connection().credentialRef());
+            check.that(operation + " never stores the credential in the connection file", !Files.readString(file).contains(SECRET));
+        } finally {
+            allowMutation.countDown();
+            pool.shutdownNow();
+        }
     }
 
     private static void rejectedPayloads(Check check, Path home) throws Exception {
