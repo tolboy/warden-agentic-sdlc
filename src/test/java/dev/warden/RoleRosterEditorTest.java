@@ -22,7 +22,7 @@ public final class RoleRosterEditorTest implements Suite {
                   on_quota_exhausted: confirm
                   on_vendor_failure: stop
                 """);
-        // The shared capability list: the service catalog lists levels unordered and with a level the router cannot name.
+        // The shared capability list: the service catalog lists levels unordered, including the top ultra level Jev may pick.
         var user=UserConfig.load(home);
         Files.createDirectories(home.resolve("vendors"));
         Files.writeString(home.resolve("vendors/cli-provider-openai-catalog.json"),dev.warden.json.Json.write(Map.of("status","available",
@@ -30,7 +30,7 @@ public final class RoleRosterEditorTest implements Suite {
                 "models",List.of(Map.of("id","old-model","efforts",List.of("medium","high")),Map.of("id","new-model","efforts",List.of("ultra","high","medium","low")),Map.of("id","next-model","efforts",List.of("medium","high"))))));
         var capabilities=new dev.warden.execution.EffortCapabilities(home,UserConfig.load(home));
         check.eq("catalog levels are offered weakest first",List.of("low","medium","high","ultra"),capabilities.levels(user.profiles().get("primary"),"new-model"));
-        check.eq("router narrows the same list to levels the classifier can name",List.of("low","medium","high"),dev.warden.run.TaskRouting.supportedEfforts(capabilities.levels(user.profiles().get("primary"),"new-model")));
+        check.eq("router offers the classifier every catalog level, ultra included",List.of("low","medium","high","ultra"),dev.warden.run.TaskRouting.supportedEfforts(capabilities.levels(user.profiles().get("primary"),"new-model")));
         check.eq("a model the catalog does not list offers no levels",List.of(),capabilities.levels(user.profiles().get("primary"),"unknown-model"));
         var editor=new RoleRosterEditor(home);
         String originalPrimary=Files.readString(primary),originalReserve=Files.readString(reserve);
