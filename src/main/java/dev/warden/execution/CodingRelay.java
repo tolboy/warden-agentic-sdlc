@@ -39,6 +39,18 @@ final class CodingRelay implements AutoCloseable {
     /** Pause between resends of a request that never left; replaceable by tests. */
     ApiRetry.Sleeper sleeper = ApiRetry.REAL_SLEEP;
 
+    /**
+     * Upper bound for one upstream turn. JoinGonka answered a bare ping in about 30 s on
+     * 2026-10-28 and a coding turn with the tool schema took longer than the earlier 45 s cap,
+     * so the probe and every OpenCode dispatch on it died on its first real turn. The
+     * dispatch's own time budget still bounds the whole relay.
+     */
+    static final Duration TURN_CAP = Duration.ofSeconds(120);
+
+    static Duration turnDeadline(long remainingNanos) {
+        return Duration.ofNanos(Math.max(0, Math.min(TURN_CAP.toNanos(), remainingNanos)));
+    }
+
     CodingRelay(Connection connection, String model, String secret, Duration limit)
             throws IOException {
         this(connection, model, secret, limit, 8, 2048);
@@ -196,8 +208,7 @@ final class CodingRelay implements AutoCloseable {
                             URI.create(connection.endpoint()),
                             Json.write(body),
                             secret,
-                            Duration.ofNanos(
-                                    Math.min(Duration.ofSeconds(45).toNanos(), remaining)),
+                            turnDeadline(remaining),
                             ApiRetry.Policy.NOT_SENT_ONLY,
                             sleeper,
                             ApiRetry.correlation(null, null, "implementer", "relay-turn-" + turns));
