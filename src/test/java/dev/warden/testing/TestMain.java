@@ -22,6 +22,7 @@ public final class TestMain {
                 new dev.warden.ModelCheckTest(),
                 new dev.warden.ModelSettingsTest(),
                 new dev.warden.VendorSettingsTest(),
+                new dev.warden.ServiceBindingTest(),
                 new dev.warden.RoleRosterEditorTest(),
                 new dev.warden.DecisionRoutingTest(),
                 new dev.warden.TaskRoutingLoopTest(),

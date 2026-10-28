@@ -24,11 +24,13 @@ public final class VendorSettingsService {
     }
     private record Vendor(String id,String kind,String provider,String label,Connection connection,List<Profile> profiles,List<DecisionProfile> classifiers) {}
     public Map<String,Object> list()throws Exception{
-        var user=UserConfig.load(home);var rows=new ArrayList<Map<String,Object>>();
+        var user=UserConfig.load(home);var rows=new ArrayList<Map<String,Object>>();var evidence=CheckEvidence.current(home,user);
         for(var vendor:inventory(user).values()){
             var row=new LinkedHashMap<String,Object>();row.put("id",vendor.id());row.put("kind",vendor.kind());row.put("provider",vendor.provider());row.put("label",vendor.label());
             row.put("profiles",vendor.profiles().stream().map(Profile::name).toList());row.put("classifier_profiles",vendor.classifiers().stream().map(DecisionProfile::name).toList());
-            row.put("access_label",vendor.connection()==null?"Через CLI":"API");row.put("billing","unknown");
+            row.put("access_label",vendor.connection()!=null?"API":UNMAPPED.equals(vendor.id())?"Сервис не указан":"Через CLI");row.put("billing","unknown");
+            if(vendor.connection()==null)row.put("accounts",accounts(vendor));
+            if(UNMAPPED.equals(vendor.id()))row.put("mapping",vendor.profiles().stream().map(p->{var binding=ServiceBinding.of(p);var item=new LinkedHashMap<String,Object>();item.put("profile",p.name());item.put("reason",binding.reason());item.put("suggested",binding.suggested());return item;}).toList());
             row.put("enabled",vendor.connection()==null || vendor.connection().enabled());row.put("docs_url",docs(vendor.provider()));
             var catalog=read(cache(vendor.id(),"catalog"));
             if(catalog.isEmpty() || !Objects.equals(catalog.get("configuration"),configuration(vendor)))catalog=unavailable("catalog_not_loaded");
@@ -36,8 +38,10 @@ public final class VendorSettingsService {
             if(catalog.get("models") instanceof List<?> cached)for(Object value:cached)if(value instanceof Map<?,?> model && model.get("id") instanceof String id)models.put(id,new LinkedHashMap<>((Map<String,Object>)model));
             for(var profile:vendor.profiles())if(profile.model()!=null)models.putIfAbsent(profile.model(),Map.of("id",profile.model(),"label",profile.model(),"efforts",profile.effort()==null?List.of():List.of(profile.effort()),"origin","configured"));
             for(var profile:vendor.classifiers())models.putIfAbsent(profile.model(),Map.of("id",profile.model(),"label",profile.model(),"efforts",List.of(),"origin","configured","kind","classifier"));
-            row.put("models",new ArrayList<>(models.values()));
             var last=read(cache(vendor.id(),"check"));if(Objects.equals(last.get("configuration"),configuration(vendor)))row.put("check",last);
+            var status=CheckEvidence.status(vendor.profiles(),vendor.classifiers(),evidence);
+            for(var model:models.entrySet()){var answer=CheckEvidence.forModel(status,model.getKey());if(answer!=null){var copy=new LinkedHashMap<>(model.getValue());copy.put("check",answer);model.setValue(copy);}}
+            row.put("models",new ArrayList<>(models.values()));row.put("status",status);
             rows.add(row);
         }
         return Map.of("vendors",rows);
@@ -46,6 +50,7 @@ public final class VendorSettingsService {
         var user=UserConfig.load(home);var vendors=selected(user,ids);var rows=new ArrayList<Map<String,Object>>();
         for(var vendor:vendors){
             if(Thread.currentThread().isInterrupted())throw new InterruptedException("catalog refresh cancelled");
+            if(UNMAPPED.equals(vendor.id())){rows.add(Map.of("vendor",vendor.id(),"status","unavailable","code","service_mapping_required","models",List.of()));continue;}
             Map<String,Object> catalog;
             try{catalog=vendor.connection()==null?cliCatalog(vendor):apiCatalog(vendor.connection());}
             catch(Exception failure){if(Thread.currentThread().isInterrupted())throw new InterruptedException("catalog refresh cancelled");catalog=unavailable("catalog_unavailable");}
@@ -62,18 +67,28 @@ public final class VendorSettingsService {
             if(Thread.currentThread().isInterrupted())throw new InterruptedException("vendor check cancelled");
             Set<String> names=new LinkedHashSet<>();
             Map<String,Object> report;
-            if(vendor.connection()==null){
-                // A retired first model need not make an authenticated CLI vendor look
-                // disconnected. Try at most one other configured model, stopping at pong.
-                var attempts=new ArrayList<Object>();boolean available=false;int attempted=0;var seenModels=new HashSet<String>();
-                var direct=vendor.profiles().stream().filter(p->!"orca".equals(p.runner())).toList();
-                var candidates=direct.isEmpty()?vendor.profiles():direct;
-                for(var profile:candidates.stream().sorted(Comparator.comparing((Profile p)->!p.readOnly()).thenComparing(p->!p.verified()).thenComparing(Profile::name)).toList()){
-                    if(!seenModels.add(String.valueOf(profile.model())))continue;
-                    var attempt=checks.run(user,project,Set.of(profile.name()),ignored->{});attempts.addAll((List<?>)attempt.get("results"));attempted++;
-                    if(Boolean.TRUE.equals(attempt.get("ok"))){available=true;break;}if(attempted>=2)break;
+            if(UNMAPPED.equals(vendor.id())){
+                // Pinging a profile whose service is unknown cannot prove anything about a service.
+                rows.add(Map.of("vendor",vendor.id(),"ok",false,"code","service_mapping_required","results",List.of()));all=false;continue;
+            }else if(vendor.connection()==null){
+                // Each account authenticates separately, so each gets its own representative.
+                // A retired first model need not make an authenticated account look
+                // disconnected: try at most one other configured model, stopping at pong.
+                var attempts=new ArrayList<Object>();var accountRows=new ArrayList<Object>();boolean available=true;
+                var byAccount=new TreeMap<String,List<Profile>>();
+                for(var profile:vendor.profiles())byAccount.computeIfAbsent(ServiceBinding.of(profile).account(),ignored->new ArrayList<>()).add(profile);
+                for(var account:byAccount.entrySet()){
+                    boolean answered=false;int attempted=0;var seenModels=new HashSet<String>();
+                    var direct=account.getValue().stream().filter(p->!"orca".equals(p.runner())).toList();
+                    var candidates=direct.isEmpty()?account.getValue():direct;
+                    for(var profile:candidates.stream().sorted(Comparator.comparing((Profile p)->!p.readOnly()).thenComparing(p->!p.verified()).thenComparing(Profile::name)).toList()){
+                        if(!seenModels.add(String.valueOf(profile.model())))continue;
+                        var attempt=checks.run(user,project,Set.of(profile.name()),ignored->{});attempts.addAll((List<?>)attempt.get("results"));attempted++;
+                        if(Boolean.TRUE.equals(attempt.get("ok"))){answered=true;break;}if(attempted>=2)break;
+                    }
+                    accountRows.add(Map.of("account",account.getKey(),"ok",answered));available&=answered;
                 }
-                report=Map.of("ok",available,"code",available?"check_passed":"model_check_failed","results",attempts);
+                report=Map.of("ok",available,"code",available?"check_passed":"model_check_failed","results",attempts,"accounts",accountRows);
             }else{
                 // One diagnostic per configured API model, not per role/harness duplicate.
                 var byModel=new LinkedHashMap<String,Profile>();
@@ -82,7 +97,8 @@ public final class VendorSettingsService {
                 report=names.isEmpty()?Map.of("ok",false,"code","vendor_model_required","results",List.of()):checks.run(user,project,names,ignored->{});
             }
             var row=new LinkedHashMap<String,Object>();row.put("vendor",vendor.id());row.put("configuration",configuration(vendor));row.put("ok",Boolean.TRUE.equals(report.get("ok")));row.put("code",report.get("code"));row.put("checked_at",Instant.now().toString());row.put("results",report.get("results"));
-            row.put("scope",vendor.connection()==null?"cli_vendor_representative_model":"configured_api_models");row.put("assumption",vendor.connection()==null?"One configured model answered for this service. Role launch channels and other accounts are checked separately before execution.":"Catalog listing does not prove model access; configured API models are checked individually.");
+            if(report.get("accounts")!=null)row.put("accounts",report.get("accounts"));
+            row.put("scope",vendor.connection()==null?"cli_vendor_representative_model":"configured_api_models");row.put("assumption",vendor.connection()==null?"One configured model answered per account of this service. Role launch channels are checked separately before execution.":"Catalog listing does not prove model access; configured API models are checked individually.");
             ModelCheck.atomicWrite(cache(vendor.id(),"check"),Json.write(row));rows.add(row);all&=Boolean.TRUE.equals(report.get("ok"));
         }
         return Map.of("ok",all,"code",all?"vendors_available":"vendor_check_failed","results",rows);
@@ -96,15 +112,36 @@ public final class VendorSettingsService {
         for(var connection:user.connections().values())groups.put("api-"+connection.id(),new Vendor("api-"+connection.id(),"api",connection.provider(),providerLabel(connection.provider()),connection,new ArrayList<>(),new ArrayList<>()));
         for(var profile:user.profiles().values()){
             String id=displayVendorId(profile);var vendor=groups.get(id);
-            if(vendor==null){String provider=cliProvider(profile);String command=commandName(profile.command());vendor=new Vendor(id,"cli",provider,providerLabel(provider),null,new ArrayList<>(),new ArrayList<>());groups.put(id,vendor);}
+            if(vendor==null){
+                var binding=ServiceBinding.of(profile);
+                vendor=binding.needsMapping()?new Vendor(id,"unmapped",null,"Сервис не указан",null,new ArrayList<>(),new ArrayList<>())
+                        :new Vendor(id,"cli",binding.service(),providerLabel(binding.service()),null,new ArrayList<>(),new ArrayList<>());
+                groups.put(id,vendor);
+            }
             vendor.profiles().add(profile);
         }
         for(var profile:DecisionProfile.load(home).values()){var vendor=groups.get("api-"+profile.connection());if(vendor!=null)vendor.classifiers().add(profile);}
         return groups;
     }
-    /** Public service identity; roles and orchestration do not create new vendors. */
-    public static String displayVendorId(Profile profile){return profile.connectionRef()!=null?"api-"+profile.connectionRef():"cli-provider-"+cliProvider(profile);}
-    private static String providerLabel(String provider){return switch(provider){
+    public static final String UNMAPPED="cli-unmapped";
+    /**
+     * Public service identity: one card per authenticating service. Clients, Orca, roles and
+     * model developers never create a card; a CLI profile whose service is unknown is listed
+     * under {@link #UNMAPPED} instead of being attributed to its model developer.
+     */
+    public static String displayVendorId(Profile profile){
+        if(profile.connectionRef()!=null)return "api-"+profile.connectionRef();
+        var binding=ServiceBinding.of(profile);return binding.needsMapping()?UNMAPPED:"cli-provider-"+binding.service();
+    }
+    private static List<Map<String,Object>> accounts(Vendor vendor){
+        var accounts=new TreeMap<String,List<Profile>>();
+        for(var profile:vendor.profiles()){var binding=ServiceBinding.of(profile);accounts.computeIfAbsent(binding.needsMapping()?"":binding.account(),ignored->new ArrayList<>()).add(profile);}
+        var rows=new ArrayList<Map<String,Object>>();
+        for(var account:accounts.entrySet()){if(account.getKey().isEmpty())continue;var row=new LinkedHashMap<String,Object>();row.put("id",account.getKey());
+            row.put("binding",account.getValue().stream().map(p->ServiceBinding.of(p).source()).distinct().sorted().toList());row.put("profiles",account.getValue().stream().map(Profile::name).toList());rows.add(row);}
+        return rows;
+    }
+    private static String providerLabel(String provider){if(provider==null)return "";return switch(provider){
         case "openai"->"OpenAI";case "x-ai"->"xAI";case "deepseek"->"DeepSeek";
         case "antigravity", "google"->"Google Antigravity";case "anthropic"->"Anthropic";
         case "openrouter"->"OpenRouter";case "gonkarouter"->"GonkaRouter";case "joingonka"->"JoinGonka";
@@ -120,7 +157,8 @@ public final class VendorSettingsService {
                 String value=args.get(++i);if(!value.startsWith("model_reasoning_effort"))auth.append(a).append('=').append(value).append(';');
             }
         }
-        return "cli-"+hash(cliProvider(p)+"|"+p.command()+"|"+p.runner()+"|"+auth).substring(0,16);
+        var binding=ServiceBinding.of(p);String service=binding.needsMapping()?"unmapped:"+Profile.canonicalVendor(p.modelVendor()):binding.service()+"/"+binding.account();
+        return "cli-"+hash(service+"|"+p.command()+"|"+p.runner()+"|"+auth).substring(0,16);
     }
     private Map<String,Object> cliCatalog(Vendor vendor)throws Exception{
         boolean codex="openai".equals(vendor.provider()) && vendor.profiles().stream().allMatch(p->"codex".equals(commandName(p.command())));
@@ -152,8 +190,7 @@ public final class VendorSettingsService {
     private static Map<String,Object> read(Path path){try{if(Files.isRegularFile(path)&&Files.size(path)<=4*1024*1024)return Json.parseObject(Files.readString(path));}catch(Exception ignored){}return Map.of();}
     private static String configuration(Vendor vendor){return vendor.connection()!=null?vendor.connection().fingerprint():hash(vendor.profiles().stream().map(VendorSettingsService::vendorId).distinct().sorted().toList().toString());}
     private static String safe(Object value){if(!(value instanceof String text)||text.isBlank()||text.length()>256||text.chars().anyMatch(c->Character.isISOControl(c)))return null;return text;}
-    private static String commandName(String command){if(command==null)return "cli";String name=command.replace('\\','/');name=name.substring(name.lastIndexOf('/')+1);return name.replaceFirst("(?i)\\.(exe|cmd|bat)$","").toLowerCase(Locale.ROOT);}
-    private static String cliProvider(Profile profile){return "agy".equals(commandName(profile.command()))?"antigravity":String.valueOf(Profile.canonicalVendor(profile.modelVendor()));}
+    private static String commandName(String command){return ServiceBinding.client(command);}
     private static String hash(String value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));}catch(Exception impossible){throw new IllegalStateException(impossible);}}
-    private static String docs(String provider){return switch(provider){case "openai"->"https://developers.openai.com/codex/models";case "x-ai"->"https://docs.x.ai/developers/models";case "google", "antigravity"->"https://antigravity.google/docs/models/";case "anthropic"->"https://platform.claude.com/docs/en/about-claude/models/overview";case "openrouter"->"https://openrouter.ai/models";case "gonkarouter"->"https://gonkarouter.io/";case "joingonka"->"https://gate.joingonka.ai/dashboard";case "deepseek"->"https://api-docs.deepseek.com/quick_start/pricing";default->"";};}
+    private static String docs(String provider){if(provider==null)return "";return switch(provider){case "openai"->"https://developers.openai.com/codex/models";case "x-ai"->"https://docs.x.ai/developers/models";case "google", "antigravity"->"https://antigravity.google/docs/models/";case "anthropic"->"https://platform.claude.com/docs/en/about-claude/models/overview";case "openrouter"->"https://openrouter.ai/models";case "gonkarouter"->"https://gonkarouter.io/";case "joingonka"->"https://gate.joingonka.ai/dashboard";case "deepseek"->"https://api-docs.deepseek.com/quick_start/pricing";default->"";};}
 }
