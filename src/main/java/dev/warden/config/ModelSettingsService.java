@@ -96,21 +96,12 @@ public final class ModelSettingsService {
                 finally{checking.set(false);}
             }
             if("save-composition".equals(action)){
-                if(!checking.compareAndSet(false,true))return refused(409,"check_already_running");
-                try{
-                    var saved=new RoleRosterEditor(home).apply(payload);
-                    if(saved.status()!=200)return new Outcome(saved.status(),saved.report());
-                    var validations=new ArrayList<Map<String,Object>>();
-                    for(String name:strings(saved.report().get("pending_verification"))){
-                        try{
-                            Object savedRevision=((Map<?,?>)saved.report().get("revisions")).get(name);
-                            var outcome=verify(Map.of("name",name,"revision",savedRevision));validations.add(outcome.report());
-                        }catch(Exception failure){validations.add(Map.of("ok",false,"profile",name,"code","role_preparation_failed"));}
-                    }
-                    var report=new LinkedHashMap<String,Object>(saved.report());report.put("validation",validations);
-                    report.put("ready",validations.stream().allMatch(row->Boolean.TRUE.equals(row.get("ok"))));
-                    return new Outcome(200,report);
-                }finally{checking.set(false);}
+                var saved=new RoleRosterEditor(home).apply(payload);
+                if(saved.status()!=200)return new Outcome(saved.status(),saved.report());
+                var report=new LinkedHashMap<String,Object>(saved.report());
+                report.put("validation",List.of());report.put("ready",strings(saved.report().get("pending_verification")).isEmpty());
+                report.put("inference_started",false);
+                return new Outcome(200,report);
             }
             if ("check".equals(action)) {
                 requireKeys(payload, Set.of("profiles"));
@@ -161,7 +152,7 @@ public final class ModelSettingsService {
                     default -> throw new Invalid();
                 }
             }
-            return new Outcome(200, Map.of("ok", true, "code", "settings_saved"));
+            return new Outcome(200, Map.of("ok", true, "code", "settings_saved","settings_revision",revision(CheckSettings.file(home))));
         } catch (Changed changed) { return refused(409, "settings_changed_reload"); }
         catch (UnboundModel unbound) { return refused(400, "cli_model_binding_required"); }
         catch (Invalid | ConfigException | IllegalArgumentException | dev.warden.yaml.Yaml.YamlException invalid) { return refused(400, "settings_invalid"); }

@@ -121,6 +121,14 @@ public final class ModelSettingsTest implements Suite {
         check.eq("malformed selection preserves template",primaryBefore,Files.readString(primary));
         check.eq("malformed selection preserves policy",reordered,Files.readString(policy));
 
+        var changedSlot=List.of(Map.of("profile","primary","revision",ModelSettingsService.revision(primary),"model","another/model"));
+        var localSave=service.apply("save-composition",Map.of("revision",ModelSettingsService.revision(policy),"role","reviewer","strategy","first","slots",changedSlot));
+        check.eq("changed model saves locally",200,localSave.status());
+        check.eq("autosave never starts inference",false,localSave.report().get("inference_started"));
+        check.eq("changed model explicitly remains pending",false,localSave.report().get("ready"));
+        check.eq("pending admission is returned",List.of("primary"),localSave.report().get("pending_verification"));
+        check.eq("autosave does not invoke ping",calls,pings.get());
+        check.eq("autosave preserves pending admission",false,UserConfig.load(home).profiles().get("primary").verified());
         Path rubric=JevRoutingPolicy.file(home);
         String yaml=JevRoutingPolicy.DEFAULT.yaml().replace("Would independent code review be useful for the requested behavior?","Would independent review help verify this requested change?");
         check.that("real rubric exercises multiline policy larger than generic field limit",yaml.length()>512 && yaml.contains("\n"));

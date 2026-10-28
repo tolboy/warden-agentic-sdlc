@@ -565,6 +565,7 @@ public final class Dashboard implements AutoCloseable {
             async function loadConfig(){$('config-status').textContent='читаю…';try{const response=await fetch('/api/config',{cache:'no-store'});if(!response.ok)throw Error('unavailable');drawConfig(await response.json());$('config-status').textContent='прочитано '+new Date().toLocaleTimeString()}catch(e){$('config-status').textContent='настройки недоступны'}}
             $('reload-config').addEventListener('click',loadConfig);loadConfig();
             document.addEventListener('warden:connections-changed',loadConfig);
+            document.addEventListener('warden:config-saved',loadConfig);
             function drawRuns(){openRuns=new Set([...document.querySelectorAll('#runs details[open]')].map(d=>d.dataset.run));const body=$('runs');body.replaceChildren();const runs=data.runs||[];
             for(const r of runs){const tr=document.createElement('tr');const chain=r.chain||{},decision=r.decision||{},gate=r.orca_gate||{};
             const cost=chain.cost_usd??r.total_cost_usd,unpriced=chain.unpriced_calls??r.unpriced_calls;
