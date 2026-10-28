@@ -264,6 +264,7 @@ public final class TaskLoopTest implements Suite {
             narrationChecks(check, sandbox, home);
             reusedJudgementChecks(check, sandbox, home);
             infrastructureResumeChecks(check, sandbox, home);
+            apiReviewerResumeChecks(check, sandbox, home);
             chainBudgetChecks(check, sandbox, home);
             provenanceChecks(check, sandbox, home);
             gateTtlAndStrictCapChecks(check, sandbox, home);
@@ -3361,6 +3362,98 @@ public final class TaskLoopTest implements Suite {
 
         // Restore the ordinary roster for the checks that follow.
         writeProfiles(home, sandbox, "infra-restore", 1, 1);
+    }
+
+    /**
+     * An API reader that the provider failed has said nothing about the candidate. A GonkaRouter
+     * 502 on the review used to stop as `reviewer_failed`, which counts as a judgement, so the
+     * `--continue` declined the writer's passed stage and paid it to write the same change again.
+     */
+    @SuppressWarnings("unchecked")
+    private void apiReviewerResumeChecks(Check check, Path sandbox, Path home) throws Exception {
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        com.sun.net.httpserver.HttpServer api = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        api.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            boolean first = reads.incrementAndGet() == 1;
+            String artifact = Json.write(Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                    "verdict", "pass", "summary", "api review", "findings", List.of()));
+            byte[] body = (first ? "{\"error\":{\"message\":\"bad gateway\"}}"
+                    : Json.write(Map.of("model", "test/api-reader", "choices", List.of(Map.of(
+                            "finish_reason", "stop", "message", Map.of("content", artifact))))))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(first ? 502 : 200, body.length);
+            try (var out = exchange.getResponseBody()) { out.write(body); }
+        });
+        api.start();
+        Path profileFile = home.resolve("profiles/loop-api-review.yaml");
+        try {
+            Path project = newProject(sandbox, "infra-api-review");
+            writeProfiles(home, sandbox, "infra-api-review", 1, 1);
+            new dev.warden.config.ConnectionCommand(ignored -> null).run(home, new String[] {"connections", "add",
+                    "resume-api", "--provider", "custom", "--base-url",
+                    "http://127.0.0.1:" + api.getAddress().getPort() + "/v1", "--no-auth"});
+            Files.writeString(profileFile, """
+                    version: 1
+                    profile: loop-api-review
+                    role: reviewer
+                    model_vendor: deepseek
+                    model: test/api-reader
+                    runner: api
+                    connection: resume-api
+                    read_only: true
+                    limits: { wall_clock_minutes: 1, max_output_tokens: 256 }
+                    prompt_template: prompts/reviewer.md
+                    json_schema: schemas/reviewer.json
+                    artifact:
+                      required_fields: [role, task_id, status, verdict, summary, findings]
+                    verification:
+                      what_to_check: [text artifact only]
+                    """);
+            new dev.warden.config.ProfileVerifier(new ProcessRunner()).stamp(profileFile,
+                    UserConfig.load(home).profiles().get("loop-api-review"), java.time.LocalDate.of(2026, 10, 28));
+            policy(home, "loop-api-review", "loop-impl", "stop");
+
+            TaskLoop.Outcome stopped = loop(project, home, "ar1");
+            check.eq("api review: a 502 on the reading stops as an endpoint failure, not a verdict",
+                    "vendor_call_failed", stopped.reason());
+            check.eq("api review: the reading was asked once, not resent", 1, reads.get());
+            Map<String, Object> failure =
+                    (Map<String, Object>) stopped.summaryReport().get("infrastructure_failure");
+            check.eq("api review: the summary says it is not a judgement", false,
+                    failure == null ? null : failure.get("verdict_on_the_work"));
+            dev.warden.approval.ApprovalStore store = new dev.warden.approval.ApprovalStore(project);
+            if (store.read("ar1") != null) {
+                store.resolve("ar1", store.read("ar1").updatedAt().toString(), "retry", "operator",
+                        "the gateway recovered");
+            }
+            TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner())
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), "ar2",
+                            false, Map.of(), new TaskLoop.Continuation("ar1", null, true));
+            check.that("api review: the continuation reaches the human gate", resumed.ok());
+            check.eq("api review: the writer's stage is reused, not rerun",
+                    Map.of("from", "ar1", "stages", List.of("implement")),
+                    resumed.summaryReport().get("reused_judgements"));
+            check.eq("api review: only the unfinished reading is paid for", 1L,
+                    resumed.summaryReport().get("role_runs"));
+            check.eq("api review: no implementer dispatch in the continuation", List.of(),
+                    steps(resumed).stream()
+                            .filter(step -> "implementer".equals(step.get("role"))
+                                    && step.get("reused_from") == null)
+                            .map(step -> step.get("profile")).toList());
+            check.eq("api review: and the reading is the API reader", 2, reads.get());
+        } finally {
+            api.stop(0);
+            Files.deleteIfExists(profileFile);
+            try (var files = Files.list(home.resolve("connections"))) {
+                for (Path file : files.filter(f -> f.getFileName().toString().startsWith("resume-api")).toList()) {
+                    Files.deleteIfExists(file);
+                }
+            } catch (IOException ignored) { }
+            writeProfiles(home, sandbox, "infra-restore", 1, 1);
+        }
     }
 
     /**

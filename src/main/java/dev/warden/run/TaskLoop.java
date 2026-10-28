@@ -458,6 +458,14 @@ public final class TaskLoop {
      * {@link #reusableJudgements} still applies, and the stage that failed has no passing row
      * to reuse, so it is always dispatched again.
      */
+    /**
+     * The stop reason a role failure code maps to when it says nothing about the work, or
+     * null when it is not an infrastructure failure. Public for the API resilience tests.
+     */
+    public static String infrastructureReason(String code) {
+        return code == null ? null : INFRASTRUCTURE_REASONS.get(code);
+    }
+
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
             Map.entry("role_process_unsettled", "worktree_recovery_required"),
@@ -488,7 +496,30 @@ public final class TaskLoop {
             Map.entry("role_orca_unavailable", "orca_worker_not_started"),
             Map.entry("role_orca_no_worktree", "orca_worker_not_started"),
             Map.entry("role_orca_worker_active", "orca_worker_not_started"),
-            Map.entry("role_orca_timeout", "role_timed_out"));
+            Map.entry("role_orca_timeout", "role_timed_out"),
+            // An API reader that the network, the provider or its own output limit stopped
+            // has said nothing about the candidate. They used to become `reviewer_failed`, so a
+            // `--continue` after a GonkaRouter 502 on the review declined the implementer's
+            // passed stage and paid it to write the same change again. Configuration codes
+            // (a profile or connection edited since dispatch, a missing key variable) stay off
+            // this list: the role contract check already decides reuse for those.
+            Map.entry("role_api_timeout", "role_timed_out"),
+            Map.entry("role_api_network_error", "vendor_call_failed"),
+            Map.entry("role_api_provider_error", "vendor_call_failed"),
+            Map.entry("role_api_protocol_error", "vendor_call_failed"),
+            Map.entry("role_api_model_or_parameter_unsupported", "vendor_call_failed"),
+            Map.entry("role_api_rate_limited", "rate_limited"),
+            Map.entry("role_api_credits_exhausted", "quota_exhausted"),
+            Map.entry("role_api_budget_exhausted", "quota_exhausted"),
+            Map.entry("role_api_auth_invalid", "vendor_unavailable"),
+            Map.entry("role_api_access_denied", "vendor_unavailable"),
+            Map.entry("role_api_response_too_large", "vendor_protocol_failed"),
+            Map.entry("role_api_response_unreadable", "vendor_protocol_failed"),
+            Map.entry("role_api_output_truncated", "vendor_protocol_failed"),
+            Map.entry("role_api_model_mismatch", "vendor_protocol_failed"),
+            Map.entry("role_api_model_identity_unknown", "vendor_protocol_failed"),
+            Map.entry("role_api_tools_unsupported", "vendor_protocol_failed"),
+            Map.entry("role_api_artifact_failure", "vendor_protocol_failed"));
 
     /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
     private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
