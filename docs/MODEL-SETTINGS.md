@@ -1,8 +1,9 @@
 # Vendor and role settings
 
 `warden settings` uses the same user configuration as the CLI. The main panel has vendor
-cards and ordered role participants. CLI cards are grouped by service (OpenAI, xAI,
-DeepSeek, Google Antigravity), across profiles and direct/Orca launch methods. API cards
+cards and ordered role participants. CLI cards are grouped by the service a profile is bound
+to (`service:`; OpenAI, xAI, Google Antigravity), across profiles and direct/Orca launch
+methods, never by the model developer. API cards
 name the API service and identify the configured connection separately. Neither CLI
 profile names nor Orca create additional vendor cards. Profiles remain internal launch, permission and tool
 contracts. There is no second settings database.
@@ -37,6 +38,46 @@ nodes. If a policy file has malformed YAML, the panel remains open for repair.
 
 The stage table shows the resolved default policy; task-level overrides and Jev choices are
 recorded in actual run evidence. A vendor pong and a model catalog are not coding admission.
+
+## Services, accounts and the binding migration
+
+The design is in `DESIGN-MODEL-ENTITIES-2026-10-28.md`. In short:
+
+- A CLI profile names `service:` (whose subscription answers) and optionally `account:`
+  (which login, when one service has several). The model developer (`vendor:` /
+  `model_vendor:`) is used only for review independence. API profiles are shown inside
+  their connection. A CLI profile without a binding Warden can prove is shown on the
+  "needs a binding" card with the reason; Warden does not guess one.
+- Two accounts on one service share a card but keep separate checks and authentication.
+- Card status comes from the per-model receipts in `checks/states.json`: `answered`,
+  `partial` (some models failed; the card lists only those) or `failed`. The API-key
+  table reports `auth_evidence` from the same receipts, so a key that a model answered
+  through is not shown as unchecked.
+- Migration of an existing configuration:
+
+  ```
+  warden profiles migrate-services                      # preview; writes nothing
+  warden profiles migrate-services --apply --map NAME=SERVICE[:ACCOUNT] ...
+  warden profiles migrate-services --rollback ID        # restores the backed-up bytes
+  ```
+
+  Apply takes a lock, backs the touched files up under
+  `backups/service-bindings-<stamp>/` with a manifest, adds `service:`/`account:` lines
+  (comments and line endings kept), and moves stale `vendors/cli-*` caches of services that
+  no longer exist into the backup. Ambiguous profiles stay byte-identical until mapped.
+  A re-run is a no-op; rollback refuses if a file changed after the migration.
+- Adding the binding changes the profile file, so its earlier ping receipts no longer match
+  and the cards show it unchecked until the next Ping. `verified_on` is kept. Builds older
+  than this change reject the new keys.
+- Effort levels come from one list (`EffortCapabilities`): the model catalog when it is
+  loaded, otherwise the built-in table, in the order none..ultra. The UI offers it, save
+  refuses anything outside it (`effort_unsupported`), and automatic routing chooses only
+  among the levels its policy names (low..max), so `ultra` can be chosen by hand but is
+  never picked automatically.
+- Autosave conflicts: when another tab saved first, the page reloads the server state and
+  re-applies only the fields this tab changed. A field changed in both tabs keeps the
+  other tab's value and is shown as a notice; it is never overwritten silently.
+  `node src/test/js/model-settings-page.mjs` checks the merge and card rendering.
 
 ## Validation on 2026-10-28
 
