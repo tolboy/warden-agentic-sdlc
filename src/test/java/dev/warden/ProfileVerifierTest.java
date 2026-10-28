@@ -141,6 +141,27 @@ public final class ProfileVerifierTest implements Suite {
             check.contains("and the report shows the command that ran",
                     filled.command(), "asked-for-m-55-at-");
 
+            // --- a stamp does not leave the file saying "unverified" beside it ----------
+            Path labelled = home.resolve("profiles/labelled.yaml");
+            Files.writeString(labelled, """
+                    version: 1
+                    profile: labelled
+                    role: reviewer
+                    vendor: somevendor
+                    command: echo
+                    read_only: true
+                    verification:
+                      status: unverified
+                      probe: 'echo ok'
+                    notes: "status: unverified stays here, it is not the verification block"
+                    """);
+            check.that("a labelled profile is stamped", verifier.stamp(labelled, load(labelled), LocalDate.of(2026, 10, 28)).written());
+            String labelledText = Files.readString(labelled);
+            check.that("and its stale `status: unverified` is gone from the verification block",
+                    !labelledText.contains("  status: unverified"));
+            check.contains("while text outside the block is untouched", labelledText, "status: unverified stays here");
+            check.that("and it reads as verified", load(labelled).verified());
+
             // --- a failing probe is reported, and the caller must not stamp it --------
             Path bad = write(home, "bad", fails(), null);
             ProfileVerifier.Probe failed = verifier.run(load(bad), home, Duration.ofSeconds(60));

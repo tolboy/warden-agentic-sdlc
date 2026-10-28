@@ -203,7 +203,8 @@ public final class ProfileVerifier {
                     || Character.isWhitespace(lines.get(end).charAt(0)))) end++;
             for (int index = end - 1; index > header; index--) {
                 String content = lines.get(index).stripLeading();
-                if (content.startsWith("verified_on:") || content.startsWith("connection_fingerprint:")) lines.remove(index);
+                if (content.startsWith("verified_on:") || content.startsWith("connection_fingerprint:")
+                        || isStatus(content)) lines.remove(index);
             }
             lines.add(header + 1, "  connection_fingerprint: \"" + profile.apiFingerprint() + "\"");
             lines.add(header + 1, "  verified_on: \"" + date + "\"");
@@ -225,6 +226,17 @@ public final class ProfileVerifier {
         // Match the indentation the operator already used inside the block, and append at its
         // end rather than at its top: a comment sits above the key it explains, so inserting
         // after the header would file the date under somebody else's explanation.
+        // A hand-written `status: unverified` next to a fresh stamp made the file say both.
+        for (int index = lines.size() - 1; index > header; index--) {
+            String line = lines.get(index);
+            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) continue;
+            boolean inBlock = true;
+            for (int above = index - 1; above > header; above--) {
+                String prior = lines.get(above);
+                if (!prior.isBlank() && !Character.isWhitespace(prior.charAt(0))) { inBlock = false; break; }
+            }
+            if (inBlock && isStatus(line.stripLeading())) lines.remove(index);
+        }
         String indent = "  ";
         int insertAt = header + 1;
         for (int index = header + 1; index < lines.size(); index++) {
@@ -245,6 +257,11 @@ public final class ProfileVerifier {
         }
         return new Stamp(true, "verified", "verification.verified_on set to " + stamped,
                 profileFile, stamped);
+    }
+
+    /** A verification-block status line; the stamp itself is the status once the probe passed. */
+    private static boolean isStatus(String content) {
+        return content.startsWith("status:");
     }
 
     /** The report both paths print, so the evidence looks the same whether or not it stamped. */
