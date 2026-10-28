@@ -80,6 +80,17 @@ public final class ModelSettingsTest implements Suite {
         check.eq("API profile can be created in settings", true, api.report().get("ok"));
         check.eq("new API model is not silently assigned", List.of("primary", "reserve"), UserConfig.load(home).policy().roles().get("reviewer").profiles());
         check.eq("new API model still requires native verification", false, UserConfig.load(home).profiles().get("new-api").verified());
+        new ConnectionStore(home).add(new Connection("router","openrouter","openai_chat","https://openrouter.ai/api/v1","env:TEST_ROUTER_KEY",true));
+        var classifier=service.apply("save-classifier",Map.of("name","jev-classifier","revision","absent","connection","router","model","typesafe/jev-1.14","reported_model","typesafe/jev-1.14-20261014"));
+        check.eq("typed classifier has a separate profile",true,classifier.report().get("ok"));
+        check.eq("classifier cannot become a worker profile",false,UserConfig.load(home).profiles().containsKey("jev-classifier"));
+        check.eq("classifier is visible alongside model settings",1L,((List<?>)service.list().get("profiles")).stream().filter(row->row instanceof Map<?,?> m && "classifier".equals(m.get("kind"))).count());
+        check.eq("worker profile cannot shadow a classifier id",400,service.apply("save-profile",Map.of("name","jev-classifier","revision","absent","model","x","kind","reviewer","connection","stub","vendor","deepseek")).status());
+        var routing=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(CheckSettings.file(home)),"enabled",true,"classifier","jev-classifier","min_confidence",0.7));
+        check.eq("Jev routing is configured from shared settings",true,routing.report().get("ok"));
+        service.apply("save-check",Map.of("revision",ModelSettingsService.revision(CheckSettings.file(home)),"before_run",true,"timeout_seconds",30L,"max_output_tokens",256L));
+        check.eq("editing ping settings preserves Jev settings",true,RoutingSettings.load(home).enabled());
+        check.eq("editing ping settings preserves classifier confidence",0.7,RoutingSettings.load(home).minConfidence());
         dashboard(check, home);
     }
     private static String profile(String name) {

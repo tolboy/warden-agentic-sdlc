@@ -71,6 +71,7 @@ public final class Main {
                 case "profiles" -> profiles(args);
                 case "connections" -> connections(args);
                 case "check", "ping" -> check(args);
+                case "classify" -> classify(args);
                 case "settings" -> dashboard(args);
                 case "roster" -> roster(args);
                 case "role" -> role(args);
@@ -234,6 +235,28 @@ public final class Main {
         return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
+    private static int classify(String[] args)throws Exception{
+        if(args.length<2 || args[1].startsWith("--"))throw new IllegalArgumentException("classify requires a task id or YAML path");
+        for(int index=2;index<args.length;index++)if(!java.util.Set.of("--dry-run","--quiet").contains(args[index]))
+            throw new IllegalArgumentException("classify accepts TASK, --dry-run and --quiet");
+        var loaded=new ConfigLoader().load(Path.of("."),args[1]);var user=UserConfig.load();var processes=new ProcessRunner();
+        var targets=new java.util.ArrayList<dev.warden.run.TaskRouting.Target>();
+        for(var row:TaskLoop.dispatchPreview(loaded.root(),loaded,user,p->RoleRunner.executableFound(processes,p))){
+            if(Boolean.TRUE.equals(row.get("skipped")) || !(row.get("profile") instanceof String name))continue;
+            var profile=user.profiles().get(name);if(profile==null)continue;
+            if(row.get("effort") instanceof String effort && !effort.equals(profile.effort()))profile=profile.withEffort(effort);
+            targets.add(new dev.warden.run.TaskRouting.Target(String.valueOf(row.get("stage")),String.valueOf(row.get("role")),profile));
+        }
+        if(hasFlag(args,"--dry-run")){
+            System.out.println(Json.write(Map.of("ok",true,"dry_run",true,"classifier",dev.warden.config.RoutingSettings.load(user.home()).classifier(),
+                    "task",loaded.resolved().id(),"target_stages",targets.stream().map(dev.warden.run.TaskRouting.Target::stage).toList())));return 0;
+        }
+        var result=dev.warden.run.TaskRouting.using(new dev.warden.execution.DecisionClient(),true)
+                .route(user,loaded.root(),loaded.resolved(),targets,narration(args)::line);
+        var report=new LinkedHashMap<String,Object>(result.report());boolean answered=!report.containsKey("fallback");
+        report.put("ok",answered);System.out.println(Json.write(report));return answered?0:1;
+    }
+
     /**
      * Offline external-pilot preparation. Writes a reviewable bundle; never runs the target,
      * never calls a vendor, never edits the target checkout or the global home.
@@ -365,6 +388,8 @@ public final class Main {
         result.put("home", user.home().toString());
         result.put("policy_present", user.policyPresent());
         result.put("profiles", rows);
+        result.put("classifier_profiles",dev.warden.config.DecisionProfile.load(user.home()).values().stream()
+                .map(p->Map.of("profile",p.name(),"model",p.model(),"reported_model",p.reportedModel(),"connection",p.connection(),"execution","typed_decisions_only")).toList());
         result.put("problems", user.problems());
         result.put("dangling_policy_references", user.danglingProfileReferences());
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
@@ -553,6 +578,7 @@ public final class Main {
             dev.warden.run.Workspace card = board(args).at(loaded.root());
             java.nio.file.Path narration = narrationFile(loaded.root(), runId);
             TaskLoop loop = new TaskLoop(new ProcessRunner())
+                    .withTaskRouting(dev.warden.run.TaskRouting.live())
                     .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
@@ -859,6 +885,7 @@ public final class Main {
                 loaded = new ConfigLoader().load(root, resolved.taskId());
             }
             TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
+                    .withTaskRouting(env.taskRouting)
                     .withReadiness(env.readiness)
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
@@ -1325,6 +1352,7 @@ public final class Main {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
+                .withTaskRouting(dev.warden.run.TaskRouting.live())
                 .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                 .withWorkspace(board(args), hasFlag(args, "--watch"))
                 .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
@@ -1692,6 +1720,7 @@ public final class Main {
         /** Null means {@link UserConfig#load()}; tests pass an isolated home. */
         final Path configHome;
         final dev.warden.run.RunReadiness readiness;
+        final dev.warden.run.TaskRouting taskRouting;
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates) {
             this(clock, sleeper, gates, null);
@@ -1703,11 +1732,17 @@ public final class Main {
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome,
                    dev.warden.run.RunReadiness readiness) {
+            this(clock,sleeper,gates,configHome,readiness,null);
+        }
+
+        ApproveEnv(Clock clock,Sleeper sleeper,Gates gates,Path configHome,
+                   dev.warden.run.RunReadiness readiness,dev.warden.run.TaskRouting taskRouting){
             this.clock = clock;
             this.sleeper = sleeper;
             this.gates = gates;
             this.configHome = configHome;
             this.readiness = readiness;
+            this.taskRouting = taskRouting;
         }
 
         UserConfig user() throws java.io.IOException {
@@ -1719,7 +1754,7 @@ public final class Main {
                     System::currentTimeMillis,
                     millis -> Thread.sleep(millis),
                     (root, gate) -> new OrcaDecisionGate(new ProcessRunner()).read(root, gate),
-                    null, dev.warden.run.RunReadiness.live(new ProcessRunner()));
+                    null, dev.warden.run.RunReadiness.live(new ProcessRunner()),dev.warden.run.TaskRouting.live());
         }
     }
 
@@ -2785,6 +2820,7 @@ public final class Main {
                   warden check [--all]         fresh bounded model reply via each configured CLI/API
                   warden check --profile N     check one profile without granting role verification
                   warden check --task TASK     check the task's selected models
+                  warden classify TASK         Jev task/effort advice without starting workers
                   warden settings             connections, model checks and run settings in one panel
                   warden probe orca --agent A [--model M] [--effort E] [--image] [--worktree DIR]
                                            the probe a runner: orca profile names: one worker

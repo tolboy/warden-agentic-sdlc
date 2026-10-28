@@ -89,10 +89,12 @@ public final class DoCommand {
     private final boolean orcaGate;
     private final dev.warden.config.RunOverride override;
     private RunReadiness readiness;
+    private TaskRouting taskRouting;
+    public DoCommand withTaskRouting(TaskRouting next){taskRouting=next;return this;}
 
     public DoCommand withReadiness(RunReadiness next) { readiness = next; return this; }
 
-    private DoCommand keepReadiness(DoCommand copy) { copy.readiness = readiness; return copy; }
+    private DoCommand keepReadiness(DoCommand copy) { copy.readiness = readiness; copy.taskRouting=taskRouting; return copy; }
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
@@ -639,6 +641,7 @@ public final class DoCommand {
         TaskLoop.Outcome loop;
         try {
             loop = new TaskLoop(processes)
+                    .withTaskRouting(taskRouting)
                     .withReadiness(readiness)
                     .withProgress(Progress.tee(progress, Progress.toFile(narration)))
                     .withWorkspace(card)

@@ -94,11 +94,13 @@ public record TaskSpec(
 
         /** Whether `max_cost_usd` is a strict cap reserved against, or a threshold on reported spend. */
         public boolean strictCostCap() { return "strict".equals(costCap); }
+        public double enforcedMaxCostUsd() { return "off".equals(costCap) ? 0 : maxCostUsd; }
     }
 
     /**
-     * How `max_cost_usd` binds. `threshold` (the default, and everything the number ever
-     * was): the ceiling is compared with the spend vendors have reported so far, so an
+     * How `max_cost_usd` binds. Without an explicitly supplied dollar ceiling the default
+     * is `off`: report any available usage, bound work by calls and elapsed time.
+     * An explicit ceiling keeps the legacy `threshold` default: compare reported spend, so an
      * unpriced call spends nothing against it and the last call may exceed it. `strict`: a
      * call is admitted only when the reported spend plus the declared upper bound of that
      * call and of every paying stage still owed stays under the ceiling, which requires every
@@ -106,7 +108,7 @@ public record TaskSpec(
      * bound stops before the first dispatch as `cost_cap_unenforceable` rather than
      * pretending.
      */
-    public static final Set<String> COST_CAPS = Set.of("threshold", "strict");
+    public static final Set<String> COST_CAPS = Set.of("off", "threshold", "strict");
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "id", "goal", "non_goals", "risk", "scope", "checks", "acceptance", "reproduce",
@@ -182,7 +184,7 @@ public record TaskSpec(
                 // separate, bounded life of the human gate itself. Omitted, a gate never expires.
                 budgetNode.has("gate_ttl_hours")
                         ? budgetNode.optInt("gate_ttl_hours", 72, 1, 720) : null,
-                budgetNode.requireEnum("cost_cap", COST_CAPS, "threshold"));
+                budgetNode.requireEnum("cost_cap", COST_CAPS, budgetNode.has("max_cost_usd") ? "threshold" : "off"));
 
         Long maxFixAttempts = root.has("max_fix_attempts")
                 ? root.optInt("max_fix_attempts", 2, 0, 10) : null;
