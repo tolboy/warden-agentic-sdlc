@@ -191,6 +191,7 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                     "probe_served_model_mismatch",
                     relay.get("failure"));
             usageIsNotInvented(check);
+            providerStopsKeepTheirReason(check);
         } finally {
             upstream.stop(0);
             try (var paths = Files.walk(home)) {
@@ -198,6 +199,32 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                     Files.deleteIfExists(path);
             }
         }
+    }
+
+    private static void providerStopsKeepTheirReason(Check check) {
+        check.eq(
+                "an upstream timeout that stopped OpenCode is reported as the API timeout",
+                "role_api_timeout",
+                VerifiedOpenCodeExecutor.processFailure(Map.of("failure", "role_api_timeout")));
+        check.eq(
+                "a throttled upstream is reported as rate limiting",
+                "role_api_rate_limited",
+                VerifiedOpenCodeExecutor.processFailure(
+                        Map.of("failure", "probe_upstream_http_429")));
+        check.eq(
+                "an upstream 5xx is reported as a provider error",
+                "role_api_provider_error",
+                VerifiedOpenCodeExecutor.processFailure(
+                        Map.of("failure", "probe_upstream_http_503")));
+        check.eq(
+                "a served-model mismatch stays a harness failure",
+                "role_harness_process_failed",
+                VerifiedOpenCodeExecutor.processFailure(
+                        Map.of("failure", "probe_served_model_mismatch")));
+        check.eq(
+                "an exit without a relay failure stays a harness failure",
+                "role_harness_process_failed",
+                VerifiedOpenCodeExecutor.processFailure(Map.of("requests", 1)));
     }
 
     private static void usageIsNotInvented(Check check) {
