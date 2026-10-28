@@ -1,8 +1,10 @@
 package dev.warden;
 
+import dev.warden.config.CodexConfig;
 import dev.warden.config.Profile;
 import dev.warden.config.ServiceBinding;
 import dev.warden.testing.*;
+import java.nio.file.Files;
 import java.util.List;
 
 /** A CLI profile's service is stated or safely inferred; it is never guessed from the model developer. */
@@ -62,6 +64,43 @@ public final class ServiceBindingTest implements Suite {
         check.eq("Orca hosting keeps the binding", "work", ServiceBinding.of(bound.hostedOnOrca()).account());
         check.eq("an effort change keeps the binding", "work", ServiceBinding.of(bound.withEffort("high")).account());
         check.eq("review independence still uses the model developer", "openai", bound.independenceVendor());
+
+        var dir = Files.createTempDirectory("warden-codex-config-");
+        var toml = dir.resolve("config.toml");
+        Files.writeString(toml, String.join("\n",
+                "model = \"gpt-6.1-sol\"", "model_provider = \"openai\"   # top level is never inherited",
+                "[model_providers.openrouter]", "model_provider = \"ignored\"",
+                "[profiles.deepseek]", "model = \"deepseek/x\"", "model_provider = \"OpenRouter\" # comment",
+                "[profiles.\"warden-read\"]", "model = \"gpt-6.1-sol\"",
+                "[profiles.twice]", "model_provider = \"openai\"", "model_provider = \"openrouter\"",
+                "[profiles.client]", "model_provider = \"codex\"",
+                "[profiles.deepseek.extra]", "model_provider = \"x-ai\"", ""));
+        Files.writeString(dir.resolve("auth.json"), "{\"must\":\"never be read\"}");
+        var codex = CodexConfig.load(toml);
+        check.eq("config.toml keeps only explicit per-profile providers", java.util.Map.of("deepseek", "openrouter", "client", "codex"), codex.providers());
+        check.that("a profile without model_provider is still known", codex.profiles().contains("warden-read"));
+        var viaConfig = ServiceBinding.of(Profile.parse(cli("deepseek", "codex", "deepseek/x", "direct", "[exec, --profile, deepseek, -m, \"{{model}}\"]", ""), "f"), codex);
+        check.eq("an explicit Codex profile provider becomes the service", "openrouter", viaConfig.service());
+        check.eq("the Codex profile name is the account", "deepseek", viaConfig.account());
+        check.eq("the source is recorded as Codex config", ServiceBinding.CODEX_CONFIG, viaConfig.source());
+        check.eq("the origin names the file and profile", "codex config.toml profile deepseek", viaConfig.reason());
+        check.eq("--profile=NAME is read the same way", "openrouter",
+                codexBinding(codex, "[exec, \"--profile=deepseek\"]").service());
+        check.eq("no explicit provider keeps it unmapped", "codex_profile_has_no_model_provider", codexBinding(codex, "[exec, --profile, warden-read]").reason());
+        check.eq("a profile absent from config.toml stays unmapped", "codex_profile_not_in_config", codexBinding(codex, "[exec, --profile, ghost]").reason());
+        check.eq("a provider set twice with different values conflicts", "codex_profile_has_no_model_provider", codexBinding(codex, "[exec, --profile, twice]").reason());
+        check.eq("a client name is not accepted as a provider", "codex_model_provider_names_a_client", codexBinding(codex, "[exec, --profile, client]").reason());
+        check.eq("another selector next to --profile conflicts", "codex_profile_and_other_selector",
+                codexBinding(codex, "[exec, --profile, deepseek, -c, \"model_provider=openai\"]").reason());
+        check.eq("two --profile flags conflict", "codex_profile_ambiguous", codexBinding(codex, "[exec, --profile, deepseek, -p, warden-read]").reason());
+        check.that("a missing config.toml changes nothing", codexBinding(CodexConfig.load(dir.resolve("absent.toml")), "[exec, --profile, deepseek]").needsMapping());
+        check.eq("plain profiles ignore config.toml", ServiceBinding.INFERRED, ServiceBinding.of(Profile.parse(cli("codex", "codex", "gpt-6.1-sol", "direct", "[exec]", ""), "f"), codex).source());
+        check.eq("an explicit binding beats config.toml", "openai", ServiceBinding.of(Profile.parse(
+                cli("deepseek", "codex", "deepseek/x", "direct", "[exec, --profile, deepseek]", "service: openai\n"), "f"), codex).service());
+    }
+
+    private static ServiceBinding codexBinding(CodexConfig codex, String args) {
+        return ServiceBinding.of(Profile.parse(cli("codex", "codex", "gpt-6.1-sol", "direct", args, ""), "f"), codex);
     }
 
     private static ServiceBinding binding(String yaml) { return ServiceBinding.of(Profile.parse(yaml, "fixture")); }

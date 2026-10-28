@@ -403,7 +403,7 @@ public final class Main {
      * Preview by default. Ambiguous profiles are bound only by an explicit --map.
      */
     private static int migrateServices(String[] args) throws Exception {
-        var migration = new dev.warden.config.ServiceMigration(UserConfig.defaultHome());
+        var migration = new dev.warden.config.ServiceMigration(UserConfig.defaultHome(), dev.warden.config.CodexConfig.load());
         String rollback = option(args, "--rollback", null);
         Map<String, Object> report;
         try {

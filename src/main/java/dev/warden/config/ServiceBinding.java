@@ -11,7 +11,8 @@ import java.util.Set;
  * The model developer is not a service: a Codex CLI pointed at a DeepSeek model through a
  * `--profile` is still whatever that Codex configuration authenticates with, and Warden cannot
  * see which. Such a profile is {@code needs_mapping} until the operator names the service.
- * Nothing here reads another program's configuration or credentials.
+ * Only {@link #of(Profile, CodexConfig)} consults Codex's own config.toml, and only for an explicit
+ * per-profile {@code model_provider}; nothing here reads credentials.
  *
  * @param source    {@code explicit} ({@code service:} in the file), {@code inferred} (legacy file,
  *                  single-service client, no provider selector), {@code connection} (API/OpenCode),
@@ -37,6 +38,43 @@ public record ServiceBinding(String service, String account, String source, Stri
             "--auth-mode", "--organization", "--project");
 
     public boolean needsMapping() { return NEEDS_MAPPING.equals(source); }
+
+    public static final String CODEX_CONFIG = "codex_config";
+
+    /**
+     * Like {@link #of(Profile)}, but a Codex profile that selects exactly one {@code --profile X}
+     * and nothing else is bound to the {@code model_provider} that Codex's {@code config.toml}
+     * sets explicitly for {@code [profiles.X]}. The account is the Codex profile name and the
+     * origin is kept in {@code reason}. Anything missing or conflicting still needs a mapping.
+     */
+    public static ServiceBinding of(Profile profile, CodexConfig codex) {
+        ServiceBinding base = of(profile);
+        if (codex == null || !base.needsMapping() || !"codex".equals(client(profile.command()))) return base;
+        List<String> args = profile.args();
+        String selected = null; int count = 0;
+        var rest = new java.util.ArrayList<String>();
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if ("--profile".equals(arg) || "-p".equals(arg)) { count++; selected = i + 1 < args.size() ? args.get(++i) : ""; }
+            else if (arg.startsWith("--profile=")) { count++; selected = arg.substring(10); }
+            else rest.add(arg);
+        }
+        if (count == 0) return base;
+        String suggested = base.suggested();
+        if (count > 1 || selected == null || !selected.matches("[A-Za-z0-9._-]{1,64}"))
+            return new ServiceBinding(null, null, NEEDS_MAPPING, "codex_profile_ambiguous", suggested);
+        if (hasProviderSelector("codex", rest))
+            return new ServiceBinding(null, null, NEEDS_MAPPING, "codex_profile_and_other_selector", suggested);
+        if (!codex.present()) return base;
+        if (!codex.profiles().contains(selected))
+            return new ServiceBinding(null, null, NEEDS_MAPPING, "codex_profile_not_in_config", suggested);
+        String provider = codex.providers().get(selected);
+        if (provider == null)
+            return new ServiceBinding(null, null, NEEDS_MAPPING, "codex_profile_has_no_model_provider", suggested);
+        if (CLIENTS.contains(provider))
+            return new ServiceBinding(null, null, NEEDS_MAPPING, "codex_model_provider_names_a_client", suggested);
+        return new ServiceBinding(provider, selected, CODEX_CONFIG, "codex config.toml profile " + selected, null);
+    }
 
     public static ServiceBinding of(Profile profile) {
         if (profile.connectionRef() != null) {
