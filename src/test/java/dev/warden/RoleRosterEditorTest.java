@@ -22,6 +22,16 @@ public final class RoleRosterEditorTest implements Suite {
                   on_quota_exhausted: confirm
                   on_vendor_failure: stop
                 """);
+        // The shared capability list: the service catalog lists levels unordered and with a level the router cannot name.
+        var user=UserConfig.load(home);
+        Files.createDirectories(home.resolve("vendors"));
+        Files.writeString(home.resolve("vendors/cli-provider-openai-catalog.json"),dev.warden.json.Json.write(Map.of("status","available",
+                "configuration",dev.warden.execution.VendorSettingsService.catalogConfiguration(user,user.profiles().get("primary")),
+                "models",List.of(Map.of("id","old-model","efforts",List.of("medium","high")),Map.of("id","new-model","efforts",List.of("ultra","high","medium","low")),Map.of("id","next-model","efforts",List.of("medium","high"))))));
+        var capabilities=new dev.warden.execution.EffortCapabilities(home,UserConfig.load(home));
+        check.eq("catalog levels are offered weakest first",List.of("low","medium","high","ultra"),capabilities.levels(user.profiles().get("primary"),"new-model"));
+        check.eq("router narrows the same list to levels the classifier can name",List.of("low","medium","high"),dev.warden.run.TaskRouting.supportedEfforts(capabilities.levels(user.profiles().get("primary"),"new-model")));
+        check.eq("a model the catalog does not list offers no levels",List.of(),capabilities.levels(user.profiles().get("primary"),"unknown-model"));
         var editor=new RoleRosterEditor(home);
         String originalPrimary=Files.readString(primary),originalReserve=Files.readString(reserve);
         var result=editor.apply(payload(policy,List.of(slot(reserve,"old-model","medium"),slot(primary,"old-model","medium"))));
@@ -40,6 +50,16 @@ public final class RoleRosterEditorTest implements Suite {
         check.eq("stale secondary selection conflicts",409,result.status());
         check.eq("late invalid selection cannot partly edit primary",originalPrimary,Files.readString(primary));
         check.eq("late invalid selection cannot partly edit policy",beforePolicy,Files.readString(policy));
+        result=editor.apply(payload(policy,List.of(slot(primary,"old-model","ultra"),slot(reserve,"old-model","medium"))));
+        check.eq("an effort the model does not offer is refused",400,result.status());
+        check.eq("refusal names the capability list","effort_unsupported",result.report().get("code"));
+        check.eq("refused effort writes nothing",originalPrimary,Files.readString(primary));
+        result=editor.apply(payload(policy,List.of(slot(primary,"new-model","ultra"),slot(reserve,"old-model","medium"))));
+        check.eq("a level the new model offers is saved even if the router cannot pick it",200,result.status());
+        check.eq("saved level reaches the profile","ultra",UserConfig.load(home).profiles().get("primary").effort());
+        result=editor.apply(payload(policy,List.of(slot(primary,"old-model","ultra"),slot(reserve,"old-model","medium"))));
+        check.eq("changing to a model without the current level is refused",400,result.status());
+        Files.writeString(primary,originalPrimary);
         result=editor.apply(payload(policy,List.of(slot(primary,"new-model","high"),slot(reserve,"old-model","medium"))));
         check.eq("selected model and effort are saved together",200,result.status());
         check.eq("only changed template is pending capability validation",List.of("primary"),result.report().get("pending_verification"));
@@ -80,5 +100,5 @@ public final class RoleRosterEditorTest implements Suite {
     }
     private static Map<String,Object> payload(Path policy,List<?> slots)throws Exception{return Map.of("revision",ModelSettingsService.revision(policy),"role","reviewer","strategy","first","slots",slots);}
     private static Map<String,Object> slot(Path file,String model,String effort)throws Exception{return Map.of("profile",file.getFileName().toString().replace(".yaml",""),"revision",ModelSettingsService.revision(file),"model",model,"effort",effort);}
-    private static String profile(String name){return "version: 1\nprofile: "+name+"\nrole: reviewer\nvendor: openai\nmodel: old-model\neffort: medium\ncommand: echo\nargs: ['--model','{{model}}','--effort','{{effort}}']\nread_only: true\nprompt_template: prompts/reviewer.md\njson_schema: schemas/reviewer.json\nverification:\n  probe: echo {{model}} {{effort}} verified\n  expect: verified\n  verified_on: '2026-10-28'\n";}
+    private static String profile(String name){return "version: 1\nprofile: "+name+"\nrole: reviewer\nvendor: openai\nservice: openai\nmodel: old-model\neffort: medium\ncommand: echo\nargs: ['--model','{{model}}','--effort','{{effort}}']\nread_only: true\nprompt_template: prompts/reviewer.md\njson_schema: schemas/reviewer.json\nverification:\n  probe: echo {{model}} {{effort}} verified\n  expect: verified\n  verified_on: '2026-10-28'\n";}
 }

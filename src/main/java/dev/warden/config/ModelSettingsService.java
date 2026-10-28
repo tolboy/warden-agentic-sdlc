@@ -41,13 +41,25 @@ public final class ModelSettingsService {
 
     public Map<String, Object> list() throws Exception {
         UserConfig user = UserConfig.load(home);
+        var capabilities = new dev.warden.execution.EffortCapabilities(home, user);
+        var catalogModels = new LinkedHashMap<String, List<String>>();
+        var vendorList = vendors.list();
+        if (vendorList.get("vendors") instanceof List<?> cards) for (Object card : cards)
+            if (card instanceof Map<?, ?> row && row.get("id") instanceof String id && row.get("models") instanceof List<?> models)
+                catalogModels.put(id, models.stream().map(m -> m instanceof Map<?, ?> model ? String.valueOf(model.get("id")) : null).filter(java.util.Objects::nonNull).toList());
         List<Map<String, Object>> profiles = new ArrayList<>();
         for (Profile profile : user.profiles().values()) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("name", profile.name()); row.put("role", profile.role());
             row.put("model", profile.model()); row.put("vendor", profile.modelVendor());
             row.put("vendor_id", dev.warden.execution.VendorSettingsService.displayVendorId(profile));
-            row.put("efforts", dev.warden.run.TaskRouting.supportedEfforts(profile));
+            // One capability list for the UI, save validation and the router (EffortCapabilities).
+            row.put("efforts", capabilities.levels(profile));
+            var byModel = new LinkedHashMap<String, List<String>>();
+            for (String model : catalogModels.getOrDefault(dev.warden.execution.VendorSettingsService.displayVendorId(profile), List.of())) {
+                var levels = capabilities.levels(profile, model); if (!levels.isEmpty()) byModel.put(model, levels);
+            }
+            row.put("efforts_by_model", byModel);
             row.put("effort", profile.effort()); row.put("connection", profile.connectionRef());
             row.put("runner", profile.harness() == null ? profile.runner() : profile.harness());
             row.put("verified", profile.verified()); row.put("revision", revision(profileFile(profile.name())));
@@ -71,7 +83,7 @@ public final class ModelSettingsService {
         result.put("settings_revision", revision(CheckSettings.file(home)));
         result.put("check", CheckSettings.load(home).toMap()); result.put("checking", checking.get());
         result.put("routing",RoutingSettings.load(home).toMap());
-        result.putAll(vendors.list());
+        result.putAll(vendorList);
         Path rubricFile=JevRoutingPolicy.file(home);
         var rubricView=new LinkedHashMap<String,Object>();rubricView.put("file",rubricFile.toString());rubricView.put("revision",revision(rubricFile));
         try{rubricView.put("yaml",JevRoutingPolicy.load(home).yaml());rubricView.put("valid",true);}
@@ -155,6 +167,7 @@ public final class ModelSettingsService {
             return new Outcome(200, Map.of("ok", true, "code", "settings_saved","settings_revision",revision(CheckSettings.file(home))));
         } catch (Changed changed) { return refused(409, "settings_changed_reload"); }
         catch (UnboundModel unbound) { return refused(400, "cli_model_binding_required"); }
+        catch (dev.warden.execution.EffortCapabilities.Unsupported unsupported) { return refused(400, "effort_unsupported"); }
         catch (Invalid | ConfigException | IllegalArgumentException | dev.warden.yaml.Yaml.YamlException invalid) { return refused(400, "settings_invalid"); }
         catch (java.nio.channels.OverlappingFileLockException busy) { return refused(409, "settings_busy"); }
         catch (Exception unavailable) { return refused(503, "settings_unavailable"); }
@@ -242,6 +255,10 @@ public final class ModelSettingsService {
                 }
                 yaml = replaceValue(yaml, List.of("effort"), Json.write(text(payload, "effort")));
             }
+            String finalEffort = payload.get("effort") instanceof String effort && !effort.isBlank() ? effort : old.effort();
+            boolean effortChanged = !java.util.Objects.equals(finalEffort, old.effort());
+            if (effortChanged || !java.util.Objects.equals(old.model(), model))
+                new dev.warden.execution.EffortCapabilities(home, user).require(old, model, finalEffort, effortChanged);
             if (old.connectionRef() != null) {
                 String connection = text(payload, "connection");
                 if (!user.connections().containsKey(connection)) throw new Invalid();

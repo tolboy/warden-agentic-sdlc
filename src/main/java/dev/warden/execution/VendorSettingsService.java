@@ -124,6 +124,23 @@ public final class VendorSettingsService {
         return groups;
     }
     public static final String UNMAPPED="cli-unmapped";
+    /** The configuration stamp a current catalog for this profile's service card must carry. */
+    public static String catalogConfiguration(UserConfig user,Profile profile){
+        if(profile.connectionRef()!=null){var connection=user.connections().get(profile.connectionRef());return connection==null?null:connection.fingerprint();}
+        String id=displayVendorId(profile);
+        return hash(user.profiles().values().stream().filter(p->id.equals(displayVendorId(p))).map(VendorSettingsService::vendorId).distinct().sorted().toList().toString());
+    }
+    /** Model id to catalog effort levels from this profile's service catalog, or null when no current catalog is loaded. */
+    static Map<String,List<String>> catalogEfforts(Path home,UserConfig user,Profile profile){
+        String id=displayVendorId(profile);if(UNMAPPED.equals(id))return null;
+        String configuration=catalogConfiguration(user,profile);if(configuration==null)return null;
+        var catalog=read(home.resolve("vendors").resolve(id+"-catalog.json"));
+        if(!Objects.equals(catalog.get("configuration"),configuration) || !(catalog.get("models") instanceof List<?> models))return null;
+        var result=new LinkedHashMap<String,List<String>>();
+        for(Object value:models)if(value instanceof Map<?,?> model && model.get("id") instanceof String modelId && model.get("efforts") instanceof List<?> efforts)
+            result.put(modelId,efforts.stream().filter(String.class::isInstance).map(String.class::cast).toList());
+        return result;
+    }
     /**
      * Public service identity: one card per authenticating service. Clients, Orca, roles and
      * model developers never create a card; a CLI profile whose service is unknown is listed
@@ -183,7 +200,7 @@ public final class VendorSettingsService {
         var models=new LinkedHashMap<String,Map<String,Object>>();for(Object entry:entries){if(models.size()>=2000)break;if(entry instanceof Map<?,?> value){String id=safe(value.get("id")),label=safe(value.get("name"));if(id!=null && (token==null || !id.contains(token)) && (label==null || token==null || !label.contains(token)))models.put(id,model(id,label,List.of()));}}
         if(models.isEmpty())return unavailable("catalog_empty");return Map.of("status","available","source","provider_models_endpoint","fetched_at",Instant.now().toString(),"models",new ArrayList<>(models.values()),"warning","Catalog membership does not prove key access or coding capability.");
     }
-    private static Map<String,Object> model(String id,String label,List<String> efforts){return Map.of("id",id,"label",label==null?id:label,"efforts",efforts,"origin","catalog");}
+    private static Map<String,Object> model(String id,String label,List<String> efforts){return Map.of("id",id,"label",label==null?id:label,"efforts",EffortCapabilities.ordered(efforts),"origin","catalog");}
     private static List<String> efforts(Object value,String key){var result=new ArrayList<String>();if(value instanceof List<?> list)for(Object item:list)if(item instanceof Map<?,?> row){String effort=safe(row.get(key));if(effort!=null && effort.matches("[a-z][a-z0-9_-]{0,31}"))result.add(effort);}return result;}
     private static Map<String,Object> unavailable(String code){return Map.of("status","unavailable","code",code,"models",List.of(),"warning","Could not load a current model list. Enter a model from the vendor's current documentation.");}
     private Path cache(String id,String type){return home.resolve("vendors").resolve(id+"-"+type+".json");}
