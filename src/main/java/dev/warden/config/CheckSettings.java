@@ -19,7 +19,7 @@ public record CheckSettings(boolean beforeRun, int timeoutSeconds, int maxOutput
     }
 
     public static CheckSettings parse(Object document) {
-        Values root = Values.of(document, "settings.yaml").rejectUnknownKeys(Set.of("version", "check"));
+        Values root = Values.of(document, "settings.yaml").rejectUnknownKeys(Set.of("version", "check", "routing"));
         root.requireVersion(1);
         Values check = Values.of(((Map<?, ?>) document).getOrDefault("check", null), "settings.yaml check")
                 .rejectUnknownKeys(Set.of("before_run", "timeout_seconds", "max_output_tokens"));

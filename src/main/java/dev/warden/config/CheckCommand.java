@@ -40,7 +40,7 @@ public final class CheckCommand {
                     profile -> RoleRunner.executableFound(processes, profile))) {
                 if (!Boolean.TRUE.equals(row.get("skipped")) && row.get("profile") instanceof String name) names.add(name);
             }
-        } else if (names.isEmpty()) names.addAll(user.profiles().keySet());
+        } else if (names.isEmpty()) { names.addAll(user.profiles().keySet()); names.addAll(DecisionProfile.load(user.home()).keySet()); }
         return new ModelCheck(processes).run(user, project, names, progress);
     }
 }

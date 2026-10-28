@@ -4,6 +4,7 @@ import dev.warden.config.CheckSettings;
 import dev.warden.config.Connection;
 import dev.warden.config.Profile;
 import dev.warden.config.UserConfig;
+import dev.warden.config.DecisionProfile;
 import dev.warden.execution.orca.OrcaProbe;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
@@ -45,10 +46,21 @@ public final class ModelCheck {
         CheckSettings settings = CheckSettings.load(user.home());
         List<Map<String, Object>> rows = new ArrayList<>();
         for (String name : new LinkedHashSet<>(names)) {
+            if(Thread.currentThread().isInterrupted())throw new InterruptedException("model check cancelled");
             Profile profile = user.profiles().get(name);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("profile", name);
-            if (profile == null) {
+            DecisionProfile classifier=profile==null?DecisionProfile.load(user.home()).get(name):null;
+            if(classifier!=null){
+                row.put("source_profile",name);row.put("model",classifier.model());row.put("vendor","typesafe");
+                row.put("runner","decisions");row.put("connection",classifier.connection());
+                var connection=user.connections().get(classifier.connection());
+                if(connection!=null)row.put("configuration",classifier.fingerprint(connection));
+                progress.accept("check "+name+" · "+classifier.model()+" …"); long start=System.nanoTime();
+                try{row.putAll(new DecisionClient(environment).ping(classifier,user));}
+                catch(Exception failed){row.put("ok",false);row.put("code","classifier_check_failed");}
+                row.put("duration_millis",Duration.ofNanos(System.nanoTime()-start).toMillis());
+            } else if (profile == null) {
                 row.put("ok", false); row.put("code", "check_profile_unavailable");
             } else {
                 row.put("model", profile.model()); row.put("vendor", profile.vendor());
@@ -160,8 +172,9 @@ public final class ModelCheck {
                 && choices.get(0) instanceof Map<?, ?> choice
                 && "stop".equals(choice.get("finish_reason"))
                 && choice.get("message") instanceof Map<?, ?> message
-                && !message.containsKey("tool_calls") && message.get("content") instanceof String content) {
-            try { pong = nonce.equals(Json.parseObject(content.strip()).get("pong")); }
+                && (message.get("tool_calls")==null || message.get("tool_calls") instanceof List<?> calls && calls.isEmpty())
+                && message.get("function_call")==null && message.get("content") instanceof String content) {
+            try { var object=Json.findLastObject(content); pong = object!=null && nonce.equals(object.get("pong")); }
             catch (RuntimeException invalid) { /* A banner, auth page or echo is not a model answer. */ }
         }
         result.put("ok", error == null && pong);

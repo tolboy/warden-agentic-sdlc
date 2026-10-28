@@ -148,6 +148,12 @@ public final class TaskLoop {
     private Executors.Factory executors;
     private RoleResolver.Availability availability;
     private RunReadiness readiness;
+    private TaskRouting taskRouting;
+
+    public TaskLoop withTaskRouting(TaskRouting next){
+        TaskLoop copy=keepClock(new TaskLoop(processes,visualCheck,progress,workspace,orcaGate,preparation,override));
+        copy.taskRouting=next;return copy;
+    }
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -240,6 +246,7 @@ public final class TaskLoop {
         copy.executors = executors;
         copy.availability = availability;
         copy.readiness = readiness;
+        copy.taskRouting = taskRouting;
         return copy;
     }
 
@@ -710,7 +717,7 @@ public final class TaskLoop {
         // or a deleted scenario file are all terms the run would then be judged by.
         Map<String, String> configSnapshot = WardenTree.snapshot(root, runId);
         String contractHash = WardenTree.digest(configSnapshot);
-        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd(),
+        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().enforcedMaxCostUsd(),
                 task.budget().maxElapsedMinutes(), clock);
         budget.alreadySpent(prior.roleRuns(), prior.costUsd(), prior.unpriced());
         // Only a continuation that carries verdicts continues the chain; see Chain.
@@ -1028,6 +1035,31 @@ public final class TaskLoop {
         // header is the last thing printed before money starts being spent.
         List<Map<String, Object>> cast = cast(root, workflow, user, task, reviewByRisk, roles, overlay);
         summary.put("cast", cast);
+        if(!dryRun && taskRouting!=null){
+            List<TaskRouting.Target> targets=new ArrayList<>();
+            for(var stage:workflow.stages()){
+                if(stage.kind()!=Workflow.Kind.ROLE || skipReason(stage,user,task,reviewByRisk)!=null)continue;
+                var selected=roles.peek(root,user,stage.name(),stage.role(),RoleResolver.Writers.NONE,workflow.rotationPositionOf(stage));
+                if(selected!=null)targets.add(new TaskRouting.Target(stage.name(),stage.role(),selected));
+            }
+            var routed=taskRouting.route(user,root,task,targets,progress::line);
+            var routeReport=new LinkedHashMap<String,Object>(routed.report());
+            if(!routed.overrides().isEmpty()){
+                // Explicit task/CLI/handover choices remain authoritative over classifier advice.
+                overlay=routed.overrides().merged(overlay).withWriterFixes(workflow);overlay.pin(roles);roles.overlay(overlay);
+                cast=cast(root,workflow,user,task,reviewByRisk,roles,overlay);summary.put("cast",cast);
+                Map<String,Object> effective=new LinkedHashMap<>();
+                for(var row:cast)if(row.get("effort")!=null)effective.put(String.valueOf(row.get("stage")),row.get("effort"));
+                routeReport.put("effective_efforts",effective);routeReport.put("operator_overrides_take_precedence",true);
+                var suggested=routeReport.get("applied_efforts");routeReport.put("suggested_efforts",suggested);
+                Map<String,Object> applied=new LinkedHashMap<>();
+                if(suggested instanceof Map<?,?> levels)for(var entry:levels.entrySet())
+                    if(java.util.Objects.equals(effective.get(entry.getKey()),entry.getValue()))applied.put(String.valueOf(entry.getKey()),entry.getValue());
+                routeReport.put("applied_efforts",applied);
+            }
+            summary.put("task_routing",routeReport);
+            dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("task-routing.json"),Json.write(routeReport));
+        }
         if (!dryRun && readiness != null) {
             List<dev.warden.config.Profile> checks = new ArrayList<>();
             for (Workflow.Stage stage : workflow.stages()) {
@@ -1248,6 +1280,7 @@ public final class TaskLoop {
 
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
+        summary.put("cost_status",budget.unpriced()>0?(budget.spent()>0?"partial":"unknown"):"reported");
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
         if (budget.unpricedCharge() > 0) {
@@ -4708,7 +4741,7 @@ public final class TaskLoop {
      */
     public static RoleRunner.DispatchGate amendmentGate(Path root, String runId, TaskSpec.Budget ceilings,
                                                         java.util.function.LongSupplier nanos) {
-        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.maxCostUsd(),
+        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.enforcedMaxCostUsd(),
                 ceilings.maxElapsedMinutes(), nanos);
         budget.inherit(Chain.after(root, runId));
         return new RoleRunner.DispatchGate() {
@@ -5271,9 +5304,10 @@ public final class TaskLoop {
         progress.line("plan  " + String.join(" -> ", names));
         printCast(cast);
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
-                + Progress.money(task.budget().maxCostUsd())
+                + ("off".equals(task.budget().costCap()) ? "cost tracking only"
+                : Progress.money(task.budget().maxCostUsd())
                 + (task.budget().maxCostUsd() == 0 ? " (money limit disabled)"
-                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend") + ", fix rounds <= "
+                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend")) + ", fix rounds <= "
                 + task.maxFixAttempts()
                 + (task.budget().maxElapsedMinutes() == null ? ""
                         : ", " + task.budget().maxElapsedMinutes() + " min of execution"));

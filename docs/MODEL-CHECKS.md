@@ -1,5 +1,8 @@
 # Model checks and shared settings
 
+Typed Jev profiles and optional task effort selection use the same settings panel.
+See [Jev routing](JEV-ROUTING.md) for Decisions API checks, fallback and optional cost telemetry.
+
 `warden settings --open-orca` opens the dashboard with connections, CLI/API profiles, role ordering,
 capability verification and live availability checks in one panel. It reads the same personal files
 as commands (`WARDEN_CONFIG_HOME`, otherwise `~/.warden`). Opening or refreshing settings sends no inference.

@@ -22,6 +22,8 @@ public final class TestMain {
                 new dev.warden.ProfileVerifierTest(),
                 new dev.warden.ModelCheckTest(),
                 new dev.warden.ModelSettingsTest(),
+                new dev.warden.DecisionRoutingTest(),
+                new dev.warden.TaskRoutingLoopTest(),
                 new dev.warden.RoleResolverTest(),
                 new dev.warden.QuotaSignalTest(),
                 new dev.warden.VendorAvailabilityTest(),

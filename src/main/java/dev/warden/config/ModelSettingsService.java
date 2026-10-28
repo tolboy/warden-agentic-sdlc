@@ -47,6 +47,13 @@ public final class ModelSettingsService {
             row.put("configuration", ModelCheck.configuration(profile, user));
             profiles.add(row);
         }
+        for(var classifier:DecisionProfile.load(home).values()){
+            var row=new LinkedHashMap<String,Object>();row.put("name",classifier.name());row.put("role","classifier");row.put("kind","classifier");
+            row.put("model",classifier.model());row.put("reported_model",classifier.reportedModel());row.put("vendor","typesafe");row.put("connection",classifier.connection());
+            row.put("runner","decisions");row.put("verified",false);row.put("revision",revision(DecisionProfile.file(home,classifier.name())));
+            var connection=user.connections().get(classifier.connection());
+            row.put("configuration",connection==null?"unbound":classifier.fingerprint(connection));profiles.add(row);
+        }
         List<Map<String, Object>> routes = new ArrayList<>();
         if (user.policy() != null) for (var role : user.policy().roles().values())
             routes.add(Map.of("role", role.role(), "profiles", role.profiles(), "strategy", role.strategy()));
@@ -56,6 +63,7 @@ public final class ModelSettingsService {
         result.put("policy_revision", revision(home.resolve("policy.yaml")));
         result.put("settings_revision", revision(CheckSettings.file(home)));
         result.put("check", CheckSettings.load(home).toMap()); result.put("checking", checking.get());
+        result.put("routing",RoutingSettings.load(home).toMap());
         Path latest = home.resolve("checks/latest.json");
         if (Files.isRegularFile(latest) && Files.size(latest) < 1024 * 1024)
             result.put("latest_check", Json.parseObject(Files.readString(latest)));
@@ -91,9 +99,23 @@ public final class ModelSettingsService {
                         Path file = CheckSettings.file(home); expectRevision(file, payload);
                         Map<String, Object> values = new LinkedHashMap<>(payload); values.remove("revision");
                         CheckSettings settings = CheckSettings.parse(Map.of("version", 1L, "check", values));
-                        ModelCheck.atomicWrite(file, settings.yaml());
+                        String yaml=Files.exists(file)?Files.readString(file):"version: 1\n";
+                        String block=settings.yaml().substring(settings.yaml().indexOf("check:")+"check:".length()).stripTrailing();
+                        yaml=replaceValue(yaml,List.of("check"),block);
+                        CheckSettings.parse(dev.warden.yaml.Yaml.parse(yaml)); ModelCheck.atomicWrite(file,yaml);
+                    }
+                    case "save-routing" -> {
+                        requireKeys(payload,Set.of("revision","enabled","classifier","min_confidence"));
+                        Path file=CheckSettings.file(home);expectRevision(file,payload);
+                        var values=new LinkedHashMap<String,Object>(payload);values.remove("revision");
+                        var routing=RoutingSettings.parse(Values.of(values,"routing"));
+                        if(routing.enabled() && !DecisionProfile.load(home).containsKey(routing.classifier()))throw new Invalid();
+                        String yaml=Files.exists(file)?Files.readString(file):CheckSettings.DEFAULT.yaml();
+                        yaml=replaceValue(yaml,List.of("routing"),routing.yamlValue());
+                        ModelCheck.atomicWrite(file,yaml);
                     }
                     case "save-profile" -> saveProfile(payload);
+                    case "save-classifier" -> saveClassifier(payload);
                     case "save-route" -> saveRoute(payload);
                     default -> throw new Invalid();
                 }
@@ -106,8 +128,21 @@ public final class ModelSettingsService {
         catch (Exception unavailable) { return refused(503, "settings_unavailable"); }
     }
 
+    private void saveClassifier(Map<String,Object> payload)throws Exception{
+        requireKeys(payload,Set.of("name","revision","connection","model","reported_model"));
+        String name=text(payload,"name"); Path file=DecisionProfile.file(home,name); expectRevision(file,payload);
+        var user=UserConfig.load(home);if(user.profiles().containsKey(name))throw new Invalid();
+        String connection=text(payload,"connection");var bound=user.connections().get(connection);
+        if(bound==null || !"openrouter".equals(bound.provider()))throw new Invalid();
+        var current=DecisionProfile.load(home).get(name);
+        var profile=new DecisionProfile(name,connection,text(payload,"model"),text(payload,"reported_model"),
+                current==null?15:current.timeoutSeconds(),current==null?8000:current.maxInputCharacters(),current==null||current.enabled());
+        ModelCheck.atomicWrite(file,profile.yaml());
+    }
+
     private Outcome verify(Map<String, Object> payload) throws Exception {
         String name = text(payload, "name"); Path file = profileFile(name); expectRevision(file, payload);
+        if(DecisionProfile.load(home).containsKey(name))throw new Invalid();
         UserConfig user = UserConfig.load(home); Profile profile = user.profiles().get(name);
         if (profile == null) throw new Invalid();
         ProfileVerifier verifier = new ProfileVerifier(new ProcessRunner(), (args, timeout) -> {
@@ -138,6 +173,7 @@ public final class ModelSettingsService {
     private void saveProfile(Map<String, Object> payload) throws Exception {
         requireKeys(payload, Set.of("name", "revision", "model", "effort", "connection", "vendor", "kind", "harness_executable"));
         String name = text(payload, "name"); Path file = profileFile(name); expectRevision(file, payload);
+        if(DecisionProfile.load(home).containsKey(name))throw new Invalid();
         String model = text(payload, "model");
         if (!model.matches("[A-Za-z0-9][A-Za-z0-9._:/@+\\-]{0,255}")) throw new Invalid();
         UserConfig user = UserConfig.load(home);

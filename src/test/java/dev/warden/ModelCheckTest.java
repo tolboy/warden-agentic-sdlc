@@ -39,6 +39,10 @@ public final class ModelCheckTest implements Suite {
             check.that("safe receipt exists", Files.isRegularFile(Path.of((String) result.get("receipt"))));
             check.that("credential stays out of receipts", !Files.readString(home.resolve("checks/latest.json")).contains("synthetic-secret"));
             check.eq("unknown money remains unknown", "unknown", row(result).get("cost_status"));
+            stub.emptyTools=true;stub.fenced=true;
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("empty tool metadata and fenced JSON are valid availability replies",true,result.get("ok"));
+            stub.emptyTools=false;stub.fenced=false;
             stub.served = "substituted/model";
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("a substituted model is not ready", "check_model_mismatch", row(result).get("code"));
@@ -123,13 +127,15 @@ public final class ModelCheckTest implements Suite {
     }
     private static final class Stub implements AutoCloseable {
         final HttpServer server; final AtomicInteger calls = new AtomicInteger();
-        int status = 200; String served = "test/model", body; boolean pong = true, toolCall;
+        int status = 200; String served = "test/model", body; boolean pong = true, toolCall,emptyTools,fenced;
         Stub() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/v1/chat/completions", exchange -> {
                 calls.incrementAndGet(); body = new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                 Map<String, Object> message = new java.util.LinkedHashMap<>();
                 message.put("content", Json.write(Map.of("pong", pong ? nonce(body) : "old")));
+                if(fenced)message.put("content","```json\n"+message.get("content")+"\n```");
+                if(emptyTools)message.put("tool_calls",null);
                 if (toolCall) message.put("tool_calls", List.of(Map.of("id", "x")));
                 String response = status == 200 ? Json.write(Map.of("model", served, "choices", List.of(Map.of("finish_reason", "stop", "message", message))))
                         : "{\"error\":{\"message\":\"synthetic-secret\"}}";

@@ -1,0 +1,10 @@
+version: 1
+# Install into ~/.warden/classifiers/, not worker profiles/.
+profile: jev-classifier
+connection: openrouter-personal
+model: typesafe/jev-1.14
+# Snapshot observed in a live response on 2026-10-28; recheck before changing it.
+reported_model: typesafe/jev-1.14-20261014
+timeout_seconds: 15
+max_input_characters: 8000
+enabled: true
