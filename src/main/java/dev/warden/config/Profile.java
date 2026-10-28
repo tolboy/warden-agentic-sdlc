@@ -51,7 +51,30 @@ public record Profile(
         String mcpConfig,
         String verificationExpect,
         String harness,
-        ApiSettings apiSettings) {
+        ApiSettings apiSettings,
+        CliService cliService) {
+
+    /**
+     * The service and account a CLI profile authenticates against. Null for legacy files that
+     * predate it; {@link ServiceBinding} decides whether such a profile can be inferred or needs
+     * an explicit mapping. Never derived from the model developer.
+     */
+    public record CliService(String service, String account) {}
+
+    /** Source compatibility for callers written before service bindings. */
+    public Profile(String name, String role, String vendor, String model, String effort,
+                   String command, List<String> args, boolean readOnly, long wallClockMinutes,
+                   Double maxCostUsd, String promptTemplate, String jsonSchema, boolean enforceSchema,
+                   List<String> requiredArtifactFields, List<String> quotaSignatures,
+                   String promptDelivery, String attachmentFlag, VisionCapability vision,
+                   String runner, String endpoint, String apiKeyEnv, String verificationProbe,
+                   List<String> verificationChecks, boolean verified, String mcpConfig,
+                   String verificationExpect, String harness, ApiSettings apiSettings) {
+        this(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
+                maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
+                quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings, null);
+    }
 
     /** Connection metadata contains references only; never a credential value. */
     public record ApiSettings(String connection, String modelVendor, int maxOutputTokens,
@@ -110,7 +133,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, false, mcpConfig, verificationExpect, harness, probe);
+                verificationProbe, verificationChecks, false, mcpConfig, verificationExpect, harness, probe, cliService);
     }
 
     /** Effective identity for independence; the legacy label remains in historical evidence. */
@@ -148,14 +171,14 @@ public record Profile(
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
                 runner, boundEndpoint, connection.apiKeyEnv(), verificationProbe,
-                verificationChecks, verified, mcpConfig, verificationExpect, harness, settings);
+                verificationChecks, verified, mcpConfig, verificationExpect, harness, settings, cliService);
         boolean checked = verified
                 && bound.apiFingerprint().equals(settings.verificationFingerprint());
         return new Profile(name, role, vendor, model, effort, command, args, readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
                 runner, boundEndpoint, connection.apiKeyEnv(), verificationProbe,
-                verificationChecks, checked, mcpConfig, verificationExpect, harness, settings);
+                verificationChecks, checked, mcpConfig, verificationExpect, harness, settings, cliService);
     }
 
     /** Changes to model, endpoint, adapter or output bound invalidate API verification. */
@@ -225,7 +248,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, resolved, verificationExpect, harness, apiSettings);
+                verificationProbe, verificationChecks, verified, resolved, verificationExpect, harness, apiSettings, cliService);
     }
 
     /** Effort for one dispatch. Does not rewrite the home file or drop {@code verified_on}. */
@@ -233,7 +256,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, next, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings, cliService);
     }
 
     /**
@@ -254,14 +277,15 @@ public record Profile(
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, "workspace_file", attachmentFlag,
                 vision, "orca", endpoint, apiKeyEnv, verificationProbe, verificationChecks,
-                verified, mcpConfig, verificationExpect);
+                verified, mcpConfig, verificationExpect, null, null, cliService);
     }
 
     private static final Set<String> TOP_LEVEL = Set.of(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
-            "verification", "notes", "mcp", "connection", "model_vendor", "harness", "harness_executable");
+            "verification", "notes", "mcp", "connection", "model_vendor", "harness", "harness_executable",
+            "service", "account");
     private static final Set<String> MCP = Set.of("config", "note");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd", "max_output_tokens");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
@@ -333,7 +357,7 @@ public record Profile(
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, bounded,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, scoped);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, scoped, cliService);
     }
 
     public boolean hasVerifiedVision() {
@@ -546,6 +570,24 @@ public record Profile(
         } else if (connection != null || modelVendor != null || limits.has("max_output_tokens")) {
             root.collector().add("connection, model_vendor and max_output_tokens require runner: api or harness: opencode");
         }
+        String service = root.optString("service", null);
+        String account = root.optString("account", null);
+        CliService cliService = null;
+        if (service != null || account != null) {
+            if ("api".equals(runner) || opencode || "local".equals(runner)) {
+                root.collector().add("service and account apply to CLI profiles; API and OpenCode use connection");
+            } else if (service == null) {
+                root.collector().add("account requires service");
+            } else if (!service.matches("[a-z][a-z0-9-]{0,31}") || !service.equals(canonicalVendor(service))
+                    || ServiceBinding.CLIENTS.contains(service)) {
+                root.collector().add("service must name the authenticating service (openai, x-ai, anthropic, google, "
+                        + "antigravity, ...), not the CLI client or an alias");
+            } else if (account != null && !account.matches("[a-z0-9][a-z0-9._-]{0,63}")) {
+                root.collector().add("account must be a short label such as default or work");
+            } else {
+                cliService = new CliService(service, account == null ? "default" : account);
+            }
+        }
         if ("local".equals(runner) && endpoint == null) {
             root.collector().add("endpoint is required when runner is local");
         }
@@ -630,7 +672,8 @@ public record Profile(
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
                 probe, whatToCheck, verified, mcpConfig, expect, harness,
                 connects ? new ApiSettings(connection, canonicalVendor(modelVendor),
-                        maxOutputTokens, connectionFingerprint, null, null, harnessExecutable, wallClock) : null);
+                        maxOutputTokens, connectionFingerprint, null, null, harnessExecutable, wallClock) : null,
+                cliService);
     }
 
     /**

@@ -12,14 +12,17 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Catalog lookup is explicit, model access differs from vendor authentication, and receipts are projected. */
+/**
+ * Catalog lookup is explicit, model access differs from vendor authentication, receipts are
+ * projected, and cards are services: never a client, an orchestrator or a model developer.
+ */
 public final class VendorSettingsTest implements Suite {
     public String name(){return "vendor-settings";}
     public void run(Check check)throws Exception{
         Path home=Files.createTempDirectory("warden-vendor-settings-"),cliHome=Files.createTempDirectory("warden-vendor-cli-");
         Files.createDirectories(home.resolve("profiles"));Files.createDirectories(cliHome.resolve(".codex"));Files.createDirectories(cliHome.resolve(".grok"));
-        Files.writeString(home.resolve("profiles/codex-read.yaml"),cli("codex-read","codex","codex","gpt-6.1-sol","medium","warden-read","direct"));
-        Files.writeString(home.resolve("profiles/codex-other.yaml"),cli("codex-other","codex","codex","gpt-6-astra","high","warden-read","direct"));
+        Files.writeString(home.resolve("profiles/codex-read.yaml"),bind(cli("codex-read","codex","codex","gpt-6.1-sol","medium","warden-read","direct"),"openai","warden-read"));
+        Files.writeString(home.resolve("profiles/codex-other.yaml"),bind(cli("codex-other","codex","codex","gpt-6-astra","high","warden-read","direct"),"openai","warden-read"));
         Files.writeString(home.resolve("profiles/deepseek-read.yaml"),cli("deepseek-read","deepseek","codex","deepseek/model","medium","deepseek","direct"));
         Files.writeString(home.resolve("profiles/grok-read.yaml"),cli("grok-read","grok","grok","grok-4.7","high","","direct"));
         Files.writeString(cliHome.resolve(".codex/models_cache.json"),Json.write(Map.of("fetched_at","2026-10-28T00:00:00Z","identity","private-account-fingerprint","models",List.of(
@@ -35,8 +38,16 @@ public final class VendorSettingsTest implements Suite {
             Files.writeString(home.resolve("profiles/api-two.yaml"),api("api-two","deepseek/two"));
             var service=new VendorSettingsService(home,home,key->"CATALOG_KEY".equals(key)?"catalog-secret":null,transport,cliHome);
             var before=service.list();check.that("billing is not inferred from CLI or API",rows(before).stream().allMatch(r->"unknown".equals(r.get("billing"))));check.eq("GET inventory never calls API",0,api.calls.get());check.eq("GET inventory never pings",0,probes.get());
-            var rows=rows(before);check.eq("same CLI auth/model family shares vendor group",4,rows.size());
-            String codexId=vendor(rows,"openai").get("id").toString(),grokId=vendor(rows,"x-ai").get("id").toString(),deepseekId=vendor(rows,"deepseek").get("id").toString();
+            var rows=rows(before);check.eq("cards are services plus one needs-mapping card",4,rows.size());
+            String codexId=vendor(rows,"openai").get("id").toString(),grokId=vendor(rows,"x-ai").get("id").toString(),deepseekId=VendorSettingsService.UNMAPPED;
+            check.that("Codex CLI running a DeepSeek model is not a DeepSeek CLI vendor",rows.stream().noneMatch(r->"deepseek".equals(r.get("provider"))));
+            var unmapped=byId(rows,VendorSettingsService.UNMAPPED);
+            check.eq("ambiguous legacy profile is listed as needing a mapping",List.of("deepseek-read"),unmapped.get("profiles"));
+            check.eq("ambiguous profile gets no invented service",null,unmapped.get("provider"));
+            var mapping=(Map<?,?>)((List<?>)unmapped.get("mapping")).get(0);
+            check.eq("mapping states why the service is unknown","model_developer_differs_from_client",mapping.get("reason"));
+            check.eq("developer mismatch suggests nothing",null,mapping.get("suggested"));
+            check.eq("an ambiguous profile gets no billing either","unknown",unmapped.get("billing"));
             check.eq("new catalog reports unavailable until explicit refresh","unavailable",((Map<?,?>)vendor(rows,"openai").get("catalog")).get("status"));
             service.refresh(Set.of(codexId,grokId,deepseekId,"api-stub"));
             check.eq("refresh makes exactly one models GET",1,api.calls.get());check.eq("refresh authenticates intended endpoint","Bearer catalog-secret",api.authorization);
@@ -44,11 +55,16 @@ public final class VendorSettingsTest implements Suite {
             check.eq("local source provenance remains explicit","Codex CLI local model cache",((Map<?,?>)codex.get("catalog")).get("source"));
             check.that("hidden cache models are omitted",!Json.write(codex).contains("gpt-reserve"));check.that("local credential metadata is never projected",!Json.write(grok).contains("cache-secret"));
             check.that("cache identity is never projected",!Json.write(codex).contains("private-account"));
-            check.eq("unsupported CLI catalog warns rather than inventing versions","unavailable",((Map<?,?>)vendor(rows,"deepseek").get("catalog")).get("status"));
-            check.that("manual fallback has documentation link",vendor(rows,"deepseek").get("docs_url").toString().startsWith("https://"));
+            check.eq("needs-mapping card has no catalog","unavailable",((Map<?,?>)byId(rows,deepseekId).get("catalog")).get("status"));
+            check.that("manual fallback has documentation link",vendor(rows,"x-ai").get("docs_url").toString().startsWith("https://"));
+            check.that("an unmapped profile never gets a vendor catalog file",!Files.exists(home.resolve("vendors/cli-unmapped-catalog.json")));
             check.eq("API catalog safely projects ids",2,((List<?>)((Map<?,?>)vendor(rows,"custom").get("catalog")).get("models")).size());
             check.that("API raw metadata is not persisted",!Files.readString(home.resolve("vendors/api-stub-catalog.json")).contains("upstream-private-field"));
             service.check(Set.of(codexId));check.eq("vendor check pings one CLI model",1,probes.get());
+            check.eq("card status is derived from per-model receipts","answered",((Map<?,?>)vendor(rows(service.list()),"openai").get("status")).get("state"));
+            var refused=service.check(Set.of(deepseekId));
+            check.eq("an unmapped card refuses a service check","service_mapping_required",((Map<?,?>)((List<?>)refused.get("results")).get(0)).get("code"));
+            check.eq("refusing an unmapped check pings nothing",1,probes.get());
             service.check(Set.of("api-stub"));check.eq("configured API models are pinged separately without role duplicates",3,probes.get());
             check.eq("catalog GET never pays for chat inference",1,api.calls.get());
             check.eq("vendor receipt states its assumption","cli_vendor_representative_model",((Map<?,?>)vendor(rows(service.list()),"openai").get("check")).get("scope"));
@@ -58,7 +74,7 @@ public final class VendorSettingsTest implements Suite {
             check.rejects("arbitrary vendor paths are refused",null,()->service.refresh(Set.of("../../elsewhere")));
             var user=UserConfig.load(home);var one=user.profiles().get("codex-read");var other=user.profiles().get("codex-other");
             check.eq("same auth groups across model and effort",VendorSettingsService.vendorId(one),VendorSettingsService.vendorId(other));
-            var different=Profile.parse(cli("other-account","codex","codex","gpt-6.1-sol","medium","other-account","direct"),"fixture");
+            var different=Profile.parse(bind(cli("other-account","codex","codex","gpt-6.1-sol","medium","other-account","direct"),"openai","other-account"),"fixture");
             check.that("different auth selector separates CLI accounts",!VendorSettingsService.vendorId(one).equals(VendorSettingsService.vendorId(different)));
             var inlineAccount=Profile.parse(cli("inline-account","codex","codex","gpt-6.1-sol","medium","","direct").replace("args: [","args: [\"--profile=another-account\","),"fixture");
             check.that("inline auth selectors do not merge accounts",!VendorSettingsService.vendorId(one).equals(VendorSettingsService.vendorId(inlineAccount)));
@@ -76,13 +92,24 @@ public final class VendorSettingsTest implements Suite {
             var agyResult=fallbackService.check(Set.of(agyVendor.get("id").toString()));
             check.eq("a second configured model can prove shared CLI login",true,agyResult.get("ok"));
             check.eq("failed CLI representative gets one bounded alternative",2,agyAttempts.get());
-            Files.writeString(home.resolve("profiles/codex-write.yaml"),cli("codex-write","codex","codex","gpt-6.1-sol","high","warden-write","direct"));
+            var agyStatus=(Map<?,?>)vendor(rows(service.list()),"antigravity").get("status");
+            check.eq("one failed model does not paint an answering service failed","partial",agyStatus.get("state"));
+            check.eq("the failed model is named, not the service",List.of("gemini-unavailable"),((List<?>)agyStatus.get("failed")).stream().map(r->((Map<?,?>)r).get("model")).toList());
+            Files.writeString(home.resolve("profiles/codex-write.yaml"),bind(cli("codex-write","codex","codex","gpt-6.1-sol","high","warden-write","direct"),"openai","warden-write"));
             Files.writeString(home.resolve("profiles/codex-orca.yaml"),cli("codex-orca","codex","codex","gpt-6.1-sol","medium","","orca"));
             var publicRows=rows(service.list());
             check.eq("one OpenAI card across CLI profiles and Orca",1L,publicRows.stream().filter(r->"openai".equals(r.get("provider"))).count());
             check.eq("public vendor label has no client or orchestrator","OpenAI",vendor(publicRows,"openai").get("label"));
             check.eq("all OpenAI role templates remain selectable",4,((List<?>)vendor(publicRows,"openai").get("profiles")).size());
-            check.eq("DeepSeek service label does not name its Codex client","DeepSeek",vendor(publicRows,"deepseek").get("label"));
+            check.eq("accounts stay separate inside one service card",List.of("default","warden-read","warden-write"),((List<?>)vendor(publicRows,"openai").get("accounts")).stream().map(a->((Map<?,?>)a).get("id")).toList());
+            check.that("no card is named after a model developer reached through another client",publicRows.stream().noneMatch(r->"deepseek".equals(r.get("provider"))));
+            Files.writeString(home.resolve("profiles/deepseek-read.yaml"),bind(cli("deepseek-read","deepseek","codex","deepseek/model","medium","deepseek","direct"),"openrouter","personal"));
+            var mappedRows=rows(service.list());
+            check.eq("an explicit mapping moves the profile to its real service",List.of("deepseek-read"),vendor(mappedRows,"openrouter").get("profiles"));
+            check.that("the needs-mapping card disappears once everything is mapped",mappedRows.stream().noneMatch(r->VendorSettingsService.UNMAPPED.equals(r.get("id"))));
+            int beforeAccounts=probes.get();var perAccount=service.check(Set.of(codexId));
+            check.eq("each account of a service is checked separately",beforeAccounts+3,probes.get());
+            check.eq("per-account outcomes are reported",3,((List<?>)((Map<?,?>)((List<?>)perAccount.get("results")).get(0)).get("accounts")).size());
             check.that("vendor titles never include Orca",publicRows.stream().noneMatch(r->String.valueOf(r.get("label")).contains("Orca")));
             check.eq("Orca and direct share public vendor identity",VendorSettingsService.displayVendorId(one),VendorSettingsService.displayVendorId(orca));
             check.that("public grouping preserves technical readiness isolation",!VendorSettingsService.vendorId(one).equals(VendorSettingsService.vendorId(orca)));
@@ -92,6 +119,8 @@ public final class VendorSettingsTest implements Suite {
     }
     private static String cli(String name,String vendor,String command,String model,String effort,String account,String runner){return "version: 1\nprofile: "+name+"\nrole: reviewer\nvendor: "+vendor+"\nmodel: "+model+"\neffort: "+effort+"\ncommand: "+command+"\nrunner: "+runner+"\nread_only: true\n"+("orca".equals(runner)?"":"args: "+Json.write(account.isEmpty()?List.of("--model","{{model}}","--effort","{{effort}}") : List.of("--profile",account,"--model","{{model}}","--effort","{{effort}}"))+"\n");}
     private static String api(String name,String model){return "version: 1\nprofile: "+name+"\nrole: reviewer\nrunner: api\nconnection: stub\nmodel_vendor: deepseek\nmodel: "+model+"\nread_only: true\nlimits: {max_output_tokens: 512}\n";}
+    private static String bind(String yaml,String service,String account){return yaml.replaceFirst("\nmodel: ","\nservice: "+service+"\naccount: "+account+"\nmodel: ");}
+    private static Map<String,Object> byId(List<Map<String,Object>> rows,String id){return rows.stream().filter(r->id.equals(r.get("id"))).findFirst().orElseThrow();}
     private static List<Map<String,Object>> rows(Map<String,Object> report){return (List<Map<String,Object>>)report.get("vendors");}
     private static Map<String,Object> vendor(List<Map<String,Object>> rows,String provider){return rows.stream().filter(r->provider.equals(r.get("provider"))).findFirst().orElseThrow();}
     private static final class CatalogStub implements AutoCloseable{
