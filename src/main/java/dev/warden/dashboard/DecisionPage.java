@@ -369,6 +369,21 @@ public final class DecisionPage implements AutoCloseable {
                             + "с этой страницей</small></button></form>");
         }
 
+        if (summary.get("model_check") instanceof Map<?, ?> checked
+                && !Boolean.TRUE.equals(checked.get("ok"))) {
+            html.append("<h2>Проверка перед запуском остановилась</h2><p><code>")
+                    .append(escape(String.valueOf(checked.get("code")))).append("</code></p>");
+            html.append("<p>").append("check_strict_cost_unproven".equals(checked.get("code"))
+                    ? "Денежное резервирование для диагностических запросов пока не поддерживается. Для запуска с прежним строгим лимитом можно явно отключить автоматическую проверку в личных настройках."
+                    : "Восстановите вход CLI или доступ к API-модели, затем повторите проверку.")
+                    .append(" Новые рабочие вызовы не выполнялись.</p>");
+            if (checked.get("results") instanceof List<?> rows) for (Object row : rows) {
+                if (row instanceof Map<?, ?> item && !Boolean.TRUE.equals(item.get("ok")))
+                    html.append("<p class=bad>").append(escape(String.valueOf(item.get("profile"))))
+                            .append(" · ").append(escape(String.valueOf(item.get("code"))))
+                            .append("</p>");
+            }
+        }
         if (pending) {
             html.append("<h2>Ваше решение</h2><form method=post action=decide>")
                     .append("<input type=hidden name=expected value='")

@@ -1,5 +1,9 @@
 # API connections
 
+Connections, model profiles, native verification, live pings and role ordering are now available together
+in `warden settings`. See [model checks and shared settings](MODEL-CHECKS.md) for automatic pre-run checks,
+their token/time bounds and separate diagnostic spending.
+
 Warden can share a user-owned API connection across text profiles and verified OpenCode implementers. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. OpenCode admission requires a native capability receipt for the exact profile, connection and executable.
 
 Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter, JoinGonka Gateway and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. OpenRouter can mint a user key through PKCE into that vault. Env mode does not require the vault.

@@ -38,6 +38,7 @@ public final class TaskLoopTest implements Suite {
         try {
             Path home = sandbox.resolve("home");
             new UserSetup().run(home);
+            readinessStopsBeforeWork(check, sandbox, home);
             writerPinFollowsAFixAndAnAdvance(check, sandbox, home);
 
             // Clean run: implement, gates pass, review passes, stop for a human.
@@ -329,6 +330,24 @@ public final class TaskLoopTest implements Suite {
         } finally {
             deleteTree(sandbox);
         }
+    }
+
+    private void readinessStopsBeforeWork(Check check, Path sandbox, Path home) throws Exception {
+        Path project = newProject(sandbox, "readiness-refused");
+        writeProfiles(home, sandbox, "clean", 1, 1);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        TaskLoop loop = new TaskLoop(new ProcessRunner()).withReadiness((u, root, profiles, strict, progress) -> {
+            calls.incrementAndGet();
+            check.that("launch check receives active role models", profiles.size() >= 2);
+            return Map.of("ok", false, "code", "model_check_failed", "results", List.of());
+        });
+        var loaded = new ConfigLoader().load(project, "hello");
+        var refused = loop.run(loaded, UserConfig.load(home), "check-refused", false);
+        check.eq("failed readiness stops before implementer", "model_check_failed", refused.reason());
+        check.eq("failed readiness spends no working role calls", 0L, refused.summaryReport().get("role_runs"));
+        check.that("run retains diagnostic result", Files.isRegularFile(project.resolve(".warden/runs/check-refused/model-check.json")));
+        loop.run(loaded, UserConfig.load(home), "check-preview", true);
+        check.eq("dry run never pings models", 1, calls.get());
     }
 
     /**

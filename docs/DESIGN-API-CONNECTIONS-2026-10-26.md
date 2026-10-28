@@ -228,6 +228,11 @@ Continuation fingerprint включает endpoint/protocol, connection identity
 
 ## 9. Внедрение по проверяемым этапам
 
+Обновление 2026-10-28: единая панель `warden settings` объединяет подключения, CLI/API-профили,
+native-проверку допуска, состав ролей и настройки свежего `warden check` перед прогоном. Проверка
+ответа не выдаёт coding-допуск и не включает платный fallback. Каталог, подтверждённые денежные
+ограничения и Orca forwarding остаются отдельными этапами. Подробности — `MODEL-CHECKS.md`.
+
 1. **Connection core.** UserConfig/Connection/CredentialResolver с env, совместимость `endpoint + api_key_env`, identity migration, connection fingerprint. Ошибки конфигурации и отсутствие секрета видны в doctor/dry-run без сетевого запроса. Сохранить schema/login CLI-подписок; для неизвестного legacy model vendor показать необходимое identity mapping до independent gate.
 2. **API transport и native probes.** Общий Chat client, OpenRouter/GonkaRouter adapters, typed errors, output limits, model receipts и cost. Auth/catalog check без inference, где он поддержан; отдельно bounded платная проверка конкретной модели. Context builder для text-role. Fake HTTP доказывает redaction и ограничения до живого вызова.
 3. **Настройки авторизации.** ConnectionService, CLI операции и Settings editor; desktop OS store, endpoint binding, optimistic revisions. Env-режим доступен независимо от vault. Сохранённый ключ не включает новый профиль в policy автоматически.
@@ -247,4 +252,4 @@ Continuation fingerprint включает endpoint/protocol, connection identity
 - End-to-end fixture подтверждает чтение файла, ограниченную правку, запуск gate, валидный artifact и завершение всех дочерних процессов; read-only роль не получает write tools.
 - Платный fallback запускается только в разрешённой policy границе; сильная модель после product findings проходит через escalation. Каждый потенциально платный turn учитывается.
 
-Первоначальное исследование ограничивалось source/documentation review и публичным catalog read. Последующая реализация и проверки описаны в статусе выше и `API-CONNECTIONS.md`: OS vault проверен отдельно, живые coding probes имеют собственные квитанции. Сверка фактического биллинга, общий допуск coding adapter в петлю и Orca forwarding остаются незакрытыми; список выше задаёт критерии полной приёмки.
+Первоначальное исследование ограничивалось source/documentation review и публичным catalog read. Последующая реализация и проверки описаны в статусе выше и `API-CONNECTIONS.md`: OS vault проверен отдельно, живые coding probes имеют собственные квитанции; проверенный implementer допущен в обычную петлю. Сверка фактического биллинга, расширение допуска на другие роли и Orca forwarding остаются незакрытыми; список выше задаёт критерии полной приёмки.

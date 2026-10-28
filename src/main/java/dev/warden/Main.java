@@ -70,6 +70,8 @@ public final class Main {
                 case "setup" -> setup();
                 case "profiles" -> profiles(args);
                 case "connections" -> connections(args);
+                case "check", "ping" -> check(args);
+                case "settings" -> dashboard(args);
                 case "roster" -> roster(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
@@ -213,7 +215,7 @@ public final class Main {
             // Connection files are edited here through the same service as `warden connections`.
             System.out.println(Json.write(Map.of("ok", true, "url", dashboard.url(),
                     "project", project.toString(), "read_only", false,
-                    "actions", List.of("open_decision_page", "manage_connections"))));
+                    "actions", List.of("open_decision_page", "manage_connections", "manage_models", "check_models"))));
             if (hasFlag(args, "--open-orca")) {
                 var opened = new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", dashboard.url()));
@@ -223,6 +225,13 @@ public final class Main {
             new java.util.concurrent.CountDownLatch(1).await();
         }
         return 0;
+    }
+
+    private static int check(String[] args) throws Exception {
+        Map<String, Object> report = dev.warden.config.CheckCommand.run(args, UserConfig.load(),
+                Path.of(".").toAbsolutePath().normalize(), new ProcessRunner(), narration(args)::line);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     /**
@@ -544,6 +553,7 @@ public final class Main {
             dev.warden.run.Workspace card = board(args).at(loaded.root());
             java.nio.file.Path narration = narrationFile(loaded.root(), runId);
             TaskLoop loop = new TaskLoop(new ProcessRunner())
+                    .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
@@ -759,6 +769,24 @@ public final class Main {
             report.put("message", String.valueOf(invalid.getMessage()));
             return report;
         }
+        if (replan && env.readiness != null) {
+            java.util.Set<String> names = new java.util.LinkedHashSet<>();
+            if (user.policy() != null) for (var spec : user.policy().roles().values()) names.addAll(spec.profiles());
+            List<Profile> models = names.stream().map(user.profiles()::get).filter(java.util.Objects::nonNull)
+                    .filter(Profile::verified).toList();
+            try {
+                Map<String, Object> checked = env.readiness.check(
+                        user, root, models, loaded.resolved().budget().strictCostCap(), narration(args)::line);
+                if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                    report.put("started", false); report.put("ok", false);
+                    report.put("code", "model_check_failed"); report.put("model_check", checked);
+                    return report;
+                }
+            } catch (Exception failed) {
+                report.put("started", false); report.put("ok", false); report.put("code", "model_check_failed");
+                return report;
+            }
+        }
         Map<String, Object> claimed;
         try {
             claimed = claimContinuation(root, resolved.runId(), nextId);
@@ -831,6 +859,7 @@ public final class Main {
                 loaded = new ConfigLoader().load(root, resolved.taskId());
             }
             TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
+                    .withReadiness(env.readiness)
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
@@ -1296,6 +1325,7 @@ public final class Main {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
+                .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                 .withWorkspace(board(args), hasFlag(args, "--watch"))
                 .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                 .withOverride(dev.warden.config.RunOverride.fromArgs(args))
@@ -1661,16 +1691,23 @@ public final class Main {
         final Gates gates;
         /** Null means {@link UserConfig#load()}; tests pass an isolated home. */
         final Path configHome;
+        final dev.warden.run.RunReadiness readiness;
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates) {
             this(clock, sleeper, gates, null);
         }
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome) {
+            this(clock, sleeper, gates, configHome, null);
+        }
+
+        ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome,
+                   dev.warden.run.RunReadiness readiness) {
             this.clock = clock;
             this.sleeper = sleeper;
             this.gates = gates;
             this.configHome = configHome;
+            this.readiness = readiness;
         }
 
         UserConfig user() throws java.io.IOException {
@@ -1682,7 +1719,7 @@ public final class Main {
                     System::currentTimeMillis,
                     millis -> Thread.sleep(millis),
                     (root, gate) -> new OrcaDecisionGate(new ProcessRunner()).read(root, gate),
-                    null);
+                    null, dev.warden.run.RunReadiness.live(new ProcessRunner()));
         }
     }
 
@@ -2173,6 +2210,23 @@ public final class Main {
             var project = dev.warden.config.ProjectConfig.parse(
                     java.nio.file.Files.readString(projectFile), projectFile.toString());
             var spec = dev.warden.config.TaskSpec.parse(before, taskFile.toString());
+            if (env.readiness != null) {
+                UserConfig user = env.user();
+                List<Profile> models = new java.util.ArrayList<>();
+                for (String role : Preparation.payingStages(user)) {
+                    var roster = user.policy() == null ? null : user.policy().roles().get(role);
+                    if (roster != null) for (String name : roster.profiles()) {
+                        Profile profile = user.profiles().get(name);
+                        if (profile != null && profile.verified()) models.add(profile);
+                    }
+                }
+                Map<String, Object> checked = env.readiness.check(user, root, models,
+                        spec.resolve(project, taskFile.toString()).budget().strictCostCap(), narration::line);
+                if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                    report.put("contract_amendment", Map.of("ok", false, "code", "model_check_failed", "model_check", checked));
+                    return report;
+                }
+            }
             List<String> scopes = spec.scope().entries();
             List<Map<String, Object>> gaps = new java.util.ArrayList<>();
             List<Object> ids = new java.util.ArrayList<>();
@@ -2728,6 +2782,10 @@ public final class Main {
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                  warden check [--all]         fresh bounded model reply via each configured CLI/API
+                  warden check --profile N     check one profile without granting role verification
+                  warden check --task TASK     check the task's selected models
+                  warden settings             connections, model checks and run settings in one panel
                   warden probe orca --agent A [--model M] [--effort E] [--image] [--worktree DIR]
                                            the probe a runner: orca profile names: one worker
                                            through Orca reads a word Warden just wrote, and

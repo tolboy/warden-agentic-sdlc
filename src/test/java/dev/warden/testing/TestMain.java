@@ -19,6 +19,8 @@ public final class TestMain {
                 new dev.warden.WorktreeLeaseTest(),
                 new dev.warden.DirectCaptureTest(),
                 new dev.warden.ProfileVerifierTest(),
+                new dev.warden.ModelCheckTest(),
+                new dev.warden.ModelSettingsTest(),
                 new dev.warden.RoleResolverTest(),
                 new dev.warden.QuotaSignalTest(),
                 new dev.warden.VendorAvailabilityTest(),
