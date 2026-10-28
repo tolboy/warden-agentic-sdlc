@@ -32,8 +32,12 @@ final class CodingRelay implements AutoCloseable {
     private final List<Map<String, Object>> receipts = new ArrayList<>();
     private final Map<String, String> calls = new HashMap<>();
     private final Set<String> observedTools = new TreeSet<>();
+    private final List<Map<String, Object>> upstreamAttempts = new ArrayList<>();
     private String failure;
+    private Map<String, Object> failureDetail;
     private int turns;
+    /** Pause between resends of a request that never left; replaceable by tests. */
+    ApiRetry.Sleeper sleeper = ApiRetry.REAL_SLEEP;
 
     CodingRelay(Connection connection, String model, String secret, Duration limit)
             throws IOException {
@@ -82,7 +86,9 @@ final class CodingRelay implements AutoCloseable {
                 "identity_confirmed",
                 failure == null && !receipts.isEmpty() && receipts.size() == turns);
         result.put("cost_status", "provider_usage_recorded_no_strict_cap");
+        result.put("upstream_attempts", List.copyOf(upstreamAttempts));
         if (failure != null) result.put("failure", failure);
+        if (failureDetail != null) result.put("failure_detail", failureDetail);
         return sanitizedMap(result);
     }
 
@@ -178,15 +184,26 @@ final class CodingRelay implements AutoCloseable {
                 return;
             }
             turns++;
-            ApiExecutor.HttpReply reply =
-                    ApiExecutor.call(
+            // Resent only when the request provably never left this machine. OpenCode applies
+            // a tool call only from a response this relay forwarded, and nothing is forwarded
+            // until one upstream attempt answered completely, so a resend can never deliver
+            // the same edit twice. An unknown outcome (dropped after sending, a 5xx, a
+            // deadline) is not resent: it may already have been billed.
+            ApiRetry.Outcome sent =
+                    ApiRetry.send(
                             connection,
                             "POST",
                             URI.create(connection.endpoint()),
                             Json.write(body),
                             secret,
                             Duration.ofNanos(
-                                    Math.min(Duration.ofSeconds(45).toNanos(), remaining)));
+                                    Math.min(Duration.ofSeconds(45).toNanos(), remaining)),
+                            ApiRetry.Policy.NOT_SENT_ONLY,
+                            sleeper,
+                            ApiRetry.correlation(null, null, "implementer", "relay-turn-" + turns));
+            upstreamAttempts.addAll(sent.attempts());
+            if (sent.failure() != null) throw sent.failure();
+            ApiExecutor.HttpReply reply = sent.reply();
             if (reply.status() != 200) {
                 failure = "probe_upstream_http_" + reply.status();
                 send(exchange, 502, "application/json", "{}");
@@ -263,6 +280,8 @@ final class CodingRelay implements AutoCloseable {
             send(exchange, 200, "text/event-stream", response);
         } catch (ApiExecutor.CallFailure failed) {
             failure = failed.code;
+            failureDetail = new LinkedHashMap<>();
+            failed.describe(failureDetail);
             send(exchange, 502, "application/json", "{}");
         } catch (RuntimeException | java.nio.charset.CharacterCodingException invalid) {
             failure = "probe_relay_protocol";
