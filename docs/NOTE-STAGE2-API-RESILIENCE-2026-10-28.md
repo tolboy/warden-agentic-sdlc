@@ -1,6 +1,6 @@
-# Stage 2 note: API resilience and safe recovery (not implemented)
+# Stage 2 note: API resilience and safe recovery
 
-Status: proposal only. Follows Stage 1 (`DESIGN-MODEL-ENTITIES-2026-10-28.md`) and section 2 of
+Status: implemented on `grok/api-resilience-stage2` (see "Implemented" below). Follows Stage 1 (`DESIGN-MODEL-ENTITIES-2026-10-28.md`) and section 2 of
 [PLAN-MODEL-CONNECTIONS-AND-ROUTING-2026-10-28](PLAN-MODEL-CONNECTIONS-AND-ROUTING-2026-10-28.md).
 
 ## What exists today
@@ -46,3 +46,19 @@ headers, slow body past the deadline, oversized body, truncated pong, wrong mode
 Assert the phase, the delivery flag, the attempt count, that no secret text is stored, and
 that a retried writing stage never applies file changes twice. Live per-service results stay
 in a separate document, not in the automated suite.
+
+## Implemented (2026-10-28)
+
+- `ApiExecutor.CallFailure` carries `code`, `phase` and `delivery`; the phase comes from which step
+  was pending (connect, headers, body) and the exception type. Messages and bodies are not stored.
+- `ApiRetry` holds the policies (`none`, `not_sent_only`, `check`), the attempt log, correlation ids
+  and cost settlement (unknown stays unknown). Retry policy is per caller, not per connection:
+  roles and the relay use `not_sent_only`, checks use `check`.
+- `ModelCheck`: reasoning-model ping floor, `role_api_output_truncated`, truncation advice before
+  auth advice, attempts recorded.
+- `TaskLoop.infrastructureReason` maps `role_api_*` transport codes so a continuation reuses the
+  implementer stage.
+- Not done: an ordered per-role fallback list (point 6). Without it, failures stop with the reason.
+
+Tests: `ApiResilienceTest` (suite `api-resilience`), `ModelCheckTest` (reasoning limit, truncation,
+502 retry, auth once), `TaskLoopTest.apiReviewerResumeChecks`.
