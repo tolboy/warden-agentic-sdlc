@@ -87,7 +87,34 @@ API roles have no filesystem or command tools. A role dispatched through Warden 
 
 Every request sets an output token limit (default 2048). GonkaRouter refuses a configured limit above 4096; model fallback is disabled. OpenRouter requires supported parameters and disables provider fallback for this first increment. A response with unknown/substituted model identity, tool calls, truncated output or invalid artifact fails.
 
-HTTP response size is bounded to 4 MiB and the deadline includes the response body. No API error is retried or routed to another profile automatically in this increment. Errors distinguish authorization, credits/budgets, rate limits, unsupported requests, network/protocol failures and identity mismatches, and stop for operator action instead of triggering a code repair.
+HTTP response size is bounded to 4 MiB and the deadline includes the response body. Errors distinguish authorization, credits/budgets, rate limits, unsupported requests, network/protocol failures and identity mismatches, and stop for operator action instead of triggering a code repair. Nothing is routed to another profile, connection or model automatically.
+
+### Failure evidence and retries
+
+Every API failure is recorded as a fixed code plus a `failure_phase` (`connect`, `dns`, `tls_handshake`, `headers`, `body`, `connect_deadline`, `headers_deadline`, `body_deadline`, `cancel`, `http_status`, `parse`, `identity`, `output_limit`) and a `delivery` flag:
+
+- `not_sent`: the request provably never reached the service (refused connection, DNS, TLS handshake, connect deadline). `vendor_turn_started` is `false`.
+- `unknown`: the request may have been processed and paid for (connection dropped after sending, body cut, slow body, cancel).
+- `answered`: the service returned a status.
+
+No exception message or response body is stored. A provider error is reduced to a short redacted `provider_error` field with key-shaped strings and bearer tokens removed.
+
+Each logical call records a `correlation_id`, `api_retry_policy`, `api_attempt_count`, `api_attempts` (each row: attempt number, correlation id, run id, profile, stage, call, delivery, phase, status, request id, duration) and `api_retry_stopped` (`retries_exhausted`, `deadline`, `cancelled`). Usage and cost are summed across attempts; if any attempt that may have reached the service has no reported cost, `cost_status` is `unknown`, never 0.
+
+Retry policies are fixed in code and capped at 2 extra attempts (3 in total):
+
+| Caller | Policy | Resent |
+| --- | --- | --- |
+| Writing and reviewing roles (`ApiExecutor`), OpenCode relay upstream | `not_sent_only` | only `not_sent`, backoff 0.5 s × attempt |
+| Pong checks (`ModelCheck`) | `check` | `not_sent`; 429 with a whole-second `Retry-After` ≤ 10 s; 502/503; backoff 1 s |
+
+An unknown outcome, an auth refusal, a model mismatch, a truncated answer and a cancel are never resent. A role call therefore cannot send the same turn twice, and the relay forwards at most one upstream request per OpenCode request, so a tool call (file edit) is never duplicated by a retry. Cancelling during backoff stops at once.
+
+### Continuing after an API failure
+
+API transport failures map to infrastructure reasons (`role_api_timeout` → `role_timed_out`; network/provider/protocol/unsupported → `vendor_call_failed`; `rate_limited`; credits/budget → `quota_exhausted`; auth/access → `vendor_unavailable`; truncation/identity/artifact → `vendor_protocol_failed`). These are not judgements about the work, so `warden run --continue` keeps the completed candidate and its stage results and reruns only the unfinished stage: a reviewer that failed on a 502 is called again without rerunning the implementer. Configuration codes (missing key, disabled connection, changed profile) are not mapped and still require the operator.
+
+Auth errors never open a browser, change the key status beyond `auth_invalid`, or switch the model. Provider or model fallback happens only through an explicit policy the operator wrote; an ordered per-role fallback list is not implemented yet.
 
 Input/output/cache/reasoning tokens and request/model receipts are recorded when supplied. OpenRouter-reported `usage.cost` is authoritative for its connection; model-written artifact cost is ignored. GonkaRouter/custom cost remains unknown. Unknown cost is never zero. `runner: api` refuses declared `limits.max_cost_usd`, so strict task budgets cannot mistake an unenforced declaration for a proven spend bound. Advisory budgets retain the usual post-call accounting semantics.
 

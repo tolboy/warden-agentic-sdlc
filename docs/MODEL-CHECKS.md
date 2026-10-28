@@ -28,6 +28,16 @@ Pong means **available at check time**. It does not promise availability through
 tools or vision, change verification, establish independent review, assign a profile or permit paid
 fallback. Runtime failures retain their existing handling.
 
+API pings use the `check` retry policy: a refused connection, a 502/503, or a 429 with a short
+`Retry-After` is retried at most twice; every attempt is recorded (`api_attempt_count`, `api_attempts`).
+An auth refusal is asked once and never changes the model. A ping reports `max_output_tokens` and
+`reasoning_model`. Reasoning models (DeepSeek, GLM, Qwen3/QwQ, Kimi K2, MiniMax, GPT-5, o-series) think
+before answering, so their ping limit is raised to at least 2048 tokens (never above the profile limit,
+and at most 4096 on GonkaRouter). A pong cut off by the output limit fails as
+`role_api_output_truncated` with `pong_failure: output_limit`; that is a limit problem, not an
+authentication problem, and the advice is to raise `max_output_tokens`, not to sign in.
+Dated live ping results are in [LIVE-API-PINGS-2026-10-28](LIVE-API-PINGS-2026-10-28.md).
+
 ## Before a run
 
 CLI launchers for `run`, `do` and decision continuations attach the same readiness service. After static
