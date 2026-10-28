@@ -66,6 +66,7 @@ public final class TestMain {
                 new dev.warden.ConnectionSettingsUiTest(),
                 new dev.warden.DashboardConnectionsTest(),
                 new dev.warden.ApiExecutorTest(),
+                new dev.warden.execution.ApiResilienceTest(),
                 new dev.warden.ApiConfigTest(),
                 new dev.warden.OpenCodeHarnessTest(),
                 new dev.warden.ApiContextTest(),
