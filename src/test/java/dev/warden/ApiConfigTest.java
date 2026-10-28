@@ -217,7 +217,8 @@ public final class ApiConfigTest implements Suite {
         check.that("restoring the exact configuration restores its verified identity", requireProfile(home).verified());
 
         Files.writeString(file, stamped.replace(verifiedFingerprint, "stale-fingerprint")
-                .replace("2026-10-26", "2026-10-01"));
+                .replace("2026-10-26", "2026-10-01")
+                .replace("verification:", "verification:\n  status: unverified"));
         Profile stale = requireProfile(home);
         check.that("a stale API stamp is not accepted by load", !stale.verified());
         check.that("stamping a stale block replaces its old keys", verifier.stamp(file, stale, LocalDate.of(2026, 10, 26)).written());
@@ -225,6 +226,8 @@ public final class ApiConfigTest implements Suite {
         check.eq("stamping keeps exactly one date", 1L, replaced.lines().filter(line -> line.stripLeading().startsWith("verified_on:")).count());
         check.eq("stamping keeps exactly one fingerprint", 1L, replaced.lines().filter(line -> line.stripLeading().startsWith("connection_fingerprint:")).count());
         check.that("the replaced stamp is usable", requireProfile(home).verified());
+        check.that("a fresh stamp drops the stale `status: unverified` it would contradict",
+                replaced.lines().noneMatch(line -> line.stripLeading().startsWith("status:")));
         check.that("the operator's dormant legacy probe is preserved", replaced.contains(yaml(shellProbe)));
     }
 
