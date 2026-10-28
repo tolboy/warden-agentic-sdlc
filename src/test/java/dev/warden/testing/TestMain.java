@@ -40,6 +40,7 @@ public final class TestMain {
                 new dev.warden.PlannerTest(),
                 new dev.warden.run.PreparationAccountingTest(),
                 new dev.warden.run.InterruptionGuardTest(),
+                new dev.warden.run.VendorCallFailedWordingTest(),
                 new dev.warden.VisualQaTest(),
                 new dev.warden.OrcaClientTest(),
                 new dev.warden.OrcaIsolationTest(),
