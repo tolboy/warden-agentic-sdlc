@@ -39,17 +39,15 @@ public interface TaskRouting {
                     Profile p=target.profile();if(p==null)continue;
                     var description=new LinkedHashMap<String,Object>();description.put("stage",target.stage());description.put("role",target.role());
                     description.put("profile",p.name());description.put("model",p.model());description.put("configured_effort",p.effort());descriptions.add(description);
-                    // GPT-6 CLI/Orca profiles have the five documented levels. Other models
-                    // retain their configured controls until a capability mapping is supplied.
-                    if(!"openai".equals(Profile.canonicalVendor(p.modelVendor())) || p.model()==null || !p.model().startsWith("gpt-6")
-                            || !("orca".equals(p.runner()) || p.args().stream().anyMatch(a->a.contains("{{effort}}"))))continue;
+                    List<String> levels=supportedEfforts(p);
+                    if(levels.isEmpty())continue;
                     if(eligible.size()>=12)break;
                     String key="effort_"+eligible.size();eligible.put(key,target);
+                    var options=new LinkedHashMap<String,String>();
+                    for(String level:levels)options.put(level,effortDescriptions().get(level));
                     questions.put(key,DecisionClient.choice("Choose the reasoning effort needed by stage "+target.stage()+" (role "+target.role()+") for this task. "
                             +"Use low for a clear mechanical change, medium for ordinary bounded implementation/review, high for interacting constraints, "
-                            +"xhigh for difficult design or concurrency, max only for exceptional complexity.",Map.of(
-                            "low","Clear mechanical work with minimal reasoning.","medium","Ordinary implementation or review within clear boundaries.",
-                            "high","Several interacting constraints or substantial analysis.","xhigh","Difficult architecture, concurrency, or deep investigation.","max","Exceptional reasoning difficulty with many interacting invariants.")));
+                            +"xhigh for difficult design or concurrency, max only for exceptional complexity when available.",options));
                 }
                 progress.accept("route "+profile.name()+" · classifying task and effort …");
                 var result=client.decide(profile,user,Map.of("task",task.goal(),"risk",task.risk(),"stages",descriptions),questions);
@@ -67,7 +65,7 @@ public interface TaskRouting {
                     // Jev's confidence is concentration, not the probability of correctness.
                     // Adjacent ambiguity (xhigh vs max) should not send a hard task back to
                     // medium. Use a supported lower quantile, rejecting broadly spread advice.
-                    String effort=chooseEffort(answer,settings.minConfidence());
+                    String effort=chooseEffort(answer,settings.minConfidence(),supportedEfforts(entry.getValue().profile()));
                     if(effort==null){uncertain.add(entry.getValue().stage());continue;}
                     if("high".equals(task.risk()) && List.of("low","medium").contains(effort))effort="high";
                     var proposed=new RunOverride(Map.of(),Map.of(entry.getValue().stage(),effort),Map.of());
@@ -81,9 +79,22 @@ public interface TaskRouting {
             catch(Exception unavailable){return recorded(user,unchanged("classifier_unavailable_kept_configured",report));}
         };
     }
+    /** Explicit model capabilities; a transport flag alone does not establish valid levels. */
+    static List<String> supportedEfforts(Profile profile){
+        if(profile==null || profile.harness()!=null || profile.model()==null)return List.of();
+        if(!"orca".equals(profile.runner()) && !("direct".equals(profile.runner()) && profile.args().stream().anyMatch(a->a.contains("{{effort}}"))))return List.of();
+        String vendor=Profile.canonicalVendor(profile.modelVendor());
+        if("openai".equals(vendor) && profile.model().startsWith("gpt-6"))return List.of("low","medium","high","xhigh","max");
+        if("x-ai".equals(vendor) && "grok-4.7".equals(profile.model()))return List.of("low","medium","high","xhigh");
+        return List.of();
+    }
+    private static Map<String,String> effortDescriptions(){return Map.of(
+            "low","Clear mechanical work with minimal reasoning.","medium","Ordinary implementation or review within clear boundaries.",
+            "high","Several interacting constraints or substantial analysis.","xhigh","Difficult architecture, concurrency, or deep investigation.",
+            "max","Exceptional reasoning difficulty with many interacting invariants.");}
     private static Map<String,String> yesNo(){return Map.of("yes","This role is useful or necessary for this task.","no","This task does not benefit from this role.");}
-    private static String chooseEffort(Map<String,Object> answer,double threshold){
-        List<String> levels=List.of("low","medium","high","xhigh","max");var probabilities=(Map<?,?>)answer.get("probabilities");
+    private static String chooseEffort(Map<String,Object> answer,double threshold,List<String> levels){
+        var probabilities=(Map<?,?>)answer.get("probabilities");
         double bestBand=0;
         for(int index=0;index<levels.size()-1;index++)bestBand=Math.max(bestBand,
                 ((Number)probabilities.get(levels.get(index))).doubleValue()+((Number)probabilities.get(levels.get(index+1))).doubleValue());

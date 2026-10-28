@@ -53,6 +53,13 @@ public final class DecisionRoutingTest implements Suite {
             stub.effortBand=Map.of("low",0.0,"medium",0.03,"high",0.03,"xhigh",0.45,"max",0.49);
             route=TaskRouting.using(client).route(scoped,home,task,targets,ignored->{});
             check.eq("adjacent high-effort ambiguity does not revert to medium","xhigh",((Map<?,?>)route.overrides().toMap().get("effort")).get("implement"));
+            var grok=Profile.parse("version: 1\nprofile: grok-worker\nrole: implementer\nvendor: grok\nmodel: grok-4.7\neffort: high\ncommand: grok\nargs: ['--effort','{{effort}}']\nread_only: false\n", "fixture");
+            check.eq("Grok 4.7 has no max effort",List.of("low","medium","high","xhigh"),TaskRouting.supportedEfforts(grok));
+            stub.effortBand=Map.of("low",0.0,"medium",0.0,"high",0.1,"xhigh",0.9);
+            var grokUser=new UserConfig(home,user.policy(),Map.of(grok.name(),grok),Map.of(),true,user.connections());
+            var grokRoute=TaskRouting.using(client).route(grokUser,home,task,List.of(new TaskRouting.Target("implement","implementer",grok)),ignored->{});
+            check.eq("Grok receives a supported effort","xhigh",((Map<?,?>)grokRoute.overrides().toMap().get("effort")).get("implement"));
+            check.eq("API transport cannot silently acquire CLI effort",List.of(),TaskRouting.supportedEfforts(Profile.parse("version: 1\nprofile: text\nrole: reviewer\nvendor: grok\nmodel: grok-4.7\nrunner: api\nconnection: example\nmodel_vendor: grok\nread_only: true\n", "fixture")));
             stub.effortBand=null;
             route=TaskRouting.using(client).route(scoped,home,task(home,"high"),targets,ignored->{});
             check.eq("high-risk task has a deterministic effort floor","high",((Map<?,?>)route.overrides().toMap().get("effort")).get("implement"));
@@ -96,7 +103,7 @@ public final class DecisionRoutingTest implements Suite {
                     var options=(Map<?,?>)((Map<?,?>)question.getValue()).get("criteria");String selected=options.containsKey("low")?"low":options.containsKey("yes")?"yes":String.valueOf(options.keySet().iterator().next());
                     if("availability".equals(question.getKey()))selected=(String)((Map<?,?>)request.get("state")).get("expected_choice");
                     Map<String,Object> probabilities=new LinkedHashMap<>();for(Object key:options.keySet())probabilities.put(String.valueOf(key),key.equals(selected)?probability:(1-probability)/(options.size()-1));
-                    if(effortBand!=null && String.valueOf(question.getKey()).startsWith("effort_")){probabilities.clear();probabilities.putAll(effortBand);selected="max";}
+                    if(effortBand!=null && String.valueOf(question.getKey()).startsWith("effort_")){probabilities.clear();probabilities.putAll(effortBand);selected=options.containsKey("max")?"max":"xhigh";}
                     if(badProbabilities)probabilities.put(selected,"test-secret");
                     answers.put(String.valueOf(question.getKey()),Map.of("type","choice","choice",selected,"confidence",confidence,"probabilities",probabilities));
                 }
