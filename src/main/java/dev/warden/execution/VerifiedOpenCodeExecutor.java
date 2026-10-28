@@ -225,7 +225,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             evidence.put("tokens", usage(observed));
             if (run.timedOut()) return fail("role_timeout", started, evidence, safe);
             if (!run.ok() || run.stdoutTruncated() || run.stderrTruncated())
-                return fail("role_harness_process_failed", started, evidence, safe);
+                return fail(processFailure(observed), started, evidence, safe);
             if (!Boolean.TRUE.equals(observed.get("identity_confirmed")))
                 return fail("role_harness_identity_unproven", started, evidence, safe);
             evidence.put("model_served", profile.model());
@@ -357,6 +357,22 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
 
     private static Duration elapsed(long started) {
         return Duration.ofNanos(System.nanoTime() - started);
+    }
+
+    /**
+     * Why OpenCode exited unsuccessfully. When the relay stopped it because the upstream
+     * service timed out, throttled or failed, that is the reason: on 2026-10-28 a JoinGonka
+     * turn that sent no headers for 120 s read as a harness failure, which hides that the
+     * stop was the provider's and that nothing about the work was judged.
+     */
+    static String processFailure(Map<String, Object> relay) {
+        Object failure = relay == null ? null : relay.get("failure");
+        if (failure instanceof String code) {
+            if (code.startsWith("role_api_")) return code;
+            if (code.equals("probe_upstream_http_429")) return "role_api_rate_limited";
+            if (code.startsWith("probe_upstream_http_5")) return "role_api_provider_error";
+        }
+        return "role_harness_process_failed";
     }
 
     private static Result fail(
