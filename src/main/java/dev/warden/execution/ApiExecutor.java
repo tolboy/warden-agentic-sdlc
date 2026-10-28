@@ -34,6 +34,8 @@ public final class ApiExecutor implements RoleExecutor {
     private final Function<String, String> environment;
     private final GitRepository git;
     private final Duration timeoutOverride;
+    private final ApiRetry.Policy retryPolicy;
+    private final ApiRetry.Sleeper sleeper;
 
     public ApiExecutor() { this(System::getenv, null); }
 
@@ -46,6 +48,22 @@ public final class ApiExecutor implements RoleExecutor {
         this.environment = Objects.requireNonNullElse(environment, System::getenv);
         this.git = git;
         this.timeoutOverride = timeout;
+        this.retryPolicy = ApiRetry.Policy.NOT_SENT_ONLY;
+        this.sleeper = ApiRetry.REAL_SLEEP;
+    }
+
+    /**
+     * Role calls resend only a request that provably never reached the provider. A 429, a 5xx
+     * and every unknown outcome stop with their reason: the role runner's own rate-limit policy
+     * and the operator decide whether to pay again, not this transport.
+     */
+    ApiExecutor(Function<String, String> environment, Duration timeout, GitRepository git,
+                ApiRetry.Policy policy, ApiRetry.Sleeper sleeper) {
+        this.environment = Objects.requireNonNullElse(environment, System::getenv);
+        this.git = git;
+        this.timeoutOverride = timeout;
+        this.retryPolicy = policy;
+        this.sleeper = sleeper;
     }
 
     @Override public Result execute(Request request) throws Exception {
@@ -106,12 +124,18 @@ public final class ApiExecutor implements RoleExecutor {
         Duration limit = timeoutOverride != null ? timeoutOverride
                 : Duration.ofMinutes(profile.wallClockMinutes());
         HttpReply reply;
-        try {
-            evidence.put("vendor_turn_started", true);
-            reply = call(connection, "POST", URI.create(connection.endpoint()), Json.write(body), token, limit);
-        } catch (CallFailure failed) {
-            return failure(failed.code, started, "", evidence);
+        evidence.put("vendor_turn_started", true);
+        ApiRetry.Outcome sent = ApiRetry.send(connection, "POST", URI.create(connection.endpoint()),
+                Json.write(body), token, limit, retryPolicy, sleeper,
+                ApiRetry.correlation(request.runId(), profile.name(), request.role(),
+                        request.evidenceName()));
+        sent.record(evidence);
+        if (sent.failure() != null) {
+            // A call that provably never left this machine spent nothing; the budget gives it back.
+            if (sent.nothingSent()) evidence.put("vendor_turn_started", false);
+            return failure(sent.failure().code, started, "", evidence);
         }
+        reply = sent.reply();
         String safe = redact(reply.body(), token);
         Map<String, Object> envelope = object(safe);
         if (envelope == null && token != null) {
@@ -125,6 +149,7 @@ public final class ApiExecutor implements RoleExecutor {
             safe = Json.write(envelope);
         }
         recordReceipt(connection, envelope, reply.headers(), evidence, token);
+        sent.settleCost(evidence);
         if (!dispatchedFingerprint.equals(profile.apiFingerprint())) {
             persist(request, safe, evidence);
             return failure("role_api_profile_changed", started, safe, evidence);
@@ -132,17 +157,23 @@ public final class ApiExecutor implements RoleExecutor {
         evidence.put("http_status", (long) reply.status());
         String httpFailure = errorCode(reply.status(), envelope);
         if (httpFailure != null) {
-            evidence.put("body_head", head(safe, 1000));
+            // Structured fields only. The redacted body stays in the raw transcript file;
+            // a prefix of it is not copied into the evidence that reports and ledgers carry.
+            evidence.put("failure_phase", "http_status");
+            evidence.put("delivery", "answered");
+            providerError(envelope, token, evidence);
             persist(request, safe, evidence);
             return failure(httpFailure, started, safe, evidence);
         }
         if (envelope == null) {
             persist(request, safe, evidence);
+            evidence.put("failure_phase", "parse");
             return failure("role_api_response_unreadable", started, safe, evidence);
         }
         String served = text(envelope.get("model"));
         if (served == null || !served.equals(profile.model())) {
             persist(request, safe, evidence);
+            evidence.put("failure_phase", "identity");
             return failure(served == null ? "role_api_model_identity_unknown" : "role_api_model_mismatch",
                     started, safe, evidence);
         }
@@ -157,6 +188,7 @@ public final class ApiExecutor implements RoleExecutor {
         }
         if ("length".equals(evidence.get("finish_reason"))) {
             persist(request, safe, evidence);
+            evidence.put("failure_phase", "output_limit");
             return failure("role_api_output_truncated", started, safe, evidence);
         }
         if ("tool_calls".equals(evidence.get("finish_reason"))) {
@@ -178,10 +210,37 @@ public final class ApiExecutor implements RoleExecutor {
 
     static record HttpReply(int status, HttpHeaders headers, String body) { }
 
+    /**
+     * A call that produced no complete reply, described only by a fixed vocabulary.
+     *
+     * {@code phase} says where the call stopped: {@code request} (refused before any socket),
+     * {@code connect}, {@code headers}, {@code body}, {@code deadline} or {@code cancel}.
+     * {@code delivery} says what the provider may have seen: {@code not_sent} is known not to
+     * have reached it and is the only failure that may be sent again without risking a second
+     * charge; {@code unknown} may have been received, processed and billed. {@code cause} is a
+     * fixed word derived from the exception type. No exception message or response text is
+     * ever kept: either may echo a credential.
+     */
     static final class CallFailure extends Exception {
         private static final long serialVersionUID = 1L;
         final String code;
-        CallFailure(String code) { super(code); this.code = code; }
+        final String phase;
+        final String delivery;
+        final String cause;
+        CallFailure(String code) { this(code, "request", "not_sent", null); }
+        CallFailure(String code, String phase, String delivery, String cause) {
+            super(code, null, false, false);
+            this.code = code;
+            this.phase = phase;
+            this.delivery = delivery;
+            this.cause = cause;
+        }
+        boolean notSent() { return "not_sent".equals(delivery); }
+        void describe(Map<String, Object> target) {
+            target.put("failure_phase", phase);
+            target.put("delivery", delivery);
+            if (cause != null) target.put("transport_cause", cause);
+        }
     }
 
     static Map<String, Object> completionBody(Connection connection, String model, String prompt, int outputLimit) {
@@ -214,15 +273,31 @@ public final class ApiExecutor implements RoleExecutor {
         HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(limit).version(HttpClient.Version.HTTP_1_1).build();
         CompletableFuture<HttpResponse<byte[]>> pending = null;
+        // Which await was pending decides the phase. The request body is subscribed only after
+        // the connection is up and the request line and headers are on their way; a POST whose
+        // body was never pulled cannot have been acted on by the provider.
+        java.util.concurrent.atomic.AtomicBoolean bodyPulled = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean headersSeen = new java.util.concurrent.atomic.AtomicBoolean();
+        boolean post = "POST".equals(method);
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(limit)
                     .header("Accept", "application/json");
             if (token != null) builder.header("Authorization", "Bearer " + token);
             providerHeaders(connection).forEach(builder::header);
-            if ("POST".equals(method)) builder.header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
-            else builder.GET();
-            pending = client.sendAsync(builder.build(), ignored -> new BoundedBody());
+            if (post) {
+                HttpRequest.BodyPublisher inner = HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
+                builder.header("Content-Type", "application/json").POST(new HttpRequest.BodyPublisher() {
+                    @Override public long contentLength() { return inner.contentLength(); }
+                    @Override public void subscribe(Flow.Subscriber<? super ByteBuffer> subscriber) {
+                        bodyPulled.set(true);
+                        inner.subscribe(subscriber);
+                    }
+                });
+            } else builder.GET();
+            pending = client.sendAsync(builder.build(), ignored -> {
+                headersSeen.set(true);
+                return new BoundedBody();
+            });
             long remaining = limit.toNanos() - (System.nanoTime() - started);
             if (remaining <= 0) throw new TimeoutException();
             HttpResponse<byte[]> response = pending.get(remaining, TimeUnit.NANOSECONDS);
@@ -230,22 +305,63 @@ public final class ApiExecutor implements RoleExecutor {
                     new String(response.body(), StandardCharsets.UTF_8));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            throw new CallFailure("role_api_interrupted");
+            throw new CallFailure("role_api_interrupted", "cancel",
+                    delivery(post, bodyPulled.get(), headersSeen.get()), "cancelled");
         } catch (TimeoutException timeout) {
-            throw new CallFailure("role_api_timeout");
+            throw deadline(post, bodyPulled.get(), headersSeen.get());
         } catch (ExecutionException failed) {
-            Throwable cause = failed;
-            for (int i = 0; i < 12 && cause != null; i++, cause = cause.getCause()) {
-                if (cause instanceof BodyLimit) throw new CallFailure("role_api_response_too_large");
-                if (cause instanceof java.net.http.HttpTimeoutException) throw new CallFailure("role_api_timeout");
-            }
-            throw new CallFailure("role_api_network_error");
+            throw classify(failed, post, bodyPulled.get(), headersSeen.get());
         } catch (IllegalArgumentException invalid) {
             throw new CallFailure("role_api_request_invalid");
         } finally {
             if (pending != null && !pending.isDone()) pending.cancel(true);
             try { client.shutdownNow(); } catch (Exception ignored) { }
         }
+    }
+
+    /**
+     * A GET carries no body to watch, so only a failed connect proves it was not sent. Model
+     * listings and key checks are free either way; only POST completions are retried.
+     */
+    private static String delivery(boolean post, boolean bodyPulled, boolean headersSeen) {
+        if (headersSeen) return "unknown";
+        return post && !bodyPulled ? "not_sent" : "unknown";
+    }
+
+    private static CallFailure deadline(boolean post, boolean bodyPulled, boolean headersSeen) {
+        String during = headersSeen ? "body" : post && !bodyPulled ? "connect" : "headers";
+        return new CallFailure("role_api_timeout", "deadline", delivery(post, bodyPulled, headersSeen),
+                during + "_deadline");
+    }
+
+    /** Exception types only. Their messages can carry hosts, headers or reflected input. */
+    private static CallFailure classify(ExecutionException failed, boolean post, boolean bodyPulled,
+                                        boolean headersSeen) {
+        Throwable cause = failed;
+        for (int i = 0; i < 12 && cause != null; i++, cause = cause.getCause()) {
+            if (cause instanceof BodyLimit) {
+                return new CallFailure("role_api_response_too_large", "body", "unknown", "body_limit");
+            }
+            if (cause instanceof java.net.http.HttpConnectTimeoutException) {
+                return new CallFailure("role_api_timeout", "connect", "not_sent", "connect_timeout");
+            }
+            if (cause instanceof java.net.http.HttpTimeoutException) {
+                return deadline(post, bodyPulled, headersSeen);
+            }
+            if (cause instanceof java.nio.channels.UnresolvedAddressException
+                    || cause instanceof java.net.UnknownHostException) {
+                return new CallFailure("role_api_network_error", "connect", "not_sent", "dns");
+            }
+            if (cause instanceof java.net.ConnectException) {
+                return new CallFailure("role_api_network_error", "connect", "not_sent", "connect_refused");
+            }
+            if (cause instanceof javax.net.ssl.SSLHandshakeException) {
+                return new CallFailure("role_api_network_error", "connect", "not_sent", "tls_handshake");
+            }
+        }
+        String phase = headersSeen ? "body" : post && !bodyPulled ? "connect" : "headers";
+        return new CallFailure("role_api_network_error", phase, delivery(post, bodyPulled, headersSeen),
+                "connection_closed");
     }
 
     private static int effectivePort(URI uri) {
@@ -447,5 +563,26 @@ public final class ApiExecutor implements RoleExecutor {
     }
 
     private static Duration elapsed(long started) { return Duration.ofNanos(System.nanoTime() - started); }
-    private static String head(String text, int limit) { return text.length() <= limit ? text : text.substring(0, limit); }
+
+    /**
+     * The provider's own error code and type, when they are short identifiers. Messages are
+     * prose that may quote the request; they stay in the redacted transcript only.
+     */
+    static void providerError(Map<String, Object> envelope, String token, Map<String, Object> evidence) {
+        if (envelope == null || !(envelope.get("error") instanceof Map<?, ?> error)) return;
+        Object code = error.get("code");
+        if (code instanceof Number number) evidence.put("provider_error_code", String.valueOf(number.longValue()));
+        else if (identifier(code, token) != null) evidence.put("provider_error_code", identifier(code, token));
+        String type = identifier(error.get("type"), token);
+        if (type != null) evidence.put("provider_error_type", type);
+    }
+
+    private static String identifier(Object value, String token) {
+        if (!(value instanceof String text) || text.isEmpty() || text.length() > 64) return null;
+        if (!text.matches("[A-Za-z0-9_.:-]+")) return null;
+        if (token != null && !token.isEmpty() && (text.contains(token) || token.contains(text) && text.length() >= 8)) {
+            return null;
+        }
+        return text;
+    }
 }
