@@ -72,6 +72,25 @@ public final class ServiceMigrationTest implements Suite {
         check.eq("rollback refuses to clobber later edits", "changed_since_migration", refused.get("code"));
         check.eq("refused rollback changes nothing", edited, snapshot(home));
         check.rejects("rollback ids cannot escape backups", "unknown migration backup", () -> migration.rollback("../profiles"));
+
+        Path codexHome = Files.createTempDirectory("warden-codex-home-");
+        Files.writeString(codexHome.resolve("config.toml"), "[profiles.deepseek]\nmodel_provider = \"openrouter\"\n[profiles.warden-read]\nmodel = \"gpt\"\n");
+        byte[] codexBefore = Files.readAllBytes(codexHome.resolve("config.toml"));
+        Path fresh = Files.createTempDirectory("warden-service-migration-codex-");
+        Files.createDirectories(fresh.resolve("profiles"));
+        write(fresh, "deepseek-cli", cli("deepseek-cli", "codex", "deepseek/deepseek-v4.1-flash-1017", "[exec, --profile, deepseek]").replace("vendor: codex", "vendor: deepseek"));
+        write(fresh, "codex-selected", cli("codex-selected", "codex", "gpt-6.1-sol", "[exec, --profile, warden-read]"));
+        var withCodex = new ServiceMigration(fresh, CodexConfig.load(codexHome.resolve("config.toml")));
+        var codexPreview = withCodex.preview(List.of());
+        check.eq("config.toml binds the Codex profile it names", "bind_codex_config", row(codexPreview, "deepseek-cli").get("action"));
+        check.eq("the preview records where the binding came from", "codex config.toml profile deepseek", row(codexPreview, "deepseek-cli").get("binding_source"));
+        check.eq("a Codex profile without an explicit provider still needs a mapping", List.of("codex-selected"), codexPreview.get("needs_mapping"));
+        check.eq("its reason says why", "codex_profile_has_no_model_provider", row(codexPreview, "codex-selected").get("reason"));
+        withCodex.apply(List.of(ServiceMigration.Mapping.parse("codex-selected=openai:warden-read")));
+        var codexUser = UserConfig.load(fresh);
+        check.eq("the applied binding is written explicitly", "openrouter:deepseek",
+                codexUser.profiles().get("deepseek-cli").cliService().service() + ":" + codexUser.profiles().get("deepseek-cli").cliService().account());
+        check.that("Codex config.toml is never written", java.util.Arrays.equals(codexBefore, Files.readAllBytes(codexHome.resolve("config.toml"))));
     }
 
     private static Map<String, Object> row(Map<String, Object> report, String name) {

@@ -66,6 +66,12 @@ The design is in `DESIGN-MODEL-ENTITIES-2026-10-28.md`. In short:
   (comments and line endings kept), and moves stale `vendors/cli-*` caches of services that
   no longer exist into the backup. Ambiguous profiles stay byte-identical until mapped.
   A re-run is a no-op; rollback refuses if a file changed after the migration.
+  A Codex profile that passes exactly one `--profile X` (and no other provider selector) is
+  bound to the `model_provider` that `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`)
+  sets explicitly in `[profiles.X]`, with account `X`; the preview shows
+  `binding_source: codex config.toml profile X`. Only that one file and that one key are read,
+  never `auth.json` or any token file, and nothing is written to Codex's config. A missing
+  profile, a missing or conflicting value, or another selector keeps it on "needs a binding".
 - Adding the binding changes the profile file, so its earlier ping receipts no longer match
   and the cards show it unchecked until the next Ping. `verified_on` is kept. Builds older
   than this change reject the new keys.

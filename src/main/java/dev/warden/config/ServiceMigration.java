@@ -33,8 +33,13 @@ public final class ServiceMigration {
 
     private static final String PREFIX = "service-bindings-";
     private final Path home;
+    private final CodexConfig codex;
 
-    public ServiceMigration(Path home) { this.home = home.toAbsolutePath().normalize(); }
+    public ServiceMigration(Path home) { this(home, CodexConfig.NONE); }
+
+    public ServiceMigration(Path home, CodexConfig codex) {
+        this.home = home.toAbsolutePath().normalize(); this.codex = codex == null ? CodexConfig.NONE : codex;
+    }
 
     public Map<String, Object> preview(List<Mapping> mappings) throws Exception { return plan(mappings).report(false); }
 
@@ -126,7 +131,7 @@ public final class ServiceMigration {
         Plan plan = new Plan(); plan.problems.putAll(user.problems());
         var cards = new TreeSet<String>();
         for (Profile profile : user.profiles().values()) {
-            var binding = ServiceBinding.of(profile);
+            var binding = ServiceBinding.of(profile, codex);
             Mapping mapping = byName.get(profile.name());
             var row = new LinkedHashMap<String, Object>();
             row.put("profile", profile.name()); row.put("binding", binding.source());
@@ -139,7 +144,7 @@ public final class ServiceMigration {
                 if (mapping != null && !(mapping.service().equals(binding.service()) && mapping.account().equals(binding.account())))
                     throw new IllegalArgumentException(profile.name() + " is already bound to " + binding.service() + ":" + binding.account() + "; edit the file to change it");
                 action = "already_bound";
-            } else if (mapping != null || ServiceBinding.INFERRED.equals(binding.source())) {
+            } else if (mapping != null || ServiceBinding.INFERRED.equals(binding.source()) || ServiceBinding.CODEX_CONFIG.equals(binding.source())) {
                 String service = mapping == null ? binding.service() : mapping.service();
                 String account = mapping == null ? binding.account() : mapping.account();
                 String relative = "profiles/" + profile.name() + ".yaml";
@@ -148,7 +153,8 @@ public final class ServiceMigration {
                 try { after = Profile.parse(updated, relative); }
                 catch (RuntimeException invalid) { throw new IllegalArgumentException(profile.name() + ": " + invalid.getMessage()); }
                 plan.writes.put(relative, updated);
-                action = mapping == null ? "bind_inferred" : "bind_mapped";
+                action = mapping != null ? "bind_mapped" : ServiceBinding.CODEX_CONFIG.equals(binding.source()) ? "bind_codex_config" : "bind_inferred";
+                if (mapping == null && ServiceBinding.CODEX_CONFIG.equals(binding.source())) row.put("binding_source", binding.reason());
                 row.put("service", service); row.put("account", account);
             } else {
                 action = "needs_mapping"; row.put("reason", binding.reason()); row.put("suggested", binding.suggested());
@@ -202,6 +208,7 @@ public final class ServiceMigration {
             if (!problems.isEmpty()) report.put("problems", problems);
             report.put("note", "Adding service/account changes no command, model, permission or tool, so verification receipts stay. "
                     + "Model check receipts are tied to the file and must be re-run. Older Warden builds reject the new keys; use --rollback to return.");
+            if (codex.present()) report.put("codex_config", "read model_provider only from " + codex.file());
             return report;
         }
     }
