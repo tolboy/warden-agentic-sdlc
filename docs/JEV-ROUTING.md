@@ -67,8 +67,11 @@ almost even xhigh/max split can select xhigh instead of falling back to medium; 
 advice retains configured effort. The API's separate `confidence` concentration value is recorded.
 These initial thresholds are transparent policy, not a benchmarked guarantee of successful work.
 
-Automatic application currently changes effort on configured GPT-6 CLI/Orca profiles with an effort
-control that reaches the vendor. API/OpenCode and other model families keep their current controls.
+Automatic application currently changes effort on configured GPT-6 and Grok 4.7 CLI/Orca profiles with an effort
+control that reaches the vendor. Grok 4.7 is offered only low/medium/high/xhigh; max is never requested.
+The mapping follows the [xAI model capability table](https://docs.x.ai/developers/model-capabilities/text/reasoning)
+and the [Grok headless CLI guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md).
+API/OpenCode and other model families keep their current controls.
 Selected profiles still pass normal admission, independence and a fresh availability check using
 effective effort. High-risk tasks have a high effort floor for classifier recommendations. Explicit
 task/CLI/handover overrides win, and fixes inherit the resolved writer effort.
@@ -105,3 +108,16 @@ budgets:
 Legacy `total_cost_usd` is a reported subtotal for compatibility. `cost_status` says `unknown` or
 `partial` when unpriced calls exist, so it is not a complete invoice. Provider-side key limits and
 account billing are separate. Jev's optional `usage.cost` is recorded when present, never invented.
+
+## Live validation, 2026-10-28
+
+A low-risk task in the existing Orca hello-world workspace exercised real Jev classification,
+CLI readiness, a Codex worker, baseline and acceptance gates. Jev selected low; the worker
+launch contained `model_reasoning_effort="low"`. The provider did not independently report
+its effective effort, so the receipt says `not_reported_by_provider` rather than attesting it.
+The worker added string whitespace trimming, both acceptance commands passed, and the run
+reached `ready_for_human` with accept/reject still pending. Low-risk policy skipped review
+and visual stages; this live run does not validate those paths. A separate real Grok 4.7
+low-effort CLI challenge returned pong. Offline integration tests cover mandatory review,
+explicit effort precedence and the Grok-only choice set. This is functional validation,
+not evidence that Jev's effort policy is optimally calibrated.
