@@ -46,7 +46,7 @@ public final class ModelSettingsService {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("name", profile.name()); row.put("role", profile.role());
             row.put("model", profile.model()); row.put("vendor", profile.modelVendor());
-            row.put("vendor_id", dev.warden.execution.VendorSettingsService.vendorId(profile));
+            row.put("vendor_id", dev.warden.execution.VendorSettingsService.displayVendorId(profile));
             row.put("efforts", dev.warden.run.TaskRouting.supportedEfforts(profile));
             row.put("effort", profile.effort()); row.put("connection", profile.connectionRef());
             row.put("runner", profile.harness() == null ? profile.runner() : profile.harness());

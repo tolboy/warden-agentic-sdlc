@@ -76,6 +76,16 @@ public final class VendorSettingsTest implements Suite {
             var agyResult=fallbackService.check(Set.of(agyVendor.get("id").toString()));
             check.eq("a second configured model can prove shared CLI login",true,agyResult.get("ok"));
             check.eq("failed CLI representative gets one bounded alternative",2,agyAttempts.get());
+            Files.writeString(home.resolve("profiles/codex-write.yaml"),cli("codex-write","codex","codex","gpt-6.1-sol","high","warden-write","direct"));
+            Files.writeString(home.resolve("profiles/codex-orca.yaml"),cli("codex-orca","codex","codex","gpt-6.1-sol","medium","","orca"));
+            var publicRows=rows(service.list());
+            check.eq("one OpenAI card across CLI profiles and Orca",1L,publicRows.stream().filter(r->"openai".equals(r.get("provider"))).count());
+            check.eq("public vendor label has no client or orchestrator","OpenAI",vendor(publicRows,"openai").get("label"));
+            check.eq("all OpenAI role templates remain selectable",4,((List<?>)vendor(publicRows,"openai").get("profiles")).size());
+            check.eq("DeepSeek service label does not name its Codex client","DeepSeek",vendor(publicRows,"deepseek").get("label"));
+            check.that("vendor titles never include Orca",publicRows.stream().noneMatch(r->String.valueOf(r.get("label")).contains("Orca")));
+            check.eq("Orca and direct share public vendor identity",VendorSettingsService.displayVendorId(one),VendorSettingsService.displayVendorId(orca));
+            check.that("public grouping preserves technical readiness isolation",!VendorSettingsService.vendorId(one).equals(VendorSettingsService.vendorId(orca)));
             var changed=new Connection("stub","custom","openai_chat",connection.baseUrl(),"env:OTHER_KEY",true);var stored=new ConnectionStore(home).versioned("stub");new ConnectionStore(home).update(changed,stored.revision());
             check.that("changed connection cannot reuse vendor check",!vendor(rows(service.list()),"custom").containsKey("check"));
         }
