@@ -89,6 +89,7 @@ public final class Dashboard implements AutoCloseable {
         RunAnalytics analytics = new RunAnalytics(project);
         OsCredentialStore vault = credentials == null ? OsCredentialStores.unavailable() : credentials;
         ConnectionService connections = new ConnectionService(home, environment, vault);
+        var models = new dev.warden.config.ModelSettingsService(home, project, environment);
         boolean osStore = vault.available();
         byte[] secret = new byte[24];
         new SecureRandom().nextBytes(secret);
@@ -111,7 +112,8 @@ public final class Dashboard implements AutoCloseable {
             String location = null;
             if (!authority.equals(host) || (origin != null && !origin.equals("http://" + authority))) {
                 status = 403; body = "{}";
-            } else if ("POST".equals(exchange.getRequestMethod()) && path.startsWith("/api/connections/")) {
+            } else if ("POST".equals(exchange.getRequestMethod())
+                    && (path.startsWith("/api/connections/") || path.startsWith("/api/models/"))) {
                 String suppliedToken = exchange.getRequestHeaders().getFirst("X-Warden-Token");
                 String suppliedType = exchange.getRequestHeaders().getFirst("Content-Type");
                 if (suppliedToken == null || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
@@ -137,8 +139,13 @@ public final class Dashboard implements AutoCloseable {
                         if (payload == null) {
                             status = 400; body = Json.write(Map.of("ok", false, "code", "settings_json_invalid"));
                         } else {
-                            ConnectionService.Outcome outcome = connections.apply(path.substring("/api/connections/".length()), payload);
-                            status = outcome.status(); body = Json.write(outcome.report());
+                            if (path.startsWith("/api/models/")) {
+                                var outcome = models.apply(path.substring("/api/models/".length()), payload);
+                                status = outcome.status(); body = Json.write(outcome.report());
+                            } else {
+                                ConnectionService.Outcome outcome = connections.apply(path.substring("/api/connections/".length()), payload);
+                                status = outcome.status(); body = Json.write(outcome.report());
+                            }
                         }
                     }
                 }
@@ -195,9 +202,13 @@ public final class Dashboard implements AutoCloseable {
             } else if ("/".equals(path)) {
                 contentType = "text/html; charset=utf-8";
                 body = HTML.replace("{{CONNECTION_SETTINGS}}", ConnectionSettingsUi.html(osStore))
+                        .replace("{{MODEL_SETTINGS}}", ModelSettingsUi.html())
                         .replace("{{SETTINGS_TOKEN}}", token)
                         .replace("{{TOKEN}}", token)
                         .replace("{{ACTIONS}}", decisions == null ? "false" : "true");
+            } else if ("/api/models".equals(path)) {
+                try { body = Json.write(models.list()); }
+                catch (Exception failed) { status = 503; body = Json.write(Map.of("ok", false, "code", "settings_unavailable")); }
             } else if ("/api/connections".equals(path)) {
                 try { body = Json.write(connections.list()); }
                 catch (RuntimeException unavailable) {
@@ -618,6 +629,7 @@ public final class Dashboard implements AutoCloseable {
             </div></section>
             {{SETTINGS_HTML}}
             {{CONNECTION_SETTINGS}}
+            {{MODEL_SETTINGS}}
             <h2>Состав по стадиям</h2><p class="muted">По политике, до настроек конкретной задачи: её <code>use:</code> может закрепить другой профиль, а <code>review_assurance</code> — допустить пару того же вендора. Что запустится для задачи, показывает столбец «Запустится» в таблице задач. Кто заполнит каждую стадию и почему остальные кандидаты не подходят — это ответы самого резолвера. Ридеры проверены против писателя, которого выбрал бы запуск. Источник: личное — ~/.warden, проект — .warden/project.yaml, задача — файл задачи, по умолчанию — встроенное значение Warden.</p>
             <p><button id="reload-config" type="button">Перечитать настройки</button> <span id="config-status" class="muted"></span></p>
             <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · effort · runner</th><th>Проверен</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>

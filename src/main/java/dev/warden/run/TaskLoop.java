@@ -147,6 +147,7 @@ public final class TaskLoop {
     /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
     private Executors.Factory executors;
     private RoleResolver.Availability availability;
+    private RunReadiness readiness;
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -198,6 +199,14 @@ public final class TaskLoop {
         return copy;
     }
 
+    /** Live inference is wired by launchers; embedded/offline loops explicitly own this seam. */
+    public TaskLoop withReadiness(RunReadiness next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.readiness = next;
+        return copy;
+    }
+
     /**
      * The same loop, dispatching through {@code next} instead of the profile's own runner.
      *
@@ -230,6 +239,7 @@ public final class TaskLoop {
         copy.watchNarration = watchNarration;
         copy.executors = executors;
         copy.availability = availability;
+        copy.readiness = readiness;
         return copy;
     }
 
@@ -355,7 +365,7 @@ public final class TaskLoop {
      * twenty minutes for a defect that was in Warden itself.
      */
     private static final java.util.Set<String> NOT_ABOUT_THE_WORK = java.util.Set.of(
-            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope",
+            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope", "model_check_failed",
             // A visual role that brought no pixels, or a vendor whose MCP configuration file
             // is missing, is the tooling failing, not a verdict on the candidate; the readings
             // before it stand.
@@ -1018,6 +1028,41 @@ public final class TaskLoop {
         // header is the last thing printed before money starts being spent.
         List<Map<String, Object>> cast = cast(root, workflow, user, task, reviewByRisk, roles, overlay);
         summary.put("cast", cast);
+        if (!dryRun && readiness != null) {
+            List<dev.warden.config.Profile> checks = new ArrayList<>();
+            for (Workflow.Stage stage : workflow.stages()) {
+                if (stage.kind() != Workflow.Kind.ROLE || skipReason(stage, user, task, reviewByRisk) != null) continue;
+                dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                if (chosen != null) checks.add(chosen);
+                if (stage.fixWith() != null) {
+                    dev.warden.config.Profile fixer = roles.peek(root, user, stage.name() + "/fix", stage.fixWith(),
+                            RoleResolver.Writers.NONE, RoleRunner.UNSTAGED);
+                    if (fixer != null) checks.add(fixer);
+                    var fixSpec = user.policy() == null ? null : user.policy().roles().get(stage.fixWith());
+                    if (fixSpec != null) for (String name : fixSpec.profiles()) {
+                        var alternative = user.profiles().get(name);
+                        if (alternative != null && alternative.verified() && alternative.role().equals(stage.fixWith())
+                                && (fixer == null || !alternative.name().equals(fixer.name()))) checks.add(alternative);
+                    }
+                }
+                // All verified roster alternatives for an active role can be selected by rotation
+                // or explicit failover. A failed ping never changes that routing automatically.
+                var spec = user.policy() == null ? null : user.policy().roles().get(stage.role());
+                if (spec != null) for (String name : spec.profiles()) {
+                    var alternative = user.profiles().get(name);
+                    if (alternative != null && alternative.verified() && alternative.role().equals(stage.role())
+                            && (chosen == null || !alternative.name().equals(chosen.name()))) checks.add(alternative);
+                }
+            }
+            Map<String, Object> checked = readiness.check(user, root, checks, task.budget().strictCostCap(), progress::line);
+            summary.put("model_check", checked);
+            dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("model-check.json"), Json.write(checked));
+            if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                progress.line("check stopped the run; restore authentication/model access and check again");
+                return stop(ledger, summary, "model_check_failed", steps, 0, budget);
+            }
+        }
         header(task, runId, workflow, dryRun, callPlan, budget, cast);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
