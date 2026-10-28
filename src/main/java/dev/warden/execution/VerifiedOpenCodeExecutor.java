@@ -90,7 +90,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
         evidence.put("profile_fingerprint", fingerprint);
         evidence.put("model_requested", profile.model());
         int outputLimit = Math.min(2048, profile.maxOutputTokens());
-        Duration limit = Duration.ofSeconds(Math.min(240, profile.wallClockMinutes() * 60));
+        Duration limit = CodingRelay.budget(profile.wallClockMinutes());
         evidence.put("max_requests", CodingAttestation.MAX_REQUESTS);
         evidence.put("max_output_tokens", outputLimit);
         evidence.put("time_budget_seconds", limit.toSeconds());

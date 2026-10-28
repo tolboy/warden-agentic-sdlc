@@ -47,6 +47,17 @@ final class CodingRelay implements AutoCloseable {
      */
     static final Duration TURN_CAP = Duration.ofSeconds(120);
 
+    /**
+     * Whole-relay ceiling. Four minutes fit OpenRouter-speed gateways but not JoinGonka, whose
+     * nonstreaming 2048-token coding turns ran past two minutes on 2026-10-28. The profile's own
+     * wall clock still tightens it.
+     */
+    static final Duration MAX_BUDGET = Duration.ofMinutes(12);
+
+    static Duration budget(long wallClockMinutes) {
+        return Duration.ofMinutes(Math.max(1, Math.min(MAX_BUDGET.toMinutes(), wallClockMinutes)));
+    }
+
     static Duration turnDeadline(long remainingNanos) {
         return Duration.ofNanos(Math.max(0, Math.min(TURN_CAP.toNanos(), remainingNanos)));
     }

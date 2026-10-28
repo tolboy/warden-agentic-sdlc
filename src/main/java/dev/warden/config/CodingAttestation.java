@@ -54,7 +54,7 @@ public final class CodingAttestation {
     }
 
     public static long timeLimitSeconds(Profile profile) {
-        return Math.min(profile.declaredWallClockMinutes() * 60, 240);
+        return Math.min(profile.declaredWallClockMinutes() * 60, 720); // CodingRelay.MAX_BUDGET
     }
 
     public static boolean valid(Profile profile) {

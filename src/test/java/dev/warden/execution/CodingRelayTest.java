@@ -32,6 +32,15 @@ public final class CodingRelayTest implements Suite {
                 CodingRelay.turnDeadline(Duration.ofSeconds(10).toNanos())
                         .equals(Duration.ofSeconds(10)));
         check.that(
+                "a slow-gateway profile may get more than four minutes",
+                CodingRelay.budget(12).equals(Duration.ofMinutes(12)));
+        check.that(
+                "the profile wall clock still tightens the relay budget",
+                CodingRelay.budget(3).equals(Duration.ofMinutes(3)));
+        check.that(
+                "the relay budget keeps a hard ceiling",
+                CodingRelay.budget(600).equals(CodingRelay.MAX_BUDGET));
+        check.that(
                 "a relay turn is capped even with a large budget",
                 CodingRelay.turnDeadline(Duration.ofMinutes(30).toNanos())
                         .equals(CodingRelay.TURN_CAP));

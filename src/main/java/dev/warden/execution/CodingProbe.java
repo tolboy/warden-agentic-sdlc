@@ -117,7 +117,7 @@ public final class CodingProbe {
             if (before.ok()) return finish(fixture, report, false, "fixture_not_red", secret, null);
             report.put("initial_gate_failed", true);
             try (CodingRelay relay =
-                    new CodingRelay(connection, model, secret, Duration.ofMinutes(4))) {
+                    new CodingRelay(connection, model, secret, CodingRelay.MAX_BUDGET)) {
                 env.put("WARDEN_PROBE_RELAY_KEY", relay.bearer());
                 env.put("OPENCODE_CONFIG_CONTENT", config(relay.baseUrl(), model));
                 var scoped = process.withEnvironment(env);
@@ -163,7 +163,7 @@ public final class CodingProbe {
                                         "json",
                                         prompt),
                                 fixture,
-                                Duration.ofMinutes(4),
+                                CodingRelay.MAX_BUDGET,
                                 256 * 1024,
                                 null);
                 // Close sockets before taking the synchronized evidence snapshot. A partial
