@@ -25,6 +25,7 @@ public final class RoleRosterEditor {
             }
         } catch(Changed conflict) { return refused(409,"settings_changed_reload"); }
         catch(Unbound unavailable) { return refused(400,"cli_model_binding_required"); }
+        catch(dev.warden.execution.EffortCapabilities.Unsupported unsupported) { return refused(400,"effort_unsupported"); }
         catch(Invalid | IllegalArgumentException | ConfigException invalid) { return refused(400,"settings_invalid"); }
         catch(java.nio.channels.OverlappingFileLockException busy) { return refused(409,"settings_busy"); }
         catch(Exception unavailable) { return refused(503,"settings_unavailable"); }
@@ -34,6 +35,7 @@ public final class RoleRosterEditor {
         keys(payload,Set.of("revision","role","strategy","slots"));
         Path policyFile=home.resolve("policy.yaml");expect(policyFile,text(payload,"revision"));
         var user=UserConfig.load(home);String role=text(payload,"role"),strategy=text(payload,"strategy");
+        var capabilities=new dev.warden.execution.EffortCapabilities(home,user);
         if(user.policy()==null || !user.policy().roles().containsKey(role) || !Set.of("first","rotate").contains(strategy))throw new Invalid();
         if(!(payload.get("slots") instanceof List<?> slots) || slots.isEmpty() || slots.size()>64)throw new Invalid();
         var names=new ArrayList<String>();var pending=new ArrayList<String>();
@@ -88,6 +90,9 @@ public final class RoleRosterEditor {
                     yaml=replace(yaml,List.of("effort"),Json.write(effort));
                 }
             }
+            String finalEffort=slot.containsKey("effort")?text(slot,"effort"):old.effort();
+            boolean effortChanged=!Objects.equals(finalEffort,old.effort());
+            if(effortChanged || modelChanged)capabilities.require(old,model,finalEffort,effortChanged);
             if(!Objects.equals(probe,old.verificationProbe()))yaml=replace(yaml,List.of("verification","probe"),Json.write(probe));
             boolean edited=!yaml.equals(original);
             if(edited) {
