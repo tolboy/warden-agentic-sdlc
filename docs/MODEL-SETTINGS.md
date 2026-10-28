@@ -1,10 +1,15 @@
 # Vendor and role settings
 
 `warden settings` uses the same user configuration as the CLI. The main panel has vendor
-cards and ordered role participants; profiles remain internal launch, permission and tool
+cards and ordered role participants. CLI cards are grouped by service (OpenAI, xAI,
+DeepSeek, Google Antigravity), across profiles and direct/Orca launch methods. API cards
+name the API service and identify the configured connection separately. Neither CLI
+profile names nor Orca create additional vendor cards. Profiles remain internal launch, permission and tool
 contracts. There is no second settings database.
 
-- **Ping:** one successful representative per CLI authorization/channel group. Diagnostics
+- **Ping:** one successful representative for the displayed CLI service, preferring a direct
+  CLI over an orchestration adapter. This proves a response from that service, not that
+  every account/launch configuration works. Diagnostics
   may try a second distinct configured model if the first fails. This intentionally assumes
   the other CLI models share authentication; it does not attest access to each model.
   API connections check each configured model; a connection without one needs a model first.
@@ -13,7 +18,8 @@ contracts. There is no second settings database.
   vendor CLI's cache. Unsupported/failed discovery shows a documentation link and manual
   entry. Last-good cached lists remain visibly stale after a failed refresh.
 - **Role composition:** select vendor/channel and model, drag cards or use arrows, choose
-  first-available/rotation, and save. Changing a model preserves tool grants and read-only
+  first-available/rotation, and save. Vendor choice is distinct from the optional
+  expandable launch-method selector; Orca appears only there. Changing a model preserves tool grants and read-only
   settings, invalidates prior admission and runs preparation in that save action. An
   unsuccessful preparation leaves a saved, visibly pending role; launch remains blocked.
   Reordering alone does not re-probe admitted channels. Existing CLI profiles use their own
@@ -23,8 +29,8 @@ contracts. There is no second settings database.
   in the panel and `~/.warden/jev-routing-policy.yaml`. Numeric decision probabilities come
   from Jev. The application threshold remains `routing.min_confidence` in settings.yaml.
 
-All inference and catalog access is explicit; opening settings does neither. The role
-preflight uses the same representative grouping. Settings POSTs require the local page token,
+All inference and catalog access is explicit; opening settings does neither. Role preflight separately checks the selected authorization/channel groups, including
+Orca when that is the requested launch method. Settings POSTs require the local page token,
 validate revisions, and never return secret values. Configuration rows and labels use text
 nodes. If a policy file has malformed YAML, the panel remains open for repair.
 

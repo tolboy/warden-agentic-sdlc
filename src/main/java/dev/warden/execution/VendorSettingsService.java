@@ -65,7 +65,9 @@ public final class VendorSettingsService {
                 // A retired first model need not make an authenticated CLI vendor look
                 // disconnected. Try at most one other configured model, stopping at pong.
                 var attempts=new ArrayList<Object>();boolean available=false;int attempted=0;var seenModels=new HashSet<String>();
-                for(var profile:vendor.profiles().stream().sorted(Comparator.comparing((Profile p)->!p.readOnly()).thenComparing(p->!p.verified()).thenComparing(Profile::name)).toList()){
+                var direct=vendor.profiles().stream().filter(p->!"orca".equals(p.runner())).toList();
+                var candidates=direct.isEmpty()?vendor.profiles():direct;
+                for(var profile:candidates.stream().sorted(Comparator.comparing((Profile p)->!p.readOnly()).thenComparing(p->!p.verified()).thenComparing(Profile::name)).toList()){
                     if(!seenModels.add(String.valueOf(profile.model())))continue;
                     var attempt=checks.run(user,project,Set.of(profile.name()),ignored->{});attempts.addAll((List<?>)attempt.get("results"));attempted++;
                     if(Boolean.TRUE.equals(attempt.get("ok"))){available=true;break;}if(attempted>=2)break;
@@ -79,7 +81,7 @@ public final class VendorSettingsService {
                 report=names.isEmpty()?Map.of("ok",false,"code","vendor_model_required","results",List.of()):checks.run(user,project,names,ignored->{});
             }
             var row=new LinkedHashMap<String,Object>();row.put("vendor",vendor.id());row.put("configuration",configuration(vendor));row.put("ok",Boolean.TRUE.equals(report.get("ok")));row.put("code",report.get("code"));row.put("checked_at",Instant.now().toString());row.put("results",report.get("results"));
-            row.put("scope",vendor.connection()==null?"cli_vendor_representative_model":"configured_api_models");row.put("assumption",vendor.connection()==null?"Other listed models share vendor authentication; their individual availability is not proven.":"Catalog listing does not prove model access; configured API models are checked individually.");
+            row.put("scope",vendor.connection()==null?"cli_vendor_representative_model":"configured_api_models");row.put("assumption",vendor.connection()==null?"One configured model answered for this service. Role launch channels and other accounts are checked separately before execution.":"Catalog listing does not prove model access; configured API models are checked individually.");
             ModelCheck.atomicWrite(cache(vendor.id(),"check"),Json.write(row));rows.add(row);all&=Boolean.TRUE.equals(report.get("ok"));
         }
         return Map.of("ok",all,"code",all?"vendors_available":"vendor_check_failed","results",rows);
@@ -90,15 +92,22 @@ public final class VendorSettingsService {
     }
     private Map<String,Vendor> inventory(UserConfig user)throws Exception{
         var groups=new LinkedHashMap<String,Vendor>();
-        for(var connection:user.connections().values())groups.put("api-"+connection.id(),new Vendor("api-"+connection.id(),"api",connection.provider(),connection.id(),connection,new ArrayList<>(),new ArrayList<>()));
+        for(var connection:user.connections().values())groups.put("api-"+connection.id(),new Vendor("api-"+connection.id(),"api",connection.provider(),providerLabel(connection.provider()),connection,new ArrayList<>(),new ArrayList<>()));
         for(var profile:user.profiles().values()){
-            String id=vendorId(profile);var vendor=groups.get(id);
-            if(vendor==null){String provider=cliProvider(profile);String command=commandName(profile.command());vendor=new Vendor(id,"cli",provider,provider+" · "+command+("orca".equals(profile.runner())?" · Orca":""),null,new ArrayList<>(),new ArrayList<>());groups.put(id,vendor);}
+            String id=displayVendorId(profile);var vendor=groups.get(id);
+            if(vendor==null){String provider=cliProvider(profile);String command=commandName(profile.command());vendor=new Vendor(id,"cli",provider,providerLabel(provider),null,new ArrayList<>(),new ArrayList<>());groups.put(id,vendor);}
             vendor.profiles().add(profile);
         }
         for(var profile:DecisionProfile.load(home).values()){var vendor=groups.get("api-"+profile.connection());if(vendor!=null)vendor.classifiers().add(profile);}
         return groups;
     }
+    /** Public service identity; roles and orchestration do not create new vendors. */
+    public static String displayVendorId(Profile profile){return profile.connectionRef()!=null?"api-"+profile.connectionRef():"cli-provider-"+cliProvider(profile);}
+    private static String providerLabel(String provider){return switch(provider){
+        case "openai"->"OpenAI";case "x-ai"->"xAI";case "deepseek"->"DeepSeek";
+        case "antigravity", "google"->"Google Antigravity";case "anthropic"->"Anthropic";
+        case "openrouter"->"OpenRouter";case "gonkarouter"->"GonkaRouter";case "joingonka"->"JoinGonka";
+        default->provider;};}
     /** Stable group identity separates CLI accounts/providers and Orca transport without exposing argv. */
     public static String vendorId(Profile p){
         if(p.connectionRef()!=null)return "api-"+p.connectionRef();
@@ -140,7 +149,7 @@ public final class VendorSettingsService {
     private static Map<String,Object> unavailable(String code){return Map.of("status","unavailable","code",code,"models",List.of(),"warning","Could not load a current model list. Enter a model from the vendor's current documentation.");}
     private Path cache(String id,String type){return home.resolve("vendors").resolve(id+"-"+type+".json");}
     private static Map<String,Object> read(Path path){try{if(Files.isRegularFile(path)&&Files.size(path)<=4*1024*1024)return Json.parseObject(Files.readString(path));}catch(Exception ignored){}return Map.of();}
-    private static String configuration(Vendor vendor){return vendor.connection()!=null?vendor.connection().fingerprint():vendor.id();}
+    private static String configuration(Vendor vendor){return vendor.connection()!=null?vendor.connection().fingerprint():hash(vendor.profiles().stream().map(VendorSettingsService::vendorId).distinct().sorted().toList().toString());}
     private static String safe(Object value){if(!(value instanceof String text)||text.isBlank()||text.length()>256||text.chars().anyMatch(c->Character.isISOControl(c)))return null;return text;}
     private static String commandName(String command){if(command==null)return "cli";String name=command.replace('\\','/');name=name.substring(name.lastIndexOf('/')+1);return name.replaceFirst("(?i)\\.(exe|cmd|bat)$","").toLowerCase(Locale.ROOT);}
     private static String cliProvider(Profile profile){return "agy".equals(commandName(profile.command()))?"antigravity":String.valueOf(Profile.canonicalVendor(profile.modelVendor()));}
