@@ -23,6 +23,18 @@ public final class CodingRelayTest implements Suite {
 
     @Override
     public void run(Check check) throws Exception {
+        check.that(
+                "a relay turn may wait longer than 45 s for a slow gateway",
+                CodingRelay.turnDeadline(Duration.ofSeconds(240).toNanos())
+                        .compareTo(Duration.ofSeconds(90)) >= 0);
+        check.that(
+                "a relay turn never outlives the dispatch budget",
+                CodingRelay.turnDeadline(Duration.ofSeconds(10).toNanos())
+                        .equals(Duration.ofSeconds(10)));
+        check.that(
+                "a relay turn is capped even with a large budget",
+                CodingRelay.turnDeadline(Duration.ofMinutes(30).toNanos())
+                        .equals(CodingRelay.TURN_CAP));
         java.nio.file.Path artifact =
                 java.nio.file.Files.createTempFile("warden-coding-artifact-", ".json");
         try {
