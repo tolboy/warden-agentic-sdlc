@@ -6212,10 +6212,7 @@ public final class TaskLoop {
                     + "repository whether to trust it, and Codex asks to update. The role report's "
                     + "agent_screen_tail and agent_blocked_on say which. Answer it once in an Orca "
                     + "tab in this worktree, then: " + carryOn + kept(summary);
-            case "vendor_call_failed" -> "the " + failedProfile(summary) + " process failed "
-                    + "without a recognised cause (a login, the network, the CLI itself). Read "
-                    + "stderr_tail and stdout_tail in its role report, fix what they name, "
-                    + "then: " + carryOn + kept(summary);
+            case "vendor_call_failed" -> vendorCallFailed(summary) + carryOn + kept(summary);
             case "vendor_unavailable" -> "the " + failedProfile(summary) + " account cannot use "
                     + "this vendor here (a location or eligibility refusal, often HTTP 403). "
                     + "It is not a verdict on the work. That profile is skipped for the rest of "
@@ -6307,6 +6304,26 @@ public final class TaskLoop {
     }
 
     /** The profile behind an infrastructure stop, for a sentence that names it. */
+    /**
+     * What to do about a vendor call that failed, worded for how the call was made. An API
+     * profile has no process, stderr or login; telling the operator to read them sent them
+     * looking for a CLI that never ran when the cause was an HTTP 502 from the gateway.
+     */
+    static String vendorCallFailed(Map<String, Object> summary) {
+        Object code = summary.get("infrastructure_failure") instanceof Map<?, ?> failure
+                ? failure.get("role_code") : null;
+        if (code instanceof String role && role.startsWith("role_api_")) {
+            return "the " + failedProfile(summary) + " API call failed at the provider or on the "
+                    + "way to it (" + role + "). Read api_attempts (http_status, failure_phase, "
+                    + "delivery) in its role report; wait for the service to recover or switch "
+                    + "the stage to another profile, then: ";
+        }
+        return "the " + failedProfile(summary) + " process failed "
+                + "without a recognised cause (a login, the network, the CLI itself). Read "
+                + "stderr_tail and stdout_tail in its role report, fix what they name, "
+                + "then: ";
+    }
+
     private static String failedProfile(Map<String, Object> summary) {
         if (summary.get("infrastructure_failure") instanceof Map<?, ?> failure
                 && failure.get("profile") != null) {
