@@ -28,6 +28,7 @@ public final class VendorSettingsService {
         for(var vendor:inventory(user).values()){
             var row=new LinkedHashMap<String,Object>();row.put("id",vendor.id());row.put("kind",vendor.kind());row.put("provider",vendor.provider());row.put("label",vendor.label());
             row.put("profiles",vendor.profiles().stream().map(Profile::name).toList());row.put("classifier_profiles",vendor.classifiers().stream().map(DecisionProfile::name).toList());
+            row.put("access_label",vendor.connection()==null?"Через CLI":"API");row.put("billing","unknown");
             row.put("enabled",vendor.connection()==null || vendor.connection().enabled());row.put("docs_url",docs(vendor.provider()));
             var catalog=read(cache(vendor.id(),"catalog"));
             if(catalog.isEmpty() || !Objects.equals(catalog.get("configuration"),configuration(vendor)))catalog=unavailable("catalog_not_loaded");

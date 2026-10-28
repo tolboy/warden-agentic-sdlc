@@ -34,7 +34,7 @@ public final class VendorSettingsTest implements Suite {
             Files.writeString(home.resolve("profiles/api-one-copy.yaml"),api("api-one-copy","deepseek/one"));
             Files.writeString(home.resolve("profiles/api-two.yaml"),api("api-two","deepseek/two"));
             var service=new VendorSettingsService(home,home,key->"CATALOG_KEY".equals(key)?"catalog-secret":null,transport,cliHome);
-            var before=service.list();check.eq("GET inventory never calls API",0,api.calls.get());check.eq("GET inventory never pings",0,probes.get());
+            var before=service.list();check.that("billing is not inferred from CLI or API",rows(before).stream().allMatch(r->"unknown".equals(r.get("billing"))));check.eq("GET inventory never calls API",0,api.calls.get());check.eq("GET inventory never pings",0,probes.get());
             var rows=rows(before);check.eq("same CLI auth/model family shares vendor group",4,rows.size());
             String codexId=vendor(rows,"openai").get("id").toString(),grokId=vendor(rows,"x-ai").get("id").toString(),deepseekId=vendor(rows,"deepseek").get("id").toString();
             check.eq("new catalog reports unavailable until explicit refresh","unavailable",((Map<?,?>)vendor(rows,"openai").get("catalog")).get("status"));

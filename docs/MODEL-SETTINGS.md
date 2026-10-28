@@ -18,10 +18,11 @@ contracts. There is no second settings database.
   vendor CLI's cache. Unsupported/failed discovery shows a documentation link and manual
   entry. Last-good cached lists remain visibly stale after a failed refresh.
 - **Role composition:** select vendor/channel and model, drag cards or use arrows, choose
-  first-available/rotation, and save. Vendor choice is distinct from the optional
+  first-available/rotation. Changes save automatically through one serialized local write
+  queue, including role order, model, effort, launch method and strategy. Vendor choice is distinct from the optional
   expandable launch-method selector; Orca appears only there. Changing a model preserves tool grants and read-only
-  settings, invalidates prior admission and runs preparation in that save action. An
-  unsuccessful preparation leaves a saved, visibly pending role; launch remains blocked.
+  settings, invalidates prior admission and leaves a saved, visibly pending role. Preparation is a separate explicit action
+  that may call a model; autosaving never runs a probe. Launch remains blocked until admission.
   Reordering alone does not re-probe admitted channels. Existing CLI profiles use their own
   authentication; API coding still requires a real OpenCode tool probe.
 - **Jev:** enabling automatic effort hides manual effort selectors. The fallback remains the
@@ -62,3 +63,9 @@ Verification: 853 regression checks passed, plus a focused panel/connection run 
 (overlapping suites, not an additive unique total). These include local authorization/token
 and body-size guards, failed policy repair, stale edits, role composition, vendor grouping,
 optional billing and malformed API pong diagnostics.
+
+CLI/API labels describe only the connection mechanism; billing/subscription status is unknown
+and is never inferred from the executable or model developer. API credentials and new-channel
+forms still use deliberate submission; ordinary role, Jev and readiness selectors autosave.
+Autosave reports saved/failed status, uses revision checks, serializes edits across roles, and
+keeps pending admission separate from successful local persistence.
