@@ -80,6 +80,18 @@ public final class ModelSettingsTest implements Suite {
         check.eq("API profile can be created in settings", true, api.report().get("ok"));
         check.eq("new API model is not silently assigned", List.of("primary", "reserve"), UserConfig.load(home).policy().roles().get("reviewer").profiles());
         check.eq("new API model still requires native verification", false, UserConfig.load(home).profiles().get("new-api").verified());
+        var keys = new dev.warden.config.ConnectionService(home, ignored -> "key-value");
+        java.util.function.Function<String, Map<?, ?>> keyRow = id -> ((List<?>) keys.list().get("connections")).stream()
+                .map(row -> (Map<?, ?>) row).filter(row -> id.equals(row.get("id"))).findFirst().orElseThrow();
+        check.eq("an unchecked connection carries no auth evidence", null, keyRow.apply("stub").get("auth_evidence"));
+        new ModelSettingsService(home, home, new ModelCheck(new ProcessRunner(), ignored -> null,
+                (p, u, d, s) -> Map.of("ok", true, "code", "pong"))).apply("check", Map.of("profiles", List.of("new-api")));
+        var evidence = (Map<?, ?>) keyRow.apply("stub").get("auth_evidence");
+        check.eq("a model that answered confirms the connection key in the key table", "confirmed_by_model", evidence.get("state"));
+        check.eq("and names the model that answered", "deepseek/model", evidence.get("model"));
+        new ModelSettingsService(home, home, new ModelCheck(new ProcessRunner(), ignored -> null,
+                (p, u, d, s) -> Map.of("ok", false, "code", "role_api_auth_invalid"))).apply("check", Map.of("profiles", List.of("new-api")));
+        check.eq("a refused key replaces the older answer", "rejected", ((Map<?, ?>) keyRow.apply("stub").get("auth_evidence")).get("state"));
         new ConnectionStore(home).add(new Connection("router","openrouter","openai_chat","https://openrouter.ai/api/v1","env:TEST_ROUTER_KEY",true));
         var classifier=service.apply("save-classifier",Map.of("name","jev-classifier","revision","absent","connection","router","model","typesafe/jev-1.14","reported_model","typesafe/jev-1.14-20261014"));
         check.eq("typed classifier has a separate profile",true,classifier.report().get("ok"));

@@ -1,6 +1,7 @@
 package dev.warden.config;
 
 import dev.warden.execution.ApiConnectionCheck;
+import dev.warden.execution.CheckEvidence;
 import dev.warden.execution.CredentialResolver;
 import dev.warden.execution.OsCredentialStore;
 import dev.warden.execution.OsCredentialStores;
@@ -23,6 +24,7 @@ public final class ConnectionService {
     private static final Set<String> UPDATE = Set.of("id", "provider", "base_url", "credential_ref", "enabled", "revision");
     private static final Set<String> ACTION = Set.of("id", "revision");
     private final ConnectionStore store;
+    private final Path home;
     private final Function<String, String> environment;
     private final OsCredentialStore credentials;
 
@@ -35,6 +37,7 @@ public final class ConnectionService {
 
     public ConnectionService(Path home, Function<String, String> environment, OsCredentialStore credentials) {
         store = new ConnectionStore(Objects.requireNonNull(home));
+        this.home = home;
         this.environment = Objects.requireNonNull(environment);
         this.credentials = credentials == null ? OsCredentialStores.unavailable() : credentials;
     }
@@ -43,11 +46,16 @@ public final class ConnectionService {
     public Map<String, Object> list() {
         List<Map<String, Object>> rows = new ArrayList<>();
         Map<String, String> problems = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> evidence = authEvidence();
         try {
             ConnectionStore.Snapshot snapshot = store.load();
             snapshot.problems().keySet().forEach(id -> problems.put(id, "Connection configuration is invalid; inspect its local file"));
             for (String id : snapshot.connections().keySet()) {
-                try { rows.add(view(store.versioned(id))); }
+                try {
+                    Map<String, Object> row = view(store.versioned(id));
+                    row.put("auth_evidence", evidence.get(id));
+                    rows.add(row);
+                }
                 catch (IOException | ConfigException changed) {
                     problems.put(id, "Connection changed or could not be read; reload settings");
                 }
@@ -188,6 +196,67 @@ public final class ConnectionService {
         }
         return new Outcome(200, Map.of("ok", true, "code", "credential_removed",
                 "profiles_activated", false, "service_key_revoked", false));
+    }
+
+    /**
+     * What the model checks already proved about each connection's key. A model that answered
+     * through a connection proves the service accepted its key, so the key table must not keep
+     * saying "not checked" beside a card that shows the answer. Only current receipts count.
+     */
+    private Map<String, Map<String, Object>> authEvidence() {
+        Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+        UserConfig user;
+        Map<String, DecisionProfile> classifiers;
+        try {
+            user = UserConfig.load(home);
+            classifiers = DecisionProfile.load(home);
+        } catch (Exception unavailable) {
+            return result;
+        }
+        Map<String, Map<String, Object>> receipts = CheckEvidence.current(home, user);
+        Map<String, List<Profile>> profiles = new LinkedHashMap<>();
+        for (Profile profile : user.profiles().values())
+            if (profile.connectionRef() != null)
+                profiles.computeIfAbsent(profile.connectionRef(), ignored -> new ArrayList<>()).add(profile);
+        Map<String, List<DecisionProfile>> deciders = new LinkedHashMap<>();
+        for (DecisionProfile classifier : classifiers.values())
+            deciders.computeIfAbsent(classifier.connection(), ignored -> new ArrayList<>()).add(classifier);
+        Set<String> ids = new java.util.TreeSet<>(profiles.keySet());
+        ids.addAll(deciders.keySet());
+        for (String id : ids) {
+            Map<String, Object> status = CheckEvidence.status(profiles.getOrDefault(id, List.of()),
+                    deciders.getOrDefault(id, List.of()), receipts);
+            Map<String, Object> summary = authSummary(status);
+            if (summary != null) result.put(id, summary);
+        }
+        return result;
+    }
+
+    /** {@code confirmed_by_model} if any model answered, {@code rejected} if the key was refused. */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> authSummary(Map<String, Object> status) {
+        List<Map<String, Object>> answered = (List<Map<String, Object>>) status.get("answered");
+        List<Map<String, Object>> failed = (List<Map<String, Object>>) status.get("failed");
+        Map<String, Object> newest = null;
+        String state = null;
+        for (Map<String, Object> row : answered)
+            if (newest == null || String.valueOf(row.get("checked_at")).compareTo(String.valueOf(newest.get("checked_at"))) > 0) newest = row;
+        if (newest != null) state = "confirmed_by_model";
+        else {
+            for (Map<String, Object> row : failed)
+                if ("role_api_auth_invalid".equals(row.get("code")) && (newest == null
+                        || String.valueOf(row.get("checked_at")).compareTo(String.valueOf(newest.get("checked_at"))) > 0)) newest = row;
+            if (newest != null) state = "rejected";
+        }
+        if (state == null) return null;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("state", state);
+        summary.put("model", newest.get("model"));
+        summary.put("profile", newest.get("profile"));
+        summary.put("checked_at", newest.get("checked_at"));
+        summary.put("models_answered", answered.size());
+        summary.put("models_failed", failed.size());
+        return summary;
     }
 
     private Map<String, Object> view(ConnectionStore.Versioned value) {
