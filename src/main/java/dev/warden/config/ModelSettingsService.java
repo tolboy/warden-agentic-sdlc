@@ -25,13 +25,18 @@ public final class ModelSettingsService {
     private final Path home;
     private final Path project;
     private final ModelCheck checks;
+    private final dev.warden.execution.VendorSettingsService vendors;
     private final AtomicBoolean checking = new AtomicBoolean();
 
     public ModelSettingsService(Path home, Path project, Function<String, String> environment) {
-        this(home, project, new ModelCheck(new ProcessRunner(), environment, null));
+        this(home, project, new ModelCheck(new ProcessRunner(), environment, null),environment);
     }
     public ModelSettingsService(Path home, Path project, ModelCheck checks) {
+        this(home,project,checks,System::getenv);
+    }
+    private ModelSettingsService(Path home,Path project,ModelCheck checks,Function<String,String> environment){
         this.home = home.toAbsolutePath().normalize(); this.project = project; this.checks = checks;
+        this.vendors=new dev.warden.execution.VendorSettingsService(this.home,project,environment,checks,Path.of(System.getProperty("user.home")));
     }
 
     public Map<String, Object> list() throws Exception {
@@ -41,6 +46,8 @@ public final class ModelSettingsService {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("name", profile.name()); row.put("role", profile.role());
             row.put("model", profile.model()); row.put("vendor", profile.modelVendor());
+            row.put("vendor_id", dev.warden.execution.VendorSettingsService.vendorId(profile));
+            row.put("efforts", dev.warden.run.TaskRouting.supportedEfforts(profile));
             row.put("effort", profile.effort()); row.put("connection", profile.connectionRef());
             row.put("runner", profile.harness() == null ? profile.runner() : profile.harness());
             row.put("verified", profile.verified()); row.put("revision", revision(profileFile(profile.name())));
@@ -64,6 +71,12 @@ public final class ModelSettingsService {
         result.put("settings_revision", revision(CheckSettings.file(home)));
         result.put("check", CheckSettings.load(home).toMap()); result.put("checking", checking.get());
         result.put("routing",RoutingSettings.load(home).toMap());
+        result.putAll(vendors.list());
+        Path rubricFile=JevRoutingPolicy.file(home);
+        var rubricView=new LinkedHashMap<String,Object>();rubricView.put("file",rubricFile.toString());rubricView.put("revision",revision(rubricFile));
+        try{rubricView.put("yaml",JevRoutingPolicy.load(home).yaml());rubricView.put("valid",true);}
+        catch(Exception invalid){rubricView.put("yaml",Files.isRegularFile(rubricFile)&&Files.size(rubricFile)<=24000?Files.readString(rubricFile):JevRoutingPolicy.DEFAULT.yaml());rubricView.put("valid",false);}
+        result.put("jev_policy",rubricView);
         Path latest = home.resolve("checks/latest.json");
         if (Files.isRegularFile(latest) && Files.size(latest) < 1024 * 1024)
             result.put("latest_check", Json.parseObject(Files.readString(latest)));
@@ -75,6 +88,30 @@ public final class ModelSettingsService {
 
     public Outcome apply(String action, Map<String, Object> payload) {
         try {
+            if(Set.of("refresh-vendors","check-vendors").contains(action)){
+                requireKeys(payload,Set.of("vendors"));var ids=new LinkedHashSet<>(strings(payload.get("vendors")));
+                if(ids.isEmpty() || ids.size()>64)throw new Invalid();
+                if(!checking.compareAndSet(false,true))return refused(409,"check_already_running");
+                try{return new Outcome(200,"refresh-vendors".equals(action)?vendors.refresh(ids):vendors.check(ids));}
+                finally{checking.set(false);}
+            }
+            if("save-composition".equals(action)){
+                if(!checking.compareAndSet(false,true))return refused(409,"check_already_running");
+                try{
+                    var saved=new RoleRosterEditor(home).apply(payload);
+                    if(saved.status()!=200)return new Outcome(saved.status(),saved.report());
+                    var validations=new ArrayList<Map<String,Object>>();
+                    for(String name:strings(saved.report().get("pending_verification"))){
+                        try{
+                            Object savedRevision=((Map<?,?>)saved.report().get("revisions")).get(name);
+                            var outcome=verify(Map.of("name",name,"revision",savedRevision));validations.add(outcome.report());
+                        }catch(Exception failure){validations.add(Map.of("ok",false,"profile",name,"code","role_preparation_failed"));}
+                    }
+                    var report=new LinkedHashMap<String,Object>(saved.report());report.put("validation",validations);
+                    report.put("ready",validations.stream().allMatch(row->Boolean.TRUE.equals(row.get("ok"))));
+                    return new Outcome(200,report);
+                }finally{checking.set(false);}
+            }
             if ("check".equals(action)) {
                 requireKeys(payload, Set.of("profiles"));
                 Set<String> names = new LinkedHashSet<>(strings(payload.get("profiles")));
@@ -94,6 +131,10 @@ public final class ModelSettingsService {
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE); var lock = channel.tryLock()) {
                 if (lock == null) return refused(409, "settings_busy");
                 switch (action) {
+                    case "save-jev-policy" -> {
+                        requireKeys(payload,Set.of("revision","yaml"));Path file=JevRoutingPolicy.file(home);expectRevision(file,payload);
+                        if(!(payload.get("yaml") instanceof String yaml) || yaml.length()>24576)throw new Invalid();JevRoutingPolicy.parse(yaml);ModelCheck.atomicWrite(file,yaml);
+                    }
                     case "save-check" -> {
                         requireKeys(payload, Set.of("revision", "before_run", "timeout_seconds", "max_output_tokens"));
                         Path file = CheckSettings.file(home); expectRevision(file, payload);
@@ -123,7 +164,7 @@ public final class ModelSettingsService {
             return new Outcome(200, Map.of("ok", true, "code", "settings_saved"));
         } catch (Changed changed) { return refused(409, "settings_changed_reload"); }
         catch (UnboundModel unbound) { return refused(400, "cli_model_binding_required"); }
-        catch (Invalid | ConfigException | IllegalArgumentException invalid) { return refused(400, "settings_invalid"); }
+        catch (Invalid | ConfigException | IllegalArgumentException | dev.warden.yaml.Yaml.YamlException invalid) { return refused(400, "settings_invalid"); }
         catch (java.nio.channels.OverlappingFileLockException busy) { return refused(409, "settings_busy"); }
         catch (Exception unavailable) { return refused(503, "settings_unavailable"); }
     }

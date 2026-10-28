@@ -15,6 +15,17 @@ public final class DecisionRoutingTest implements Suite {
     public String name(){return "decision-routing";}
     public void run(Check check)throws Exception{
         Path home=Files.createTempDirectory("warden-decisions-");new UserSetup().run(home);
+        var defaults=JevRoutingPolicy.load(home);
+        check.eq("absent routing policy uses reproducible defaults",JevRoutingPolicy.DEFAULT.fingerprint(),defaults.fingerprint());
+        check.eq("editable rubric round-trips exactly",defaults.fingerprint(),JevRoutingPolicy.parse(defaults.yaml()).fingerprint());
+        var customized=JevRoutingPolicy.parse("version: 1\ninstructions:\n  kind: Choose the dominant type of requested work.\ncriteria:\n  effort:\n    low: A mechanical edit with direct acceptance criteria.\n");
+        check.eq("partial YAML customizes wording", "Choose the dominant type of requested work.",customized.instructions().get("kind"));
+        check.eq("partial YAML preserves fixed effort alternatives",5,customized.criteria().get("effort").size());
+        check.that("rubric edits change receipt fingerprint",!defaults.fingerprint().equals(customized.fingerprint()));
+        check.rejects("rubric cannot inject new routing actions",null,()->JevRoutingPolicy.parse("criteria: {effort: {skip_review: skip mandatory review}}"));
+        check.rejects("blank rubric descriptions fail closed",null,()->JevRoutingPolicy.parse("instructions: {kind: ''}"));
+        check.rejects("oversize rubric wording is refused",null,()->JevRoutingPolicy.parse("instructions: {kind: "+Json.write("x".repeat(1601))+"}"));
+
         try(Stub stub=new Stub()){
             var connection=stub.connection();new ConnectionStore(home).add(connection);
             var profile=new DecisionProfile("jev-test",connection.id(),"typesafe/jev-1.14","typesafe/jev-1.14-20261014",3,8000,true);
@@ -48,6 +59,21 @@ public final class DecisionRoutingTest implements Suite {
             check.eq("role advice is retained",true,route.report().containsKey("recommended_roles"));
             check.eq("unknown money does not block routing","unknown",route.report().get("cost_status"));
             check.that("classification gets its own receipt",Files.isRegularFile(Path.of((String)route.report().get("receipt"))));
+            check.eq("routing receipt identifies policy",defaults.fingerprint(),route.report().get("policy_hash"));
+            Files.writeString(JevRoutingPolicy.file(home),customized.yaml());
+            route=TaskRouting.using(client).route(scoped,home,task,targets,ignored->{});
+            check.eq("YAML question wording reaches typed request",customized.instructions().get("kind"),stub.kindInstructions);
+            check.eq("custom policy is identified in receipt",customized.fingerprint(),route.report().get("policy_hash"));
+            stub.beforeReply=()->{try{Files.writeString(JevRoutingPolicy.file(home),defaults.yaml());}catch(Exception failure){throw new RuntimeException(failure);}};
+            route=TaskRouting.using(client).route(scoped,home,task,targets,ignored->{});
+            check.eq("in-flight policy edit invalidates the recommendation","routing_policy_changed_kept_configured",route.report().get("code"));
+            check.eq("changed rubric cannot apply stale effort",true,route.overrides().isEmpty());stub.beforeReply=()->{};
+            Files.writeString(JevRoutingPolicy.file(home),"instructions: {kind: ''}");calls=stub.calls.get();
+            route=TaskRouting.using(client).route(scoped,home,task,targets,ignored->{});
+            check.eq("invalid policy visibly preserves workflow","routing_policy_invalid_kept_configured",route.report().get("code"));
+            check.eq("invalid policy makes no request",calls,stub.calls.get());
+            Files.writeString(JevRoutingPolicy.file(home),defaults.yaml());
+
             stub.confidence=0.1;stub.probability=0.4;route=TaskRouting.using(client).route(scoped,home,task,targets,ignored->{});
             check.eq("uncertain decisions keep configured efforts",true,route.overrides().isEmpty());stub.confidence=0.95;stub.probability=1;
             stub.effortBand=Map.of("low",0.0,"medium",0.03,"high",0.03,"xhigh",0.45,"max",0.49);
@@ -94,11 +120,11 @@ public final class DecisionRoutingTest implements Suite {
         return TaskSpec.parse("version: 1\nid: decision-test\ngoal: Update a clearly named label\nrisk: "+risk+"\nscope: [src]\nacceptance: [check]\n","fixture").resolve(project,"fixture");
     }
     private static final class Stub implements AutoCloseable{
-        final HttpServer server;final AtomicInteger calls=new AtomicInteger();int status=200;String model="typesafe/jev-1.14-20261014",authorization;boolean badProbabilities;double confidence=0.95,probability=1;Map<String,Double> effortBand;Runnable beforeReply=()->{};
+        final HttpServer server;final AtomicInteger calls=new AtomicInteger();int status=200;String model="typesafe/jev-1.14-20261014",authorization,kindInstructions;boolean badProbabilities;double confidence=0.95,probability=1;Map<String,Double> effortBand;Runnable beforeReply=()->{};
         Stub()throws Exception{
             server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);server.createContext("/v1/decisions",exchange->{
                 calls.incrementAndGet();authorization=exchange.getRequestHeaders().getFirst("Authorization");var request=Json.parseObject(new String(exchange.getRequestBody().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8));
-                var questions=(Map<?,?>)request.get("questions");var answers=new LinkedHashMap<String,Object>();
+                var questions=(Map<?,?>)request.get("questions");if(questions.get("kind") instanceof Map<?,?> kind)kindInstructions=(String)kind.get("instructions");var answers=new LinkedHashMap<String,Object>();
                 for(var question:questions.entrySet()){
                     var options=(Map<?,?>)((Map<?,?>)question.getValue()).get("criteria");String selected=options.containsKey("low")?"low":options.containsKey("yes")?"yes":String.valueOf(options.keySet().iterator().next());
                     if("availability".equals(question.getKey()))selected=(String)((Map<?,?>)request.get("state")).get("expected_choice");

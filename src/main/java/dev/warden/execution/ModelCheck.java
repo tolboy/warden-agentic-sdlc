@@ -167,20 +167,32 @@ public final class ModelCheck {
         String error = ApiExecutor.errorCode(reply.status(), envelope);
         if (error == null && (envelope == null || !profile.model().equals(envelope.get("model"))))
             error = "check_model_mismatch";
-        boolean pong = false;
-        if (error == null && envelope.get("choices") instanceof List<?> choices && choices.size() == 1
-                && choices.get(0) instanceof Map<?, ?> choice
-                && "stop".equals(choice.get("finish_reason"))
-                && choice.get("message") instanceof Map<?, ?> message
-                && (message.get("tool_calls")==null || message.get("tool_calls") instanceof List<?> calls && calls.isEmpty())
-                && message.get("function_call")==null && message.get("content") instanceof String content) {
-            try { var object=Json.findLastObject(content); pong = object!=null && nonce.equals(object.get("pong")); }
-            catch (RuntimeException invalid) { /* A banner, auth page or echo is not a model answer. */ }
-        }
+        String pongFailure = error == null ? apiPongFailure(envelope, nonce) : null;
+        boolean pong = error == null && pongFailure == null;
         result.put("ok", error == null && pong);
         result.put("code", error != null ? error : pong ? "pong" : "check_no_pong");
+        if (error == null && !pong) result.put("pong_failure", pongFailure);
         result.put("identity", "provider_response_exact_model");
         return result;
+    }
+
+    /** Fixed diagnostic vocabulary only: upstream content, markers and finish reasons stay private. */
+    private static String apiPongFailure(Map<String,Object> envelope, String nonce) {
+        if (!(envelope.get("choices") instanceof List<?> choices) || choices.isEmpty()) return "missing_choice";
+        if (choices.size() != 1) return "ambiguous_choice";
+        if (!(choices.get(0) instanceof Map<?,?> choice)) return "missing_choice";
+        if ("length".equals(choice.get("finish_reason"))) return "output_limit";
+        Map<?,?> message = choice.get("message") instanceof Map<?,?> value ? value : null;
+        if (message != null && (!(message.get("tool_calls") == null
+                || message.get("tool_calls") instanceof List<?> calls && calls.isEmpty())
+                || message.get("function_call") != null)) return "tool_call";
+        if (!"stop".equals(choice.get("finish_reason"))) return "unfinished_response";
+        if (message == null || !(message.get("content") instanceof String content) || content.isBlank()) return "missing_text";
+        try {
+            var object=Json.findLastObject(content);
+            if(object==null)return "invalid_json";
+            return nonce.equals(object.get("pong")) ? null : "nonce_mismatch";
+        } catch(RuntimeException invalid) { return "invalid_json"; }
     }
 
     private Map<String, Object> cli(Profile profile, UserConfig user, CheckSettings settings) throws Exception {

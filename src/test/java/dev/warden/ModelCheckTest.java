@@ -33,6 +33,7 @@ public final class ModelCheckTest implements Suite {
             ModelCheck service = new ModelCheck(new ProcessRunner(), name -> "synthetic-secret", null);
             Map<String, Object> result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("exact served model answers nonce", true, result.get("ok"));
+            check.eq("successful reply needs no failure diagnostic",false,row(result).containsKey("pong_failure"));
             check.eq("one bounded inference per model", 1, stub.calls.get());
             check.eq("hard output ceiling comes from central settings", 512L, Json.parseObject(stub.body).get("max_tokens"));
             check.eq("API ping does not stamp profile", false, api.verified());
@@ -46,6 +47,7 @@ public final class ModelCheckTest implements Suite {
             stub.served = "substituted/model";
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("a substituted model is not ready", "check_model_mismatch", row(result).get("code"));
+            check.eq("model mismatch retains its own failure classification",false,row(result).containsKey("pong_failure"));
             stub.served = "test/model"; stub.status = 401;
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("expired credential blocks readiness", false, result.get("ok"));
@@ -53,9 +55,37 @@ public final class ModelCheckTest implements Suite {
             stub.status = 200; stub.pong = false;
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("HTTP success without a fresh pong fails", "check_no_pong", row(result).get("code"));
+            check.eq("stale nonce has a safe distinct diagnostic","nonce_mismatch",row(result).get("pong_failure"));
+            stub.pong=true;stub.finish="length";
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("even a matching partial answer cannot pass the output ceiling",false,result.get("ok"));
+            check.eq("output exhaustion is distinct from nonce mismatch","output_limit",row(result).get("pong_failure"));
+            stub.finish="synthetic-secret-upstream-reason";
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("unknown provider finish reason is projected as a fixed enum","unfinished_response",row(result).get("pong_failure"));
+            check.that("upstream finish reason is not reflected in receipt",!Json.write(result).contains("synthetic-secret-upstream-reason"));
+            stub.finish="stop";
             stub.pong = true; stub.toolCall = true;
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("a tool request is not a ping answer", false, result.get("ok"));
+            check.eq("tool requests are distinguishable from wrong nonce","tool_call",row(result).get("pong_failure"));
+            stub.finish="tool_calls";
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("normal tool finish reason still has a tool diagnostic","tool_call",row(result).get("pong_failure"));
+            stub.finish="stop";stub.toolCall=false;stub.missingText=true;
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("missing assistant text is distinct from malformed JSON","missing_text",row(result).get("pong_failure"));
+            stub.missingText=false;stub.invalidJson=true;
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("non-JSON text has a safe fixed diagnostic","invalid_json",row(result).get("pong_failure"));
+            check.that("invalid assistant content is not reflected in receipt",!Json.write(result).contains("synthetic-secret-content"));
+            stub.invalidJson=false;stub.choices=0;
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("empty choices are explicit","missing_choice",row(result).get("pong_failure"));
+            stub.choices=2;
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("multiple answers cannot choose a convenient pong","ambiguous_choice",row(result).get("pong_failure"));
+            stub.choices=1;
             int before = stub.calls.get();
             result = new ModelCheck(new ProcessRunner(), name -> null, null).run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("missing key sends nothing", before, stub.calls.get());
@@ -127,7 +157,7 @@ public final class ModelCheckTest implements Suite {
     }
     private static final class Stub implements AutoCloseable {
         final HttpServer server; final AtomicInteger calls = new AtomicInteger();
-        int status = 200; String served = "test/model", body; boolean pong = true, toolCall,emptyTools,fenced;
+        int status = 200,choices=1; String served = "test/model", body,finish="stop"; boolean pong = true, toolCall,emptyTools,fenced,missingText,invalidJson;
         Stub() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/v1/chat/completions", exchange -> {
@@ -137,7 +167,10 @@ public final class ModelCheckTest implements Suite {
                 if(fenced)message.put("content","```json\n"+message.get("content")+"\n```");
                 if(emptyTools)message.put("tool_calls",null);
                 if (toolCall) message.put("tool_calls", List.of(Map.of("id", "x")));
-                String response = status == 200 ? Json.write(Map.of("model", served, "choices", List.of(Map.of("finish_reason", "stop", "message", message))))
+                if(missingText)message.remove("content");
+                if(invalidJson)message.put("content","synthetic-secret-content");
+                var answers=new java.util.ArrayList<Map<String,Object>>();for(int i=0;i<choices;i++)answers.add(Map.of("finish_reason",finish,"message",message));
+                String response = status == 200 ? Json.write(Map.of("model", served, "choices", answers))
                         : "{\"error\":{\"message\":\"synthetic-secret\"}}";
                 byte[] bytes = response.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(status, bytes.length); exchange.getResponseBody().write(bytes); exchange.close();

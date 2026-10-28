@@ -122,8 +122,9 @@ public final class Dashboard implements AutoCloseable {
                 } else if (suppliedType == null || !"application/json".equalsIgnoreCase(suppliedType.split(";", 2)[0].trim())) {
                     status = 415; body = Json.write(Map.of("ok", false, "code", "settings_json_required"));
                 } else {
-                    byte[] input = exchange.getRequestBody().readNBytes(MAX_SETTINGS_BODY + 1);
-                    if (input.length > MAX_SETTINGS_BODY) {
+                    int bodyLimit="/api/models/save-jev-policy".equals(path)?160*1024:MAX_SETTINGS_BODY;
+                    byte[] input = exchange.getRequestBody().readNBytes(bodyLimit + 1);
+                    if (input.length > bodyLimit) {
                         status = 413; body = Json.write(Map.of("ok", false, "code", "settings_body_too_large"));
                     } else {
                         Map<String, Object> payload = null;
@@ -628,11 +629,11 @@ public final class Dashboard implements AutoCloseable {
             <button type="button" data-next-copy="next-yaml">Скопировать use:</button>
             </div></section>
             {{SETTINGS_HTML}}
-            {{CONNECTION_SETTINGS}}
             {{MODEL_SETTINGS}}
+            <details id="api-auth-settings"><summary>Ключи и адреса API</summary>{{CONNECTION_SETTINGS}}</details>
             <h2>Состав по стадиям</h2><p class="muted">По политике, до настроек конкретной задачи: её <code>use:</code> может закрепить другой профиль, а <code>review_assurance</code> — допустить пару того же вендора. Что запустится для задачи, показывает столбец «Запустится» в таблице задач. Кто заполнит каждую стадию и почему остальные кандидаты не подходят — это ответы самого резолвера. Ридеры проверены против писателя, которого выбрал бы запуск. Источник: личное — ~/.warden, проект — .warden/project.yaml, задача — файл задачи, по умолчанию — встроенное значение Warden.</p>
             <p><button id="reload-config" type="button">Перечитать настройки</button> <span id="config-status" class="muted"></span></p>
-            <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · effort · runner</th><th>Проверен</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
+            <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · усилие · канал</th><th>Допуск подтверждён</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
             <h2>Ограничения</h2><div class="scroll"><table><thead><tr><th>Параметр</th><th>Значение</th><th>Источник</th></tr></thead><tbody id="limits"></tbody></table></div>
             <h2>Задачи</h2><div class="scroll"><table><thead><tr><th>Задача</th><th>Риск</th><th>Вызовы</th><th>Деньги</th><th>Время</th><th>Фиксы</th><th>Visual QA</th><th>Запустится</th><th>Overlay</th></tr></thead><tbody id="tasks"></tbody></table><div id="tasks-empty" class="empty" hidden>Задач нет.</div></div>
             <h2>Запуски</h2><p class="muted">Каждый запуск со своей хронологией этапов, вердиктами, стоимостью и решением. Dry-run в этот список не входят.</p>
