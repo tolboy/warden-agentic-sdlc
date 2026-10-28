@@ -1,0 +1,48 @@
+# Stage 2 note: API resilience and safe recovery (not implemented)
+
+Status: proposal only. Follows Stage 1 (`DESIGN-MODEL-ENTITIES-2026-10-28.md`) and section 2 of
+[PLAN-MODEL-CONNECTIONS-AND-ROUTING-2026-10-28](PLAN-MODEL-CONNECTIONS-AND-ROUTING-2026-10-28.md).
+
+## What exists today
+
+- `ApiExecutor.send` maps every failure to one coarse code. A `TimeoutException` on the overall
+  deadline and an `HttpTimeoutException` both become `role_api_timeout`. Any other
+  `ExecutionException` becomes `role_api_network_error`, so connect refused, TLS failure, reset
+  while reading the body and DNS failure are indistinguishable.
+- HTTP statuses are already classified (`role_api_auth_invalid`, `role_api_rate_limited`,
+  `role_api_provider_error`, ...) and `retry-after` is kept as sanitized evidence.
+- There is no retry anywhere: one failed call fails the stage.
+- Stage 1 made check receipts per connection + model (`CheckEvidence`), so a GLM 502 on
+  GonkaRouter no longer paints the whole connection red. Stage 2 should keep that granularity.
+
+## Proposed shape
+
+1. **Failure phase, not text.** Add a `phase` to `CallFailure`: `connect`, `request_sent`,
+   `headers`, `body`, `deadline`, `parse`, `identity` (model or nonce mismatch). Derive it from
+   the exception type and from which await was pending; never store the exception message or
+   the body. `role_api_network_error` keeps its code and gains the phase as evidence, so old
+   reports still read.
+2. **Sent vs. maybe-sent.** `connect` failures are known not to have reached the provider;
+   everything from `request_sent` on has an unknown outcome and may have spent quota. The
+   attempt log records this as `delivery: not_sent | unknown | answered`.
+3. **Bounded retry policy** (per connection, default on for checks, off for writing roles):
+   at most 2 extra attempts, only for `not_sent`, 429 with `retry-after` under a cap, and 502/503.
+   Never retry after `auth_invalid`, `model_mismatch`, `output_truncated` or a cancel. Each
+   attempt is logged with profile, stage, attempt number, status, durations and usage.
+4. **Truncation is not auth.** A pong cut by the output limit reports
+   `role_api_output_truncated` with `reasoning`/`max_tokens` evidence and leaves the key
+   status untouched (Stage 1 key table already only flips on `role_api_auth_invalid`).
+5. **Resume, don't redo.** After a review failure, keep the coding candidate and rerun only the
+   unfinished stage when the contract hash and worktree state still match (`TaskLoop`,
+   `RoleRunner`). A changed profile file already invalidates via `role_api_profile_changed`.
+6. **Fallback only by explicit policy.** A role may name an ordered fallback list of
+   connection + model; without it, a failure stops with the reason. Auth errors never open a
+   browser or switch models silently.
+
+## Tests to write first
+
+Stub HTTP server cases: 429 with and without `retry-after`, 502, connect refused, reset after
+headers, slow body past the deadline, oversized body, truncated pong, wrong model id, cancel.
+Assert the phase, the delivery flag, the attempt count, that no secret text is stored, and
+that a retried writing stage never applies file changes twice. Live per-service results stay
+in a separate document, not in the automated suite.
