@@ -1035,6 +1035,7 @@ public final class TaskLoop {
         // header is the last thing printed before money starts being spent.
         List<Map<String, Object>> cast = cast(root, workflow, user, task, reviewByRisk, roles, overlay);
         summary.put("cast", cast);
+        List<Map<String,Object>> effortWarnings=List.of();
         if(!dryRun && taskRouting!=null){
             List<TaskRouting.Target> targets=new ArrayList<>();
             for(var stage:workflow.stages()){
@@ -1057,6 +1058,11 @@ public final class TaskLoop {
                     if(java.util.Objects.equals(effective.get(entry.getKey()),entry.getValue()))applied.put(String.valueOf(entry.getKey()),entry.getValue());
                 routeReport.put("applied_efforts",applied);
             }
+            // Only levels that survive explicit overrides are warned about; printed before the header.
+            Object appliedNow=routeReport.get("applied_efforts");
+            effortWarnings=TaskRouting.keptWarnings(routeReport.get("effort_warnings"),appliedNow instanceof Map<?,?> m?m:Map.of());
+            routeReport.put("effort_warnings",effortWarnings);
+            if(!effortWarnings.isEmpty())summary.put("effort_warnings",effortWarnings);
             summary.put("task_routing",routeReport);
             dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("task-routing.json"),Json.write(routeReport));
         }
@@ -1088,6 +1094,7 @@ public final class TaskLoop {
                 }
             }
             Map<String, Object> checked = readiness.check(user, root, checks, task.budget().strictCostCap(), progress::line);
+            if(!effortWarnings.isEmpty()){checked=new LinkedHashMap<>(checked);checked.put("effort_warnings",effortWarnings);}
             summary.put("model_check", checked);
             dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("model-check.json"), Json.write(checked));
             if (!Boolean.TRUE.equals(checked.get("ok"))) {
@@ -1095,6 +1102,7 @@ public final class TaskLoop {
                 return stop(ledger, summary, "model_check_failed", steps, 0, budget);
             }
         }
+        for (var warning : effortWarnings) progress.line("warn  " + warning.get("message"));
         header(task, runId, workflow, dryRun, callPlan, budget, cast);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
