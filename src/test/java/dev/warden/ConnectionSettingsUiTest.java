@@ -17,7 +17,7 @@ public final class ConnectionSettingsUiTest implements Suite {
         check.contains("JoinGonka can be selected separately from GonkaRouter", html,
                 "<option value=\"joingonka\">JoinGonka Gateway</option>");
         check.contains("the form asks for a variable name, not a credential", html, "Укажите имя переменной, не значение ключа");
-        check.contains("native check is described without implying model verification", html, "Проверка подключения не вызывает модель");
+        check.contains("native check is described without implying model verification", html, "Проверка ключа не вызывает модель");
         check.contains("deleting a connection is distinguished from key revocation", html, "Удаление подключения не отзывает ключ");
         check.contains("changes do not implicitly enable a model profile", html, "Сохранение не добавляет модель в состав ролей");
 

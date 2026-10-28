@@ -91,7 +91,51 @@ public final class ModelSettingsTest implements Suite {
         service.apply("save-check",Map.of("revision",ModelSettingsService.revision(CheckSettings.file(home)),"before_run",true,"timeout_seconds",30L,"max_output_tokens",256L));
         check.eq("editing ping settings preserves Jev settings",true,RoutingSettings.load(home).enabled());
         check.eq("editing ping settings preserves classifier confidence",0.7,RoutingSettings.load(home).minConfidence());
+        compositionAndJevPolicy(check,home,service,pings);
+        Files.writeString(JevRoutingPolicy.file(home),"version: [broken");
+        check.eq("invalid rubric remains repairable from settings",false,((Map<?,?>)service.list().get("jev_policy")).get("valid"));
+        check.eq("malformed YAML is a field error",400,service.apply("save-jev-policy",Map.of("revision",ModelSettingsService.revision(JevRoutingPolicy.file(home)),"yaml","version: [broken")).status());
+        Files.writeString(JevRoutingPolicy.file(home),JevRoutingPolicy.DEFAULT.yaml());
         dashboard(check, home);
+    }
+    private static void compositionAndJevPolicy(Check check,Path home,ModelSettingsService service,AtomicInteger pings)throws Exception {
+        Path policy=home.resolve("policy.yaml"),primary=home.resolve("profiles/primary.yaml"),reserve=home.resolve("profiles/reserve.yaml");
+        String primaryBefore=Files.readString(primary),reserveBefore=Files.readString(reserve),policyBefore=Files.readString(policy);
+        int calls=pings.get();
+        var slots=List.of(Map.of("profile","reserve","revision",ModelSettingsService.revision(reserve),"model","original/model"),
+                Map.of("profile","primary","revision",ModelSettingsService.revision(primary),"model","original/model"));
+        var composition=service.apply("save-composition",Map.of("revision",ModelSettingsService.revision(policy),"role","reviewer","strategy","first","slots",slots));
+        check.eq("composition integration accepts unchanged prepared templates",200,composition.status());
+        check.eq("no-op template save stays ready",true,composition.report().get("ready"));
+        check.eq("reordering does not run native verification",List.of(),composition.report().get("validation"));
+        check.eq("reordering does not ping models",calls,pings.get());
+        check.eq("reordering preserves primary template bytes",primaryBefore,Files.readString(primary));
+        check.eq("reordering preserves reserve template bytes",reserveBefore,Files.readString(reserve));
+        check.eq("composition order is the order used by roles",List.of("reserve","primary"),UserConfig.load(home).policy().roles().get("reviewer").profiles());
+        String reordered=Files.readString(policy);
+        check.eq("composition integration refuses a stale policy revision",409,service.apply("save-composition",Map.of("revision","stale","role","reviewer","strategy","first","slots",slots)).status());
+        check.eq("conflict does not alter selected policy",reordered,Files.readString(policy));
+        var malformed=List.of(Map.of("profile","primary","revision",ModelSettingsService.revision(primary),"model","model; invoke-shell"));
+        check.eq("composition integration rejects malformed model before any probe",400,service.apply("save-composition",Map.of("revision",ModelSettingsService.revision(policy),"role","reviewer","strategy","first","slots",malformed)).status());
+        check.eq("malformed selection sends no inference",calls,pings.get());
+        check.eq("malformed selection preserves template",primaryBefore,Files.readString(primary));
+        check.eq("malformed selection preserves policy",reordered,Files.readString(policy));
+
+        Path rubric=JevRoutingPolicy.file(home);
+        String yaml=JevRoutingPolicy.DEFAULT.yaml().replace("Would independent code review be useful for the requested behavior?","Would independent review help verify this requested change?");
+        check.that("real rubric exercises multiline policy larger than generic field limit",yaml.length()>512 && yaml.contains("\n"));
+        var saved=service.apply("save-jev-policy",Map.of("revision","absent","yaml",yaml));
+        check.eq("settings editor accepts complete multiline Jev rubric",200,saved.status());
+        check.eq("saved rubric is the one runtime classification loads","Would independent review help verify this requested change?",JevRoutingPolicy.load(home).instructions().get("reviewer"));
+        check.eq("saving question criteria does not infer",calls,pings.get());
+        String stored=Files.readString(rubric);
+        check.eq("stale Jev editor cannot overwrite newer rubric",409,service.apply("save-jev-policy",Map.of("revision","stale","yaml",yaml)).status());
+        check.eq("unknown rubric keys are refused",400,service.apply("save-jev-policy",Map.of("revision",ModelSettingsService.revision(rubric),"yaml",yaml+"unknown_policy: true\n")).status());
+        check.eq("oversized rubric is refused",400,service.apply("save-jev-policy",Map.of("revision",ModelSettingsService.revision(rubric),"yaml",yaml+"#".repeat(24001))).status());
+        check.eq("invalid edits retain saved rubric",stored,Files.readString(rubric));
+        var read=service.list();
+        check.eq("settings exposes the current rubric revision",ModelSettingsService.revision(rubric),((Map<?,?>)read.get("jev_policy")).get("revision"));
+        check.eq("reading rubric and roster does not infer",calls,pings.get());
     }
     private static String profile(String name) {
         return "version: 1\nprofile: " + name + "\nrole: reviewer\nvendor: openai\nmodel: original/model\ncommand: echo\nargs: ['--model', '{{model}}']\nread_only: true\nprompt_template: prompts/reviewer.md\njson_schema: schemas/reviewer.json\nverification:\n  probe: echo {{model}} verified\n  expect: verified\n  verified_on: '2026-10-28'\n";
@@ -100,8 +144,11 @@ public final class ModelSettingsTest implements Suite {
         try (Dashboard dashboard = new Dashboard(home, 0, null, home, ignored -> null); HttpClient client = HttpClient.newHttpClient()) {
             dashboard.start(); String root = dashboard.url();
             var html = client.send(HttpRequest.newBuilder(URI.create(root)).GET().build(), HttpResponse.BodyHandlers.ofString());
-            check.contains("same panel offers CLI and API readiness", html.body(), "Проверить все модели");
-            check.contains("same panel offers native capability check", html.body(), "Проверить допуск");
+            check.contains("same panel offers vendor availability", html.body(), "Проверить подключения");
+            check.contains("role composition has horizontal selectable slots", html.body(), "className='role-slot'");
+            check.contains("same panel offers editable Jev rubric",html.body(),"jev-policy-yaml");
+            check.that("ordinary settings omit per-model ping buttons",!html.body().contains("Проверить все модели"));
+            check.that("ordinary settings omit separate capability verification button",!html.body().contains("Проверить допуск"));
             check.that("template substitutions are complete", !html.body().contains("{{MODEL_SETTINGS}}"));
             var noToken = client.send(HttpRequest.newBuilder(URI.create(root + "api/models/save-check"))
                     .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString("{}"))

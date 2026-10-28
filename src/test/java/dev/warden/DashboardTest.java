@@ -114,11 +114,11 @@ public final class DashboardTest implements Suite {
             check.eq("dashboard reachable over loopback", 200, page.statusCode());
             check.contains("UI treats configured fields as text", page.body(), "td.textContent");
             check.contains("runs section is on the page", page.body(), "Запуски");
-            check.contains("connections section is on the page", page.body(), "id=\"connection-editor-title\">Подключения</h2>");
+            check.contains("connections section is on the page", page.body(), "id=\"connection-editor-title\">Ключи и адреса API</h2>");
             check.contains("authorization is not inferred from key presence", page.body(), "не подтверждает авторизацию");
             check.contains("coding requires a separately verified harness", page.body(), "OpenCode после отдельной проверки профиля");
-            check.contains("connection setup names the CLI entry point", page.body(), "warden connections add");
-            check.contains("connection setup uses an environment reference", page.body(), "env:OPENROUTER_API_KEY");
+            check.that("legacy CLI setup help is removed", !page.body().contains("warden connections add"));
+            check.contains("environment authorization remains available", page.body(), "Ключ из переменной окружения");
             check.contains("invalid credential formats have their own UI state", page.body(), "неверный формат ключа");
             check.contains("unavailable credential sources have their own UI state", page.body(), "источник ключа недоступен");
             check.that("the editor has no api_key value parameter", !page.body().contains("name=\"api_key\""));
