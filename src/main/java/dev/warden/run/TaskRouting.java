@@ -60,7 +60,7 @@ public interface TaskRouting {
                 report.put("classification",result.answers().get("kind"));
                 for(String role:List.of("planner","reviewer","visual_qa"))recommendations.put(role,result.answers().get(role));
                 report.put("recommended_roles",recommendations);report.put("roles_changed",false);
-                List<String> uncertain=new ArrayList<>();Map<String,Object> effortDecisions=new LinkedHashMap<>();
+                List<String> uncertain=new ArrayList<>();Map<String,Object> effortDecisions=new LinkedHashMap<>();List<Map<String,Object>> warnings=new ArrayList<>();
                 for(var entry:eligible.entrySet()){
                     Map<String,Object> answer=result.answers().get(entry.getKey());
                     effortDecisions.put(entry.getValue().stage(),answer);
@@ -71,11 +71,15 @@ public interface TaskRouting {
                     if(effort==null){uncertain.add(entry.getValue().stage());continue;}
                     if("high".equals(task.risk()) && List.of("low","medium").contains(effort))effort="high";
                     var proposed=new RunOverride(Map.of(),Map.of(entry.getValue().stage(),effort),Map.of());
-                    if(proposed.problem(entry.getValue().stage(),entry.getValue().profile(),user.profiles())==null)
+                    if(proposed.problem(entry.getValue().stage(),entry.getValue().profile(),user.profiles())==null){
                         efforts.put(entry.getValue().stage(),effort);
+                        var warning=effortWarning(entry.getValue().stage(),entry.getValue().profile(),effort,supportedEfforts(capabilities.levels(entry.getValue().profile())));
+                        if(warning!=null)warnings.add(warning);
+                    }
                 }
-                report.put("applied_efforts",efforts);report.put("effort_decisions",effortDecisions);report.put("effort_policy","supported_lower_quantile");report.put("uncertain_stages",uncertain);report.put("code",efforts.isEmpty()?"routing_kept_configured":"routing_efforts_selected");
+                report.put("applied_efforts",efforts);report.put("effort_decisions",effortDecisions);report.put("effort_policy","supported_lower_quantile");report.put("uncertain_stages",uncertain);report.put("effort_warnings",warnings);report.put("code",efforts.isEmpty()?"routing_kept_configured":"routing_efforts_selected");
                 report.put("ok",true);progress.accept("route "+report.get("code")+" · "+efforts);
+                for(var warning:warnings)progress.accept("warn  "+warning.get("message"));
                 return recorded(user,new Result(new RunOverride(Map.of(),efforts,Map.of()),report));
             }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw interrupted;}
             catch(Exception unavailable){return recorded(user,unchanged("classifier_unavailable_kept_configured",report));}
@@ -85,6 +89,36 @@ public interface TaskRouting {
     static List<String> supportedEfforts(Profile profile){return supportedEfforts(new dev.warden.execution.EffortCapabilities(null,null).levels(profile));}
     /** Routable levels: the shared capability list narrowed to what the classifier policy defines, weakest first. */
     public static List<String> supportedEfforts(List<String> capability){return capability.stream().filter(JevRoutingPolicy.EFFORTS::contains).toList();}
+    /**
+     * A warning for a Jev-chosen effort that is the model's strongest routable level or stronger
+     * than the profile's configured effort; null when neither holds. Trusting Jev includes its top
+     * level, so the level is applied, but the operator is told before money is spent.
+     */
+    public static Map<String,Object> effortWarning(String stage,Profile profile,String effort,List<String> levels){
+        if(effort==null || profile==null)return null;
+        boolean highest=!levels.isEmpty() && effort.equals(levels.get(levels.size()-1));
+        String configured=profile.effort();
+        int chosen=dev.warden.execution.EffortCapabilities.ORDER.indexOf(effort),base=configured==null?-1:dev.warden.execution.EffortCapabilities.ORDER.indexOf(configured);
+        boolean above=chosen>=0 && base>=0 && chosen>base;
+        if(!highest && !above)return null;
+        var reasons=new ArrayList<String>();
+        if(highest)reasons.add("the highest level "+profile.model()+" supports");
+        if(above)reasons.add("above the configured "+configured);
+        var warning=new LinkedHashMap<String,Object>();
+        warning.put("stage",stage);warning.put("profile",profile.name());warning.put("model",profile.model());warning.put("effort",effort);
+        warning.put("configured_effort",configured);warning.put("highest_supported",highest);warning.put("above_configured",above);
+        warning.put("message","Jev chose effort "+effort+" for stage "+stage+" ("+profile.name()+"): "+String.join(", ",reasons)+"; this may be slow or expensive.");
+        return warning;
+    }
+    /** Warnings whose stage still runs at the Jev-chosen level after explicit task/run overrides. */
+    public static List<Map<String,Object>> keptWarnings(Object warnings,Map<?,?> applied){
+        var kept=new ArrayList<Map<String,Object>>();if(!(warnings instanceof List<?> list))return kept;
+        for(Object item:list)if(item instanceof Map<?,?> warning && applied.containsKey(warning.get("stage"))
+                && java.util.Objects.equals(applied.get(warning.get("stage")),warning.get("effort"))){
+            var copy=new LinkedHashMap<String,Object>();for(var e:warning.entrySet())copy.put(String.valueOf(e.getKey()),e.getValue());kept.add(copy);
+        }
+        return kept;
+    }
     private static String chooseEffort(Map<String,Object> answer,double threshold,List<String> levels){
         var probabilities=(Map<?,?>)answer.get("probabilities");
         double bestBand=0;

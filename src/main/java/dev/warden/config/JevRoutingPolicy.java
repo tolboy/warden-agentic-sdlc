@@ -11,7 +11,7 @@ import java.util.*;
 public record JevRoutingPolicy(Map<String,String> instructions, Map<String,Map<String,String>> criteria) {
     private static final List<String> QUESTIONS=List.of("kind","planner","reviewer","visual_qa","effort");
     /** Effort levels the classifier can name; routing narrows a model's capability list to these. */
-    public static final List<String> EFFORTS=List.of("low","medium","high","xhigh","max");
+    public static final List<String> EFFORTS=List.of("low","medium","high","xhigh","max","ultra");
     private static final Map<String,List<String>> OPTIONS=Map.of(
             "kind",List.of("code","interface","documentation","architecture","investigation"),
             "boolean",List.of("yes","no"),"effort",EFFORTS);
@@ -20,13 +20,14 @@ public record JevRoutingPolicy(Map<String,String> instructions, Map<String,Map<S
             "planner","Would this task benefit from a planning role before implementation?",
             "reviewer","Would independent code review be useful for the requested behavior?",
             "visual_qa","Does the task require checking rendered appearance or visual interaction?",
-            "effort","Choose the reasoning effort needed by stage {{stage}} (role {{role}}) for this task. Use low for a clear mechanical change, medium for ordinary bounded implementation/review, high for interacting constraints, xhigh for difficult design or concurrency, max only for exceptional complexity when available."),Map.of(
+            "effort","Choose the reasoning effort needed by stage {{stage}} (role {{role}}) for this task. Use low for a clear mechanical change, medium for ordinary bounded implementation/review, high for interacting constraints, xhigh for difficult design or concurrency, max or ultra only for exceptional complexity, when the model offers them."),Map.of(
             "kind",Map.of("code","Implement or repair program behavior.","interface","Change user interface, layout or visual interaction.",
                     "documentation","Write or edit documentation without changing program behavior.","architecture","Design or restructure several interacting components.","investigation","Investigate or explain existing behavior."),
             "boolean",Map.of("yes","This role is useful or necessary for this task.","no","This task does not benefit from this role."),
             "effort",Map.of("low","Clear mechanical work with minimal reasoning.","medium","Ordinary implementation or review within clear boundaries.",
                     "high","Several interacting constraints or substantial analysis.","xhigh","Difficult architecture, concurrency, or deep investigation.",
-                    "max","Exceptional reasoning difficulty with many interacting invariants.")));
+                    "max","Exceptional reasoning difficulty with many interacting invariants.",
+                    "ultra","The hardest problems, worth the slowest and most expensive reasoning the model offers.")));
 
     public JevRoutingPolicy {
         if(instructions==null || !instructions.keySet().equals(new HashSet<>(QUESTIONS)) || criteria==null || !criteria.keySet().equals(OPTIONS.keySet()))

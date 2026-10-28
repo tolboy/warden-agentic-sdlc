@@ -78,8 +78,8 @@ The design is in `DESIGN-MODEL-ENTITIES-2026-10-28.md`. In short:
 - Effort levels come from one list (`EffortCapabilities`): the model catalog when it is
   loaded, otherwise the built-in table, in the order none..ultra. The UI offers it, save
   refuses anything outside it (`effort_unsupported`), and automatic routing chooses only
-  among the levels its policy names (low..max), so `ultra` can be chosen by hand but is
-  never picked automatically.
+  among the levels its policy names (low..ultra) that the model offers, warning before the
+  run when it picks the model's highest level or one above the configured effort.
 - Autosave conflicts: when another tab saved first, the page reloads the server state and
   re-applies only the fields this tab changed. A field changed in both tabs keeps the
   other tab's value and is shown as a notice; it is never overwritten silently.

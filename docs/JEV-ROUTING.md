@@ -68,7 +68,18 @@ advice retains configured effort. The API's separate `confidence` concentration 
 These initial thresholds are transparent policy, not a benchmarked guarantee of successful work.
 
 Automatic application currently changes effort on configured GPT-6 and Grok 4.7 CLI/Orca profiles with an effort
-control that reaches the vendor. Grok 4.7 is offered only low/medium/high/xhigh; max is never requested.
+control that reaches the vendor. Jev chooses among the levels the shared capability list
+(`EffortCapabilities`: the loaded model catalog, else the built-in table) offers for that model,
+up to and including its highest level: `max` for GPT-6, `ultra` where a catalog lists it. Grok 4.7
+is offered only low/medium/high/xhigh, so max is never requested for it.
+
+Trusting Jev includes trusting its top level, so a strong choice is applied, not capped. When the
+applied level is the model's highest supported level, or is above the profile's configured effort,
+Warden warns before the loop starts: a `warn  Jev chose effort <level> for stage <stage> (<profile>):
+the highest level <model> supports, above the configured <effort>; this may be slow or expensive.`
+line is printed right before the run header, and the same entries are recorded as `effort_warnings`
+in `task_routing`, in the readiness report (`model_check`) and at the top of the run summary. A level
+replaced by an explicit task/CLI/handover override is not warned about, because it does not run.
 The mapping follows the [xAI model capability table](https://docs.x.ai/developers/model-capabilities/text/reasoning)
 and the [Grok headless CLI guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md).
 API/OpenCode and other model families keep their current controls.
@@ -113,6 +124,7 @@ criteria:
     high: "Several interacting constraints or substantial analysis."
     xhigh: "Difficult architecture, concurrency, or deep investigation."
     max: "Exceptional difficulty involving many interacting invariants."
+    ultra: "The hardest problems, worth the slowest and most expensive reasoning the model offers."
 ```
 
 The full rubric also contains `criteria.kind` (`code`, `interface`,
