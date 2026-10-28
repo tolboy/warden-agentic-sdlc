@@ -49,9 +49,21 @@ public final class ModelCheckTest implements Suite {
             check.eq("a substituted model is not ready", "check_model_mismatch", row(result).get("code"));
             check.eq("model mismatch retains its own failure classification",false,row(result).containsKey("pong_failure"));
             stub.served = "test/model"; stub.status = 401;
+            int authBefore = stub.calls.get();
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("expired credential blocks readiness", false, result.get("ok"));
             check.that("auth failure offers login action", row(result).get("next").toString().contains("Sign in"));
+            check.eq("an auth refusal is asked exactly once", 1, stub.calls.get() - authBefore);
+            check.eq("an auth refusal never changes the model", "test/model", user.profiles().get(api.name()).model());
+            stub.status = 200; stub.failFirst = 1;
+            int gatewayBefore = stub.calls.get();
+            result = new ModelCheck(new ProcessRunner(), name -> "synthetic-secret", null,
+                    dev.warden.execution.ApiRetry.Policy.CHECK, millis -> {}).run(user, home, Set.of(api.name()), ignored -> {});
+            check.eq("a check rides out one 502", true, result.get("ok"));
+            check.eq("with exactly one more request", 2, stub.calls.get() - gatewayBefore);
+            check.eq("and counts both attempts", 2L, row(result).get("api_attempt_count"));
+            check.eq("the retried check names its policy", "check", row(result).get("api_retry_policy"));
+            stub.status = 401;
             stub.status = 200; stub.pong = false;
             result = service.run(user, home, Set.of(api.name()), ignored -> {});
             check.eq("HTTP success without a fresh pong fails", "check_no_pong", row(result).get("code"));
@@ -60,6 +72,11 @@ public final class ModelCheckTest implements Suite {
             result=service.run(user,home,Set.of(api.name()),ignored->{});
             check.eq("even a matching partial answer cannot pass the output ceiling",false,result.get("ok"));
             check.eq("output exhaustion is distinct from nonce mismatch","output_limit",row(result).get("pong_failure"));
+            check.eq("a cut-off pong is truncation, not a credential problem","role_api_output_truncated",row(result).get("code"));
+            check.that("truncation advice raises the limit instead of asking to sign in",
+                    !row(result).get("next").toString().contains("Sign in")
+                            && row(result).get("next").toString().contains("max_output_tokens"));
+            check.eq("truncation keeps the limit that was hit",512L,row(result).get("max_output_tokens"));
             stub.finish="synthetic-secret-upstream-reason";
             result=service.run(user,home,Set.of(api.name()),ignored->{});
             check.eq("unknown provider finish reason is projected as a fixed enum","unfinished_response",row(result).get("pong_failure"));
@@ -94,6 +111,7 @@ public final class ModelCheckTest implements Suite {
             check.eq("strict budget is refused ahead of diagnostic spending", "check_strict_cost_unproven", result.get("code"));
             check.eq("strict diagnostic refusal sends nothing", before, stub.calls.get());
         }
+        reasoningPingLimit(check);
         cli(check, home);
         Files.writeString(CheckSettings.file(home), new CheckSettings(false, 90, 512).yaml());
         check.eq("only personal settings disable the automatic check", "check_disabled_by_user",
@@ -105,6 +123,20 @@ public final class ModelCheckTest implements Suite {
         check.that("exception text is never projected", !Json.write(sanitized).contains("synthetic-secret"));
         check.eq("missing profiles fail closed", false,
                 exploding.run(user(home, null, null), home, Set.of("missing"), ignored -> {}).get("ok"));
+    }
+
+    private static void reasoningPingLimit(Check check) {
+        CheckSettings settings = new CheckSettings(true, 90, 512);
+        Connection gonka = new Connection("g", "gonkarouter", "openai_chat", "https://api.gonkarouter.io/v1", "env:K", true);
+        Profile deepseek = Profile.parse("version: 1\nprofile: ds\nrole: reviewer\nrunner: api\nconnection: g\nmodel_vendor: deepseek\nmodel: deepseek-ai/DeepSeek-V4-Flash-0731\nread_only: true\nlimits:\n  max_output_tokens: 2048\n", "fixture").withConnection(gonka);
+        check.eq("a reasoning model's ping gets room to think", 2048, ModelCheck.pingOutputLimit(deepseek, gonka, settings));
+        Profile small = Profile.parse("version: 1\nprofile: ds\nrole: reviewer\nrunner: api\nconnection: g\nmodel_vendor: deepseek\nmodel: deepseek-ai/DeepSeek-V4-Flash-0731\nread_only: true\nlimits:\n  max_output_tokens: 1024\n", "fixture").withConnection(gonka);
+        check.eq("but never more than the profile allows", 1024, ModelCheck.pingOutputLimit(small, gonka, settings));
+        Profile plain = Profile.parse("version: 1\nprofile: p\nrole: reviewer\nrunner: api\nconnection: g\nmodel_vendor: deepseek\nmodel: test/model\nread_only: true\nlimits:\n  max_output_tokens: 2048\n", "fixture").withConnection(gonka);
+        check.eq("an ordinary model keeps the central ping limit", 512, ModelCheck.pingOutputLimit(plain, gonka, settings));
+        check.that("GLM is treated as a reasoning model", ModelCheck.reasoningModel("zai-org/GLM-5.3-Flash"));
+        check.that("an o-series id is a reasoning model", ModelCheck.reasoningModel("openai/o3-mini"));
+        check.that("a plain chat model is not", !ModelCheck.reasoningModel("meta-llama/llama-3.3-70b-instruct"));
     }
 
     private static void cli(Check check, Path home) throws Exception {
@@ -157,11 +189,11 @@ public final class ModelCheckTest implements Suite {
     }
     private static final class Stub implements AutoCloseable {
         final HttpServer server; final AtomicInteger calls = new AtomicInteger();
-        int status = 200,choices=1; String served = "test/model", body,finish="stop"; boolean pong = true, toolCall,emptyTools,fenced,missingText,invalidJson;
+        int status = 200,choices=1,failFirst; String served = "test/model", body,finish="stop"; boolean pong = true, toolCall,emptyTools,fenced,missingText,invalidJson;
         Stub() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/v1/chat/completions", exchange -> {
-                calls.incrementAndGet(); body = new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                int call = calls.incrementAndGet(); body = new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                 Map<String, Object> message = new java.util.LinkedHashMap<>();
                 message.put("content", Json.write(Map.of("pong", pong ? nonce(body) : "old")));
                 if(fenced)message.put("content","```json\n"+message.get("content")+"\n```");
@@ -172,8 +204,10 @@ public final class ModelCheckTest implements Suite {
                 var answers=new java.util.ArrayList<Map<String,Object>>();for(int i=0;i<choices;i++)answers.add(Map.of("finish_reason",finish,"message",message));
                 String response = status == 200 ? Json.write(Map.of("model", served, "choices", answers))
                         : "{\"error\":{\"message\":\"synthetic-secret\"}}";
+                int answer = status;
+                if (failFirst > 0) { failFirst--; answer = 502; response = "{\"error\":{\"message\":\"bad gateway\"}}"; }
                 byte[] bytes = response.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(status, bytes.length); exchange.getResponseBody().write(bytes); exchange.close();
+                exchange.sendResponseHeaders(answer, bytes.length); exchange.getResponseBody().write(bytes); exchange.close();
             }); server.start();
         }
         Connection connection() { return new Connection("stub", "custom", "openai_chat", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1", "env:TEST_KEY", true); }

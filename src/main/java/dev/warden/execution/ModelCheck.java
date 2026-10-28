@@ -34,11 +34,26 @@ public final class ModelCheck {
     private final ProcessRunner processes;
     private final Function<String, String> environment;
     private final Probe probe;
+    private final ApiRetry.Policy retryPolicy;
+    private final ApiRetry.Sleeper sleeper;
+
+    /**
+     * The output floor for a model that thinks before it answers. A reasoning model spends
+     * hidden tokens first; under the general 512-token ping limit DeepSeek and GLM were cut
+     * off before the pong, and the check read like a broken connection.
+     */
+    public static final int REASONING_PING_FLOOR = 2048;
 
     public ModelCheck(ProcessRunner processes) { this(processes, System::getenv, null); }
     public ModelCheck(ProcessRunner processes, Function<String, String> environment, Probe probe) {
+        this(processes, environment, probe, ApiRetry.Policy.CHECK, ApiRetry.REAL_SLEEP);
+    }
+    /** Checks may resend transient failures; tests pass a sleeper that does not wait. */
+    public ModelCheck(ProcessRunner processes, Function<String, String> environment, Probe probe,
+                      ApiRetry.Policy retryPolicy, ApiRetry.Sleeper sleeper) {
         this.processes = processes; this.environment = environment;
         this.probe = probe == null ? this::ping : probe;
+        this.retryPolicy = retryPolicy; this.sleeper = sleeper;
     }
 
     public Map<String, Object> run(UserConfig user, Path project, Set<String> names, Consumer<String> progress)
@@ -150,30 +165,85 @@ public final class ModelCheck {
         try { token = new CredentialResolver(environment).resolve(connection); }
         catch (RuntimeException missing) { return failure("check_auth_missing"); }
         String nonce = UUID.randomUUID().toString();
-        int outputLimit = Math.min(settings.maxOutputTokens(), profile.maxOutputTokens());
+        int outputLimit = pingOutputLimit(profile, connection, settings);
         if (outputLimit < 1) return failure("check_output_limit_missing");
         var body = ApiExecutor.completionBody(connection, profile.model(), prompt(nonce), outputLimit);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("vendor_turn_started", true); result.put("cost_status", "unknown");
-        ApiExecutor.HttpReply reply;
-        try { reply = ApiExecutor.call(connection, "POST", endpoint, Json.write(body), token,
-                limit(profile, settings)); }
-        catch (ApiExecutor.CallFailure failed) { result.putAll(failure(failed.code)); return result; }
+        result.put("max_output_tokens", (long) outputLimit);
+        if (reasoningModel(profile.model())) result.put("reasoning_model", true);
+        ApiRetry.Outcome sent = ApiRetry.send(connection, "POST", endpoint, Json.write(body), token,
+                limit(profile, settings), retryPolicy, sleeper,
+                ApiRetry.correlation(null, profile.name(), "check", "ping"));
+        sent.record(result);
+        if (sent.failure() != null) {
+            if (sent.nothingSent()) result.put("vendor_turn_started", false);
+            result.put("ok", false); result.put("code", sent.failure().code);
+            return result;
+        }
+        ApiExecutor.HttpReply reply = sent.reply();
         Map<String, Object> envelope = ApiExecutor.object(reply.body());
         Map<String, Object> telemetry = new LinkedHashMap<>();
         ApiExecutor.recordReceipt(connection, envelope, reply.headers(), telemetry, token);
-        for (String key : List.of("tokens", "cost_usd", "cost_status"))
+        for (String key : List.of("tokens", "cost_usd", "cost_status", "request_id"))
             if (telemetry.containsKey(key)) result.put(key, telemetry.get(key));
+        sent.settleCost(result);
+        result.put("http_status", (long) reply.status());
         String error = ApiExecutor.errorCode(reply.status(), envelope);
-        if (error == null && (envelope == null || !profile.model().equals(envelope.get("model"))))
-            error = "check_model_mismatch";
+        if (error != null) {
+            result.put("failure_phase", "http_status");
+            ApiExecutor.providerError(envelope, token, result);
+        } else if (envelope == null) {
+            error = "check_no_pong"; result.put("failure_phase", "parse");
+            result.put("pong_failure", "invalid_json");
+        } else if (!profile.model().equals(envelope.get("model"))) {
+            error = "check_model_mismatch"; result.put("failure_phase", "identity");
+        }
         String pongFailure = error == null ? apiPongFailure(envelope, nonce) : null;
         boolean pong = error == null && pongFailure == null;
-        result.put("ok", error == null && pong);
-        result.put("code", error != null ? error : pong ? "pong" : "check_no_pong");
-        if (error == null && !pong) result.put("pong_failure", pongFailure);
+        result.put("ok", pong);
+        if (pongFailure != null) {
+            result.put("pong_failure", pongFailure);
+            result.put("failure_phase", switch (pongFailure) {
+                case "output_limit" -> "output_limit";
+                case "nonce_mismatch" -> "identity";
+                case "invalid_json", "missing_text", "missing_choice", "ambiguous_choice" -> "parse";
+                default -> "answer";
+            });
+        }
+        // A pong the output limit cut off says the limit was too small for this model's
+        // thinking, nothing about its key: it is reported as truncation, never as auth.
+        result.put("code", error != null ? error : pong ? "pong"
+                : "output_limit".equals(pongFailure) ? "role_api_output_truncated" : "check_no_pong");
         result.put("identity", "provider_response_exact_model");
         return result;
+    }
+
+    /**
+     * The ping's output limit: the check setting, raised to {@link #REASONING_PING_FLOOR} for a
+     * reasoning model, and never above the profile's own limit or a provider cap.
+     */
+    public static int pingOutputLimit(Profile profile, Connection connection, CheckSettings settings) {
+        int limit = Math.min(settings.maxOutputTokens(), profile.maxOutputTokens());
+        if (limit >= 1 && reasoningModel(profile.model())) {
+            limit = Math.max(limit, Math.min(REASONING_PING_FLOOR, profile.maxOutputTokens()));
+        }
+        if (connection != null && "gonkarouter".equals(connection.provider())) limit = Math.min(limit, 4096);
+        return limit;
+    }
+
+    /**
+     * Model families that spend hidden reasoning tokens before the visible answer. A name
+     * heuristic only decides how much room a ping gets; it grants nothing.
+     */
+    public static boolean reasoningModel(String model) {
+        if (model == null) return false;
+        String id = model.toLowerCase(java.util.Locale.ROOT);
+        String leaf = id.substring(id.lastIndexOf('/') + 1);
+        for (String family : List.of("deepseek", "glm", "qwq", "qwen3", "reason", "think", "-r1",
+                "kimi-k2", "minimax", "gpt-5"))
+            if (id.contains(family)) return true;
+        return leaf.matches("o[134](-.*)?");
     }
 
     /** Fixed diagnostic vocabulary only: upstream content, markers and finish reasons stay private. */
@@ -275,12 +345,14 @@ public final class ModelCheck {
     }
 
     private static String cliFailure(ProcessRunner.Result result) {
+        // Truncation first: a cut-off answer can contain any word, including "login", and a
+        // model that ran out of output room has said nothing about its credentials.
+        if (result.outputLimitExceeded() || result.stdoutTruncated()) return "check_output_limit";
         String text = (result.stdout() + "\n" + result.stderr()).toLowerCase(java.util.Locale.ROOT);
         if (text.contains("not logged in") || text.contains("unauthorized") || text.contains("authentication")
                 || text.contains("login") || text.contains("sign in") || text.contains("log in")
                 || text.contains("not authenticated") || text.contains("token expired") || text.contains("session expired")) return "check_auth_required";
         if (text.contains("usage limit") || text.contains("quota") || text.contains("credit balance")) return "check_quota_exhausted";
-        if (result.outputLimitExceeded() || result.stdoutTruncated()) return "check_output_limit";
         return result.exitCode() == 0 ? "check_no_pong" : "check_command_failed";
     }
 
@@ -315,6 +387,8 @@ public final class ModelCheck {
     }
     public static String next(String code) {
         if ("pong".equals(code)) return "Available at check time; role and coding verification are separate.";
+        if (code.contains("output_truncated") || code.contains("output_limit"))
+            return "The answer was cut off by the output token limit; the key is not in question. Raise max_output_tokens for this profile, then check again.";
         if (code.contains("auth") || code.contains("key") || code.contains("401"))
             return "Sign in with this vendor CLI, or replace the API credential in Warden settings, then run warden check again.";
         if (code.contains("quota") || code.contains("credit")) return "Restore the subscription quota or API balance, then check again.";
