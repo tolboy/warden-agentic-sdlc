@@ -361,6 +361,8 @@ public final class TaskLoop {
 
     /** A passing run whose readers found the acceptance too weak, sent to the planner. */
     public static final String CONTRACT_AMENDMENT = "contract_amendment_requested";
+    /** The stop reason of a controller stopped by a signal before the run concluded. */
+    public static final String CONTROLLER_INTERRUPTED = "controller_interrupted";
 
     /**
      * Failures that were never about the work.
@@ -424,6 +426,10 @@ public final class TaskLoop {
             "output_limit_exceeded",
             "prompt_undeliverable",
             "orca_worker_not_started",
+            // Ctrl+C or SIGTERM of the controller says nothing about the candidate. The stage
+            // that was running is not in the summary; the ones before it are, with their
+            // fingerprints, and the continuation still checks those against the tree.
+            CONTROLLER_INTERRUPTED,
             // The candidate passed; what is being fixed is what it was judged by. The writer's
             // product is carried into the amended run, and every reading is taken again there.
             CONTRACT_AMENDMENT);
@@ -1284,8 +1290,14 @@ public final class TaskLoop {
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
                 progress, carried, reusable, callPlan);
+        try (InterruptionGuard guard = new InterruptionGuard(
+                () -> recordInterruption(ledger, summary, steps, engine.attempt(), budget), !dryRun)) {
         try {
-            engine.run();
+            try {
+                engine.run();
+            } finally {
+                if (!guard.conclude()) InterruptionGuard.yieldToShutdown();
+            }
         } catch (StopException stopped) {
             if ("contract_mutated".equals(stopped.reason())) {
                 recordContractChanges(loaded, configSnapshot, summary);
@@ -1308,6 +1320,7 @@ public final class TaskLoop {
                     "type", unexpected.getClass().getName(),
                     "message", String.valueOf(unexpected.getMessage())));
             return stop(ledger, summary, "unexpected_error", steps, engine.attempt(), budget);
+        }
         }
         int attempt = engine.attempt();
         summary.putIfAbsent("skipped_stages", engine.skipped());
@@ -5919,6 +5932,33 @@ public final class TaskLoop {
         if (!(candidate instanceof String text) || text.isBlank()) return;
         Path path = Path.of(text);
         if (Files.isRegularFile(path) && !into.contains(path)) into.add(path);
+    }
+
+    /**
+     * Concludes a run whose controller is being stopped by a signal. The stages that finished
+     * are written with their receipts and a failure decision is opened, so {@code --continue}
+     * can keep what was already judged instead of refusing an unknown run.
+     */
+    private void recordInterruption(EvidenceLedger ledger, Map<String, Object> summary,
+                                    List<Map<String, Object>> steps, int attempt, Budget budget) {
+        List<Map<String, Object>> finished = null;
+        for (int tries = 0; finished == null && tries < 5; tries++) {
+            try {
+                finished = new ArrayList<>(steps);
+            } catch (java.util.ConcurrentModificationException moving) {
+                Thread.onSpinWait();
+            }
+        }
+        if (finished == null) finished = List.of();
+        summary.put("interrupted", Map.of(
+                "at", java.time.Instant.now().toString(),
+                "detail", "the controller was stopped by a signal while a stage was running; "
+                        + "stages that had finished keep their receipts"));
+        try {
+            stop(ledger, summary, CONTROLLER_INTERRUPTED, finished, attempt, budget);
+        } catch (Exception failed) {
+            throw new IllegalStateException(failed.getMessage(), failed);
+        }
     }
 
     /**
