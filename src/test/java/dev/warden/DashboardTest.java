@@ -116,7 +116,7 @@ public final class DashboardTest implements Suite {
             check.contains("runs section is on the page", page.body(), "Запуски");
             check.contains("connections section is on the page", page.body(), "id=\"connection-editor-title\">Подключения</h2>");
             check.contains("authorization is not inferred from key presence", page.body(), "не подтверждает авторизацию");
-            check.contains("API text completion does not claim coding tools", page.body(), "инструменты кодинга пока не подключены");
+            check.contains("coding requires a separately verified harness", page.body(), "OpenCode после отдельной проверки профиля");
             check.contains("connection setup names the CLI entry point", page.body(), "warden connections add");
             check.contains("connection setup uses an environment reference", page.body(), "env:OPENROUTER_API_KEY");
             check.contains("invalid credential formats have their own UI state", page.body(), "неверный формат ключа");

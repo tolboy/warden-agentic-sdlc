@@ -95,7 +95,9 @@ public final class ConfigView {
             row.put("auth", credentials.status(connection));
             // Presence is a local observation. Rendering settings must never make a paid request.
             row.put("authentication", "not_verified");
-            row.put("execution", "text_completion_only");
+            boolean coding = user.profiles().values().stream().anyMatch(profile -> connection.id().equals(profile.connectionRef())
+                    && profile.harness() != null && profile.verified());
+            row.put("execution", coding ? "text_and_verified_coding" : "text_completion_only");
             rows.add(row);
         }
         return rows;
@@ -210,6 +212,11 @@ public final class ConfigView {
         row.put("runner", profile.runner());
         row.put("read_only", profile.readOnly());
         row.put("verified", profile.verified());
+        if (profile.harness() != null) {
+            row.put("harness", profile.harness());
+            row.put("coding_tools_verified", profile.verified());
+            row.put("harness_executable", profile.harnessExecutable() == null ? null : profile.harnessExecutable().toString());
+        }
         row.put("verify_probe", profile.verificationProbe() != null);
         row.put("max_cost_usd", profile.maxCostUsd());
         row.put("source", "personal");
@@ -221,7 +228,8 @@ public final class ConfigView {
                 row.put("endpoint", connection.endpoint());
                 row.put("auth", credentials.status(connection));
                 row.put("authentication", "not_verified");
-                row.put("execution", "text_completion_only");
+                row.put("execution", profile.harness() == null ? "text_completion_only"
+                        : profile.verified() ? "verified_coding_harness" : "coding_harness_unproven");
             } else {
                 row.put("connection_problem", "connection_not_found");
             }

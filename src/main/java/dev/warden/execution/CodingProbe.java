@@ -166,6 +166,9 @@ public final class CodingProbe {
                                 Duration.ofMinutes(4),
                                 256 * 1024,
                                 null);
+                // Close sockets before taking the synchronized evidence snapshot. A partial
+                // local request must not keep the completed process waiting past its deadline.
+                relay.close();
                 Files.writeString(
                         fixture.resolve("opencode-events.jsonl"),
                         redact(result.stdout(), secret, relay.bearer()),
@@ -287,19 +290,16 @@ public final class CodingProbe {
                         "mcp",
                         Map.of(),
                         "permission",
-                        Map.of(
-                                "*",
-                                "deny",
-                                "read",
-                                "allow",
-                                "edit",
-                                "allow",
-                                "write",
-                                "allow",
-                                "apply_patch",
-                                "allow",
-                                "bash",
-                                "allow")));
+                        permissions()));
+    }
+
+    private static Map<String, Object> permissions() {
+        // OpenCode applies the last matching rule. Never use Map.of for this sequence.
+        Map<String, Object> rules = new LinkedHashMap<>();
+        rules.put("*", "deny");
+        for (String tool : List.of("read", "edit", "write", "apply_patch", "bash"))
+            rules.put(tool, "allow");
+        return rules;
     }
 
     static boolean validArtifact(Path file) {
@@ -322,20 +322,9 @@ public final class CodingProbe {
             if (!("warden/" + model).equals(value.get("model"))
                     || !List.of("warden").equals(value.get("enabled_providers"))) return false;
             if (!("warden/" + model).equals(value.get("small_model"))) return false;
-            if (!Map.of(
-                            "*",
-                            "deny",
-                            "read",
-                            "allow",
-                            "edit",
-                            "allow",
-                            "write",
-                            "allow",
-                            "apply_patch",
-                            "allow",
-                            "bash",
-                            "allow")
-                    .equals(value.get("permission"))) return false;
+            if (!(value.get("permission") instanceof Map<?, ?> rules)
+                    || !permissions().equals(rules)
+                    || !"*".equals(rules.keySet().iterator().next())) return false;
             for (String name : List.of("agent", "mode", "command"))
                 if (value.get(name) instanceof Map<?, ?> entries && !entries.isEmpty())
                     return false;

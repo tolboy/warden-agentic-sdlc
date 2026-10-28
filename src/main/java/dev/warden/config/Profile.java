@@ -55,7 +55,18 @@ public record Profile(
 
     /** Connection metadata contains references only; never a credential value. */
     public record ApiSettings(String connection, String modelVendor, int maxOutputTokens,
-                              String verificationFingerprint, Connection resolved, java.nio.file.Path home) {}
+                              String verificationFingerprint, Connection resolved, java.nio.file.Path home,
+                              java.nio.file.Path harnessExecutable, Long declaredWallClockMinutes) {
+        public ApiSettings(String connection, String modelVendor, int maxOutputTokens,
+                           String verificationFingerprint, Connection resolved, java.nio.file.Path home,
+                           java.nio.file.Path harnessExecutable) {
+            this(connection, modelVendor, maxOutputTokens, verificationFingerprint, resolved, home, harnessExecutable, null);
+        }
+        public ApiSettings(String connection, String modelVendor, int maxOutputTokens,
+                           String verificationFingerprint, Connection resolved, java.nio.file.Path home) {
+            this(connection, modelVendor, maxOutputTokens, verificationFingerprint, resolved, home, null, null);
+        }
+    }
 
     /** Source compatibility for existing CLI/local callers. */
     public Profile(String name, String role, String vendor, String model, String effort,
@@ -76,9 +87,17 @@ public record Profile(
     public String modelVendor() { return apiSettings == null ? vendor : apiSettings.modelVendor(); }
     public int maxOutputTokens() { return apiSettings == null ? 2048 : apiSettings.maxOutputTokens(); }
     public Connection apiConnection() { return apiSettings == null ? null : apiSettings.resolved(); }
+    public java.nio.file.Path harnessExecutable() { return apiSettings == null ? null : apiSettings.harnessExecutable(); }
+    /** Configuration identity, separate from a tighter deadline for one dispatch. */
+    public long declaredWallClockMinutes() {
+        return apiSettings == null || apiSettings.declaredWallClockMinutes() == null
+                ? wallClockMinutes : apiSettings.declaredWallClockMinutes();
+    }
     @Override public boolean verified() {
         // A hand-written stamp cannot make a coding harness eligible. Tool-loop proof is separate.
-        if (harness != null) return false;
+        if (harness != null) return verified && apiSettings != null
+                && java.util.Objects.equals(apiSettings.verificationFingerprint(), apiFingerprint())
+                && CodingAttestation.valid(this);
         return verified && (apiSettings == null || (apiConnection() != null
                 && java.util.Objects.equals(apiSettings.verificationFingerprint(), apiFingerprint())));
     }
@@ -87,7 +106,7 @@ public record Profile(
     public Profile forApiProbe() {
         if (apiConnection() == null) throw new IllegalArgumentException("API probe requires a bound connection");
         ApiSettings probe = new ApiSettings(connectionRef(), modelVendor(), maxOutputTokens(), null,
-                apiConnection(), apiSettings.home());
+                apiConnection(), apiSettings.home(), harnessExecutable(), declaredWallClockMinutes());
         return new Profile(name, role, vendor, model, effort, command, args, readOnly, wallClockMinutes,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
@@ -124,13 +143,13 @@ public record Profile(
         // The HTTP adapter posts to chat/completions. A harness needs the API root instead.
         String boundEndpoint = harness == null ? connection.endpoint() : connection.baseUrl();
         ApiSettings settings = new ApiSettings(connectionRef(), modelVendor(), maxOutputTokens(),
-                apiSettings.verificationFingerprint(), connection, home.toAbsolutePath().normalize());
+                apiSettings.verificationFingerprint(), connection, home.toAbsolutePath().normalize(), harnessExecutable(), declaredWallClockMinutes());
         Profile bound = new Profile(name, role, vendor, model, effort, command, args, readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
                 requiredArtifactFields, quotaSignatures, promptDelivery, attachmentFlag, vision,
                 runner, boundEndpoint, connection.apiKeyEnv(), verificationProbe,
                 verificationChecks, verified, mcpConfig, verificationExpect, harness, settings);
-        boolean checked = harness == null && verified
+        boolean checked = verified
                 && bound.apiFingerprint().equals(settings.verificationFingerprint());
         return new Profile(name, role, vendor, model, effort, command, args, readOnly,
                 wallClockMinutes, maxCostUsd, promptTemplate, jsonSchema, enforceSchema,
@@ -151,6 +170,11 @@ public record Profile(
         if (harness != null) {
             // Tool policy is part of the contract. A read-only change must drop an old stamp.
             contract = String.join("\n", contract, harness, Boolean.toString(readOnly), "opencode-tools-v1");
+            if (harnessExecutable() != null) {
+                contract = String.join("\n", contract, CodingAttestation.ADAPTER,
+                        harnessExecutable().toAbsolutePath().normalize().toString(),
+                        Long.toString(declaredWallClockMinutes()), Integer.toString(CodingAttestation.MAX_REQUESTS));
+            }
         }
         try {
             return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
@@ -237,7 +261,7 @@ public record Profile(
             "version", "profile", "role", "vendor", "model", "effort", "command", "args", "read_only",
             "limits", "prompt_template", "json_schema", "enforce_schema", "artifact", "quota",
             "prompt_delivery", "attachments", "capabilities", "runner", "endpoint", "api_key_env",
-            "verification", "notes", "mcp", "connection", "model_vendor", "harness");
+            "verification", "notes", "mcp", "connection", "model_vendor", "harness", "harness_executable");
     private static final Set<String> MCP = Set.of("config", "note");
     private static final Set<String> LIMITS = Set.of("wall_clock_minutes", "max_cost_usd", "max_output_tokens");
     private static final Set<String> ARTIFACT = Set.of("required_fields");
@@ -299,10 +323,17 @@ public record Profile(
      * Nothing else moves: the verdict the call reaches is judged under the same contract.
      */
     public Profile withWallClockMinutes(long minutes) {
-        return new Profile(name, role, vendor, model, effort, command, args, readOnly, minutes,
+        ApiSettings scoped = apiSettings;
+        if (scoped != null && scoped.declaredWallClockMinutes() == null) {
+            scoped = new ApiSettings(scoped.connection(), scoped.modelVendor(), scoped.maxOutputTokens(),
+                    scoped.verificationFingerprint(), scoped.resolved(), scoped.home(), scoped.harnessExecutable(), wallClockMinutes);
+        }
+        // A per-dispatch override can only tighten a harness's verified declaration.
+        long bounded = harness == null ? minutes : Math.min(minutes, Math.min(wallClockMinutes, declaredWallClockMinutes()));
+        return new Profile(name, role, vendor, model, effort, command, args, readOnly, bounded,
                 maxCostUsd, promptTemplate, jsonSchema, enforceSchema, requiredArtifactFields,
                 quotaSignatures, promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
-                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, apiSettings);
+                verificationProbe, verificationChecks, verified, mcpConfig, verificationExpect, harness, scoped);
     }
 
     public boolean hasVerifiedVision() {
@@ -329,6 +360,18 @@ public record Profile(
             root.collector().add("harness must be opencode");
         }
         boolean opencode = "opencode".equals(harness);
+        String executableReference = root.optString("harness_executable", null);
+        java.nio.file.Path harnessExecutable = null;
+        if (executableReference != null) {
+            try {
+                harnessExecutable = java.nio.file.Path.of(executableReference);
+                if (!opencode || !harnessExecutable.isAbsolute()) {
+                    root.collector().add("harness_executable requires harness: opencode and an absolute executable path");
+                } else harnessExecutable = harnessExecutable.normalize();
+            } catch (java.nio.file.InvalidPathException invalid) {
+                root.collector().add("harness_executable must be an absolute executable path");
+            }
+        }
         if (opencode && !"direct".equals(runner)) {
             root.collector().add("harness: opencode requires runner: direct");
         }
@@ -395,6 +438,9 @@ public record Profile(
         int maxOutputTokens = (int) limits.optInt("max_output_tokens", 2048, 1, 16384);
         // An omitted cap is not a promise of 2048. API keeps its historical default.
         if (opencode && !limits.has("max_output_tokens")) maxOutputTokens = 0;
+        if (harnessExecutable != null && maxOutputTokens == 0) {
+            root.collector().add("harness_executable requires an explicit limits.max_output_tokens");
+        }
 
         String promptTemplate = root.optString("prompt_template", null);
         String jsonSchema = root.optString("json_schema", null);
@@ -584,7 +630,7 @@ public record Profile(
                 promptDelivery, attachmentFlag, vision, runner, endpoint, apiKeyEnv,
                 probe, whatToCheck, verified, mcpConfig, expect, harness,
                 connects ? new ApiSettings(connection, canonicalVendor(modelVendor),
-                        maxOutputTokens, connectionFingerprint, null, null) : null);
+                        maxOutputTokens, connectionFingerprint, null, null, harnessExecutable, wallClock) : null);
     }
 
     /**

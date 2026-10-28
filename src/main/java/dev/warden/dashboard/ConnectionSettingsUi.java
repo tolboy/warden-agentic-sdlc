@@ -62,7 +62,7 @@ public final class ConnectionSettingsUi {
             <p class="muted">Сохранение не добавляет модель в состав ролей. Переменная должна быть задана в окружении процесса Warden; форма не изменяет окружение или авторизацию CLI.</p>
             <div class="connection-toolbar"><button id="connection-save" type="submit">Добавить</button><button id="connection-cancel" type="button">Отменить</button></div>
             </fieldset></form>
-            <p class="muted">API-профили работают с текстом; инструменты кодинга пока не подключены. CLI-подписки используют собственную авторизацию. Удаление подключения не отзывает ключ на сервисе.</p>
+            <p class="muted">Прямые API-профили работают с текстом. Для кодинга доступен OpenCode после отдельной проверки профиля. CLI-подписки используют собственную авторизацию. Удаление подключения не отзывает ключ на сервисе.</p>
             <details><summary>Настройка через CLI</summary><p><code>warden connections add openrouter-personal --provider openrouter --env OPENROUTER_API_KEY</code></p><p class="muted">В настройках сохранится ссылка <code>env:OPENROUTER_API_KEY</code>. Значение ключа задаётся отдельно в окружении процесса Warden.</p></details>
             <script>
             (()=>{

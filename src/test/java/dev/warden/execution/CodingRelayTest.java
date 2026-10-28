@@ -45,6 +45,8 @@ public final class CodingRelayTest implements Suite {
         AtomicReference<Map<String, Object>> posted = new AtomicReference<>();
         AtomicReference<String> served = new AtomicReference<>("model-one");
         AtomicReference<String> upstreamAuth = new AtomicReference<>();
+        AtomicReference<String> responseId = new AtomicReference<>("receipt-one");
+        AtomicReference<Object> reflectedUsage = new AtomicReference<>();
         HttpServer upstream = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         upstream.createContext(
                 "/v1/chat/completions",
@@ -75,11 +77,16 @@ public final class CodingRelayTest implements Suite {
                                                                     "arguments",
                                                                     "{}"))))
                                     : Map.of("role", "assistant", "content", "safe reply");
+                    Map<String, Object> usage = new LinkedHashMap<>();
+                    usage.put("prompt_tokens", 12);
+                    usage.put("completion_tokens", 8);
+                    if (reflectedUsage.get() != null)
+                        usage.put("nested", List.of(Map.of("metadata", reflectedUsage.get())));
                     byte[] body =
                             Json.write(
                                             Map.of(
                                                     "id",
-                                                    "receipt-one",
+                                                    responseId.get(),
                                                     "model",
                                                     served.get(),
                                                     "choices",
@@ -92,11 +99,7 @@ public final class CodingRelayTest implements Suite {
                                                                             ? "tool_calls"
                                                                             : "stop")),
                                                     "usage",
-                                                    Map.of(
-                                                            "prompt_tokens",
-                                                            12,
-                                                            "completion_tokens",
-                                                            8)))
+                                                    usage))
                                     .getBytes(StandardCharsets.UTF_8);
                     exchange.sendResponseHeaders(200, body.length);
                     try (var output = exchange.getResponseBody()) {
@@ -134,6 +137,23 @@ public final class CodingRelayTest implements Suite {
                                         true,
                                         "max_tokens",
                                         99999,
+                                        "n",
+                                        100,
+                                        "models",
+                                        List.of("other-model"),
+                                        "plugins",
+                                        List.of(Map.of("id", "web")),
+                                        "tools",
+                                        List.of(
+                                                Map.of(
+                                                        "type",
+                                                        "function",
+                                                        "function",
+                                                        Map.of(
+                                                                "name",
+                                                                "read",
+                                                                "parameters",
+                                                                Map.of("type", "object")))),
                                         "messages",
                                         List.of()));
                 check.eq("a matching model response becomes SSE", 200, first.statusCode());
@@ -150,15 +170,42 @@ public final class CodingRelayTest implements Suite {
                         false,
                         posted.get().get("stream"));
                 check.eq(
+                        "first coding request must use the offered tools",
+                        "required",
+                        posted.get().get("tool_choice"));
+                check.eq(
                         "the requested output limit is clamped",
                         2048L,
                         posted.get().get("max_tokens"));
+                check.eq(
+                        "the upstream call can generate only one choice",
+                        1L,
+                        posted.get().get("n"));
+                check.that(
+                        "child model fallback extras are not forwarded",
+                        !posted.get().containsKey("models"));
+                check.that(
+                        "child remote plugins are not forwarded",
+                        !posted.get().containsKey("plugins"));
                 post(
                         relay,
                         relay.bearer(),
                         Map.of(
                                 "model",
                                 "model-one",
+                                "tool_choice",
+                                "auto",
+                                "tools",
+                                List.of(
+                                        Map.of(
+                                                "type",
+                                                "function",
+                                                "function",
+                                                Map.of(
+                                                        "name",
+                                                        "read",
+                                                        "parameters",
+                                                        Map.of("type", "object")))),
                                 "messages",
                                 List.of(
                                         Map.of(
@@ -172,6 +219,10 @@ public final class CodingRelayTest implements Suite {
                         "tool results link to observed upstream requests",
                         List.of("read"),
                         relay.evidence().get("observed_tool_results"));
+                check.eq(
+                        "after an observed tool result the requested tool policy is retained",
+                        "auto",
+                        posted.get().get("tool_choice"));
                 for (int i = 2; i < 8; i++)
                     post(relay, relay.bearer(), Map.of("model", "model-one"));
                 check.eq(
@@ -231,6 +282,20 @@ public final class CodingRelayTest implements Suite {
             String contaminated =
                     CodingProbe.config("http://127.0.0.1:9/v1", "model-one")
                             .replace("\"plugin\":[]", "\"plugin\":[\"foreign-plugin\"]");
+            Map<String, Object> reordered =
+                    Json.parseObject(CodingProbe.config("http://127.0.0.1:9/v1", "model-one"));
+            Map<String, Object> lateDeny = new LinkedHashMap<>();
+            lateDeny.put("read", "allow");
+            lateDeny.put("edit", "allow");
+            lateDeny.put("write", "allow");
+            lateDeny.put("apply_patch", "allow");
+            lateDeny.put("bash", "allow");
+            lateDeny.put("*", "deny");
+            reordered.put("permission", lateDeny);
+            check.that(
+                    "late wildcard denial cannot disable tools silently",
+                    !CodingProbe.validConfig(
+                            Json.write(reordered), "http://127.0.0.1:9/v1", "model-one"));
             check.that(
                     "external plugin config cannot pass",
                     !CodingProbe.validConfig(contaminated, "http://127.0.0.1:9/v1", "model-one"));
@@ -240,9 +305,124 @@ public final class CodingRelayTest implements Suite {
             check.that(
                     "a broader merged permission policy cannot pass",
                     !CodingProbe.validConfig(broader, "http://127.0.0.1:9/v1", "model-one"));
+            served.set("model-one");
+            for (String credential :
+                    List.of("synthetic-upstream-credential", "synthetic-\"quoted\\credential")) {
+                for (String reflectedField : List.of("id", "nested usage")) {
+                    responseId.set(reflectedField.equals("id") ? credential : "receipt-one");
+                    reflectedUsage.set(reflectedField.equals("nested usage") ? credential : null);
+                    try (var relay =
+                            new CodingRelay(c, "model-one", credential, Duration.ofSeconds(20))) {
+                        var reflected = post(relay, relay.bearer(), Map.of("model", "model-one"));
+                        check.eq(
+                                "reflected credential in "
+                                        + reflectedField
+                                        + " is refused before release",
+                                502,
+                                reflected.statusCode());
+                        Map<String, Object> evidence = relay.evidence();
+                        check.eq(
+                                "reflection is recorded without provider data",
+                                "probe_credential_reflected",
+                                evidence.get("failure"));
+                        check.eq(
+                                "a reflected response cannot be retained as a model receipt",
+                                List.of(),
+                                evidence.get("responses"));
+                        String encodedCredential = Json.write(credential);
+                        encodedCredential =
+                                encodedCredential.substring(1, encodedCredential.length() - 1);
+                        String retained = Json.write(evidence) + reflected.body();
+                        check.that(
+                                "reflected credential is absent in raw and JSON-escaped forms",
+                                !retained.contains(credential)
+                                        && !retained.contains(encodedCredential));
+                        check.eq(
+                                "reflected metadata cannot establish identity",
+                                false,
+                                evidence.get("identity_confirmed"));
+                    }
+                }
+            }
+            responseId.set("receipt-one");
+            reflectedUsage.set(null);
+            partialBodyClosesBeforeEvidence(check, c, hits);
         } finally {
             upstream.stop(0);
         }
+    }
+
+    private void partialBodyClosesBeforeEvidence(
+            Check check, Connection connection, AtomicInteger upstreamHits) throws Exception {
+        CodingRelay relay =
+                new CodingRelay(
+                        connection,
+                        "model-one",
+                        "synthetic-upstream-credential",
+                        Duration.ofSeconds(20));
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        int before = upstreamHits.get();
+        try (Socket client = new Socket()) {
+            client.connect(
+                    new InetSocketAddress("127.0.0.1", URI.create(relay.baseUrl()).getPort()));
+            String authority = "127.0.0.1:" + URI.create(relay.baseUrl()).getPort();
+            String request =
+                    "POST /v1/chat/completions HTTP/1.1\r\nHost: "
+                            + authority
+                            + "\r\nAuthorization: Bearer "
+                            + relay.bearer()
+                            + "\r\nContent-Type: application/json\r\nContent-Length: 256\r\n\r\n{";
+            client.getOutputStream().write(request.getBytes(StandardCharsets.US_ASCII));
+            client.getOutputStream().flush();
+            long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+            boolean handling = false;
+            while (!handling && System.nanoTime() < deadline) {
+                handling =
+                        Thread.getAllStackTraces().values().stream()
+                                .anyMatch(
+                                        stack ->
+                                                Arrays.stream(stack)
+                                                        .anyMatch(
+                                                                frame ->
+                                                                        frame.getClassName()
+                                                                                        .equals(
+                                                                                                CodingRelay
+                                                                                                        .class
+                                                                                                        .getName())
+                                                                                && frame.getMethodName()
+                                                                                        .equals(
+                                                                                                "handle")));
+                if (!handling) Thread.sleep(10);
+            }
+            check.that("the authorized partial body reaches the relay handler", handling);
+            var stopped =
+                    pool.submit(
+                            () -> {
+                                relay.close();
+                                return relay.evidence();
+                            });
+            Map<String, Object> evidence = null;
+            try {
+                evidence = stopped.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException blocked) {
+                check.that("close before snapshot cannot hang on an incomplete local body", false);
+            }
+            if (evidence != null) {
+                check.eq(
+                        "an incomplete local body sends no charged request",
+                        0,
+                        evidence.get("requests"));
+                check.eq(
+                        "an incomplete local body cannot prove model identity",
+                        false,
+                        evidence.get("identity_confirmed"));
+            }
+        } finally {
+            relay.close();
+            pool.shutdownNow();
+            pool.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        check.eq("partial body cleanup does not contact upstream", before, upstreamHits.get());
     }
 
     private HttpResponse<String> post(CodingRelay relay, String token, Map<String, Object> body)

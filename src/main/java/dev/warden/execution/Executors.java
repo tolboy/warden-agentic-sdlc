@@ -24,7 +24,8 @@ public final class Executors {
     }
 
     public static RoleExecutor forProfile(Profile profile, ProcessRunner processes, GitRepository git) {
-        if ("opencode".equals(profile.harness())) return new OpenCodeExecutor(processes, git);
+        if ("opencode".equals(profile.harness())) return profile.harnessExecutable() == null
+                ? new OpenCodeExecutor(processes, git) : new VerifiedOpenCodeExecutor(processes, git);
         return switch (profile.runner()) {
             case "orca" -> new OrcaExecutor(processes, git);
             // git, so a read_only local role is held to the same fingerprint as a CLI one.

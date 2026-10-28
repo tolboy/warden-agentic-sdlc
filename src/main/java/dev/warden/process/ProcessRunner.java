@@ -40,6 +40,16 @@ public final class ProcessRunner {
         return new ProcessRunner(combined, environmentOverrides);
     }
 
+    /** A security boundary also drops earlier explicit overrides for removed credentials. */
+    public ProcessRunner withoutEnvironmentAndOverrides(Set<String> names) {
+        Set<String> combined = new LinkedHashSet<>(removedEnvironment);
+        combined.addAll(names);
+        Map<String,String> kept = new LinkedHashMap<>(environmentOverrides);
+        kept.keySet().removeIf(name -> combined.stream().anyMatch(removed -> windows()
+                ? removed.equalsIgnoreCase(name) : removed.equals(name)));
+        return new ProcessRunner(combined, kept);
+    }
+
     /**
      * A dispatch-scoped copy that installs these variables after removals.
      * Values are credentials or generated config: never log the map.

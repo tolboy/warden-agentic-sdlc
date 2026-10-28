@@ -83,6 +83,8 @@ public final class ProfileVerifier {
     public Probe run(Profile profile, Path home, Duration timeout, Path worktree)
             throws IOException, InterruptedException {
         if (profile.harness() != null) {
+            if(profile.harnessExecutable()!=null)
+                return new HarnessProfileVerifier().run(profile,home,timeout,worktree);
             throw new IllegalStateException("profile '" + profile.name() + "' uses harness "
                     + profile.harness() + "; coding tools are not proven and a probe cannot stamp them");
         }
@@ -171,7 +173,7 @@ public final class ProfileVerifier {
         if (!Profile.parse(source.text(), profileFile.toString()).equals(profile)) {
             return new Stamp(false, "config_conflict", "profile changed since the probe; reload and verify again", profileFile, null);
         }
-        if (profile.harness() != null) {
+        if (profile.harness() != null && !CodingAttestation.valid(profile)) {
             return new Stamp(false, "harness_coding_unproven",
                     "profile '" + profile.name() + "' uses harness " + profile.harness()
                             + "; coding tools are not proven and a probe cannot stamp them",
@@ -194,7 +196,7 @@ public final class ProfileVerifier {
                             + "; add one with a probe rather than having Warden invent its shape",
                     profileFile, null);
         }
-        if ("api".equals(profile.runner())) {
+        if ("api".equals(profile.runner()) || profile.harness()!=null) {
             if (profile.apiFingerprint() == null) throw new IOException("API connection must be resolved before stamping");
             int end = header + 1;
             while (end < lines.size() && (lines.get(end).isBlank()
@@ -216,7 +218,9 @@ public final class ProfileVerifier {
             } finally {
                 Files.deleteIfExists(temporary);
             }
-            return new Stamp(true, "verified", "API text artifact transport verified for this configuration", profileFile, date.toString());
+            return new Stamp(true, "verified", profile.harness()!=null
+                    ? "Coding capability verified for this profile, connection and executable"
+                    : "API text artifact transport verified for this configuration", profileFile, date.toString());
         }
         // Match the indentation the operator already used inside the block, and append at its
         // end rather than at its top: a comment sits above the key it explains, so inserting
