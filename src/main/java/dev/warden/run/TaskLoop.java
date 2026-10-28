@@ -1066,11 +1066,6 @@ public final class TaskLoop {
         }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         summary.put("candidate_fingerprint", candidateFingerprint);
-        Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
-                ? reusableJudgements(root, carried.fromRunId(), contractHash,
-                        String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
-                        workflow, user, summary, overlay, authorizedFailover)
-                : Map.of();
         // After the preflights, so a stage nobody can fill has already been reported as the
         // fault it is rather than as a blank in a table, and before the header, because the
         // header is the last thing printed before money starts being spent.
@@ -1107,6 +1102,15 @@ public final class TaskLoop {
             summary.put("task_routing",routeReport);
             dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("task-routing.json"),Json.write(routeReport));
         }
+        // After routing, because routing can set the effort a stage runs at, and a kept verdict
+        // has to be compared with the effort this run would dispatch. Measured 2026-10-28: a
+        // continuation built the pool against the profile's default `xhigh`, declined the
+        // implementer that had run at Jev's `medium`, and paid for it again at `medium`.
+        Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
+                ? reusableJudgements(root, carried.fromRunId(), contractHash,
+                        String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
+                        workflow, user, summary, overlay, authorizedFailover)
+                : Map.of();
         if (!dryRun && readiness != null) {
             List<dev.warden.config.Profile> checks = new ArrayList<>();
             for (Workflow.Stage stage : workflow.stages()) {
