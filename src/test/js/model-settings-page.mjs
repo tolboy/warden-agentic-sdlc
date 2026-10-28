@@ -1,5 +1,5 @@
 // Optional check (needs Node 18+; not part of test.cmd, which has no JS engine):
-//   node src/test/js/model-settings-merge.mjs
+//   node src/test/js/model-settings-page.mjs
 // Exercises the three-way merge the settings page runs after a 409 revision conflict.
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -50,4 +50,36 @@ check('settings fields merge the same way', () => {
   assert.deepEqual(merged, { enabled: true, min_confidence: 0.8 });
   assert.deepEqual(conflicts, []);
 });
-console.log(`merge checks: ${passed} passed, 0 failed`);
+// --- service cards read per-model receipts, accounts and missing bindings ---------------------
+const cardsStart = source.indexOf('function statusText(');
+const cards = source.slice(cardsStart, source.indexOf('function resetDrafts(', cardsStart));
+assert.ok(cardsStart > 0 && !cards.includes('\\'), 'card renderer is present and free of escapes');
+const make = (tag, text = '') => ({ tag, text, className: '', children: [], append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; } });
+const render = vendors => {
+  const list = make('div');
+  new Function('state', 'el', 'node', 'button', 'action', 'openAuth', cards + ';drawVendors();')(
+    { vendors }, () => list, make, () => {}, () => {}, () => {});
+  return list.children[0].children;
+};
+const texts = items => items.map(item => item.text);
+check('one failed model makes the card partial, not red', () => {
+  const card = render([{ id: 'api-gonkarouter', kind: 'api', label: 'GonkaRouter', enabled: true, catalog: { status: 'ok' },
+    check: { ok: false, code: 'role_api_provider_error' },
+    status: { state: 'partial', answered: [{ model: 'qwen', ok: true }], failed: [{ model: 'glm', account: 'gonkarouter', ok: false, code: 'role_api_timeout' }] } }]);
+  assert.ok(texts(card).some(text => text.startsWith('\u0427\u0430\u0441\u0442\u0438\u0447\u043d\u043e')), texts(card).join(' | '));
+  const failed = card.filter(item => item.className === 'bad');
+  assert.deepEqual(texts(failed), ['glm \u00b7 gonkarouter: role_api_timeout']);
+});
+check('a card without receipts keeps the vendor-level sentence', () => {
+  const card = render([{ id: 'cli-provider-openai', kind: 'cli', label: 'OpenAI', enabled: true, catalog: { status: 'ok' }, status: { state: 'unchecked', answered: [], failed: [] } }]);
+  assert.ok(!texts(card).some(text => text.startsWith('\u0427\u0430\u0441\u0442\u0438\u0447\u043d\u043e')));
+});
+check('accounts are listed and unmapped profiles show the migration command', () => {
+  const card = render([{ id: 'cli-unmapped', kind: 'cli', label: 'CLI', enabled: true, catalog: { status: 'ok' },
+    accounts: [{ id: 'openai-work', profiles: ['codex-implement'] }, { id: 'openai-home', profiles: ['codex-review'] }],
+    mapping: [{ profile: 'agy-gpt-oss-review', reason: 'no service', suggested: null }] }]);
+  assert.ok(texts(card).some(text => text.includes('openai-work (codex-implement); openai-home (codex-review)')));
+  assert.ok(texts(card).some(text => text.startsWith('agy-gpt-oss-review')));
+  assert.ok(texts(card).includes('warden profiles migrate-services --map agy-gpt-oss-review=SERVICE[:ACCOUNT]'));
+});
+console.log(`settings page checks: ${passed} passed, 0 failed`);
