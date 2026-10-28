@@ -1,6 +1,6 @@
 # API connections
 
-Warden can share a user-owned API connection across read-only text profiles. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. An OpenCode profile can name a connection, but it is not an eligible implementer until a live tool loop is proven.
+Warden can share a user-owned API connection across text profiles and verified OpenCode implementers. CLI subscriptions and legacy `runner: local` profiles keep their existing configuration. `runner: api` does not supply coding tools. OpenCode admission requires a native capability receipt for the exact profile, connection and executable.
 
 Connection files live under `~/.warden/connections/` (or `WARDEN_CONFIG_HOME`). They contain endpoints and credential references, never key values. This increment supports OpenRouter, GonkaRouter, JoinGonka Gateway and custom OpenAI Chat Completions endpoints. The local dashboard edits those same files. On Windows, a connection may reference Credential Manager instead of an environment variable. OpenRouter can mint a user key through PKCE into that vault. Env mode does not require the vault.
 
@@ -89,7 +89,7 @@ Input/output/cache/reasoning tokens and request/model receipts are recorded when
 
 Known credential values are redacted before raw responses, diagnostics, artifacts or verification receipts are persisted. Credentials are resolved inside the HTTP executor and are never installed in a CLI's global configuration. Registered connection environment variables are removed from CLI dispatches and shell verification probes launched by Warden. Existing external Orca processes retain their own environment; API credential forwarding through Orca is not implemented.
 
-## Offline OpenCode profile
+## Legacy offline OpenCode profile
 
 `examples/api/opencode-implementer.yaml` is the offline contract for a later coding adapter. It uses `runner: direct` and `harness: opencode` with a connection, an explicit model and `model_vendor`. It is not eligible for a role. `warden profiles --verify` refuses to stamp it, and a hand-written `verified_on` does not make it eligible. Copying it into `profiles/` does not add it to policy.
 
@@ -109,7 +109,24 @@ A run-scoped loopback relay keeps the upstream key in Warden. OpenCode receives 
 
 OpenCode uses fresh XDG config/data/cache/state and database paths, project config is disabled and pure mode excludes external plugins. Warden checks the effective provider, model, permissions, plugins, commands and MCP configuration before inference. This protects this probe's configuration; it does not prove arbitrary agent code is confined to the fixture directory.
 
-**A successful coding check does not stamp a profile or enable a loop role.** The general OpenCode adapter above still uses the earlier offline contract. Routing requires a subsequent adapter integration and a capability receipt bound to its configuration and binary. Live checks of this dedicated probe were performed on 2026-10-27; consult their receipts for the exact connection/model pair and outcome.
+**A successful coding check does not stamp a profile or enable a loop role.** It remains a standalone diagnostic. Use native profile verification below for loop admission. Live checks of this dedicated probe were performed on 2026-10-27; consult their receipts for the exact connection/model pair and outcome.
+
+## Verified OpenCode implementer
+
+`examples/api/joingonka-coder.yaml` describes the admitted path. Set `harness_executable` to the absolute path of the pinned native OpenCode 1.19.4 executable, use explicit positive `limits.max_output_tokens`, and keep `role: implementer`, `read_only: false`, `enforce_schema: true`. Other roles and legacy profiles without the executable remain ineligible. Strict `max_cost_usd` remains unsupported.
+
+```text
+warden profiles --verify joingonka-coder
+warden profiles
+```
+
+Run verification from a disposable project: it creates a new `warden-profile-probe-*` fixture there. Warden invokes the same executor used for normal dispatch, through the bounded relay. Native verification checks observed reading and shell use, an actual source change, an initially failing and then independently passing unchanged test, and an artifact valid against the profile schema. Edits may use either a dedicated file tool or the shell; the original observed tool list is retained. Prose promises, a successful process exit, or a hand-written date cannot substitute for that proof.
+
+Success writes `verification/<profile>.coding.json` and stamps the profile fingerprint/date. The receipt binds the profile/connection, prompt and schema contents, executable path and SHA-256, adapter/version, role and limits. Missing or changed inputs invalidate admission even on a cached profile. A narrower deadline for one task tightens execution without changing the underlying verified configuration. Native verification reloads inputs before stamping so a proof cannot stamp settings changed during the test.
+
+The loop uses the verified native executable with fresh per-run config/state and the same relay. Instructions and schema travel through a dispatch file, avoiding shell quoting of JSON. Upstream keys remain outside the agent process. The first offered coding-tool request requires a tool choice; metadata requests without tools remain text calls. Every response model is checked before releasing content or tool requests. A mismatched model or adapter/configuration failure stops for operator action rather than triggering an automatic paid replacement or a code-repair attempt. A mismatch after earlier valid edits retains those edits and all earlier call receipts.
+
+Saving or verifying a profile does not change policy. Explicitly select the verified profile for an implementer role or a task override. The first release keeps an eight-request/2048-output-token/four-minute ceiling (or a tighter profile/task limit). Missing usage remains unknown; partial known calls do not become a complete zero-valued total. Costs remain provider evidence/advisory, and tool permissions are not an OS sandbox.
 
 ## Disable or remove
 

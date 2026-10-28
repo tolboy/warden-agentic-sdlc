@@ -236,9 +236,8 @@ public final class RoleResolver {
                 verdicts.add(new Candidate(name, "connection_unavailable", null));
                 continue;
             }
-            // An offline harness contract is not a coding-tool proof. A written stamp cannot
-            // make it eligible, and a fake CLI must not be treated as one.
-            if (profile.harness() != null) {
+            // Legacy offline contracts and stale capability receipts cannot enable a harness.
+            if (profile.harness() != null && !profile.verified()) {
                 verdicts.add(new Candidate(name, "harness_coding_unproven", null));
                 continue;
             }

@@ -26,6 +26,9 @@ final class CodingRelay implements AutoCloseable {
     private final Connection connection;
     private final String model, secret, bearer;
     private final long deadline;
+    private final int maxRequests, maxOutputTokens;
+    private final java.util.concurrent.atomic.AtomicBoolean closed =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final List<Map<String, Object>> receipts = new ArrayList<>();
     private final Map<String, String> calls = new HashMap<>();
     private final Set<String> observedTools = new TreeSet<>();
@@ -34,6 +37,21 @@ final class CodingRelay implements AutoCloseable {
 
     CodingRelay(Connection connection, String model, String secret, Duration limit)
             throws IOException {
+        this(connection, model, secret, limit, 8, 2048);
+    }
+
+    CodingRelay(
+            Connection connection,
+            String model,
+            String secret,
+            Duration limit,
+            int maxRequests,
+            int maxOutputTokens)
+            throws IOException {
+        if (maxRequests < 1 || maxRequests > 8 || maxOutputTokens < 1 || maxOutputTokens > 2048)
+            throw new IllegalArgumentException("unsupported coding relay limits");
+        this.maxRequests = maxRequests;
+        this.maxOutputTokens = maxOutputTokens;
         this.connection = connection;
         this.model = model;
         this.secret = secret;
@@ -65,7 +83,7 @@ final class CodingRelay implements AutoCloseable {
                 failure == null && !receipts.isEmpty() && receipts.size() == turns);
         result.put("cost_status", "provider_usage_recorded_no_strict_cap");
         if (failure != null) result.put("failure", failure);
-        return result;
+        return sanitizedMap(result);
     }
 
     private synchronized void handle(HttpExchange exchange) throws IOException {
@@ -87,7 +105,7 @@ final class CodingRelay implements AutoCloseable {
                 send(exchange, 404, "application/json", "{}");
                 return;
             }
-            if (failure != null || turns >= 8 || System.nanoTime() >= deadline) {
+            if (failure != null || turns >= maxRequests || System.nanoTime() >= deadline) {
                 if (failure == null) failure = "probe_turn_or_time_limit";
                 // This dispatch cannot resume. A retryable status would make the SDK wait
                 // and would obscure the first upstream failure without permitting progress.
@@ -126,10 +144,31 @@ final class CodingRelay implements AutoCloseable {
                 return;
             }
             noteToolResults(body.get("messages"));
+            Map<String, Object> projected = new LinkedHashMap<>();
+            for (String field :
+                    List.of(
+                            "messages",
+                            "tools",
+                            "tool_choice",
+                            "parallel_tool_calls",
+                            "temperature",
+                            "top_p",
+                            "frequency_penalty",
+                            "presence_penalty",
+                            "stop",
+                            "seed",
+                            "response_format"))
+                if (body.containsKey(field)) projected.put(field, body.get(field));
+            body = projected;
+            // A coding dispatch must start by using the offered tools. Metadata/title
+            // requests have no tools and remain ordinary text completions.
+            if (observedTools.isEmpty()
+                    && body.get("tools") instanceof List<?> tools
+                    && !tools.isEmpty()) body.put("tool_choice", "required");
+            body.put("model", model);
+            body.put("n", 1);
             body.put("stream", false);
-            body.remove("stream_options");
-            body.remove("max_completion_tokens");
-            body.put("max_tokens", 2048);
+            body.put("max_tokens", maxOutputTokens);
             if ("openrouter".equals(connection.provider()))
                 body.put("provider", Map.of("require_parameters", true, "allow_fallbacks", false));
             long remaining = deadline - System.nanoTime();
@@ -155,6 +194,11 @@ final class CodingRelay implements AutoCloseable {
             }
             // Identity is checked before OpenCode receives content or a tool request.
             Map<String, Object> parsed = Json.parseObject(reply.body());
+            if (containsCredential(parsed)) {
+                failure = "probe_credential_reflected";
+                send(exchange, 502, "application/json", "{}");
+                return;
+            }
             if (!model.equals(parsed.get("model"))) {
                 failure = "probe_served_model_mismatch";
                 send(exchange, 502, "application/json", "{}");
@@ -237,6 +281,37 @@ final class CodingRelay implements AutoCloseable {
             }
     }
 
+    private boolean containsCredential(Object value) {
+        if (value instanceof String text)
+            return secret != null && text.contains(secret) || text.contains(bearer);
+        if (value instanceof Map<?, ?> map)
+            return map.entrySet().stream()
+                    .anyMatch(
+                            entry ->
+                                    containsCredential(entry.getKey())
+                                            || containsCredential(entry.getValue()));
+        if (value instanceof List<?> list) return list.stream().anyMatch(this::containsCredential);
+        return false;
+    }
+
+    private Map<String, Object> sanitizedMap(Map<?, ?> input) {
+        Map<String, Object> clean = new LinkedHashMap<>();
+        input.forEach((key, value) -> clean.put(cleanText(String.valueOf(key)), sanitized(value)));
+        return clean;
+    }
+
+    private Object sanitized(Object value) {
+        if (value instanceof String text) return cleanText(text);
+        if (value instanceof Map<?, ?> map) return sanitizedMap(map);
+        if (value instanceof List<?> list) return list.stream().map(this::sanitized).toList();
+        return value;
+    }
+
+    private String cleanText(String text) {
+        if (secret != null) text = text.replace(secret, "[REDACTED]");
+        return text.replace(bearer, "[REDACTED]");
+    }
+
     private static void send(HttpExchange exchange, int code, String type, String body)
             throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -250,6 +325,7 @@ final class CodingRelay implements AutoCloseable {
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
         server.stop(0);
         workers.shutdownNow();
     }

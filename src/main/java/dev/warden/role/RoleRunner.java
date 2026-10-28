@@ -448,7 +448,7 @@ public final class RoleRunner {
         else if (profile.connectionRef() != null && (profile.apiConnection() == null
                 || !profile.apiConnection().enabled())) {
             rejected.put(pinned, "connection_unavailable");
-        } else if (profile.harness() != null) {
+        } else if (profile.harness() != null && !profile.verified()) {
             rejected.put(pinned, "harness_coding_unproven");
         } else if (RoleResolver.judges(role) && !profile.readOnly()) {
             rejected.put(pinned, RoleResolver.JUDGE_NOT_READ_ONLY);
@@ -914,7 +914,7 @@ public final class RoleRunner {
             report.put("runner", profile.runner());
             if (profile.harness() != null) {
                 report.put("harness", profile.harness());
-                report.put("coding_tools_verified", false);
+                report.put("coding_tools_verified", profile.verified());
             }
             // What the roster chose, beside what the overlay made of it. Recorded because a
             // reading is a reading by a named profile on a named channel, and "the operator
@@ -958,7 +958,9 @@ public final class RoleRunner {
                 report.put("dispatch_preview", dispatchPreview(profile));
             } else if (profile.harness() != null) {
                 report.put("connection", profile.connectionRef());
-                report.put("command_preview", List.of("opencode", "run", "--format", "json"));
+                report.put("command_preview", profile.harnessExecutable() == null
+                        ? List.of("opencode", "run", "--format", "json")
+                        : List.of(profile.harnessExecutable().toString(), "run", "--pure", "--format", "json"));
             } else if ("orca".equals(profile.runner())) {
                 List<String> preview = new ArrayList<>(List.of("orca", "orchestration", "worker-start",
                         "--task", "<orca-task-id>", "--worktree", "<current-worktree>"));
@@ -1464,6 +1466,10 @@ public final class RoleRunner {
             "role_vendor_unavailable");
 
     private static boolean vendorFailure(String code) {
+        // Harness admission/configuration/identity failures describe the execution boundary.
+        // Paying another writer cannot repair it and may obscure edits from earlier turns.
+        if (code == null || code.startsWith("role_harness_")
+                || "harness_coding_unproven".equals(code)) return false;
         return VENDOR_FAILURE_CODES.contains(code);
     }
 
@@ -1961,9 +1967,14 @@ public final class RoleRunner {
             return "ready".equals(state) || "not_required".equals(state);
         }
         if ("local".equals(profile.runner())) return true;
-        // Coding harnesses stay ineligible until a real tool loop is proven. Do not probe
-        // a null command, and do not treat a binary on PATH as that proof.
-        if (profile.harness() != null || profile.command() == null) return false;
+        if (profile.harness() != null) {
+            if (profile.harnessExecutable() == null || !Files.isExecutable(profile.harnessExecutable())
+                    || profile.apiConnection() == null || !profile.apiConnection().enabled()) return false;
+            String state = String.valueOf(new dev.warden.execution.CredentialResolver()
+                    .status(profile.apiConnection()).get("state"));
+            return "ready".equals(state) || "not_required".equals(state);
+        }
+        if (profile.command() == null) return false;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command.contains("/") || command.contains("\\")) return Files.isExecutable(Path.of(command));
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");

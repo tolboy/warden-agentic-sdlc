@@ -42,6 +42,7 @@ public final class RoleContract {
             "profile", "vendor", "model", "effort", "runner", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "api_connection_fingerprint", "model_vendor",
+            "harness", "harness_adapter", "harness_executable_sha256", "coding_tools_verified",
             // The stage's own routing. A stage name is stable across a workflow edit, so
             // `review` can keep its identity while changing what a finding from it does —
             // and a verdict reached under `on_findings: fix` is not evidence for a stage that
@@ -95,7 +96,12 @@ public final class RoleContract {
         }
         if (profile.harness() != null) {
             contract.put("harness", profile.harness());
-            contract.put("coding_tools_verified", false);
+            contract.put("coding_tools_verified", profile.verified());
+            if(profile.harnessExecutable()!=null){
+                contract.put("harness_adapter",dev.warden.config.CodingAttestation.ADAPTER);
+                try{contract.put("harness_executable_sha256",dev.warden.config.CodingAttestation.binarySha256(profile.harnessExecutable()));}
+                catch(java.io.IOException unavailable){contract.put("harness_executable_sha256",null);}
+            }
         }
         return contract;
     }
