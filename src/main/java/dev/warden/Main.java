@@ -335,6 +335,7 @@ public final class Main {
      * verify it, because "why did nothing run" is the question this command exists to answer.
      */
     private static int profiles(String[] args) throws Exception {
+        if (java.util.Arrays.asList(args).contains("migrate-services")) return migrateServices(args);
         String verify = option(args, "--verify", null);
         if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"));
 
@@ -395,6 +396,31 @@ public final class Main {
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
         System.out.println(Json.write(result));
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
+    }
+
+    /**
+     * `warden profiles migrate-services [--apply] [--map NAME=SERVICE[:ACCOUNT]]... | --rollback ID`.
+     * Preview by default. Ambiguous profiles are bound only by an explicit --map.
+     */
+    private static int migrateServices(String[] args) throws Exception {
+        var migration = new dev.warden.config.ServiceMigration(UserConfig.defaultHome());
+        String rollback = option(args, "--rollback", null);
+        Map<String, Object> report;
+        try {
+            if (rollback != null) report = migration.rollback(rollback);
+            else {
+                List<dev.warden.config.ServiceMigration.Mapping> mappings = new ArrayList<>();
+                for (int i = 0; i < args.length; i++) {
+                    if ("--map".equals(args[i]) && i + 1 < args.length) mappings.add(dev.warden.config.ServiceMigration.Mapping.parse(args[++i]));
+                    else if (args[i].startsWith("--map=")) mappings.add(dev.warden.config.ServiceMigration.Mapping.parse(args[i].substring(6)));
+                }
+                report = hasFlag(args, "--apply") ? migration.apply(mappings) : migration.preview(mappings);
+            }
+        } catch (IllegalArgumentException | IllegalStateException refused) {
+            report = Map.of("ok", false, "code", "migration_refused", "error", String.valueOf(refused.getMessage()));
+        }
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     /**
