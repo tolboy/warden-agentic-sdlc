@@ -54,6 +54,7 @@ public final class HomeCorpusTest implements Suite {
             neighbourPendingAndIndexFailure(check, sandbox);
             noRawContent(check, sandbox);
             apiFallbackProjection(check);
+            modelSelectionProjection(check);
             measurementContext(check, sandbox);
             localLedgerUnchanged(check, sandbox);
         } finally {
@@ -882,6 +883,73 @@ public final class HomeCorpusTest implements Suite {
         check.eq("catalog provenance does not become confirmation", false, safeCapability.get("provider_confirmed"));
         check.that("new relay and routing projections exclude provider bodies, questions and paths",
                 !Json.write(measured).contains("PRIVATE_SOURCE_CODE") && !Json.write(measured).contains("/private/path"));
+    }
+
+    private void modelSelectionProjection(Check check) {
+        var candidate = new LinkedHashMap<String, Object>();
+        candidate.put("option", "candidate_1"); candidate.put("profile", "api-writer");
+        candidate.put("model", "deepseek/fixture"); candidate.put("vendor", "deepseek");
+        candidate.put("runner", "api"); candidate.put("read_only", false);
+        candidate.put("cost_status", "unknown"); candidate.put("capability_hash", "a".repeat(64));
+        candidate.put("prompt", SECRET); candidate.put("credentials", Map.of("api_key", SECRET));
+        candidate.put("private_endpoint", "https://private.example/" + SECRET);
+        var answer = new LinkedHashMap<String, Object>();
+        answer.put("type", "choice"); answer.put("choice", "candidate_1"); answer.put("confidence", 0.9);
+        answer.put("probabilities", Map.of("candidate_0", 0.1, "candidate_1", 0.9,
+                "private_free_text", SECRET, "candidate_999", Double.NaN));
+        answer.put("explanation", SECRET);
+        var decision = new LinkedHashMap<String, Object>();
+        decision.put("stage", "implement"); decision.put("role", "implementer");
+        decision.put("configured_profile", "cli-writer"); decision.put("selected_profile", "api-writer");
+        decision.put("selected_model", "deepseek/fixture"); decision.put("reason", "classifier_selected");
+        decision.put("profile_pinned", false); decision.put("candidates", List.of(candidate));
+        decision.put("rejected", Map.of("stale-writer", "profile_unverified", "private-message", SECRET));
+        decision.put("answer", answer); decision.put("goal", SECRET);
+        var selection = new LinkedHashMap<String, Object>();
+        selection.put("enabled", true); selection.put("code", "models_selected");
+        selection.put("policy_hash", "b".repeat(64)); selection.put("catalog_snapshot", "c".repeat(64));
+        selection.put("joint_validation", "passed"); selection.put("decisions", List.of(decision));
+        selection.put("classifier", Map.of("model_reported", "typesafe/fixture", "cost_status", "reported",
+                "tokens", Map.of("input", 30L, "output", 10L), "body", SECRET, "prompt", SECRET));
+        selection.put("task", SECRET); selection.put("policy_file", "/private/path/" + SECRET);
+        var routing = new LinkedHashMap<String, Object>();
+        routing.put("model_selection", selection); routing.put("classifier", "jev-classifier");
+        routing.put("suggested_profiles", Map.of("implement", "api-writer", "/private/path", SECRET));
+        routing.put("applied_profiles", Map.of("implement", "api-writer"));
+        routing.put("effective_profiles", Map.of("implement", "api-writer"));
+        routing.put("operator_overrides_take_precedence", true);
+        routing.put("selection_reused_from","previous-run");
+        Map<String, Object> event = Map.of("type", "task_run", "task_routing", routing);
+        var measured = MeasurementProjector.project(event).body();
+        var safeRouting = (Map<?, ?>) measured.get("task_routing");
+        check.eq("portable choice records continuation origin","previous-run",safeRouting.get("selection_reused_from"));
+        var safeSelection = (Map<?, ?>) safeRouting.get("model_selection");
+        var safeDecision = (Map<?, ?>) ((List<?>) safeSelection.get("decisions")).getFirst();
+        var safeCandidate = (Map<?, ?>) ((List<?>) safeDecision.get("candidates")).getFirst();
+        var safeAnswer = (Map<?, ?>) safeDecision.get("answer");
+        check.eq("model choice retains configured and selected identities", "api-writer", safeDecision.get("selected_profile"));
+        check.eq("model choice retains the selected model", "deepseek/fixture", safeDecision.get("selected_model"));
+        check.eq("model choice retains the typed reason", "classifier_selected", safeDecision.get("reason"));
+        check.eq("model choice preserves explicit-pin provenance", false, safeDecision.get("profile_pinned"));
+        check.eq("model choice retains policy hash", "b".repeat(64), safeSelection.get("policy_hash"));
+        check.eq("model choice retains candidate snapshot", "c".repeat(64), safeSelection.get("catalog_snapshot"));
+        check.eq("unknown model cost stays unknown", "unknown", safeCandidate.get("cost_status"));
+        check.eq("typed distribution survives without arbitrary keys", Map.of("candidate_0", 0.1, "candidate_1", 0.9), safeAnswer.get("probabilities"));
+        check.eq("typed rejection survives", Map.of("stale-writer", "profile_unverified"), safeDecision.get("rejected"));
+        check.eq("effective choice can be reconstructed", Map.of("implement", "api-writer"), safeRouting.get("effective_profiles"));
+        check.eq("classifier identity survives", "typesafe/fixture", ((Map<?, ?>) safeSelection.get("classifier")).get("model_reported"));
+        check.that("model selection measurements omit raw tasks, prompts, keys, paths and explanations", !Json.write(measured).contains(SECRET));
+
+        decision.put("reason", SECRET); answer.put("choice", SECRET); answer.put("confidence", Double.POSITIVE_INFINITY);
+        var malformed = MeasurementProjector.project(event).body();
+        var badSelection = (Map<?, ?>) ((Map<?, ?>) malformed.get("task_routing")).get("model_selection");
+        var badDecision = (Map<?, ?>) ((List<?>) badSelection.get("decisions")).getFirst();
+        check.that("generated rationale cannot replace a typed selection reason", !badDecision.containsKey("reason"));
+        check.that("malformed answer cannot smuggle arbitrary choice or confidence", !Json.write(malformed).contains(SECRET)
+                && !((Map<?, ?>) badDecision.get("answer")).containsKey("confidence"));
+        decision.put("reason", null); selection.put("joint_validation", null);
+        var incomplete = MeasurementProjector.project(event).body();
+        check.that("incomplete selection labels are safely omitted", !Json.write(incomplete).contains("\"joint_validation\""));
     }
 
     private void localLedgerUnchanged(Check check, Path sandbox) throws Exception {

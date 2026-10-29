@@ -113,7 +113,35 @@ public final class MeasurementProjector {
 
     private static final Set<String> ROUTING = Set.of(
             "ok", "code", "mode", "classifier", "policy_hash", "stage_capabilities",
-            "roles_changed", "effort_policy", "fallback");
+            "roles_changed", "effort_policy", "fallback", "model_selection",
+            "suggested_profiles", "applied_profiles", "effective_profiles",
+            "selection_reused_from", "model_selection_rejected",
+            "operator_overrides_take_precedence");
+
+    private static final Set<String> MODEL_SELECTION = Set.of(
+            "enabled", "code", "policy_hash", "catalog_snapshot", "decisions",
+            "joint_validation", "classifier");
+
+    private static final Set<String> MODEL_DECISION = Set.of(
+            "stage", "role", "configured_profile", "selected_profile", "selected_model",
+            "reason", "profile_pinned", "candidates", "rejected", "answer");
+
+    private static final Set<String> MODEL_CANDIDATE = Set.of(
+            "option", "profile", "model", "vendor", "runner", "read_only", "effort",
+            "capability_hash", "cost_status");
+
+    private static final Set<String> MODEL_ANSWER = Set.of(
+            "type", "choice", "confidence", "probabilities");
+
+    private static final Set<String> CLASSIFIER = Set.of(
+            "configuration", "model_requested", "model_reported", "vendor_turn_started",
+            "tokens", "cost_usd", "cost_status");
+
+    /** Warden labels explain the choice; arbitrary generated rationale stays local. */
+    private static final Set<String> MODEL_SELECTION_REASONS = Set.of(
+            "explicit_profile", "configured_only_candidate", "no_admissible_candidates",
+            "candidate_limit", "classifier_uncertain", "classifier_selected", "classifier_failed",
+            "configuration_changed", "dependent_selection");
 
     private static final Set<String> STAGE_CAPABILITY = Set.of(
             "stage", "role", "profile", "model", "configured_effort", "effort_capabilities");
@@ -208,6 +236,11 @@ public final class MeasurementProjector {
             Map.entry("relay", RELAY),
             Map.entry("responses", RELAY_RESPONSE),
             Map.entry("task_routing", ROUTING),
+            Map.entry("model_selection", MODEL_SELECTION),
+            Map.entry("decisions", MODEL_DECISION),
+            Map.entry("candidates", MODEL_CANDIDATE),
+            Map.entry("answer", MODEL_ANSWER),
+            Map.entry("classifier", CLASSIFIER),
             Map.entry("stage_capabilities", STAGE_CAPABILITY),
             Map.entry("effort_capabilities", EFFORT_CAPABILITY),
             Map.entry("findings", FINDING),
@@ -275,6 +308,22 @@ public final class MeasurementProjector {
         for (Map.Entry<String, Object> entry : source.entrySet()) {
             String key = entry.getKey();
             if (!allowed.contains(key) || NEVER.contains(key)) continue;
+            if(allowed==ROUTING && "selection_reused_from".equals(key)
+                    && (!(entry.getValue() instanceof String id)||!id.matches("[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")))continue;
+            if(allowed==ROUTING && "model_selection_rejected".equals(key)
+                    && !"final_cast_not_admissible".equals(entry.getValue()))continue;
+            if (allowed == MODEL_DECISION && "reason".equals(key)
+                    && (!(entry.getValue() instanceof String reason) || !MODEL_SELECTION_REASONS.contains(reason))) continue;
+            if (allowed == MODEL_SELECTION && "joint_validation".equals(key)
+                    && (!(entry.getValue() instanceof String validation)
+                    || !Set.of("passed", "configured_fallback").contains(validation))) continue;
+            if ((allowed == MODEL_CANDIDATE && "option".equals(key)
+                    || allowed == MODEL_ANSWER && "choice".equals(key))
+                    && (!(entry.getValue() instanceof String option) || !option.matches("candidate_[0-9]{1,3}"))) continue;
+            if (allowed == MODEL_ANSWER && "type".equals(key) && !"choice".equals(entry.getValue())) continue;
+            if (allowed == MODEL_ANSWER && "confidence".equals(key)
+                    && (!(entry.getValue() instanceof Number n) || !Double.isFinite(n.doubleValue())
+                    || n.doubleValue() < 0 || n.doubleValue() > 1)) continue;
             Object projected = projectValue(key, entry.getValue());
             if (projected != SKIP) out.put(key, projected);
         }
@@ -287,6 +336,9 @@ public final class MeasurementProjector {
         if (value == null) return null;
         if (NEVER.contains(key)) return SKIP;
         if (value instanceof Map<?, ?> map) {
+            if ("probabilities".equals(key)) return probabilities(map);
+            if (Set.of("suggested_profiles", "applied_profiles", "effective_profiles", "rejected").contains(key))
+                return identifiers(key, map);
             Set<String> nested = NESTED.get(key);
             if (nested == null) return SKIP;
             @SuppressWarnings("unchecked")
@@ -318,6 +370,29 @@ public final class MeasurementProjector {
         }
         if (value instanceof Number || value instanceof Boolean) return value;
         return SKIP;
+    }
+
+    private static Map<String, Object> probabilities(Map<?, ?> source) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String option) || !option.matches("candidate_[0-9]{1,3}")) continue;
+            if (!(entry.getValue() instanceof Number number) || !Double.isFinite(number.doubleValue())
+                    || number.doubleValue() < 0 || number.doubleValue() > 1) continue;
+            out.put(option, number);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> identifiers(String key, Map<?, ?> source) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || !name.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")) continue;
+            if (!(entry.getValue() instanceof String value) || isUnsafeString(key, value)) continue;
+            // Rejection codes may carry a resolver qualifier, but never a provider sentence.
+            String pattern = "rejected".equals(key) ? "[a-z][a-z0-9_:-]{0,159}" : "[A-Za-z0-9][A-Za-z0-9_-]{0,63}";
+            if (value.matches(pattern)) out.put(name, value);
+        }
+        return out;
     }
 
     private static boolean isUnsafeString(String key, String text) {

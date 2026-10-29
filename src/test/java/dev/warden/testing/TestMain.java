@@ -29,6 +29,8 @@ public final class TestMain {
                 new dev.warden.ServiceMigrationTest(),
                 new dev.warden.RoleRosterEditorTest(),
                 new dev.warden.DecisionRoutingTest(),
+                new dev.warden.ModelSelectionTest(),
+                new dev.warden.ModelRoutingLoopTest(),
                 new dev.warden.TaskRoutingLoopTest(),
                 new dev.warden.RoleResolverTest(),
                 new dev.warden.QuotaSignalTest(),

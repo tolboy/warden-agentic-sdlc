@@ -110,6 +110,64 @@ Receipts are under `~/.warden/routing/`; runs retain `task-routing.json` and `ta
 summary. They distinguish suggested, applied, transmitted, provider-reported and effective efforts, retain typed role advice and
 numeric usage, and omit credentials and raw task text.
 
+## Authorized model selection (Stage 5)
+
+Model choice has separate consent: `routing.model_selection_enabled` defaults to
+`false`; `routing.enabled` still controls effort only. The settings panel exposes
+both controls independently and preserves omitted fields from older clients.
+For a new settings file retain the `check` mapping as well as routing, for example:
+
+```yaml
+version: 1
+check:
+  before_run: true
+  timeout_seconds: 30
+  max_output_tokens: 2048
+routing:
+  enabled: false
+  model_selection_enabled: true
+  classifier: jev-classifier
+  min_confidence: 0.6
+```
+
+Before selection, Warden applies ordinary roster, verification, executable/credential,
+stage tool/vision/context and explicit effort/host constraints. With availability checks
+enabled it checks each distinct candidate configuration and excludes failed candidates.
+When checks are disabled by the user, service availability remains unchecked; admission
+still checks local capabilities. The final check uses the selected cast and selected
+fixers, rather than reintroducing rejected alternatives.
+
+Jev receives typed opaque candidate labels from the admitted role roster. A unique
+maximum probability meeting the threshold may choose a profile. This probability is
+separate from the classifier's auxiliary confidence/concentration value. Low certainty,
+malformed answers, service failure or changed configuration retains configured order
+among admitted candidates. Known independent-review constraints are revalidated against
+the combined cast. No admissible cast yields an explicit stop. Unknown cost stays
+unknown; it neither means free nor disqualifies a profile. Strict monetary tasks skip
+unreserved classification calls.
+
+Selection happens once before execution, with one model-choice request (none if every
+stage is fixed or has one candidate), then a separate effort request only when effort
+routing is enabled. Explicit task/run/handover profile, effort and host settings win.
+Preparatory planning retains its configured settings. Mandatory stages are unchanged;
+existing authorized failover policy remains responsible for endpoint failures.
+
+A continuation retains selected profile pins separately from operator overrides while
+those profiles remain in the role roster. Fixed profiles are not selected again; explicit
+new overrides still win. A changed roster invalidates retention and uses the current
+admitted configuration. This does not reclassify between attempts within a launch.
+The normal role-contract and candidate checks still govern reuse of completed stages.
+
+The receipt records `model_selection` decisions, admitted alternatives, rejected reasons,
+distributions, policy and candidate snapshot hashes; `suggested_profiles`, `applied_profiles`
+and `effective_profiles` separate advice and actual choices. A snapshot includes profiles,
+connections, policy, settings, rubric, catalogs and prompt/schema/MCP resources. Safe portable
+measurements retain typed evidence without prompts, task text or generated rationale.
+`warden classify TASK` uses the same local admission and role roster for a recommendation;
+it dispatches no role and does not perform availability pings.
+
+See [Stage 5 acceptance and live results](NOTE-STAGE5-MODEL-SELECTION-2026-10-29.md).
+
 ## Editable Jev questions and probability policy
 
 The exact questions and answer descriptions are configuration, in

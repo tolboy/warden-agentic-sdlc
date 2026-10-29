@@ -137,7 +137,7 @@ An unknown outcome, an auth refusal, a model mismatch, a truncated answer and a 
 
 API transport failures map to infrastructure reasons (`role_api_timeout` → `role_timed_out`; network/provider/protocol/unsupported → `vendor_call_failed`; `rate_limited`; credits/budget → `quota_exhausted`; auth/access → `vendor_unavailable`; truncation/identity/artifact → `vendor_protocol_failed`). These are not judgements about the work, so `warden run --continue` keeps the completed candidate and its stage results and reruns only the unfinished stage: a reviewer that failed on a 502 is called again without rerunning the implementer. Configuration codes (missing key, disabled connection, changed profile) are not mapped and still require the operator.
 
-Auth errors never open a browser, change the key status beyond `auth_invalid`, or switch the model.
+A role auth error never opens a browser, changes key status beyond `auth_invalid`, or triggers provider failover. With model selection explicitly enabled, a failed prelaunch availability check excludes that candidate before selection; this is recorded in the selection receipt.
 
 ### Ordered role fallback
 

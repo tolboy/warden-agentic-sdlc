@@ -11,7 +11,10 @@ import java.util.function.Consumer;
 /** Jev supplies bounded judgments; Warden owns stages, admission, independence and overrides. */
 @FunctionalInterface
 public interface TaskRouting {
-    record Target(String stage,String role,Profile profile) {}
+    record Target(String stage,String role,Profile profile,List<Profile> candidates,Map<String,String> rejected,boolean profilePinned) {
+        public Target(String stage,String role,Profile profile){this(stage,role,profile,profile==null?List.of():List.of(profile),Map.of(),false);}
+        public Target { candidates=List.copyOf(candidates);rejected=Map.copyOf(rejected); }
+    }
     record Result(RunOverride overrides,Map<String,Object> report) {}
     Result route(UserConfig user,Path project,TaskSpec.ResolvedTask task,List<Target> targets,Consumer<String> progress)throws Exception;
     static TaskRouting live(){return using(new DecisionClient());}
@@ -19,19 +22,35 @@ public interface TaskRouting {
     static TaskRouting using(DecisionClient client,boolean manual){
         return (user,project,task,targets,progress)->{
             Map<String,Object> report=new LinkedHashMap<>();
-            report.put("applied_efforts",Map.of());report.put("mode","effort_only_existing_stages");
+            report.put("applied_efforts",Map.of());report.put("applied_profiles",Map.of());report.put("mode","effort_only_existing_stages");
             try{
                 if(Thread.currentThread().isInterrupted())throw new InterruptedException("classification cancelled");
                 var settings=RoutingSettings.load(user.home());
-                if(!manual && !settings.enabled())return unchanged("routing_disabled",report);
+                if(!manual && !settings.enabled() && !settings.modelSelectionEnabled())return unchanged("routing_disabled",report);
                 if(task.budget().strictCostCap())return unchanged("routing_skipped_strict_budget",report);
                 var profile=DecisionProfile.load(user.home()).get(settings.classifier());
                 var capabilities=new dev.warden.execution.EffortCapabilities(user.home(),user);
                 if(profile==null)return unchanged("classifier_profile_unavailable",report);
+                report.put("classifier",profile.name());
                 JevRoutingPolicy policy;
                 try{policy=JevRoutingPolicy.load(user.home());}
                 catch(Exception invalid){return recorded(user,unchanged("routing_policy_invalid_kept_configured",report));}
                 String policyHash=policy.fingerprint();report.put("policy_file",JevRoutingPolicy.file(user.home()).toString());report.put("policy_hash",policyHash);
+                List<Target> modelInputs=targets;
+                Map<String,String> selectedModels=Map.of();
+                if(settings.modelSelectionEnabled()){
+                    var selection=ModelSelection.choose(client,profile,user,task,targets,settings,policy,progress);
+                    report.put("model_selection",selection.report());
+                    if(selection.failed())return recorded(user,unchanged(String.valueOf(selection.report().get("code")),report));
+                    targets=selection.targets();selectedModels=selection.profiles();
+                    report.put("mode","authorized_models_and_effort");report.put("applied_profiles",selectedModels);
+                    report.put("suggested_profiles",selectedModels);
+                    if(!manual && !settings.enabled()){
+                        report.put("ok",true);report.put("roles_changed",false);
+                        report.put("code",selectedModels.isEmpty()?"routing_kept_configured":"routing_models_selected");
+                        return recorded(user,new Result(new RunOverride(selectedModels,Map.of(),Map.of()),report));
+                    }
+                }
                 var questions=new LinkedHashMap<String,Map<String,Object>>();
                 questions.put("kind",DecisionClient.choice(policy.instructions().get("kind"),policy.criteria().get("kind")));
                 for(String role:List.of("planner","reviewer","visual_qa"))
@@ -57,6 +76,9 @@ public interface TaskRouting {
                 report.putAll(result.evidence());report.put("classifier",profile.name());
                 try{if(!policyHash.equals(JevRoutingPolicy.load(user.home()).fingerprint()))return recorded(user,unchanged("routing_policy_changed_kept_configured",report));}
                 catch(Exception changed){return recorded(user,unchanged("routing_policy_changed_kept_configured",report));}
+                if(report.get("model_selection") instanceof Map<?,?> modelReport && !Objects.equals(
+                        modelReport.get("catalog_snapshot"),ModelSelection.snapshot(user,modelInputs)))
+                    return recorded(user,unchanged("model_roster_changed_kept_configured",report));
                 if(!result.ok())return recorded(user,unchanged(result.code(),report));
                 Map<String,String> efforts=new LinkedHashMap<>();Map<String,Object> recommendations=new LinkedHashMap<>();
                 report.put("classification",result.answers().get("kind"));
@@ -80,10 +102,10 @@ public interface TaskRouting {
                         if(warning!=null)warnings.add(warning);
                     }
                 }
-                report.put("applied_efforts",efforts);report.put("effort_decisions",effortDecisions);report.put("effort_policy","supported_lower_quantile");report.put("uncertain_stages",uncertain);report.put("effort_warnings",warnings);report.put("code",efforts.isEmpty()?"routing_kept_configured":"routing_efforts_selected");
+                report.put("applied_efforts",efforts);report.put("effort_decisions",effortDecisions);report.put("effort_policy","supported_lower_quantile");report.put("uncertain_stages",uncertain);report.put("effort_warnings",warnings);report.put("code",!selectedModels.isEmpty()?"routing_models_selected":efforts.isEmpty()?"routing_kept_configured":"routing_efforts_selected");
                 report.put("ok",true);progress.accept("route "+report.get("code")+" · "+efforts);
                 for(var warning:warnings)progress.accept("warn  "+warning.get("message"));
-                return recorded(user,new Result(new RunOverride(Map.of(),efforts,Map.of()),report));
+                return recorded(user,new Result(new RunOverride(selectedModels,efforts,Map.of()),report));
             }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw interrupted;}
             catch(Exception unavailable){return recorded(user,unchanged("classifier_unavailable_kept_configured",report));}
         };
@@ -150,7 +172,7 @@ public interface TaskRouting {
         for(int index=levels.size()-1;index>=0;index--){atLeast+=((Number)probabilities.get(levels.get(index))).doubleValue();if(atLeast>0 && atLeast+1e-9>=threshold)return levels.get(index);}
         return null;
     }
-    private static Result unchanged(String code,Map<String,Object> report){report.put("ok",true);report.put("code",code);report.put("fallback","configured_workflow_and_efforts");return new Result(RunOverride.NONE,report);}
+    private static Result unchanged(String code,Map<String,Object> report){report.put("applied_profiles",Map.of());report.put("ok",true);report.put("code",code);report.put("fallback","configured_workflow_and_efforts");return new Result(RunOverride.NONE,report);}
     private static Result recorded(UserConfig user,Result result)throws Exception{
         var report=new LinkedHashMap<>(result.report());report.put("at",java.time.Instant.now().toString());
         Path receipt=user.home().resolve("routing").resolve("route-"+UUID.randomUUID()+".json");

@@ -450,6 +450,8 @@ public final class RoleRunner {
             rejected.put(pinned, "connection_unavailable");
         } else if (profile.harness() != null && !profile.verified()) {
             rejected.put(pinned, "harness_coding_unproven");
+        } else if (dev.warden.execution.EffortCapabilities.problem(profile)!=null) {
+            rejected.put(pinned,"role_effort_unsupported");
         } else if (RoleResolver.judges(role) && !profile.readOnly()) {
             rejected.put(pinned, RoleResolver.JUDGE_NOT_READ_ONLY);
         } else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
@@ -551,6 +553,15 @@ public final class RoleRunner {
 
     /** Profiles this runner has seen run out, in the order they did. */
     public Set<String> exhaustedProfiles() { return Set.copyOf(exhausted); }
+
+    /** Initial model selection uses the ordinary admission and local-availability rules. */
+    public List<RoleResolver.Candidate> routingCandidates(UserConfig user,String role,RoleResolver.Writers writers) {
+        return new RoleResolver().candidates(role,user.policy(),user.profiles(),writers,this::available,
+                exhausted,Set.of(),unavailable);
+    }
+    public boolean pinnedForRouting(String stage,String role){return pinFor(stage,role)!=null;}
+    public void excludeForRouting(String profile){unavailable.add(profile);}
+    public boolean excludedForRouting(String profile){return unavailable.contains(profile);}
 
     /**
      * Whether anybody could still fill this role, asked without dispatching or rotating.

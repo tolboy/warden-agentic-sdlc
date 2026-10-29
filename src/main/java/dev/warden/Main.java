@@ -240,13 +240,7 @@ public final class Main {
         for(int index=2;index<args.length;index++)if(!java.util.Set.of("--dry-run","--quiet").contains(args[index]))
             throw new IllegalArgumentException("classify accepts TASK, --dry-run and --quiet");
         var loaded=new ConfigLoader().load(Path.of("."),args[1]);var user=UserConfig.load();var processes=new ProcessRunner();
-        var targets=new java.util.ArrayList<dev.warden.run.TaskRouting.Target>();
-        for(var row:TaskLoop.dispatchPreview(loaded.root(),loaded,user,p->RoleRunner.executableFound(processes,p))){
-            if(Boolean.TRUE.equals(row.get("skipped")) || !(row.get("profile") instanceof String name))continue;
-            var profile=user.profiles().get(name);if(profile==null)continue;
-            if(row.get("effort") instanceof String effort && !effort.equals(profile.effort()))profile=profile.withEffort(effort);
-            targets.add(new dev.warden.run.TaskRouting.Target(String.valueOf(row.get("stage")),String.valueOf(row.get("role")),profile));
-        }
+        var targets=TaskLoop.classificationTargets(loaded.root(),loaded,user,p->RoleRunner.executableFound(processes,p));
         if(hasFlag(args,"--dry-run")){
             System.out.println(Json.write(Map.of("ok",true,"dry_run",true,"classifier",dev.warden.config.RoutingSettings.load(user.home()).classifier(),
                     "task",loaded.resolved().id(),"target_stages",targets.stream().map(dev.warden.run.TaskRouting.Target::stage).toList())));return 0;

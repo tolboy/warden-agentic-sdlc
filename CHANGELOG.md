@@ -22,6 +22,13 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Separate opt-in Jev model choice within admitted role rosters, with explicit override
+  priority, fresh candidate availability checks when enabled, joint independent-review
+  validation and configured-order fallback. Continuations retain selected profiles;
+  typed distributions, alternatives and snapshot identities are preserved in safe receipts.
+  A live Jev-selected Grok implementation passed gates and independent AGY review and
+  reached the pending human gate.
+
 - Capability-driven effort for catalog-admitted API and verified OpenCode profiles, with exact
   per-request delivery and separate requested/transmitted/provider-reported receipts. Settings,
   Jev and explicit run overrides share known model constraints. Fresh OpenRouter DeepSeek API

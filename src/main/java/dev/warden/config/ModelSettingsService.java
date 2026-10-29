@@ -150,11 +150,13 @@ public final class ModelSettingsService {
                         CheckSettings.parse(dev.warden.yaml.Yaml.parse(yaml)); ModelCheck.atomicWrite(file,yaml);
                     }
                     case "save-routing" -> {
-                        requireKeys(payload,Set.of("revision","enabled","classifier","min_confidence"));
+                        requireKeys(payload,Set.of("revision","enabled","model_selection_enabled","classifier","min_confidence"));
                         Path file=CheckSettings.file(home);expectRevision(file,payload);
-                        var values=new LinkedHashMap<String,Object>(payload);values.remove("revision");
+                        // A change to either independent control must preserve omitted fields.
+                        var values=new LinkedHashMap<String,Object>(RoutingSettings.load(home).toMap());
+                        values.putAll(payload);values.remove("revision");
                         var routing=RoutingSettings.parse(Values.of(values,"routing"));
-                        if(routing.enabled() && !DecisionProfile.load(home).containsKey(routing.classifier()))throw new Invalid();
+                        if((routing.enabled() || routing.modelSelectionEnabled()) && !DecisionProfile.load(home).containsKey(routing.classifier()))throw new Invalid();
                         String yaml=Files.exists(file)?Files.readString(file):CheckSettings.DEFAULT.yaml();
                         yaml=replaceValue(yaml,List.of("routing"),routing.yamlValue());
                         ModelCheck.atomicWrite(file,yaml);

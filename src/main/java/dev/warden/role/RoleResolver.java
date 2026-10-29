@@ -299,7 +299,7 @@ public final class RoleResolver {
      * and with no mark on the verdict; it no longer does. A judging role is measured whatever
      * its write flag says; see {@link #JUDGING_ROLES}.
      */
-    static String assuranceOf(Policy.RoleSpec spec, Profile profile,
+    public static String assuranceOf(Policy.RoleSpec spec, Profile profile,
                               Map<String, Profile> profiles, Writers writers) {
         if (judges(spec.role()) && !profile.readOnly()) return "refused:" + JUDGE_NOT_READ_ONLY;
         if (!profile.readOnly()) return NONE;

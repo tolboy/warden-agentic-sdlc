@@ -5,6 +5,7 @@ import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Policy;
 import dev.warden.config.RunOverride;
+import dev.warden.config.RoutingSettings;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
@@ -843,7 +844,9 @@ public final class TaskLoop {
         // the tree or the contract may have changed — and it still has to keep the pin.
         // A fresh `warden run --continue` and the decision page's own continuation do not
         // retype --use/--host; the previous run's summary is where those choices live.
-        RunOverride overlay = loaded.task().use()
+        RunOverride inheritedSelection=carried.continuesRun()?priorModelSelection(root,carried.fromRunId(),user):RunOverride.NONE;
+        RunOverride overlay = inheritedSelection
+                .merged(loaded.task().use())
                 .merged(carried.continuesRun() ? priorOverride(root, carried.fromRunId()) : RunOverride.NONE)
                 .merged(handedOver(root, runId))
                 .merged(this.override);
@@ -1052,7 +1055,8 @@ public final class TaskLoop {
             if (!dryRun) return stop(ledger, summary, stopReason, steps, 0, budget);
             summary.putIfAbsent("would_stop", stopReason);
         }
-        Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        boolean selectModels=!dryRun && taskRouting!=null && !task.budget().strictCostCap() && modelSelectionEnabled(user);
+        Map<String, Object> readerGap = selectModels?null:readerGap(root, workflow, user, task, reviewByRisk, roles);
         if (readerGap != null) {
             summary.put("unavailable_role", readerGap);
             summary.put("resolution", String.valueOf(readerGap.get("message")));
@@ -1071,16 +1075,36 @@ public final class TaskLoop {
         List<Map<String,Object>> effortWarnings=List.of();
         if(!dryRun && taskRouting!=null){
             List<TaskRouting.Target> targets=new ArrayList<>();
-            for(var stage:workflow.stages()){
+            RunOverride configuredSelection=RunOverride.NONE;
+            if(selectModels){
+                var active=new ArrayList<Workflow.Stage>();
+                for(var stage:workflow.stages())if(stage.kind()==Workflow.Kind.ROLE && skipReason(stage,user,task,reviewByRisk)==null)active.add(stage);
+                var prepared=ModelRoutingPlan.prepare(root,user,task,active,workflow,roles,overlay,readiness,progress::line,carried.continuesRun()?carried.fromRunId():null);
+                summary.put("model_selection_checks",prepared.checks());
+                if(prepared.gap()!=null){
+                    summary.put("unavailable_role",prepared.gap());
+                    return stop(ledger,summary,"model_selection_unavailable",steps,0,budget);
+                }
+                targets.addAll(prepared.targets());
+                var defaults=new LinkedHashMap<String,String>();
+                for(var target:targets)defaults.put(target.stage(),target.profile().name());
+                configuredSelection=new RunOverride(defaults,Map.of(),Map.of());
+            } else for(var stage:workflow.stages()){
                 if(stage.kind()!=Workflow.Kind.ROLE || skipReason(stage,user,task,reviewByRisk)!=null)continue;
                 var selected=roles.peek(root,user,stage.name(),stage.role(),RoleResolver.Writers.NONE,workflow.rotationPositionOf(stage));
                 if(selected!=null)targets.add(new TaskRouting.Target(stage.name(),stage.role(),selected));
             }
             var routed=taskRouting.route(user,root,task,targets,progress::line);
             var routeReport=new LinkedHashMap<String,Object>(routed.report());
-            if(!routed.overrides().isEmpty()){
+            boolean profileAdvice=routed.overrides().toMap().get("profile") instanceof Map<?,?> pins&&!pins.isEmpty();
+            if(selectModels?!ModelRoutingPlan.permitted(routed.overrides(),targets,overlay,user,task):profileAdvice){
+                routeReport.put("model_selection_rejected","final_cast_not_admissible");
+                routeReport.put("applied_profiles",Map.of());routeReport.put("applied_efforts",Map.of());
+                routed=new TaskRouting.Result(RunOverride.NONE,routeReport);
+            }
+            if(!routed.overrides().isEmpty() || !configuredSelection.isEmpty()){
                 // Explicit task/CLI/handover choices remain authoritative over classifier advice.
-                overlay=routed.overrides().merged(overlay).withWriterFixes(workflow);overlay.pin(roles);roles.overlay(overlay);
+                overlay=configuredSelection.merged(routed.overrides()).merged(overlay).withWriterFixes(workflow);overlay.pin(roles);roles.overlay(overlay);
                 cast=cast(root,workflow,user,task,reviewByRisk,roles,overlay);summary.put("cast",cast);
                 Map<String,Object> effective=new LinkedHashMap<>();
                 for(var row:cast)if(row.get("effort")!=null)effective.put(String.valueOf(row.get("stage")),row.get("effort"));
@@ -1091,6 +1115,20 @@ public final class TaskLoop {
                     if(java.util.Objects.equals(effective.get(entry.getKey()),entry.getValue()))applied.put(String.valueOf(entry.getKey()),entry.getValue());
                 routeReport.put("applied_efforts",applied);
             }
+            cast=cast(root,workflow,user,task,reviewByRisk,roles,overlay);summary.put("cast",cast);
+            var effectiveProfiles=new LinkedHashMap<String,Object>();
+            for(var row:cast)if(row.get("profile")!=null)effectiveProfiles.put(String.valueOf(row.get("stage")),row.get("profile"));
+            Object suggestions=routeReport.get("suggested_profiles");
+            if(suggestions==null)suggestions=routeReport.getOrDefault("applied_profiles",Map.of());
+            routeReport.put("suggested_profiles",suggestions);routeReport.put("effective_profiles",effectiveProfiles);
+            var appliedProfiles=new LinkedHashMap<String,Object>();
+            if(suggestions instanceof Map<?,?> proposed)for(var entry:proposed.entrySet())
+                if(java.util.Objects.equals(entry.getValue(),effectiveProfiles.get(entry.getKey())))appliedProfiles.put(String.valueOf(entry.getKey()),entry.getValue());
+            routeReport.put("applied_profiles",appliedProfiles);
+            if(selectModels){
+                summary.put("model_selection_override",Map.of("profile",effectiveProfiles));
+                if(!inheritedSelection.isEmpty())routeReport.put("selection_reused_from",carried.fromRunId());
+            }
             // Only levels that survive explicit overrides are warned about; printed before the header.
             Object appliedNow=routeReport.get("applied_efforts");
             effortWarnings=TaskRouting.keptWarnings(routeReport.get("effort_warnings"),appliedNow instanceof Map<?,?> m?m:Map.of());
@@ -1098,6 +1136,14 @@ public final class TaskLoop {
             if(!effortWarnings.isEmpty())summary.put("effort_warnings",effortWarnings);
             summary.put("task_routing",routeReport);
             dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("task-routing.json"),Json.write(routeReport));
+            if(selectModels&&!ModelRoutingPlan.permitted(RunOverride.NONE,targets,overlay,user,task)){
+                summary.put("unavailable_role",Map.of("code","final_cast_not_admissible"));
+                return stop(ledger,summary,"independent_review_unavailable",steps,0,budget);
+            }
+        }
+        if(selectModels){
+            var finalGap=readerGap(root,workflow,user,task,reviewByRisk,roles);
+            if(finalGap!=null){summary.put("unavailable_role",finalGap);return stop(ledger,summary,"independent_review_unavailable",steps,0,budget);}
         }
         // After routing, because routing can set the effort a stage runs at, and a kept verdict
         // has to be compared with the effort this run would dispatch. Measured 2026-10-28: a
@@ -1120,18 +1166,18 @@ public final class TaskLoop {
                             RoleResolver.Writers.NONE, RoleRunner.UNSTAGED);
                     if (fixer != null) checks.add(fixer);
                     var fixSpec = user.policy() == null ? null : user.policy().roles().get(stage.fixWith());
-                    if (fixSpec != null) for (String name : fixSpec.profiles()) {
+                    if (!selectModels && fixSpec != null) for (String name : fixSpec.profiles()) {
                         var alternative = user.profiles().get(name);
-                        if (alternative != null && alternative.verified() && alternative.role().equals(stage.fixWith())
+                        if (alternative != null && !roles.excludedForRouting(alternative.name()) && alternative.verified() && alternative.role().equals(stage.fixWith())
                                 && (fixer == null || !alternative.name().equals(fixer.name()))) checks.add(alternative);
                     }
                 }
                 // All verified roster alternatives for an active role can be selected by rotation
                 // or explicit failover. A failed ping never changes that routing automatically.
                 var spec = user.policy() == null ? null : user.policy().roles().get(stage.role());
-                if (spec != null) for (String name : spec.profiles()) {
+                if (!selectModels && spec != null) for (String name : spec.profiles()) {
                     var alternative = user.profiles().get(name);
-                    if (alternative != null && alternative.verified() && alternative.role().equals(stage.role())
+                    if (alternative != null && !roles.excludedForRouting(alternative.name()) && alternative.verified() && alternative.role().equals(stage.role())
                             && (chosen == null || !alternative.name().equals(chosen.name()))) checks.add(alternative);
                 }
             }
@@ -2035,6 +2081,47 @@ public final class TaskLoop {
         }
     }
 
+    private static boolean modelSelectionEnabled(UserConfig user){
+        try{return RoutingSettings.load(user.home()).modelSelectionEnabled();}catch(Exception invalid){return false;}
+    }
+    /** Manual classification inspects the same admitted roster without dispatching roles or pinging models. */
+    public static List<TaskRouting.Target> classificationTargets(Path root,ConfigLoader.Loaded loaded,UserConfig user,
+                                                               RoleResolver.Availability available)throws Exception{
+        var targets=new ArrayList<TaskRouting.Target>();
+        if(!modelSelectionEnabled(user)){
+            for(var row:dispatchPreview(root,loaded,user,available)){
+                if(!(row.get("profile") instanceof String name))continue;
+                var profile=user.profiles().get(name);if(profile==null)continue;
+                if(row.get("effort") instanceof String effort)profile=profile.withEffort(effort);
+                targets.add(new TaskRouting.Target(String.valueOf(row.get("stage")),String.valueOf(row.get("role")),profile));
+            }
+            return targets;
+        }
+        var workflow=user.policy().workflow();if(loaded.resolved().visualQa().agentEvidence())workflow=workflow.forAgentEvidence();
+        var overlay=loaded.task().use().withWriterFixes(workflow);
+        var roles=new RoleRunner(new ProcessRunner()).availability(available);overlay.pin(roles);roles.overlay(overlay);
+        var active=new ArrayList<Workflow.Stage>();
+        for(var stage:workflow.stages())if(stage.kind()==Workflow.Kind.ROLE&&skipReason(stage,user,loaded.resolved(),user.policy().reviewRequired(loaded.resolved().risk()))==null)active.add(stage);
+        var prepared=ModelRoutingPlan.prepare(root,user,loaded.resolved(),active,workflow,roles,overlay,null,text->{},null);
+        if(prepared.gap()!=null)throw new IllegalArgumentException("classification has no admitted candidates: "+prepared.gap());
+        return prepared.targets();
+    }
+    private static RunOverride priorModelSelection(Path root,String runId,UserConfig user)throws java.io.IOException{
+        Path file=root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+        if(!Files.isRegularFile(file))return RunOverride.NONE;
+        var summary=Json.parseObject(Files.readString(file));Object raw=summary.get("model_selection_override");
+        if(!(raw instanceof Map<?,?> map) || !(map.get("profile") instanceof Map<?,?> pins))return RunOverride.NONE;
+        var allowed=new LinkedHashMap<String,String>();
+        for(var entry:pins.entrySet()){
+            String stage=String.valueOf(entry.getKey()),name=String.valueOf(entry.getValue());
+            var definition=user.policy().workflow().stages().stream().filter(s->s.name().equals(stage)).findFirst().orElse(null);
+            if(definition==null || definition.role()==null)return RunOverride.NONE;
+            var roster=user.policy().roles().get(definition.role());
+            if(roster==null || !roster.profiles().contains(name))return RunOverride.NONE;
+            allowed.put(stage,name);
+        }
+        return new RunOverride(allowed,Map.of(),Map.of());
+    }
     public static RunOverride priorOverride(Path root, String runId) throws java.io.IOException {
         Map<String, Object> summary = Json.parseObject(Files.readString(root.resolve(".warden/runs")
                 .resolve(runId).resolve("task-run.json")));

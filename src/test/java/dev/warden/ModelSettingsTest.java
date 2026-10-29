@@ -100,8 +100,10 @@ public final class ModelSettingsTest implements Suite {
         check.eq("worker profile cannot shadow a classifier id",400,service.apply("save-profile",Map.of("name","jev-classifier","revision","absent","model","x","kind","reviewer","connection","stub","vendor","deepseek")).status());
         var routing=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(CheckSettings.file(home)),"enabled",true,"classifier","jev-classifier","min_confidence",0.7));
         check.eq("Jev routing is configured from shared settings",true,routing.report().get("ok"));
+        modelSelectionSettings(check,home,service,pings);
         service.apply("save-check",Map.of("revision",ModelSettingsService.revision(CheckSettings.file(home)),"before_run",true,"timeout_seconds",30L,"max_output_tokens",256L));
         check.eq("editing ping settings preserves Jev settings",true,RoutingSettings.load(home).enabled());
+        check.eq("editing ping settings preserves model-selection consent",true,RoutingSettings.load(home).modelSelectionEnabled());
         check.eq("editing ping settings preserves classifier confidence",0.7,RoutingSettings.load(home).minConfidence());
         compositionAndJevPolicy(check,home,service,pings);
         Files.writeString(JevRoutingPolicy.file(home),"version: [broken");
@@ -109,6 +111,49 @@ public final class ModelSettingsTest implements Suite {
         check.eq("malformed YAML is a field error",400,service.apply("save-jev-policy",Map.of("revision",ModelSettingsService.revision(JevRoutingPolicy.file(home)),"yaml","version: [broken")).status());
         Files.writeString(JevRoutingPolicy.file(home),JevRoutingPolicy.DEFAULT.yaml());
         dashboard(check, home);
+    }
+    private static void modelSelectionSettings(Check check,Path home,ModelSettingsService service,AtomicInteger pings)throws Exception {
+        check.eq("legacy routing settings do not opt into model choice",false,RoutingSettings.load(home).modelSelectionEnabled());
+        check.eq("legacy routing constructor keeps model choice disabled",false,new RoutingSettings(true,"jev-classifier",0.7).modelSelectionEnabled());
+        int calls=pings.get();
+        Path file=CheckSettings.file(home);
+        var modelsOnly=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),
+                "enabled",false,"model_selection_enabled",true,"classifier","jev-classifier","min_confidence",0.7));
+        check.eq("model selection can be enabled without effort routing",200,modelsOnly.status());
+        check.eq("independent effort toggle remains disabled",false,RoutingSettings.load(home).enabled());
+        check.eq("separate model selection is persisted",true,RoutingSettings.load(home).modelSelectionEnabled());
+        check.eq("settings response exposes separate model-selection state",true,((Map<?,?>)service.list().get("routing")).get("model_selection_enabled"));
+        var effortOnly=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),
+                "enabled",true,"model_selection_enabled",false,"classifier","jev-classifier","min_confidence",0.7));
+        check.eq("effort routing can be enabled without model choice",200,effortOnly.status());
+        check.eq("effort toggle is persisted",true,RoutingSettings.load(home).enabled());
+        check.eq("disabled model choice stays disabled",false,RoutingSettings.load(home).modelSelectionEnabled());
+        var modelOnlyPatch=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),"model_selection_enabled",true));
+        check.eq("one-control update can preserve the others",200,modelOnlyPatch.status());
+        check.eq("model-only patch preserves effort consent",true,RoutingSettings.load(home).enabled());
+        check.eq("model-only patch preserves classifier","jev-classifier",RoutingSettings.load(home).classifier());
+        check.eq("model-only patch preserves threshold",0.7,RoutingSettings.load(home).minConfidence());
+        var both=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),
+                "enabled",true,"model_selection_enabled",true,"classifier","jev-classifier","min_confidence",0.7));
+        check.eq("both independent controls can be enabled",200,both.status());
+        String before=Files.readString(file);
+        var invalid=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),
+                "enabled",true,"model_selection_enabled","yes","classifier","jev-classifier","min_confidence",0.7));
+        check.eq("model-selection consent requires boolean input",400,invalid.status());
+        check.eq("invalid consent writes no settings",before,Files.readString(file));
+        check.eq("stale model-selection edit cannot overwrite current consent",409,
+                service.apply("save-routing",Map.of("revision","stale","enabled",false,"model_selection_enabled",false,
+                        "classifier","jev-classifier","min_confidence",0.7)).status());
+        check.eq("model choice alone still requires a configured classifier",400,
+                service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),"enabled",false,
+                        "model_selection_enabled",true,"classifier","not-configured","min_confidence",0.7)).status());
+        var olderClient=service.apply("save-routing",Map.of("revision",ModelSettingsService.revision(file),
+                "enabled",true,"classifier","jev-classifier","min_confidence",0.7));
+        check.eq("old panel payload remains accepted",200,olderClient.status());
+        check.eq("old panel does not revoke separate consent",true,RoutingSettings.load(home).modelSelectionEnabled());
+        check.eq("saving either routing setting makes no model call",calls,pings.get());
+        check.rejects("unknown model-selection YAML fields remain rejected",null,
+                ()->RoutingSettings.parse(Values.of(Map.of("enabled",false,"model_selection_enabled",true,"unbounded_catalog",true),"routing")));
     }
     private static void compositionAndJevPolicy(Check check,Path home,ModelSettingsService service,AtomicInteger pings)throws Exception {
         Path policy=home.resolve("policy.yaml"),primary=home.resolve("profiles/primary.yaml"),reserve=home.resolve("profiles/reserve.yaml");
@@ -167,6 +212,11 @@ public final class ModelSettingsTest implements Suite {
             check.contains("same panel offers vendor availability", html.body(), "Проверить подключения");
             check.contains("role composition has horizontal selectable slots", html.body(), "className='role-slot'");
             check.contains("same panel offers editable Jev rubric",html.body(),"jev-policy-yaml");
+            check.contains("panel exposes separate model-selection consent",html.body(),"id=\"routing-model-selection-enabled\"");
+            check.contains("panel explains model choice remains roster bounded",html.body(),"Выбирать модель из состава роли");
+            check.contains("model choice is included in routing autosave",html.body(),"model_selection_enabled:el('routing-model-selection-enabled').checked");
+            check.contains("model choice participates in concurrent-tab merge",html.body(),"['enabled','model_selection_enabled','classifier','min_confidence']");
+            check.contains("model selection does not implicitly enable effort routing",html.body(),"function automatic(){return el('routing-enabled').checked}");
             check.that("ordinary settings omit per-model ping buttons",!html.body().contains("Проверить все модели"));
             check.that("ordinary settings omit separate capability verification button",!html.body().contains("Проверить допуск"));
             check.that("template substitutions are complete", !html.body().contains("{{MODEL_SETTINGS}}"));
