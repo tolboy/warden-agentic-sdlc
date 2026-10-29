@@ -177,6 +177,13 @@ public final class ModelCheck {
     private Map<String, Object> apiOnce(Profile profile, Connection connection, CheckSettings settings, URI endpoint) throws Exception {
         if (connection == null) return failure("check_connection_missing");
         if (!connection.enabled()) return failure("check_connection_disabled");
+        String effortProblem = EffortCapabilities.problem(profile);
+        if (effortProblem != null) {
+            Map<String,Object> refused = failure(effortProblem);
+            ApiEffort.initialize(profile.effort(), refused);
+            refused.put("vendor_turn_started", false);
+            return refused;
+        }
         String token;
         try { token = new CredentialResolver(environment).resolve(connection); }
         catch (RuntimeException missing) { return failure("check_auth_missing"); }
@@ -184,7 +191,9 @@ public final class ModelCheck {
         int outputLimit = pingOutputLimit(profile, connection, settings);
         if (outputLimit < 1) return failure("check_output_limit_missing");
         var body = ApiExecutor.completionBody(connection, profile.model(), prompt(nonce), outputLimit);
+        ApiEffort.apply(profile.effort(), body);
         Map<String, Object> result = new LinkedHashMap<>();
+        ApiEffort.initialize(profile.effort(), result);
         result.put("vendor_turn_started", true); result.put("cost_status", "unknown");
         result.put("max_output_tokens", (long) outputLimit);
         if (reasoningModel(profile.model())) result.put("reasoning_model", true);
@@ -192,6 +201,7 @@ public final class ModelCheck {
                 limit(profile, settings), retryPolicy, sleeper,
                 ApiRetry.correlation(null, profile.name(), "check", "ping"));
         sent.record(result);
+        ApiEffort.sent(profile.effort(), sent.reply() != null, sent.nothingSent(), result);
         if (sent.failure() != null) {
             if (sent.nothingSent()) result.put("vendor_turn_started", false);
             result.put("ok", false); result.put("code", sent.failure().code);
@@ -199,6 +209,7 @@ public final class ModelCheck {
         }
         ApiExecutor.HttpReply reply = sent.reply();
         Map<String, Object> envelope = ApiExecutor.object(reply.body());
+        if (envelope != null) envelope = ApiExecutor.sanitizedObject(envelope, token);
         Map<String, Object> telemetry = new LinkedHashMap<>();
         ApiExecutor.recordReceipt(connection, envelope, reply.headers(), telemetry, token);
         for (String key : List.of("tokens", "cost_usd", "cost_status", "request_id"))
@@ -206,6 +217,7 @@ public final class ModelCheck {
         sent.settleCost(result);
         result.put("http_status", (long) reply.status());
         String error = ApiExecutor.errorCode(reply.status(), envelope);
+        boolean effortMatches = ApiEffort.reported(profile.effort(), envelope, result);
         if (error != null) {
             result.put("failure_phase", "http_status");
             ApiExecutor.providerError(envelope, token, result);
@@ -214,6 +226,8 @@ public final class ModelCheck {
             result.put("pong_failure", "invalid_json");
         } else if (!profile.model().equals(envelope.get("model"))) {
             error = "check_model_mismatch"; result.put("failure_phase", "identity");
+        } else if (!effortMatches) {
+            error = "check_effort_mismatch"; result.put("failure_phase", "identity");
         }
         String pongFailure = error == null ? apiPongFailure(envelope, nonce) : null;
         boolean pong = error == null && pongFailure == null;

@@ -71,6 +71,10 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("vendor", profile.vendor());
         evidence.put("model", profile.model());
         evidence.put("effort_requested", profile.effort());
+        evidence.put("effort_transmitted", null);
+        evidence.put("effort_reported", null);
+        evidence.put("effort_delivery", "cli_argument_template");
+        evidence.put("effort_transmission", profile.effort() == null ? "not_requested" : "not_sent");
         evidence.put("effort_verification", "not_reported_by_provider");
         evidence.put("read_only", profile.readOnly());
 
@@ -153,6 +157,7 @@ public final class DirectCliExecutor implements RoleExecutor {
                     Duration.ofMinutes(profile.wallClockMinutes()), PREVIEW_BYTES, stdinText,
                     stdoutFile, stderrFile, ProcessRunner.DEFAULT_RAW_BYTES);
         } catch (ProcessRunner.CaptureException incomplete) {
+            recordEffortTransmission(profile, evidence);
             String code = incomplete.settled() ? "role_output_capture_failed" : "role_process_unsettled";
             evidence.put("failure", code);
             evidence.put("process_tree_settled", incomplete.settled());
@@ -172,6 +177,7 @@ public final class DirectCliExecutor implements RoleExecutor {
             return new Result(false, "role_command_failed", Duration.ZERO, "", null, evidence);
         }
 
+        recordEffortTransmission(profile, evidence);
         evidence.put("raw_capture_complete", !process.outputLimitExceeded());
         evidence.put("process_tree_settled", true);
         evidence.put("raw_limit_bytes_per_stream", ProcessRunner.DEFAULT_RAW_BYTES);
@@ -1048,5 +1054,13 @@ public final class DirectCliExecutor implements RoleExecutor {
     private static String tail(String text, int limit) {
         if (text == null) return "";
         return text.length() <= limit ? text : text.substring(text.length() - limit);
+    }
+
+    /** A started process received the expanded argv; this does not prove provider inference. */
+    private static void recordEffortTransmission(Profile profile, Map<String, Object> evidence) {
+        if (profile.effort() != null && profile.args().stream().anyMatch(arg -> arg.contains("{{effort}}"))) {
+            evidence.put("effort_transmitted", profile.effort());
+            evidence.put("effort_transmission", "sent");
+        }
     }
 }

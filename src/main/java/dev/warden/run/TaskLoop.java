@@ -523,6 +523,7 @@ public final class TaskLoop {
             Map.entry("role_api_response_unreadable", "vendor_protocol_failed"),
             Map.entry("role_api_output_truncated", "vendor_protocol_failed"),
             Map.entry("role_api_model_mismatch", "vendor_protocol_failed"),
+            Map.entry("role_api_effort_mismatch", "vendor_protocol_failed"),
             Map.entry("role_api_model_identity_unknown", "vendor_protocol_failed"),
             Map.entry("role_api_tools_unsupported", "vendor_protocol_failed"),
             Map.entry("role_api_artifact_failure", "vendor_protocol_failed"));
@@ -1822,7 +1823,7 @@ public final class TaskLoop {
                 // be describing a dispatch that is not going to happen.
                 if (overlay.stages().contains(stage.name())) {
                     row.put("from_overlay",
-                            overlay.problem(stage.name(), chosen, user.profiles()) == null);
+                            overlay.problem(stage.name(), chosen, user.profiles(),user) == null);
                 }
                 written = withPreviewWriter(written, chosen);
             }
@@ -1901,7 +1902,7 @@ public final class TaskLoop {
                 row.put("judged_against", judgedBy.profiles().stream().sorted().toList());
             }
             if (overlay.stages().contains(stage.name())) {
-                String problem = overlay.problem(stage.name(), chosen, user.profiles());
+                String problem = overlay.problem(stage.name(), chosen, user.profiles(),user);
                 row.put("from_overlay", problem == null);
                 if (problem != null) {
                     row.put("refused", "run_override_undeliverable");
@@ -2117,7 +2118,7 @@ public final class TaskLoop {
             dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
                     RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
             if (chosen == null) continue;
-            String problem = overlay.problem(stage.name(), chosen, user.profiles());
+            String problem = overlay.problem(stage.name(), chosen, user.profiles(),user);
             if (problem == null) continue;
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("stage", stage.name());

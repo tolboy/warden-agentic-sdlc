@@ -131,16 +131,20 @@ public final class VendorSettingsService {
         return hash(user.profiles().values().stream().filter(p->id.equals(displayVendorId(p))).map(VendorSettingsService::vendorId).distinct().sorted().toList().toString());
     }
     /** Model id to catalog effort levels from this profile's service catalog, or null when no current catalog is loaded. */
-    record CatalogEfforts(Map<String,List<String>> levels,String source,String fetchedAt) {}
+    record CatalogEfforts(Map<String,List<String>> levels,Map<String,String> deliveries,String source,String fetchedAt) {}
     static CatalogEfforts catalogEfforts(Path home,UserConfig user,Profile profile){
         String id=displayVendorId(profile);if(UNMAPPED.equals(id))return null;
         String configuration=catalogConfiguration(user,profile);if(configuration==null)return null;
         var catalog=read(home.resolve("vendors").resolve(id+"-catalog.json"));
-        if(!Objects.equals(catalog.get("configuration"),configuration) || !(catalog.get("models") instanceof List<?> models))return null;
+        if(!"available".equals(catalog.get("status")) || Boolean.TRUE.equals(catalog.get("stale"))
+                || !Objects.equals(catalog.get("configuration"),configuration) || !(catalog.get("models") instanceof List<?> models))return null;
         var result=new LinkedHashMap<String,List<String>>();
-        for(Object value:models)if(value instanceof Map<?,?> model && model.get("id") instanceof String modelId && model.get("efforts") instanceof List<?> efforts)
+        var deliveries=new LinkedHashMap<String,String>();
+        for(Object value:models)if(value instanceof Map<?,?> model && model.get("id") instanceof String modelId && model.get("efforts") instanceof List<?> efforts){
             result.put(modelId,efforts.stream().filter(String.class::isInstance).map(String.class::cast).toList());
-        return new CatalogEfforts(Map.copyOf(result),safe(catalog.get("source")),safe(catalog.get("fetched_at")));
+            if("openrouter_reasoning".equals(model.get("effort_delivery")))deliveries.put(modelId,"openrouter_reasoning");
+        }
+        return new CatalogEfforts(Map.copyOf(result),Map.copyOf(deliveries),safe(catalog.get("source")),safe(catalog.get("fetched_at")));
     }
     /**
      * Public service identity: one card per authenticating service. Clients, Orca, roles and
@@ -198,8 +202,23 @@ public final class VendorSettingsService {
         var reply=ApiExecutor.call(connection,"GET",URI.create(connection.baseUrl()+"/models"),null,token,Duration.ofSeconds(15));
         if(reply.status()!=200)return unavailable(reply.status()==401||reply.status()==403?"catalog_auth_failed":"catalog_http_failed");
         var data=Json.parseObject(reply.body());if(!(data.get("data") instanceof List<?> entries))return unavailable("catalog_response_invalid");
-        var models=new LinkedHashMap<String,Map<String,Object>>();for(Object entry:entries){if(models.size()>=2000)break;if(entry instanceof Map<?,?> value){String id=safe(value.get("id")),label=safe(value.get("name"));if(id!=null && (token==null || !id.contains(token)) && (label==null || token==null || !label.contains(token)))models.put(id,model(id,label,List.of()));}}
+        var models=new LinkedHashMap<String,Map<String,Object>>();for(Object entry:entries){if(models.size()>=2000)break;if(entry instanceof Map<?,?> value){String id=safe(value.get("id")),label=safe(value.get("name"));if(id!=null && (token==null || !id.contains(token)) && (label==null || token==null || !label.contains(token)))models.put(id,apiModel(connection,id,label,value));}}
         if(models.isEmpty())return unavailable("catalog_empty");return Map.of("status","available","source","provider_models_endpoint","fetched_at",Instant.now().toString(),"models",new ArrayList<>(models.values()),"warning","Catalog membership does not prove key access or coding capability.");
+    }
+    /** OpenRouter exposes exact gateway levels per model; compatible custom endpoints may use the same schema. */
+    public static Map<String,Object> apiModel(Connection connection,String id,String label,Map<?,?> value){
+        var row=new LinkedHashMap<String,Object>(model(id,label,List.of()));
+        if(!Set.of("openrouter","custom").contains(connection.provider()) || !(value.get("reasoning") instanceof Map<?,?> reasoning)
+                || !reasoning.containsKey("supported_efforts"))return row;
+        Object declared=reasoning.get("supported_efforts");
+        var levels=new ArrayList<String>();
+        if(declared==null)levels.addAll(EffortCapabilities.API_LEVELS);
+        else if(declared instanceof List<?> list)for(Object level:list)
+            if(level instanceof String text && EffortCapabilities.API_LEVELS.contains(text))levels.add(text);
+        if(Boolean.TRUE.equals(reasoning.get("mandatory")))levels.removeIf("none"::equals);
+        row.put("efforts",EffortCapabilities.ordered(levels));
+        row.put("effort_delivery","openrouter_reasoning");
+        return row;
     }
     private static Map<String,Object> model(String id,String label,List<String> efforts){return Map.of("id",id,"label",label==null?id:label,"efforts",EffortCapabilities.ordered(efforts),"origin","catalog");}
     private static List<String> efforts(Object value,String key){var result=new ArrayList<String>();if(value instanceof List<?> list)for(Object item:list)if(item instanceof Map<?,?> row){String effort=safe(row.get(key));if(effort!=null && effort.matches("[a-z][a-z0-9_-]{0,31}"))result.add(effort);}return result;}

@@ -93,6 +93,10 @@ public final class OrcaStartTest implements Suite {
 
         check.eq("a start Orca could not see is waited on, and its worker_done accepted",
                 "ok", result.code());
+        check.eq("Orca receipt confirms effort delivery to worker", "max", result.evidence().get("effort_transmitted"));
+        check.eq("Orca delivery has sent status", "sent", result.evidence().get("effort_transmission"));
+        check.eq("Orca launch is not provider confirmation", null, result.evidence().get("effort_reported"));
+        check.eq("Orca provider confirmation stays explicitly unknown", "not_reported_by_provider", result.evidence().get("effort_verification"));
         check.eq("nothing was fenced", 0, orca.calls("orchestration worker-stop").size());
         check.eq("Orca's receipt is kept", "outcome_unknown", result.evidence().get("worker_start_state"));
         check.eq("the turn is recorded as seen once it was", "observed",

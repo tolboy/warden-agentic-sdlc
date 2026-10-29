@@ -120,6 +120,30 @@ public final class DecisionRoutingTest implements Suite {
             check.eq("edited classifier is not blessed by an old in-flight response","classifier_configuration_changed",client.ping(profile,user).get("code"));
         }
         var ultraLevels=List.of("low","medium","high","xhigh","max","ultra");
+        var levels=List.of("low","medium","high","xhigh","max");
+        check.eq("one supported effort can be selected","high",TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("high",1.0)),0.6,List.of("high")));
+        check.eq("empty capability has no recommendation",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of()),0.6,List.of()));
+        check.eq("simple concentrated sample selects low","low",TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("low",0.9,"medium",0.1,"high",0.0,"xhigh",0.0,"max",0.0)),0.6,levels));
+        check.eq("complex adjacent sample selects xhigh","xhigh",TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("low",0.0,"medium",0.03,"high",0.03,"xhigh",0.45,"max",0.49)),0.6,levels));
+        check.eq("ambiguous dispersed sample preserves configuration",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("low",0.2,"medium",0.2,"high",0.2,"xhigh",0.2,"max",0.2)),0.6,levels));
+        var borderline=Map.<String,Object>of("probabilities",Map.of("low",0.1,"medium",0.15,"high",0.3,"xhigh",0.3,"max",0.15));
+        check.eq("current threshold accepts a concentrated adjacent band","high",TaskRouting.chooseEffort(borderline,0.6,levels));
+        check.eq("higher threshold rejects that same sample",null,TaskRouting.chooseEffort(borderline,0.75,levels));
+        check.eq("missing probability is refused",null,TaskRouting.chooseEffort(Map.of("probabilities",Map.of("high",1.0)),0.6,levels));
+        check.eq("nonfinite probability is refused",null,TaskRouting.chooseEffort(Map.of("probabilities",Map.of("high",Double.NaN)),0.6,List.of("high")));
+        check.eq("unsupported probability labels are refused",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("high",1.0,"invented",0.0)),0.6,List.of("high")));
+        check.eq("duplicate capability labels are refused",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("high",0.5)),0.6,List.of("high","high")));
+        check.eq("unnormalized distributions are refused",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("high",0.3)),0.6,List.of("high")));
+        check.eq("invalid thresholds are refused",null,TaskRouting.chooseEffort(
+                Map.of("probabilities",Map.of("high",1.0)),Double.NaN,List.of("high")));
         check.eq("risk floor uses an available level rather than inventing high","xhigh",
                 TaskRouting.applyRiskFloor("medium","high",List.of("low","medium","xhigh")));
         check.eq("no supported risk floor keeps configured effort",null,

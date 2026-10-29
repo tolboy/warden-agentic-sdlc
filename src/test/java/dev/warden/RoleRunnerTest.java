@@ -138,6 +138,14 @@ public final class RoleRunnerTest implements Suite {
             check.that("reviewer run succeeds", reviewed.ok());
             Map<String, Object> reviewReport = readJson(project.resolve(".warden/runs/live/role-reviewer.json"));
             check.eq("the verdict reaches the ledger", "pass", reviewReport.get("verdict"));
+            check.eq("CLI receipt records the effort actually passed in argv", "max", reviewReport.get("effort_transmitted"));
+            check.eq("CLI effort submission is explicit", "sent", reviewReport.get("effort_transmission"));
+            check.eq("CLI submission does not invent provider confirmation", null, reviewReport.get("effort_reported"));
+            check.eq("absence of provider confirmation is explicit", "not_reported_by_provider", reviewReport.get("effort_verification"));
+            check.eq("attempt keeps the transmitted effort", "max", objects(reviewReport.get("vendor_attempts")).get(0).get("effort_transmitted"));
+            Map<?, ?> measuredEffort = (Map<?, ?>) ((Map<?, ?>) reviewReport.get("measurement_context")).get("effort");
+            check.eq("measurement keeps transmitted effort distinct", "max", ((Map<?, ?>) measuredEffort.get("transmitted")).get("value"));
+            check.eq("measurement does not promote argv to provider-reported effort", null, ((Map<?, ?>) measuredEffort.get("reported")).get("value"));
             check.that("an answer buried in a text envelope is still recovered",
                     Files.isRegularFile(project.resolve(".warden/runs/live/artifacts/reviewer.json")));
 

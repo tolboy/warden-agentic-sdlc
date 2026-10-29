@@ -81,9 +81,10 @@ public final class RoleRosterEditor {
                 String effort=text(slot,"effort");
                 if(!effort.matches("[a-z][a-z0-9_-]{0,63}"))throw new Invalid();
                 if(!Objects.equals(effort,old.effort())) {
-                    boolean launchBound="orca".equals(old.runner()) || old.args().stream().anyMatch(a->a.contains("{{effort}}"));
-                    if(!launchBound || old.connectionRef()!=null || old.harness()!=null || probe==null)throw new Unbound();
-                    if(!probe.contains("{{effort}}")) {
+                    boolean nativeApi=old.connectionRef()!=null;
+                    boolean launchBound=nativeApi || "orca".equals(old.runner()) || old.args().stream().anyMatch(a->a.contains("{{effort}}"));
+                    if(!launchBound || (!nativeApi && probe==null))throw new Unbound();
+                    if(!nativeApi && !probe.contains("{{effort}}")) {
                         if(old.effort()==null || !probe.contains(old.effort()))throw new Unbound();
                         probe=probe.replace(old.effort(),"{{effort}}");
                     }

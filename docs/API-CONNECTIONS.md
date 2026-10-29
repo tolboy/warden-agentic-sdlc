@@ -71,7 +71,7 @@ The OpenRouter check calls its key metadata endpoint without inference. GonkaRou
 
 Run `warden setup` for starter prompt/schema files. Copy an example from `examples/api/` into your user `profiles/` directory. The filename must match `profile`. Select a model available to your account; model IDs differ between gateways.
 
-`runner: api` requires a connection, explicit model and `model_vendor`, and is read-only. It rejects implementer/vision/tools/MCP/effort settings. `model_vendor` identifies the model developer, such as `deepseek` or `z-ai`, rather than a router. Known CLI labels (`codex`, `claude`, `grok`) are normalized when checking independence against API models. Other legacy vendor identities retain their previous interpretation in this increment; broader identity migration remains separate.
+`runner: api` requires a connection, explicit model and `model_vendor`, and is read-only. It rejects implementer/vision/tools/MCP settings. Effort requires per-model catalog support as described below. `model_vendor` identifies the model developer, such as `deepseek` or `z-ai`, rather than a router. Known CLI labels (`codex`, `claude`, `grok`) are normalized when checking independence against API models. Other legacy vendor identities retain their previous interpretation in this increment; broader identity migration remains separate.
 
 ```text
 warden profiles --verify openrouter-review
@@ -80,6 +80,29 @@ warden profiles --verify openrouter-review
 This is an explicit, potentially paid inference: one bounded synthetic text/artifact probe through the native API executor. It does not run a profile's shell probe and does not inspect a repository. Success stamps the date and a fingerprint of the connection, model, output limit, prompt/schema paths and contents. Changes to those inputs require verification again. The receipt says `text_artifact_only`; it never proves coding tools or review quality.
 
 After verification, explicitly add the profile to the intended role in `~/.warden/policy.yaml`. A normal dry run shows connection and credential readiness without sending inference.
+
+## Model effort
+
+Refresh the service model catalog before selecting API/OpenCode effort. For OpenRouter
+and compatible custom endpoints, Warden reads each model's `reasoning.supported_efforts`
+and transmits the chosen value as `reasoning.effort`. Model membership alone is insufficient.
+Missing/empty effort metadata, stale catalogs, changed connections and unsupported values
+stop explicit effort before a role call. Existing profiles with no effort retain defaults.
+GonkaRouter and JoinGonka effort controls remain unavailable until their wire protocol and
+model metadata are registered; their ordinary coding/text integration is unchanged.
+
+The profile field is `effort: low` (or another level listed for that exact model).
+The settings editor and Jev use the same registry. An OpenCode relay enforces this value
+on every upstream request, overriding harness reasoning options. Warden sends `max`
+unchanged if the model lists it; the gateway's internal mapping is outside Warden's proof.
+[OpenRouter reasoning documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+Receipts separate `effort_requested`, `effort_transmitted`, `effort_transmission`,
+`effort_reported` and `effort_verification`. Unknown delivery does not claim transmission.
+Reasoning token counts do not establish an effort value. An explicit mismatching provider
+report stops with `role_api_effort_mismatch`; it never triggers a downgrade or provider switch.
+For OpenCode, aggregate confirmation requires every turn to report the matching value;
+a later failure clears aggregate confirmation while preserving individual turn receipts.
 
 ## Context and execution limits
 

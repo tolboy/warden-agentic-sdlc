@@ -1,18 +1,11 @@
 # Jev task classification and effort routing
 
-Stage 4 capability follow-up (2026-10-29): routing receipts include
-`stage_capabilities`, with supported levels, delivery mechanism, source and catalog
-observation date. A missing date stays null; catalog data and the built-in compatibility
-table do not establish provider confirmation. Explicit empty effort lists suppress
-built-in fallback. The high-risk floor selects only supported levels at least `high`;
-when none exists, routing retains the configured effort instead of inventing `high`.
-
-This is the registry/routing portion of Stage 4. API and OpenCode effort delivery,
-per-dispatch transmission/confirmation evidence, and classifier calibration remain open.
-Preparatory planning continues to use its own configured effort.
-Validation: clean build; `role-roster-editor`, `decision-routing`, and
-`task-routing-loop`: 135 checks passed, none failed. No live model calls were made
-for this capability change.
+Stage 4 is implemented for CLI/Orca delivery and catalog-admitted API/OpenCode
+profiles. Routing receipts include `stage_capabilities`: levels, delivery mechanism,
+source and observation date. Dispatch receipts separately record requested,
+transmitted and provider-reported effort. Missing provider confirmation stays unknown.
+See [Stage 4 acceptance](ACCEPTANCE-STAGE4-2026-10-29.md) and the
+[six-task Jev evaluation](NOTE-STAGE4-EFFORT-EVALUATION-2026-10-29.md).
 
 Jev is a decision model, not a coding worker. Warden calls the OpenRouter Decisions API with typed
 questions and receives choices and probabilities. It does not ask Jev to generate JSON through chat,
@@ -81,11 +74,12 @@ almost even xhigh/max split can select xhigh instead of falling back to medium; 
 advice retains configured effort. The API's separate `confidence` concentration value is recorded.
 These initial thresholds are transparent policy, not a benchmarked guarantee of successful work.
 
-Automatic application currently changes effort on configured GPT-6 and Grok 4.7 CLI/Orca profiles with an effort
-control that reaches the vendor. Jev chooses among the levels the shared capability list
+Automatic application changes effort only on configured profiles with supported levels and an effort
+control that reaches the executor. This includes CLI/Orca and catalog-admitted API/OpenCode profiles. Jev chooses among the levels the shared capability list
 (`EffortCapabilities`: the loaded model catalog, else the built-in table) offers for that model,
-up to and including its highest level: `max` for GPT-6, `ultra` where a catalog lists it. Grok 4.7
-is offered only low/medium/high/xhigh, so max is never requested for it.
+up to and including its highest listed level. The compatibility fallback for Grok 4.7
+offers low/medium/high/xhigh; a current per-model catalog takes precedence. There is no
+universal top level shared by all model families.
 
 Trusting Jev includes trusting its top level, so a strong choice is applied, not capped. When the
 applied level is the model's highest supported level, or is above the profile's configured effort,
@@ -96,7 +90,8 @@ in `task_routing`, in the readiness report (`model_check`) and at the top of the
 replaced by an explicit task/CLI/handover override is not warned about, because it does not run.
 The mapping follows the [xAI model capability table](https://docs.x.ai/developers/model-capabilities/text/reasoning)
 and the [Grok headless CLI guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md).
-API/OpenCode and other model families keep their current controls.
+API/OpenCode profiles require current per-model metadata for the exact connection; they never inherit
+CLI capability guesses. Unregistered gateways or models keep their default controls.
 Selected profiles still pass normal admission, independence and a fresh availability check using
 effective effort. High-risk tasks have a high effort floor for classifier recommendations. Explicit
 task/CLI/handover overrides win, and fixes inherit the resolved writer effort.
@@ -104,7 +99,7 @@ task/CLI/handover overrides win, and fixes inherit the resolved writer effort.
 Role recommendations are recorded. They cannot remove mandatory stages, add undeclared workers,
 approve actions or switch to paid backups. Workflow selection and escalation remain Warden policy.
 Preparation keeps its planner settings; this phase adapts execution stages. Per-turn reclassification,
-calibrated thresholds and automatic workflow changes are later work.
+larger outcome-based calibration and automatic workflow changes are later work.
 
 Low-probability advice, classifier failure, malformed answers, changed configuration or a different
 returned model preserve configured workflow/efforts and record a fallback. No local heuristic silently
@@ -112,7 +107,7 @@ impersonates Jev. Strict monetary tasks skip unreserved classifier calls. Time, 
 remain enforced, and model availability is still checked.
 
 Receipts are under `~/.warden/routing/`; runs retain `task-routing.json` and `task_routing` in their
-summary. They distinguish suggested, applied and effective efforts, retain typed role advice and
+summary. They distinguish suggested, applied, transmitted, provider-reported and effective efforts, retain typed role advice and
 numeric usage, and omit credentials and raw task text.
 
 ## Editable Jev questions and probability policy

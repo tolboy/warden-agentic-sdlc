@@ -197,6 +197,19 @@ public final class RunOverride {
         return null;
     }
 
+    /** Current catalog constraints apply to explicit overrides as well as Jev recommendations. */
+    public String problem(String stage, Profile chosen, Map<String,Profile> roster, UserConfig user) {
+        String deliveryProblem=problem(stage,chosen,roster);
+        if(deliveryProblem!=null || chosen==null || user==null)return deliveryProblem;
+        String effort=effortByStage.get(stageKey(stage));
+        if(effort==null)return null;
+        Profile effective=adapt(stage,chosen,roster);
+        var capabilities=new dev.warden.execution.EffortCapabilities(user.home(),user);
+        var levels=capabilities.levels(effective);
+        boolean known=!levels.isEmpty() || "model_catalog".equals(capabilities.describe(effective).get("source"));
+        return known && !levels.contains(effort)?"effort "+effort+" is unsupported for "+effective.model()+"; supported: "+levels:null;
+    }
+
     /**
      * Whether a declared effort would reach the vendor, by exactly the rules
      * {@link Profile#parse} applies to a profile that declares one on disk.
@@ -207,15 +220,19 @@ public final class RunOverride {
     private static boolean effortReaches(Profile profile, String effort) {
         if (!effort.matches("[a-z][a-z0-9_-]*")) return false;
         return switch (profile.runner()) {
-            case "local", "api" -> false;
+            case "local" -> false;
+            case "api" -> dev.warden.execution.EffortCapabilities.problem(profile.withEffort(effort))==null;
             case "orca" -> profile.model() != null && !profile.model().isBlank();
-            default -> profile.args().stream().anyMatch(argument -> argument.contains("{{effort}}"));
+            default -> "opencode".equals(profile.harness())?
+                    dev.warden.execution.EffortCapabilities.problem(profile.withEffort(effort))==null:
+                    profile.args().stream().anyMatch(argument -> argument.contains("{{effort}}"));
         };
     }
 
     private static String effortRefusal(String stage, Profile profile, String effort) {
         String why = switch (profile.runner()) {
-            case "local", "api" -> "HTTP text runners cannot carry an effort level";
+            case "local" -> "this HTTP text runner cannot carry an effort level";
+            case "api" -> "the current model catalog does not authorize this exact API effort";
             case "orca" -> "runner: orca needs an explicit model before an effort means anything";
             default -> "profile '" + profile.name() + "' has no {{effort}} in its args, so the "
                     + "level would be recorded and never sent";

@@ -41,12 +41,13 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
         Path home = Files.createTempDirectory("warden-verified-opencode-");
         AtomicInteger hits = new AtomicInteger();
         AtomicReference<String> served = new AtomicReference<>(MODEL);
+        AtomicReference<Map<String,Object>> posted = new AtomicReference<>();
         HttpServer upstream = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         upstream.createContext(
                 "/v1/chat/completions",
                 exchange -> {
                     hits.incrementAndGet();
-                    exchange.getRequestBody().readAllBytes();
+                    posted.set(Json.parseObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
                     byte[] bytes =
                             Json.write(
                                             Map.of(
@@ -192,6 +193,22 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                     admitted.verified());
             var normalAccepted = normal.execute(request(home, admitted, "ordinary"));
             check.that("ordinary dispatch uses the same verified runtime", normalAccepted.ok());
+
+            Files.createDirectories(home.resolve("vendors"));
+            Files.writeString(home.resolve("vendors/api-local-catalog.json"), Json.write(Map.of(
+                    "status", "available", "configuration", connection.fingerprint(), "source", "loopback fixture",
+                    "fetched_at", "2026-10-29T00:00:00Z", "models", List.of(Map.of("id", MODEL,
+                            "efforts", List.of("low", "medium", "high"), "effort_delivery", "openrouter_reasoning")))));
+            // This is the real verified executor and a fixture child, not just the relay seam.
+            var effortAccepted = probe.execute(request(home, profile.withEffort("medium"), "effort"));
+            check.that("verified executor supports registered effort", effortAccepted.ok());
+            check.eq("verified executor sends effort in actual upstream HTTP", Map.of("effort", "medium"), posted.get().get("reasoning"));
+            check.eq("verified executor keeps transmission evidence", "medium", effortAccepted.evidence().get("effort_transmitted"));
+            check.eq("verified executor does not fabricate provider confirmation", "not_reported_by_provider", effortAccepted.evidence().get("effort_verification"));
+            int beforeUnsupported = hits.get();
+            var unsupportedEffort = probe.execute(request(home, profile.withEffort("ultra"), "unsupported-effort"));
+            check.eq("unsupported coding effort fails before tools or HTTP", "role_effort_unsupported", unsupportedEffort.code());
+            check.eq("unsupported coding effort spends no HTTP", beforeUnsupported, hits.get());
 
             served.set("z-ai/substituted-model");
             var mismatch = probe.execute(request(home, profile, "mismatch"));

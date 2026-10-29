@@ -12,6 +12,7 @@ public final class TestMain {
         List<Suite> suites = List.of(
                 new dev.warden.JsonTest(),
                 new dev.warden.JsonFileTest(),
+                new dev.warden.execution.EffortCapabilitiesTest(),
                 new dev.warden.FindingsTest(),
                 new dev.warden.SchemaTest(),
                 new dev.warden.YamlTest(),
@@ -76,6 +77,7 @@ public final class TestMain {
                 new dev.warden.DashboardConnectionsTest(),
                 new dev.warden.ApiExecutorTest(),
                 new dev.warden.execution.ApiResilienceTest(),
+                new dev.warden.execution.ApiEffortTransportTest(),
                 new dev.warden.ApiConfigTest(),
                 new dev.warden.ApiFallbackTest(),
                 new dev.warden.ApiFallbackLoopTest(),

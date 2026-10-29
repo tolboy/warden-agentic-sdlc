@@ -92,12 +92,12 @@ public final class ApiFallbackTest implements Suite {
             check.eq("exactly one successor is used for " + code,
                     List.of("primary", "backup-one"), calls.profiles);
         }
-        for (String code : List.of("role_api_auth_invalid", "role_api_model_mismatch",
+        for (String code : List.of("role_api_auth_invalid", "role_api_model_mismatch", "role_api_effort_mismatch",
                 "role_api_profile_changed", "role_api_output_truncated", "role_api_protocol_error",
                 "role_api_interrupted", "role_api_model_identity_unknown", "role_api_connection_disabled",
                 "role_api_artifact_failure", "role_api_response_unreadable", "role_api_request_invalid",
                 "role_artifact_unparseable", "role_artifact_incomplete",
-                "role_artifact_schema_violation", "role_harness_process_failed")) {
+                "role_artifact_schema_violation", "role_harness_process_failed", "role_effort_unsupported")) {
             Calls calls = new Calls(Map.of("primary", code));
             var result = f.run("forbidden-" + index++, calls, new Gate(3));
             check.eq("unsafe API failure is retained: " + code, code, result.code());

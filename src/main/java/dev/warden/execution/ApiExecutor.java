@@ -73,7 +73,10 @@ public final class ApiExecutor implements RoleExecutor {
         Map<String, Object> evidence = new LinkedHashMap<>();
         evidence.put("runner", "api");
         evidence.put("vendor_turn_started", false);
+        ApiEffort.initialize(profile.effort(), evidence);
         if (connection == null) return failure("role_api_connection_missing", started, "", evidence);
+        String effortProblem = EffortCapabilities.problem(profile);
+        if (effortProblem != null) return failure(effortProblem, started, "", evidence);
         String dispatchedFingerprint = profile.apiFingerprint();
         if (profile.apiSettings().verificationFingerprint() != null
                 && !profile.apiSettings().verificationFingerprint().equals(dispatchedFingerprint)) {
@@ -119,6 +122,7 @@ public final class ApiExecutor implements RoleExecutor {
         }
         evidence.put("max_output_tokens", (long) outputLimit);
         Map<String, Object> body = completionBody(connection, profile.model(), prompt, outputLimit);
+        ApiEffort.apply(profile.effort(), body);
         String before = profile.readOnly() && git != null && request.diffBaseCommit() != null
                 ? git.fingerprint(request.diffBaseCommit()) : null;
         Duration limit = timeoutOverride != null ? timeoutOverride
@@ -130,6 +134,7 @@ public final class ApiExecutor implements RoleExecutor {
                 ApiRetry.correlation(request.runId(), profile.name(), request.role(),
                         request.evidenceName()));
         sent.record(evidence);
+        ApiEffort.sent(profile.effort(), sent.reply() != null, sent.nothingSent(), evidence);
         if (sent.failure() != null) {
             // A call that provably never left this machine spent nothing; the budget gives it back.
             if (sent.nothingSent()) evidence.put("vendor_turn_started", false);
@@ -149,7 +154,12 @@ public final class ApiExecutor implements RoleExecutor {
             safe = Json.write(envelope);
         }
         recordReceipt(connection, envelope, reply.headers(), evidence, token);
+        boolean effortMatches = ApiEffort.reported(profile.effort(), envelope, evidence);
         sent.settleCost(evidence);
+        if (!effortMatches) {
+            persist(request, safe, evidence);
+            return failure("role_api_effort_mismatch", started, safe, evidence);
+        }
         if (!dispatchedFingerprint.equals(profile.apiFingerprint())) {
             persist(request, safe, evidence);
             return failure("role_api_profile_changed", started, safe, evidence);
@@ -489,7 +499,7 @@ public final class ApiExecutor implements RoleExecutor {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, Object> sanitizedObject(Map<String, Object> value, String token) {
+    static Map<String, Object> sanitizedObject(Map<String, Object> value, String token) {
         return (Map<String, Object>) sanitize(value, token, 0);
     }
 

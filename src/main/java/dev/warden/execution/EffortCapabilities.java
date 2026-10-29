@@ -33,8 +33,14 @@ public final class EffortCapabilities {
             var catalog = catalogs.computeIfAbsent(VendorSettingsService.displayVendorId(profile),
                     id -> Optional.ofNullable(VendorSettingsService.catalogEfforts(home, user, profile)));
             var listed = catalog.map(models -> models.levels().get(model)).orElse(null);
-            if (listed != null) return ordered(listed);
+            if (listed != null) {
+                if (profile.connectionRef()!=null && !"openrouter_reasoning".equals(
+                        catalog.map(c -> c.deliveries().get(model)).orElse(null))) return List.of();
+                var offered=ordered(listed);
+                return profile.connectionRef()==null?offered:offered.stream().filter(API_LEVELS::contains).toList();
+            }
         }
+        if(profile.connectionRef()!=null)return List.of();
         return builtIn(profile, model);
     }
 
@@ -46,7 +52,8 @@ public final class EffortCapabilities {
         var levels=levels(profile);
         var result=new LinkedHashMap<String,Object>();
         result.put("levels",levels);
-        result.put("delivery",!launchBound(profile)?"unsupported":
+        result.put("delivery",!launchBound(profile)?"unsupported":profile.connectionRef()!=null?
+                levels.isEmpty()?"unsupported":"openrouter_reasoning":
                 "orca".equals(profile.runner())?"orca_launch_setting":"cli_argument_template");
         var catalog=profile==null?null:catalogs.get(VendorSettingsService.displayVendorId(profile));
         var entry=catalog==null?null:catalog.orElse(null);
@@ -65,14 +72,34 @@ public final class EffortCapabilities {
     public void require(Profile old, String model, String effort, boolean effortChanged) {
         if (effort == null) return;
         var levels = levels(old, model);
-        if (levels.isEmpty() ? effortChanged : !levels.contains(effort))
+        if (profileTransport(old) ? !levels.contains(effort) : levels.isEmpty() ? effortChanged : !levels.contains(effort))
             throw new Unsupported("effort " + effort + " is not offered for " + model + "; supported: " + levels);
     }
 
     static boolean launchBound(Profile profile) {
-        if (profile == null || profile.harness() != null) return false;
+        if (profile == null) return false;
+        if(profileTransport(profile))return true;
+        if(profile.harness()!=null)return false;
         return "orca".equals(profile.runner())
                 || ("direct".equals(profile.runner()) && profile.args().stream().anyMatch(a -> a.contains("{{effort}}")));
+    }
+
+    public static final List<String> API_LEVELS=List.of("none","minimal","low","medium","high","xhigh","max");
+    private static boolean profileTransport(Profile profile){
+        return "api".equals(profile.runner()) || "opencode".equals(profile.harness());
+    }
+    /** Executable admission uses the same current model/connection catalog as routing and settings. */
+    public String transportProblem(Profile profile){
+        return profile.effort()==null || !profileTransport(profile) || levels(profile).contains(profile.effort())
+                ? null : "role_effort_unsupported";
+    }
+    public static String problem(Profile profile){
+        if(profile==null || profile.effort()==null || !profileTransport(profile))return null;
+        try {
+            if(profile.apiSettings()==null || profile.apiSettings().home()==null)return "role_effort_unsupported";
+            Path home=profile.apiSettings().home();
+            return new EffortCapabilities(home,UserConfig.load(home)).transportProblem(profile);
+        } catch(Exception unavailable){return "role_effort_unsupported";}
     }
 
     /** Conservative table used only while no catalog lists the model. */

@@ -833,6 +833,55 @@ public final class HomeCorpusTest implements Suite {
         Map<String, Object> projectedRequested = (Map<String, Object>) projectedModel.get("requested");
         check.eq("the allowlist keeps model.requested.source", "profile",
                 projectedRequested.get("source"));
+
+        Map<String, Object> sent = new LinkedHashMap<>(first);
+        Map<String, Object> effortEvidence = Map.of("effort_requested", "low", "effort_transmitted", "low",
+                "effort_delivery", "cli_argument_template", "effort_transmission", "sent",
+                "effort_verification", "not_reported_by_provider");
+        sent.putAll(effortEvidence);
+        Map<String, Object> relayResponse = new LinkedHashMap<>(effortEvidence);
+        relayResponse.put("body", "PRIVATE_SOURCE_CODE");
+        relayResponse.put("usage", Map.of("prompt", "PRIVATE_SOURCE_CODE"));
+        Map<String, Object> relay = Map.of("requests", 1L, "responses", List.of(relayResponse));
+        sent.put("relay", relay);
+        Map<String, Object> attempted = new LinkedHashMap<>(effortEvidence);
+        attempted.put("relay", relay);
+        sent.put("vendor_attempts", List.of(attempted));
+        Map<String, Object> capabilities = Map.of("levels", List.of("low", "high"),
+                "delivery", "openrouter_reasoning", "source", "model_catalog",
+                "source_description", "provider_models_endpoint", "observed_at", "2026-10-29T00:00:00Z",
+                "provider_confirmed", false, "prompt", "PRIVATE_SOURCE_CODE");
+        sent.put("task_routing", Map.of("stage_capabilities", List.of(Map.of("stage", "implement",
+                "profile", "writer", "model", "fixture-model", "configured_effort", "low",
+                "effort_capabilities", capabilities)), "policy_file", "/private/path/policy.yaml",
+                "questions", Map.of("goal", "PRIVATE_SOURCE_CODE")));
+        var result = new dev.warden.execution.RoleExecutor.Result(true, "ok", java.time.Duration.ZERO,
+                "", null, effortEvidence);
+        sent.put("measurement_context", dev.warden.ledger.MeasurementContext.withReported(
+                object(first.get("measurement_context")), result));
+        Map<String, Object> measured = MeasurementProjector.project(sent).body();
+        check.eq("projection keeps transmitted effort", "low", measured.get("effort_transmitted"));
+        check.eq("projection keeps effort transmission status", "sent", measured.get("effort_transmission"));
+        check.eq("projection keeps lack of provider confirmation", "not_reported_by_provider", measured.get("effort_verification"));
+        Map<?, ?> attempt = (Map<?, ?>) ((List<?>) measured.get("vendor_attempts")).get(0);
+        check.eq("projection keeps per-attempt transmitted effort", "low", attempt.get("effort_transmitted"));
+        Map<?, ?> measuredEffort = (Map<?, ?>) ((Map<?, ?>) measured.get("measurement_context")).get("effort");
+        check.eq("projection preserves effort.transmitted separately", "low", ((Map<?, ?>) measuredEffort.get("transmitted")).get("value"));
+        check.eq("transmission does not fill unknown effective effort", null, ((Map<?, ?>) measuredEffort.get("effective")).get("value"));
+        check.eq("transmission does not fill unknown provider effort", null, ((Map<?, ?>) measuredEffort.get("reported")).get("value"));
+        Map<?, ?> measuredRelay = (Map<?, ?>) measured.get("relay");
+        Map<?, ?> measuredResponse = (Map<?, ?>) ((List<?>) measuredRelay.get("responses")).get(0);
+        check.eq("relay preserves the actual per-turn effort", "low", measuredResponse.get("effort_transmitted"));
+        Map<?, ?> routing = (Map<?, ?>) measured.get("task_routing");
+        Map<?, ?> stageCapability = (Map<?, ?>) ((List<?>) routing.get("stage_capabilities")).get(0);
+        Map<?, ?> safeCapability = (Map<?, ?>) stageCapability.get("effort_capabilities");
+        check.eq("capability model is retained for comparison", "fixture-model", stageCapability.get("model"));
+        check.eq("capability levels survive projection", List.of("low", "high"), safeCapability.get("levels"));
+        check.eq("capability source survives projection", "provider_models_endpoint", safeCapability.get("source_description"));
+        check.eq("capability observation date survives projection", "2026-10-29T00:00:00Z", safeCapability.get("observed_at"));
+        check.eq("catalog provenance does not become confirmation", false, safeCapability.get("provider_confirmed"));
+        check.that("new relay and routing projections exclude provider bodies, questions and paths",
+                !Json.write(measured).contains("PRIVATE_SOURCE_CODE") && !Json.write(measured).contains("/private/path"));
     }
 
     private void localLedgerUnchanged(Check check, Path sandbox) throws Exception {

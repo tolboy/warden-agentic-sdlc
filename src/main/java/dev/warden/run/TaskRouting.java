@@ -74,7 +74,7 @@ public interface TaskRouting {
                     effort=applyRiskFloor(effort,task.risk(),supportedEfforts(capabilities.levels(entry.getValue().profile())));
                     if(effort==null){uncertain.add(entry.getValue().stage());continue;}
                     var proposed=new RunOverride(Map.of(),Map.of(entry.getValue().stage(),effort),Map.of());
-                    if(proposed.problem(entry.getValue().stage(),entry.getValue().profile(),user.profiles())==null){
+                    if(proposed.problem(entry.getValue().stage(),entry.getValue().profile(),user.profiles(),user)==null){
                         efforts.put(entry.getValue().stage(),effort);
                         var warning=effortWarning(entry.getValue().stage(),entry.getValue().profile(),effort,supportedEfforts(capabilities.levels(entry.getValue().profile())));
                         if(warning!=null)warnings.add(warning);
@@ -129,9 +129,20 @@ public interface TaskRouting {
         }
         return kept;
     }
-    private static String chooseEffort(Map<String,Object> answer,double threshold,List<String> levels){
-        var probabilities=(Map<?,?>)answer.get("probabilities");
-        double bestBand=0;
+    /** Select from a validated distribution; public so saved calibration samples use production logic. */
+    public static String chooseEffort(Map<String,Object> answer,double threshold,List<String> levels){
+        if(levels==null || levels.isEmpty() || new HashSet<>(levels).size()!=levels.size()
+                || answer==null || !Double.isFinite(threshold) || threshold<0 || threshold>1
+                || !(answer.get("probabilities") instanceof Map<?,?> probabilities))return null;
+        if(!probabilities.keySet().equals(new HashSet<>(levels)))return null;
+        double sum=0;
+        for(String level:levels){
+            if(!(probabilities.get(level) instanceof Number value) || !Double.isFinite(value.doubleValue())
+                    || value.doubleValue()<0 || value.doubleValue()>1)return null;
+            sum+=value.doubleValue();
+        }
+        if(Math.abs(sum-1)>0.02)return null;
+        double bestBand=((Number)probabilities.get(levels.get(0))).doubleValue();
         for(int index=0;index<levels.size()-1;index++)bestBand=Math.max(bestBand,
                 ((Number)probabilities.get(levels.get(index))).doubleValue()+((Number)probabilities.get(levels.get(index+1))).doubleValue());
         if(bestBand+1e-9<threshold)return null;

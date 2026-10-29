@@ -237,6 +237,9 @@ public final class RoleResolver {
                 continue;
             }
             // Legacy offline contracts and stale capability receipts cannot enable a harness.
+            if(dev.warden.execution.EffortCapabilities.problem(profile)!=null){
+                verdicts.add(new Candidate(name,"role_effort_unsupported",null)); continue;
+            }
             if (profile.harness() != null && !profile.verified()) {
                 verdicts.add(new Candidate(name, "harness_coding_unproven", null));
                 continue;

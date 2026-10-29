@@ -61,6 +61,9 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
         evidence.put("strict_budget", false);
         evidence.put("cost_status", "unknown");
         evidence.put("billing_confirmed", false);
+        ApiEffort.initialize(profile.effort(), evidence);
+        String effortProblem = EffortCapabilities.problem(profile);
+        if (effortProblem != null) return fail(effortProblem, started, evidence, "");
         if (!"implementer".equals(profile.role())
                 || profile.readOnly()
                 || !profile.enforceSchema()
@@ -166,7 +169,8 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
                         secret,
                         limit,
                         requestLimit,
-                        outputLimit)) {
+                        outputLimit,
+                        profile.effort())) {
             env.put("WARDEN_PROBE_RELAY_KEY", relay.bearer());
             env.put(
                     "OPENCODE_CONFIG_CONTENT",
@@ -246,10 +250,13 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             relay.close();
             String safe = persist(request, "run", run, secret, relay.bearer());
             Map<String, Object> observed = relay.evidence();
+            ApiEffort.copy(observed, evidence);
             evidence.put("relay", observed);
             evidence.put("process_exit", run.exitCode());
             evidence.put("timed_out", run.timedOut());
             evidence.put("tokens", usage(observed));
+            if ("probe_served_effort_mismatch".equals(observed.get("failure")))
+                return fail("role_api_effort_mismatch", started, evidence, safe);
             if (run.timedOut()) return fail("role_timeout", started, evidence, safe);
             if (!run.ok() || run.stdoutTruncated() || run.stderrTruncated())
                 return fail(processFailure(observed), started, evidence, safe);
@@ -399,6 +406,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
         Object failure = relay == null ? null : relay.get("failure");
         if (failure instanceof String code) {
             if (code.startsWith("role_api_")) return code;
+            if (code.equals("probe_served_effort_mismatch")) return "role_api_effort_mismatch";
             if (code.equals("probe_upstream_http_429")) return "role_api_rate_limited";
             if (code.startsWith("probe_upstream_http_5")) return "role_api_provider_error";
             // The relay's own bounds, not a broken harness: say which one ran out.

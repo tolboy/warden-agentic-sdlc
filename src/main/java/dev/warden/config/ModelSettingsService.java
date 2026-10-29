@@ -55,6 +55,7 @@ public final class ModelSettingsService {
             row.put("vendor_id", dev.warden.execution.VendorSettingsService.displayVendorId(profile));
             // One capability list for the UI, save validation and the router (EffortCapabilities).
             row.put("efforts", capabilities.levels(profile));
+            row.put("effort_capabilities",capabilities.describe(profile));
             var byModel = new LinkedHashMap<String, List<String>>();
             for (String model : catalogModels.getOrDefault(dev.warden.execution.VendorSettingsService.displayVendorId(profile), List.of())) {
                 var levels = capabilities.levels(profile, model); if (!levels.isEmpty()) byModel.put(model, levels);
@@ -257,13 +258,16 @@ public final class ModelSettingsService {
             }
             String finalEffort = payload.get("effort") instanceof String effort && !effort.isBlank() ? effort : old.effort();
             boolean effortChanged = !java.util.Objects.equals(finalEffort, old.effort());
-            if (effortChanged || !java.util.Objects.equals(old.model(), model))
-                new dev.warden.execution.EffortCapabilities(home, user).require(old, model, finalEffort, effortChanged);
             if (old.connectionRef() != null) {
                 String connection = text(payload, "connection");
                 if (!user.connections().containsKey(connection)) throw new Invalid();
                 yaml = replaceValue(yaml, List.of("connection"), Json.write(connection));
                 yaml = replaceValue(yaml, List.of("model_vendor"), Json.write(text(payload, "vendor")));
+            }
+            if (effortChanged || !java.util.Objects.equals(old.model(), model) || old.connectionRef()!=null) {
+                Profile capabilityProfile=old.connectionRef()==null?old:Profile.parse(yaml,"settings")
+                        .withConnection(user.connections().get(text(payload,"connection")),home);
+                new dev.warden.execution.EffortCapabilities(home,user).require(capabilityProfile,model,finalEffort,effortChanged);
             }
             // Every edit invalidates the old probe. A ping cannot recreate this stamp.
             if (yaml.lines().anyMatch(line -> line.startsWith("verification:"))) {
@@ -285,8 +289,13 @@ public final class ModelSettingsService {
                     + "\nprompt_template: prompts/" + kind + ".md\njson_schema: schemas/" + kind + ".json\nenforce_schema: true\n"
                     + "limits:\n  wall_clock_minutes: 4\n  max_output_tokens: 2048\nverification:\n  status: unverified\n";
         }
+        if (payload.get("effort") instanceof String selected && !selected.isBlank())
+            yaml=replaceValue(yaml,List.of("effort"),Json.write(selected));
         Profile next = Profile.parse(yaml, file.toString());
-        if (next.connectionRef() != null) next.withConnection(user.connections().get(next.connectionRef()), home);
+        if (next.connectionRef() != null) {
+            next=next.withConnection(user.connections().get(next.connectionRef()), home);
+            new dev.warden.execution.EffortCapabilities(home,user).require(next,next.model(),next.effort(),true);
+        }
         if (next.verified()) throw new Invalid();
         ModelCheck.atomicWrite(file, yaml);
     }

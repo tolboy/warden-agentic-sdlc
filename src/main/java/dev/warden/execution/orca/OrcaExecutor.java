@@ -74,6 +74,11 @@ public final class OrcaExecutor implements RoleExecutor {
         evidence.put("vendor", profile.vendor());
         evidence.put("model", profile.model());
         evidence.put("effort_requested", profile.effort());
+        evidence.put("effort_transmitted", null);
+        evidence.put("effort_reported", null);
+        evidence.put("effort_delivery", "orca_launch_setting");
+        evidence.put("effort_transmission", profile.effort() == null ? "not_requested" : "not_sent");
+        evidence.put("effort_verification", "not_reported_by_provider");
         evidence.put("launch_contract", OrcaLaunch.contract(profile));
         evidence.put("read_only", profile.readOnly());
         evidence.put("agent", profile.command());
@@ -193,6 +198,7 @@ public final class OrcaExecutor implements RoleExecutor {
                 evidence.put("resolution", "Cannot verify the existing dispatch launch options; retained without starting another worker");
                 return fail("role_orca_launch_unverified", evidence, Duration.ZERO, "");
             }
+            recordEffortTransmission(profile, evidence);
             // A controller that died while waiting on an unobserved start leaves the worker in
             // start_unknown; the one that attaches keeps watching it the same way.
             if ("start_unknown".equals(OrcaSettlement.workerState(launchProbe.envelope()))) {
@@ -375,6 +381,7 @@ public final class OrcaExecutor implements RoleExecutor {
                 return fail("role_orca_timeout", evidence,
                         Duration.ofMinutes(profile.wallClockMinutes()), "");
             }
+            if (profile.effort() != null) evidence.put("effort_transmission", "unknown");
             started = orca.invoke(request.projectRoot(),
                     startBudget.compareTo(START_TIMEOUT) < 0 ? startBudget : START_TIMEOUT, startArgs);
             evidence.put("worker_start_ok", started.ok());
@@ -464,6 +471,7 @@ public final class OrcaExecutor implements RoleExecutor {
                         + "Inspect launch evidence and the dispatch; no result from it is accepted");
                 return fail(code, evidence, elapsed(deadline, profile), launchReceipt.stdout());
             }
+            recordEffortTransmission(profile, evidence);
             try {
                 lifecycle.mutate(OrcaLifecycle.of(snapshot -> snapshot.worker(workerKey)
                         .map(worker -> snapshot.withWorker(worker.withLaunch(
@@ -1241,5 +1249,13 @@ public final class OrcaExecutor implements RoleExecutor {
     private static String tail(String text, int limit) {
         if (text == null) return "";
         return text.length() <= limit ? text : text.substring(text.length() - limit);
+    }
+
+    /** A matching Orca launch receipt proves delivery to the worker, not provider execution. */
+    private static void recordEffortTransmission(Profile profile, Map<String, Object> evidence) {
+        if (profile.effort() != null) {
+            evidence.put("effort_transmitted", profile.effort());
+            evidence.put("effort_transmission", "sent");
+        }
     }
 }

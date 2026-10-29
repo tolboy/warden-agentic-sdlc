@@ -45,7 +45,8 @@ public final class MeasurementProjector {
             "vendor_attempt", "vendor_attempt_id", "candidate_fingerprint",
             "ok", "code", "reason", "next_action", "verdict",
             "profile", "vendor", "model", "model_requested", "model_reported", "runner",
-            "effort_requested", "read_only", "strategy", "independence_required",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification", "read_only", "strategy", "independence_required",
             "rotation_counter", "workflow_run_id",
             "duration_millis", "duration_ms", "cost_usd", "attempts_cost_usd", "budget_charged",
             "tokens", "num_turns", "timed_out", "exit_code", "stop_reason",
@@ -58,7 +59,7 @@ public final class MeasurementProjector {
             "role_code", "policy_setting", "api_fallback_profiles",
             "failed_over_from", "exhausted_profiles", "role_failovers",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
-            "vendor_unavailable",
+            "vendor_unavailable", "relay", "task_routing", "stage_capabilities",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
             "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
             "reservation_matched_contract", "plan_review",
@@ -83,7 +84,7 @@ public final class MeasurementProjector {
 
     private static final Set<String> LABEL = Set.of("value", "source");
 
-    private static final Set<String> TRIPLE = Set.of("requested", "effective", "reported");
+    private static final Set<String> TRIPLE = Set.of("requested", "effective", "reported", "transmitted");
 
     private static final Set<String> CONTEXT = Set.of(
             "schema_version", "warden_version", "adapter_version",
@@ -96,9 +97,29 @@ public final class MeasurementProjector {
 
     private static final Set<String> ATTEMPT = Set.of(
             "attempt", "profile", "vendor", "runner", "model", "model_requested", "model_reported",
-            "effort_requested", "ok", "code", "duration_millis", "duration_ms",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification", "ok", "code", "duration_millis", "duration_ms",
             "cost_usd", "tokens", "inherited_unfinished_work", "budget_charged",
-            "vendor_attempt_id");
+            "vendor_attempt_id", "relay");
+
+    private static final Set<String> RELAY = Set.of(
+            "requests", "responses", "identity_confirmed", "cost_status",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification");
+
+    private static final Set<String> RELAY_RESPONSE = Set.of(
+            "model", "finish_reason", "effort_requested", "effort_transmitted", "effort_reported",
+            "effort_delivery", "effort_transmission", "effort_verification");
+
+    private static final Set<String> ROUTING = Set.of(
+            "ok", "code", "mode", "classifier", "policy_hash", "stage_capabilities",
+            "roles_changed", "effort_policy", "fallback");
+
+    private static final Set<String> STAGE_CAPABILITY = Set.of(
+            "stage", "role", "profile", "model", "configured_effort", "effort_capabilities");
+
+    private static final Set<String> EFFORT_CAPABILITY = Set.of(
+            "levels", "delivery", "source", "source_description", "observed_at", "provider_confirmed");
 
     private static final Set<String> FINDING = Set.of(
             "id", "severity", "status", "stage", "supersedes", "closed",
@@ -184,6 +205,11 @@ public final class MeasurementProjector {
             Map.entry("role_contract", ROLE_CONTRACT),
             Map.entry("measurement_context", CONTEXT),
             Map.entry("vendor_attempts", ATTEMPT),
+            Map.entry("relay", RELAY),
+            Map.entry("responses", RELAY_RESPONSE),
+            Map.entry("task_routing", ROUTING),
+            Map.entry("stage_capabilities", STAGE_CAPABILITY),
+            Map.entry("effort_capabilities", EFFORT_CAPABILITY),
             Map.entry("findings", FINDING),
             Map.entry("finding_registry", FINDING),
             Map.entry("finding_history", FINDING_HISTORY),
@@ -216,7 +242,8 @@ public final class MeasurementProjector {
             Map.entry("effort", TRIPLE),
             Map.entry("requested", LABEL),
             Map.entry("effective", LABEL),
-            Map.entry("reported", LABEL));
+            Map.entry("reported", LABEL),
+            Map.entry("transmitted", LABEL));
 
     public record Projection(
             Map<String, Object> body,

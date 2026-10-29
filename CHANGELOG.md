@@ -22,6 +22,13 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Capability-driven effort for catalog-admitted API and verified OpenCode profiles, with exact
+  per-request delivery and separate requested/transmitted/provider-reported receipts. Settings,
+  Jev and explicit run overrides share known model constraints. Fresh OpenRouter DeepSeek API
+  and real OpenCode verification passed with low; provider effort confirmation was not supplied.
+  Stage 4 includes six live Jev calibration samples and retains the configurable 0.6 threshold
+  provisionally. Preparatory planning keeps its explicit effort settings.
+
 - Explicit ordered API role fallback through `roles.<role>.api_fallback_profiles`, bounded by
   the existing failure policy, switch limit and task budget. Transient network, timeout,
   rate-limit and provider failures can select only listed, admitted profiles; auth, identity,

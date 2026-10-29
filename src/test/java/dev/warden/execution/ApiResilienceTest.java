@@ -252,7 +252,7 @@ public final class ApiResilienceTest implements Suite {
             check.eq("role invalid JSON: parse phase", "parse", result.evidence().get("failure_phase"));
         }
         for (String code : List.of("role_api_network_error", "role_api_timeout", "role_api_provider_error",
-                "role_api_rate_limited", "role_api_output_truncated", "role_api_model_mismatch")) {
+                "role_api_rate_limited", "role_api_output_truncated", "role_api_model_mismatch", "role_api_effort_mismatch")) {
             check.that("an API transport failure is not a verdict on the work: " + code,
                     dev.warden.run.TaskLoop.infrastructureReason(code) != null);
         }

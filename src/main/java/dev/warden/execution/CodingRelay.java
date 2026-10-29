@@ -33,6 +33,9 @@ final class CodingRelay implements AutoCloseable {
     private final Map<String, String> calls = new HashMap<>();
     private final Set<String> observedTools = new TreeSet<>();
     private final List<Map<String, Object>> upstreamAttempts = new ArrayList<>();
+    private final String effort;
+    private final Map<String,Object> effortReceipt = new LinkedHashMap<>();
+    private boolean allEffortsReported = true;
     private String failure;
     private Map<String, Object> failureDetail;
     private int turns;
@@ -75,6 +78,11 @@ final class CodingRelay implements AutoCloseable {
             int maxRequests,
             int maxOutputTokens)
             throws IOException {
+        this(connection, model, secret, limit, maxRequests, maxOutputTokens, null);
+    }
+
+    CodingRelay(Connection connection, String model, String secret, Duration limit,
+                int maxRequests, int maxOutputTokens, String effort) throws IOException {
         if (maxRequests < 1 || maxRequests > dev.warden.config.CodingAttestation.REQUEST_CEILING
                 || maxOutputTokens < 1 || maxOutputTokens > dev.warden.config.CodingAttestation.OUTPUT_CEILING)
             throw new IllegalArgumentException("unsupported coding relay limits");
@@ -83,6 +91,8 @@ final class CodingRelay implements AutoCloseable {
         this.connection = connection;
         this.model = model;
         this.secret = secret;
+        this.effort = effort;
+        ApiEffort.initialize(effort, effortReceipt);
         deadline = System.nanoTime() + limit.toNanos();
         byte[] random = new byte[24];
         new SecureRandom().nextBytes(random);
@@ -111,6 +121,12 @@ final class CodingRelay implements AutoCloseable {
                 failure == null && !receipts.isEmpty() && receipts.size() == turns);
         result.put("cost_status", "provider_usage_recorded_no_strict_cap");
         result.put("upstream_attempts", List.copyOf(upstreamAttempts));
+        ApiEffort.copy(effortReceipt, result);
+        if (failure != null && !"probe_served_effort_mismatch".equals(failure)) {
+            // Earlier confirmed responses do not confirm the failed/incomplete dispatch.
+            result.put("effort_reported", null);
+            result.put("effort_verification", "not_reported_by_provider");
+        }
         if (failure != null) result.put("failure", failure);
         if (failureDetail != null) result.put("failure_detail", failureDetail);
         return sanitizedMap(result);
@@ -199,6 +215,8 @@ final class CodingRelay implements AutoCloseable {
             body.put("n", 1);
             body.put("stream", false);
             body.put("max_tokens", maxOutputTokens);
+            // Warden owns this setting. Harness-provided reasoning fields were not projected.
+            ApiEffort.apply(effort, body);
             if ("openrouter".equals(connection.provider()))
                 body.put("provider", Map.of("require_parameters", true, "allow_fallbacks", false));
             long remaining = deadline - System.nanoTime();
@@ -208,6 +226,8 @@ final class CodingRelay implements AutoCloseable {
                 return;
             }
             turns++;
+            effortReceipt.put("effort_reported", null);
+            effortReceipt.put("effort_verification", "not_reported_by_provider");
             // Resent only when the request provably never left this machine. OpenCode applies
             // a tool call only from a response this relay forwarded, and nothing is forwarded
             // until one upstream attempt answered completely, so a resend can never deliver
@@ -225,6 +245,7 @@ final class CodingRelay implements AutoCloseable {
                             sleeper,
                             ApiRetry.correlation(null, null, "implementer", "relay-turn-" + turns));
             upstreamAttempts.addAll(sent.attempts());
+            ApiEffort.sent(effort, sent.reply() != null, sent.nothingSent(), effortReceipt);
             if (sent.failure() != null) throw sent.failure();
             ApiExecutor.HttpReply reply = sent.reply();
             if (reply.status() != 200) {
@@ -243,6 +264,23 @@ final class CodingRelay implements AutoCloseable {
                 failure = "probe_served_model_mismatch";
                 send(exchange, 502, "application/json", "{}");
                 return;
+            }
+            var turnEffort = new LinkedHashMap<String,Object>();
+            ApiEffort.initialize(effort, turnEffort);
+            if (!ApiEffort.reported(effort, parsed, turnEffort)) {
+                ApiEffort.copy(turnEffort, effortReceipt);
+                ApiEffort.sent(effort, true, false, effortReceipt);
+                failure = "probe_served_effort_mismatch";
+                send(exchange, 502, "application/json", "{}");
+                return;
+            }
+            allEffortsReported &= turnEffort.get("effort_reported") != null;
+            if (allEffortsReported) {
+                effortReceipt.put("effort_reported", turnEffort.get("effort_reported"));
+                effortReceipt.put("effort_verification", turnEffort.get("effort_verification"));
+            } else {
+                effortReceipt.put("effort_reported", null);
+                effortReceipt.put("effort_verification", "not_reported_by_provider");
             }
             if (!(parsed.get("choices") instanceof List<?> choices)
                     || choices.size() != 1
@@ -263,6 +301,8 @@ final class CodingRelay implements AutoCloseable {
             receipt.put("finish_reason", finish);
             receipt.put("id", parsed.get("id"));
             receipt.put("usage", parsed.get("usage"));
+            ApiEffort.sent(effort, true, false, turnEffort);
+            ApiEffort.copy(turnEffort, receipt);
             receipts.add(receipt);
             Map<String, Object> delta = new LinkedHashMap<>();
             delta.put("role", "assistant");

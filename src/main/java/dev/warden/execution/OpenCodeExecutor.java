@@ -65,6 +65,8 @@ public final class OpenCodeExecutor implements RoleExecutor {
         long started = System.nanoTime();
         Profile profile = request.profile();
         Map<String, Object> evidence = baseEvidence(profile);
+        ApiEffort.initialize(profile.effort(), evidence);
+        if (profile.effort() != null) return failure("role_effort_unsupported", started, "", evidence);
         Connection connection = profile.apiConnection();
         if (connection == null) return failure("role_api_connection_missing", started, "", evidence);
         String stale = recheck(profile, connection);

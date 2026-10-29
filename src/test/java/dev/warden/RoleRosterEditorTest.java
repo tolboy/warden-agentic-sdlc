@@ -37,6 +37,12 @@ public final class RoleRosterEditorTest implements Suite {
         check.eq("capability source is recorded","model_catalog",described.get("source"));
         check.eq("catalog observation date is preserved","2026-10-29T00:00:00Z",described.get("observed_at"));
         check.eq("catalog support is not provider confirmation",false,described.get("provider_confirmed"));
+        var cliOverlay=new RunOverride(Map.of(),Map.of("review","ultra"),Map.of());
+        check.that("explicit CLI override respects known catalog levels",
+                cliOverlay.problem("review",user.profiles().get("primary"),user.profiles(),user)!=null);
+        var supportedOverlay=new RunOverride(Map.of(),Map.of("review","high"),Map.of());
+        check.eq("supported explicit CLI override retains priority",null,
+                supportedOverlay.problem("review",user.profiles().get("primary"),user.profiles(),user));
         var editor=new RoleRosterEditor(home);
         String originalPrimary=Files.readString(primary),originalReserve=Files.readString(reserve);
         var result=editor.apply(payload(policy,List.of(slot(reserve,"old-model","medium"),slot(primary,"old-model","medium"))));

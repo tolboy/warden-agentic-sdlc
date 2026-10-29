@@ -431,7 +431,7 @@ public record Profile(
             if (!effort.matches("[a-z][a-z0-9_-]*")) {
                 root.collector().add("effort must be a provider effort level, not a command or blank value");
             }
-            if (http) {
+            if ("local".equals(runner)) {
                 root.collector().add("runner: " + runner + " does not support effort; it cannot silently drop it");
             }
             if ("orca".equals(runner) && (model == null || model.isBlank())) {
@@ -574,7 +574,6 @@ public record Profile(
             if (maxCostUsd != null) {
                 root.collector().add("harness: opencode cannot prove a strict max_cost_usd bound");
             }
-            if (effort != null) root.collector().add("harness: opencode does not support effort");
             if (!"implementer".equals(role) && !readOnly) {
                 root.collector().add("harness: opencode allows writes only for role implementer");
             }

@@ -1716,6 +1716,10 @@ public final class RoleRunner {
         entry.put("runner", profile.runner());
         entry.put("effort_requested", profile.effort());
         entry.put("model_requested", profile.model());
+        for (String key : List.of("effort_transmitted", "effort_reported", "effort_delivery",
+                "effort_transmission", "effort_verification")) {
+            if (result.evidence().containsKey(key)) entry.put(key, result.evidence().get(key));
+        }
         if (result.evidence().containsKey("launch")) entry.put("launch", result.evidence().get("launch"));
         Object reportedModel = result.evidence().get("model_reported");
         if (reportedModel instanceof String value && !value.isBlank()) {

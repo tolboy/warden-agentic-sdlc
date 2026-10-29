@@ -46,6 +46,7 @@ public final class MeasurementContext {
                 profile.mcpConfig() == null ? "unknown" : "profile"));
         context.put("model", triple(profile.model(), "profile", null, "unknown", null, "unknown"));
         context.put("effort", triple(profile.effort(), "profile", null, "unknown", null, "unknown"));
+        map(context.get("effort")).put("transmitted", labelled(null, "unknown"));
         return context;
     }
 
@@ -63,6 +64,11 @@ public final class MeasurementContext {
         Object reportedEffort = first(evidence, "effort_reported");
         context.put("model", overlayTriple(map(context.get("model")), reportedModel, "vendor"));
         context.put("effort", overlayTriple(map(context.get("effort")), reportedEffort, "vendor"));
+        Map<String, Object> effort = map(context.get("effort"));
+        Object transmitted = evidence.get("effort_transmitted");
+        effort.put("transmitted", labelled("sent".equals(evidence.get("effort_transmission"))
+                ? transmitted : null, "sent".equals(evidence.get("effort_transmission"))
+                && transmitted != null ? String.valueOf(evidence.getOrDefault("effort_delivery", "adapter")) : "unknown"));
 
         Map<String, Object> launch = map(evidence.get("launch"));
         Map<String, Object> effective = map(launch.get("effective"));
