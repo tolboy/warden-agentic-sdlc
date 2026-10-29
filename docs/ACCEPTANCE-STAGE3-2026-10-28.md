@@ -2,7 +2,7 @@
 
 Branch `grok/acceptance-stage3` (from `grok/api-resilience-stage2`, 1c5d392). Test project
 `/workspace/hello-world-test` (base ec5566f), branches `stage3-loopA` (task `health-endpoint`)
-and `stage3-loopB` (task `version-endpoint`). Warden was run only through the box launcher. No run
+and `stage3-loopB` / `stage3-loopB2` (task `version-endpoint`). Warden was run only through the box launcher. No run
 was accepted and `warden accept` was never used. All times are CDT (UTC-5).
 
 ## Summary
@@ -11,15 +11,15 @@ was accepted and `warden accept` was never used. All times are CDT (UTC-5).
 | --- | --- | --- |
 | Jev routing | pass (`{implement=medium}` in every run) | pass (`{review=medium}`) |
 | Model checks | pass (after the pong fix, 4559ac5) | pass |
-| Implement | pass (grok-implement, grok-4.7 medium) | **not met**: 3 attempts, none produced a change |
-| Gates | pass (`node --test`, `node .warden/checks/health.mjs`) | not reached |
-| Mandatory review | pass (GonkaRouter DeepSeek-V4-Flash, verdict pass) and review-second (agy, verdict pass) | not reached |
-| Stop/resume | pass: SIGINT mid-review, continuation reused reproduction, implement and review | **not met**: no run got as far as review |
-| End state | `s3-loopA-8` `ready_for_human`, decision pending (accept/reject left to a person) | `s3-loopB-3` `implementer_failed`, retry recorded but not run |
+| Implement | pass (grok-implement, grok-4.7 medium) | pass in B-5 (`openrouter-coder`, OpenRouter DeepSeek-V4-Flash, 24 relay requests, 1m52s); B-1 to B-4 failed |
+| Gates | pass (`node --test`, `node .warden/checks/health.mjs`) | pass in B-5 (`node --test`, `node .warden/checks/version.mjs`, 1.4 s) |
+| Mandatory review | pass (GonkaRouter DeepSeek-V4-Flash, verdict pass) and review-second (agy, verdict pass) | pass in B-5: codex-review (gpt-6.1-sol medium) pass in 28 s, agy-review pass in 5m00s. Both raised one non-blocking P2: an unrequested `/health` handler |
+| Stop/resume | pass: SIGINT mid-review, continuation reused reproduction, implement and review | **not met**: B-5 got SIGINT 3 s before review ended, but the JVM ignored it, because the launch shell ignored SIGINT (see below). The run budget was then spent |
+| End state | `s3-loopA-8` `ready_for_human`, decision pending (accept/reject left to a person) | **`s3-loopB-5` `ready_for_human`**, decision pending, not accepted |
 
 Run budget: the brief allowed about 6 loop runs. 8 dispatching runs were used (B-1, B-2, A-1, A-2,
 A-3, A-6, A-8, B-3), plus 3 preflight stops that made no role call (A-4, A-5, A-7). The budget is
-spent, so Loop B is still unfinished.
+spent, so Loop B was unfinished after round 1. Round 2 (2026-10-29) used 2 more runs (B-4, B-5) with Tol's approval.
 
 ## Loop A — `health-endpoint`
 
@@ -75,15 +75,7 @@ Timeline:
 | (verify) | `warden profiles --verify gonkarouter-coder`: the 1st attempt passed the probe but did not stamp (the profile had no `verification:` block); the 2nd hit GonkaRouter 502 after 110 s on relay turn 5; the 3rd verified and stamped. | profile verified |
 | B-3 | Fresh run. The implementer used all 8 relay requests exploring the tree (it also read earlier runs' raw output under `.warden/runs/`) without editing anything (empty candidate). The stop was reported as `role_harness_process_failed`. 63529/2101 tokens, cost unknown. The interrupt helper never fired because the run ended before review. | `implementer_failed`; retry recorded. Led to fix 419bd53 and a local `.git/info/exclude` entry for `.warden/runs/`. |
 
-Not done, because the budget is spent: a passing implement, gates, codex review, the interrupt mid-review, and a continuation that shows reuse.
-
-To finish Loop B, run (one run, or two with the interrupt):
-
-```
-warden run version-endpoint --run-id s3-loopB-4 --continue s3-loopB-3 --use implement=gonkarouter-coder --use review=codex-review
-```
-
-Interrupt that run during `[3/6]`, approve retry, then continue it as `s3-loopB-5`.
+At the end of round 1, a passing implement, gates, codex review, the interrupt mid-review and a continuation showing reuse were still missing. Round 2 follows.
 
 ## Loop B, round 2 — 2026-10-29
 
@@ -106,9 +98,24 @@ Changes before the runs:
 | Run | Provider | What happened | Result |
 | --- | --- | --- | --- |
 | B-4 | GonkaRouter `deepseek-ai/DeepSeek-V4-Flash-0731` via `gonkarouter-coder` | Fresh branch `stage3-loopB2` from ec5566f. Reproduction red as expected. The implementer worked 20 OpenCode steps in about 7 min and wrote `serve.mjs` (+13) and `test/version.test.mjs`. Two problems: (1) **shield bug**: OpenCode matches paths inside the project in project-relative form, so the absolute allow rule for the exchange directory never matched, and the `.warden/runs/*` deny blocked the implementer's own artifact write 6 times; (2) relay step 21 hung for about 2.5 min and GonkaRouter answered **HTTP 502 Bad Gateway**. I also sent SIGINT at about 02:57; the run ended at 9m16s as `role_api_timeout`. | `role_timed_out`, 1 vendor call, tokens not reported; left pending (not continued). Led to fix fd74184. |
+| B-5 | OpenRouter `deepseek/deepseek-v4-flash-0731` via `openrouter-coder` (switched after the B-4 502) | Fresh run on the same branch at 03:04 CDT. Jev `{review=medium}`, all 4 pongs. Implement ok in 1m52s: 24 relay requests, all HTTP 200, 288367/8295 tokens, **$0.0098** (OpenRouter-reported). Shield: `mount_namespace`, `hidden_paths [<project>/.warden/runs, …]`. The implementer's only touches of `.warden/runs` were its own artifact (read/edit allowed) and 2 `ls`/`cat` shell commands on its exchange (denied by the bash rule). It never read an earlier run. Gates ok (1.4 s). codex review pass in 28 s (55536/933). agy review-second pass in 5m00s (94621/18697). Browser and look skipped. SIGINT was sent at 03:07:55, during review, but had no effect (see below). | **`ready_for_human`**, exit 0, 3 vendor calls. Decision pending, not accepted. Candidate: `serve.mjs` (+12: `GET /version` → `{name, version}` from package.json, plus an unrequested `GET /health`) and `test/version.test.mjs`. Patch at `/tmp/s3-loopB-candidate.patch`. |
 
 - **fd74184**: the exchange directory is also allowed by its project-relative path, after the denies. The test evaluates the rules last-match-wins, as OpenCode does, for relative and absolute forms (earlier runs stay denied, own artifact allowed). `opencode-limits` now has 35 checks.
 - **Provider switch.** GonkaRouter was unstable again (a 502 after a hang, the same ~110 s+ gateway failure as before), so per the steering, the remaining run uses OpenRouter. The new profile `openrouter-coder` uses the same harness and limits (`max_requests: 30`, `max_output_tokens: 8192`, 12 min), connection `openrouter-personal` (`env:OPENROUTER_API_KEY`), and model `deepseek/deepseek-v4-flash-0731`, the same model family as on GonkaRouter. It was verified 2026-10-29: 6 relay requests, 30739/792 tokens, $0.0011, `mount_namespace`, `effective_config_checked: true`. `warden check` gave pong ($0.000014).
+
+**Why stop/resume was not shown in Loop B.**
+- `/tmp/s3-interrupt.sh` sent SIGINT to the Warden JVM 3 s before the codex review finished, and the run carried on to `ready_for_human`. B-4's SIGINT was ignored the same way: that run kept going until the GonkaRouter 502.
+- Cause: runs were started from a non-interactive shell with `nohup setsid … &`. Such background children inherit SIGINT and SIGQUIT as ignored (`SigIgn: 0000000000000006` in `/proc/<pid>/status`), and the JVM does not install a handler for a signal that was ignored at startup. So `InterruptionGuard` never saw it.
+- This is a harness/launch problem, not a Warden bug: Loop A's stop/resume (A-2) shows the guard works when the signal arrives.
+- The 2-run budget was spent (B-4, B-5), so no third run was made.
+- To show it, start the run with SIGINT restored, for example `python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' /tmp/s3-run.sh …`, or interrupt with SIGTERM, which the guard also handles. Then run `warden approve <id> --decision retry` and `warden run version-endpoint --continue <id> --use implement=openrouter-coder --use review=codex-review`.
+
+Loop B round 2 tokens and cost:
+- B-5 implementer: $0.0098.
+- openrouter-coder verify: $0.0011. Check: $0.000014.
+- joingonka-coder verify: about $0.0003.
+- gonkarouter-coder verify and B-4: tokens recorded, no price reported.
+- codex (55536/933) and agy (94621/18697): no price reported.
 
 ## Bugs found and fixed (all on `grok/acceptance-stage3`, each with tests)
 
@@ -133,8 +140,9 @@ Changes before the runs:
   - Earlier, there was a 503/429 outage of about an hour.
   - The gateway seems to end requests at about 110 s.
 - **JoinGonka.** Coding turns are slow and the connection closes mid-dispatch.
-- **Relay cap of 8 requests and 2048 output tokens.** These are the attested bounds (`CodingAttestation.MAX_REQUESTS`). They are too tight for an exploring model on a real task. Raising them changes the attested security envelope, so they were left for a deliberate decision.
-- **Implementer reads `.warden/runs/`.** The OpenCode implementer read earlier runs' raw outputs. A role prompt or tool-scope rule that excludes `.warden/runs/` is a follow-up.
+- **GonkaRouter again (B-4).** A relay turn hung about 2.5 min, then returned HTTP 502 Bad Gateway. For that reason, the rest of Loop B moved to OpenRouter.
+- **Relay cap of 8 requests and 2048 output tokens.** Raised per profile by Tol's decision (e7f958e). B-5 needed 24 requests.
+- **Implementer reads `.warden/runs/`.** Fixed in e7f958e and fd74184 (see Loop B round 2). In B-5 the implementer never read an earlier run.
 - **Auto-review classifier.**
   - `warden approve … --decision retry --note …` was refused three times with "An error occured while classifying this action", including the approval-card retry.
   - The decision's `updated_at` showed that the first "refused" call had in fact run.
@@ -146,6 +154,8 @@ Changes before the runs:
 
 - `s3-loopA-8`: human gate (accept/reject) pending. Not accepted.
 - `s3-loopB-3`: retry recorded, no continuation run.
+- `s3-loopB-4`: `role_timed_out` (GonkaRouter 502), decision pending, not continued.
+- `s3-loopB-5`: human gate (accept/reject) pending. Not accepted. Its candidate is left uncommitted in the working tree of `hello-world-test` branch `stage3-loopB2`.
 - All other runs: aborted, or retry recorded and continued.
 
 ## Test suite
