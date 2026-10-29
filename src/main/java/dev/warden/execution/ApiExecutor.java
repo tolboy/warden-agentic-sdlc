@@ -200,8 +200,8 @@ public final class ApiExecutor implements RoleExecutor {
         Result settled = new LocalHttpExecutor(environment, null, git).settle(request, profile,
                 elapsed(started), safe, answer, evidence, token, before);
         if (settled.ok()) return settled;
-        // Generic artifact failures enable CLI failover/repair. API transport has no such
-        // authorization in this increment; retain the reason while stopping at its boundary.
+        // Generic artifact failures enable CLI failover/repair. Invalid API artifacts are
+        // outside the transient fallback allowlist; retain the reason and stop here.
         evidence.put("settlement_code", settled.code());
         evidence.put("failure", "role_api_artifact_failure");
         return new Result(false, "role_api_artifact_failure", settled.duration(),

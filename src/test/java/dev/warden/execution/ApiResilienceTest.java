@@ -190,6 +190,11 @@ public final class ApiResilienceTest implements Suite {
         check.eq("cancel during backoff: stops instead of resending", "cancelled",
                 result.get() == null ? null : result.get().stoppedBecause());
         check.eq("cancel during backoff: one attempt only", 1, result.get() == null ? -1 : result.get().attempts().size());
+        check.eq("cancel during backoff: logical failure is cancellation, not the earlier network error",
+                "role_api_interrupted", result.get() == null || result.get().failure() == null
+                        ? null : result.get().failure().code);
+        check.eq("cancel during backoff: phase prevents API fallback", "cancel",
+                result.get() == null || result.get().failure() == null ? null : result.get().failure().phase);
     }
 
     // ---------------------------------------------------------------- roles
@@ -440,12 +445,15 @@ public final class ApiResilienceTest implements Suite {
         /** Read the request, then hang up without a word. */
         Step DROP = (socket, out, number) -> socket.close();
 
-        /** Headers, half a body, hang up. */
+        /** Headers and a partial fixed-length body, then an orderly EOF. */
         Step CUT = (socket, out, number) -> {
             out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n"
                     + "Connection: close\r\n\r\n{\"model\":\"test").getBytes(StandardCharsets.US_ASCII));
             out.flush();
-            socket.setSoLinger(true, 0);
+            // FIN follows the queued response bytes. An abortive SO_LINGER(0) reset can
+            // discard those bytes before HttpClient reads them on Windows, which tests a
+            // missing response header rather than the intended incomplete body.
+            socket.shutdownOutput();
             socket.close();
         };
 

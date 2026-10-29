@@ -39,6 +39,7 @@ public final class RoleContract {
     /** The keys compared on resume, in the order a person would want to hear about them. */
     private static final List<String> COMPARED = List.of(
             "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "api_fallback_profiles",
             "profile", "vendor", "model", "effort", "runner", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "api_connection_fingerprint", "model_vendor",
@@ -74,6 +75,11 @@ public final class RoleContract {
         contract.put("role", role);
         contract.put("roster", spec == null ? List.of() : List.copyOf(spec.profiles()));
         contract.put("strategy", spec == null ? null : spec.strategy());
+        // Omit the empty default so receipts written before API fallback existed still
+        // compare equal. A declared list, including its order, is a dispatch term.
+        if (spec != null && !spec.apiFallbackProfiles().isEmpty()) {
+            contract.put("api_fallback_profiles", spec.apiFallbackProfiles());
+        }
         contract.put("require_independent_vendor",
                 spec != null && spec.requireIndependentVendor());
         // A declared pair is a term of the reading: a verdict admitted under one pair is not

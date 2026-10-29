@@ -87,7 +87,7 @@ API roles have no filesystem or command tools. A role dispatched through Warden 
 
 Every request sets an output token limit (default 2048). GonkaRouter refuses a configured limit above 4096; model fallback is disabled. OpenRouter requires supported parameters and disables provider fallback for this first increment. A response with unknown/substituted model identity, tool calls, truncated output or invalid artifact fails.
 
-HTTP response size is bounded to 4 MiB and the deadline includes the response body. Errors distinguish authorization, credits/budgets, rate limits, unsupported requests, network/protocol failures and identity mismatches, and stop for operator action instead of triggering a code repair. Nothing is routed to another profile, connection or model automatically.
+HTTP response size is bounded to 4 MiB and the deadline includes the response body. Errors distinguish authorization, credits/budgets, rate limits, unsupported requests, network/protocol failures and identity mismatches. They stop for operator action unless the operator explicitly permits the bounded role fallback below; they never trigger a code repair.
 
 ### Failure evidence and retries
 
@@ -114,7 +114,29 @@ An unknown outcome, an auth refusal, a model mismatch, a truncated answer and a 
 
 API transport failures map to infrastructure reasons (`role_api_timeout` → `role_timed_out`; network/provider/protocol/unsupported → `vendor_call_failed`; `rate_limited`; credits/budget → `quota_exhausted`; auth/access → `vendor_unavailable`; truncation/identity/artifact → `vendor_protocol_failed`). These are not judgements about the work, so `warden run --continue` keeps the completed candidate and its stage results and reruns only the unfinished stage: a reviewer that failed on a 502 is called again without rerunning the implementer. Configuration codes (missing key, disabled connection, changed profile) are not mapped and still require the operator.
 
-Auth errors never open a browser, change the key status beyond `auth_invalid`, or switch the model. Provider or model fallback happens only through an explicit policy the operator wrote; an ordered per-role fallback list is not implemented yet.
+Auth errors never open a browser, change the key status beyond `auth_invalid`, or switch the model.
+
+### Ordered role fallback
+
+In `policy.yaml`, a role may name an ordered subset of its existing profiles:
+
+```yaml
+roles:
+  reviewer:
+    profiles: [primary-review, backup-review, second-backup]
+    strategy: first
+    require_independent_vendor: true
+    on_vendor_failure: auto
+    api_fallback_profiles: [backup-review, second-backup]
+failover:
+  max_per_stage: 2
+```
+
+Each profile pins its own connection, model and execution contract. The list is empty by default; even `on_vendor_failure: auto` cannot switch an API role without it. Only `role_api_network_error`, `role_api_timeout`, `role_api_rate_limited` and `role_api_provider_error` open this path. Auth/access, credit/budget, identity, protocol, truncation, artifact, cancellation and configuration failures still stop. Provider-internal routing remains disabled as described above.
+
+Initial selection follows the ordinary roster strategy or explicit run pin. After a transient API failure, fallback follows the declared list in order, independently of rotation, skipping failed, exhausted, unavailable, unverified or non-independent members. It cannot use unlisted roster members, including after a listed CLI fallback fails. `on_vendor_failure` retains its existing `stop` (default), `confirm` and `auto` meanings; `failover.max_per_stage` bounds vendor-failure substitutions. A listed CLI fallback that spends its subscription still follows the separate `on_quota_exhausted` policy, within the same explicit list. Every dispatch needs room in the task budget. A confirmed continuation preserves the chosen successor, exclusions, list restriction and spent switch count.
+
+Every switch records the source, destination, original `role_code`, authorization and list in `role_failover`. This is a new role dispatch and can spend quota even when the failed request's outcome is unknown. A writing successor receives the existing partial candidate; prior writer provenance and process-settlement checks still apply. Completed stages remain subject to normal continuation reuse checks, including changes to the fallback list. Offline tests cover dispatch behavior; no live provider fallback has been claimed.
 
 Input/output/cache/reasoning tokens and request/model receipts are recorded when supplied. OpenRouter-reported `usage.cost` is authoritative for its connection; model-written artifact cost is ignored. GonkaRouter/custom cost remains unknown. Unknown cost is never zero. `runner: api` refuses declared `limits.max_cost_usd`, so strict task budgets cannot mistake an unenforced declaration for a proven spend bound. Advisory budgets retain the usual post-call accounting semantics.
 

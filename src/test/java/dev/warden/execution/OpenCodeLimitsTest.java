@@ -33,7 +33,7 @@ public final class OpenCodeLimitsTest implements Suite {
                 role: implementer
                 runner: direct
                 harness: opencode
-                harness_executable: '/opt/opencode'
+                harness_executable: %s
                 connection: local
                 model_vendor: z-ai
                 model: z-ai/model-one
@@ -44,7 +44,7 @@ public final class OpenCodeLimitsTest implements Suite {
                 %s
                 verification:
                   status: unverified
-                """.formatted(limits);
+                """.formatted(Json.write(Path.of("opencode").toAbsolutePath().toString()), limits);
     }
 
     private static void limits(Check check) throws Exception {
@@ -142,11 +142,11 @@ public final class OpenCodeLimitsTest implements Suite {
         check.eq("the artifact can be written by its project-relative path", "allow",
                 lastMatch(readRules, ".warden/runs/now/opencode-io-1/harness-artifact.json"));
         check.eq("the artifact can be written by its absolute path", "allow",
-                lastMatch(readRules, exchange + "/harness-artifact.json"));
+                lastMatch(readRules, exchange.resolve("harness-artifact.json").toString().replace('\\', '/')));
         check.eq("an earlier run stays unreadable by relative path", "deny",
                 lastMatch(readRules, ".warden/runs/earlier/review.json"));
         check.eq("an earlier run stays unreadable by absolute path", "deny",
-                lastMatch(readRules, project + "/.warden/runs/earlier/review.json"));
+                lastMatch(readRules, earlier.resolve("review.json").toString().replace('\\', '/')));
         check.eq("this run's own records outside the exchange stay unreadable", "deny",
                 lastMatch(readRules, ".warden/runs/now/review.json"));
         check.eq("project files stay readable", "allow", lastMatch(readRules, "serve.mjs"));

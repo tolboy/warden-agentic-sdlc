@@ -1,11 +1,16 @@
 package dev.warden;
 
 import dev.warden.config.Policy;
+import dev.warden.config.Profile;
+import dev.warden.config.UserConfig;
 import dev.warden.config.Workflow;
+import dev.warden.role.RoleContract;
 import dev.warden.testing.Check;
 import dev.warden.testing.Suite;
 
 import java.util.List;
+import java.util.Map;
+import java.nio.file.Path;
 
 /**
  * The declared chain of stages.
@@ -30,6 +35,8 @@ public final class WorkflowTest implements Suite {
     @Override public void run(Check check) {
         repairPreviewChecks(check);
         reuseAfterAFailureThatWasNotAboutTheWork(check);
+        apiFallbackPolicyChecks(check);
+        apiFallbackContractChecks(check);
         Policy silent = Policy.parse(ROLES, "policy.yaml");
         check.that("a policy that declares no workflow is not treated as declaring one",
                 !silent.workflowDeclared());
@@ -282,6 +289,115 @@ public final class WorkflowTest implements Suite {
         check.eq("with one substitution available when a role opts in",
                 1, shipped.maxVendorFailovers());
     }
+
+    private void apiFallbackPolicyChecks(Check check) {
+        Policy silent = Policy.parse(ROLES, "policy.yaml");
+        check.eq("legacy policies authorize no API fallback profiles", List.of(),
+                silent.roles().get("reviewer").apiFallbackProfiles());
+        Policy ordered = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer:
+                    profiles: [a, b, c]
+                    strategy: rotate
+                    on_vendor_failure: auto
+                    api_fallback_profiles: [c, b]
+                """, "policy.yaml");
+        check.eq("API fallback order is the declared order rather than roster order", List.of("c", "b"),
+                ordered.roles().get("reviewer").apiFallbackProfiles());
+        check.eq("API fallback leaves normal role rotation declared", "rotate",
+                ordered.roles().get("reviewer").strategy());
+        Policy stopped = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer: { profiles: [a, b], api_fallback_profiles: [b] }
+                """, "policy.yaml");
+        check.eq("a list alone retains the default stop policy", "stop",
+                stopped.vendorFailureModeFor("reviewer"));
+        check.rejects("API fallback cannot grant a profile outside the role roster", "must be one of",
+                () -> Policy.parse("""
+                        version: 1
+                        roles:
+                          reviewer: { profiles: [a], api_fallback_profiles: [b] }
+                        """, "policy.yaml"));
+        check.rejects("API fallback cannot repeat a profile", "contains duplicate",
+                () -> Policy.parse("""
+                        version: 1
+                        roles:
+                          reviewer: { profiles: [a, b], api_fallback_profiles: [b, b] }
+                        """, "policy.yaml"));
+        check.rejects("API fallback must be a list", "must be a list of strings",
+                () -> Policy.parse("""
+                        version: 1
+                        roles:
+                          reviewer: { profiles: [a, b], api_fallback_profiles: b }
+                        """, "policy.yaml"));
+        check.rejects("API fallback profile names cannot be empty", "must be a non-empty string",
+                () -> Policy.parse("""
+                        version: 1
+                        roles:
+                          reviewer: { profiles: [a, b], api_fallback_profiles: [""] }
+                        """, "policy.yaml"));
+        check.eq("the old full RoleSpec constructor keeps API fallback disabled", List.of(),
+                new Policy.RoleSpec("reviewer", List.of("a"), "first", true, null, "auto")
+                        .apiFallbackProfiles());
+        check.eq("the old peer RoleSpec constructor keeps API fallback disabled", List.of(),
+                new Policy.RoleSpec("reviewer", List.of("a"), "first", true, null)
+                        .apiFallbackProfiles());
+        check.eq("the old minimal RoleSpec constructor keeps API fallback disabled", List.of(),
+                new Policy.RoleSpec("reviewer", List.of("a"), "first", true)
+                        .apiFallbackProfiles());
+    }
+    private void apiFallbackContractChecks(Check check) {
+        Profile reader = Profile.parse("""
+                version: 1
+                profile: a
+                role: reviewer
+                vendor: openai
+                model: test-model
+                command: synthetic-vendor
+                read_only: true
+                verification:
+                  verified_on: "2026-10-29"
+                """, "a.yaml");
+        Workflow.Stage stage = Workflow.builtIn().stages().stream()
+                .filter(candidate -> "review".equals(candidate.name())).findFirst().orElseThrow();
+        UserConfig legacy = fallbackContractUser(reader, "");
+        Map<String, Object> recorded = RoleContract.of(stage.name(), stage.role(),
+                legacy.policy().roles().get(stage.role()), reader, legacy);
+        recorded.putAll(RoleContract.routingOf(stage));
+        check.that("legacy role contracts retain no API fallback field",
+                !recorded.containsKey("api_fallback_profiles"));
+        check.eq("legacy absent API fallback remains reusable", null,
+                RoleContract.differenceFrom(recorded, stage, legacy));
+        check.eq("an explicit empty list is equivalent to the legacy default", null,
+                RoleContract.differenceFrom(recorded, stage,
+                        fallbackContractUser(reader, ", api_fallback_profiles: []")));
+        UserConfig ordered = fallbackContractUser(reader, ", api_fallback_profiles: [c, b]");
+        check.contains("adding API fallback changes the continuation contract",
+                RoleContract.differenceFrom(recorded, stage, ordered), "api_fallback_profiles changed");
+        Map<String, Object> withFallback = RoleContract.of(stage.name(), stage.role(),
+                ordered.policy().roles().get(stage.role()), reader, ordered);
+        withFallback.putAll(RoleContract.routingOf(stage));
+        check.eq("an unchanged declared API fallback remains reusable", null,
+                RoleContract.differenceFrom(withFallback, stage, ordered));
+        check.contains("reordering API fallback invalidates continuation reuse",
+                RoleContract.differenceFrom(withFallback, stage,
+                        fallbackContractUser(reader, ", api_fallback_profiles: [b, c]")),
+                "api_fallback_profiles changed");
+        check.contains("removing API fallback invalidates continuation reuse",
+                RoleContract.differenceFrom(withFallback, stage, legacy), "api_fallback_profiles changed");
+    }
+
+    private UserConfig fallbackContractUser(Profile reader, String fallback) {
+        Policy policy = Policy.parse("""
+                version: 1
+                roles:
+                  reviewer: { profiles: [a, b, c], strategy: first%s }
+                """.formatted(fallback), "policy.yaml");
+        return new UserConfig(Path.of("."), policy, Map.of(reader.name(), reader), Map.of(), true);
+    }
+
     private void repairPreviewChecks(Check check) {
         var plan = new dev.warden.run.CallPlan(Workflow.builtIn(), stage -> false);
         // implement, review(fail), repair, review(pass), visual QA: five paid calls.

@@ -55,7 +55,7 @@ public final class MeasurementProjector {
             "decision", "source", "wait_millis", "created_at", "decided_at", "updated_at",
             "lands", "kind", "finding_id", "waived_findings",
             "from_profile", "from_vendor", "to_profile", "to_vendor", "cause", "authorized_by",
-            "role_code", "policy_setting",
+            "role_code", "policy_setting", "api_fallback_profiles",
             "failed_over_from", "exhausted_profiles", "role_failovers",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
             "vendor_unavailable",
@@ -76,6 +76,7 @@ public final class MeasurementProjector {
 
     private static final Set<String> ROLE_CONTRACT = Set.of(
             "stage", "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "api_fallback_profiles",
             "profile", "vendor", "model", "effort", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "on_fail", "on_findings", "recheck_after_fix", "fix_with", "evidence");
@@ -161,7 +162,7 @@ public final class MeasurementProjector {
     private static final Set<String> FAILOVER = Set.of(
             "role", "stage", "from_profile", "from_vendor", "to_profile", "to_vendor",
             "from", "to", "cause", "authorized_by", "policy_setting", "role_code",
-            "role_invocation_id");
+            "role_invocation_id", "api_fallback_profiles");
 
     private static final Set<String> VISION = Set.of("verified", "delivery");
 

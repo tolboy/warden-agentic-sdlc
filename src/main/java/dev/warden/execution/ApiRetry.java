@@ -196,6 +196,15 @@ public final class ApiRetry {
                                 List<Map<String, Object>> attempts, Map<String, Object> correlation,
                                 Policy policy, String reason) {
         attempts.get(attempts.size() - 1).remove("resent_after_millis");
+        if ("cancelled".equals(reason)) {
+            // The last transport failure explains why we waited, not why the logical
+            // call stopped. Keep that attempt, but never expose cancellation as a
+            // transient failure that a role fallback could route around.
+            String delivery = String.valueOf(attempts.get(attempts.size() - 1)
+                    .getOrDefault("delivery", "unknown"));
+            return new Outcome(null, new ApiExecutor.CallFailure("role_api_interrupted",
+                    "cancel", delivery, "cancelled"), attempts, correlation, policy, reason);
+        }
         return new Outcome(reply, failure, attempts, correlation, policy, reason);
     }
 

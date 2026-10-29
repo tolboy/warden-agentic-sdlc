@@ -58,7 +58,21 @@ in a separate document, not in the automated suite.
   auth advice, attempts recorded.
 - `TaskLoop.infrastructureReason` maps `role_api_*` transport codes so a continuation reuses the
   implementer stage.
-- Not done: an ordered per-role fallback list (point 6). Without it, failures stop with the reason.
+- Follow-up, 2026-10-29: ordered per-role fallback is implemented as
+  `roles.<role>.api_fallback_profiles`, an explicit subset of the existing roster. Only transient
+  API network/timeout/rate-limit/provider failures may switch, under the existing
+  `on_vendor_failure` mode and `max_per_stage` bound. Auth, identity, cancellation and
+  configuration failures still stop. Verification, independence, process settlement and task
+  budget remain required; a confirmed continuation retains the list and switch count.
+  See [configuration](API-CONNECTIONS.md#ordered-role-fallback). This follow-up is tested offline;
+  live ordered provider fallback remains unverified.
+- Cancellation during retry backoff now keeps the earlier attempt as evidence and returns
+  `role_api_interrupted` with phase `cancel`; it cannot be mistaken for a transient failure
+  eligible for fallback. Failed API and OpenCode relay receipts stay on their vendor attempt
+  after a successor succeeds.
 
 Tests: `ApiResilienceTest` (suite `api-resilience`), `ModelCheckTest` (reasoning limit, truncation,
-502 retry, auth once), `TaskLoopTest.apiReviewerResumeChecks`.
+502 retry, auth once), `TaskLoopTest.apiReviewerResumeChecks`, and the new suites
+`api-fallback`, `api-fallback-loop`, `shutdown-resume` plus fallback-policy/contract/projection
+checks in `workflow` and `home-corpus`. Current verification counts are recorded in the
+[Stage 3 follow-up](ACCEPTANCE-STAGE3-2026-10-28.md#follow-up--2026-10-29-windows-automated-coverage).

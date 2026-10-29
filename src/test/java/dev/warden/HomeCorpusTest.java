@@ -53,6 +53,7 @@ public final class HomeCorpusTest implements Suite {
             failingStore(check, sandbox);
             neighbourPendingAndIndexFailure(check, sandbox);
             noRawContent(check, sandbox);
+            apiFallbackProjection(check);
             measurementContext(check, sandbox);
             localLedgerUnchanged(check, sandbox);
         } finally {
@@ -695,6 +696,30 @@ public final class HomeCorpusTest implements Suite {
         evidence.put("vendor", "stubvendor");
         evidence.put("cost_usd", 0.25);
         return evidence;
+    }
+
+    private void apiFallbackProjection(Check check) {
+        List<String> fallbacks = List.of("review-secondary", "review-tertiary");
+        Map<String, Object> local = new LinkedHashMap<>();
+        local.put("type", "role_run");
+        local.put("api_fallback_profiles", fallbacks);
+        local.put("role_contract", Map.of("api_fallback_profiles", fallbacks, "prompt", SECRET));
+        local.put("role_failovers", List.of(Map.of("from_profile", "review-primary",
+                "to_profile", "review-secondary", "api_fallback_profiles", fallbacks,
+                "message", SECRET)));
+        MeasurementProjector.Projection projected = MeasurementProjector.project(local);
+        check.eq("measurement retains the ordered API fallback policy", fallbacks,
+                projected.body().get("api_fallback_profiles"));
+        check.eq("measurement role contracts retain the ordered API fallback policy", fallbacks,
+                ((Map<?, ?>) projected.body().get("role_contract")).get("api_fallback_profiles"));
+        Map<?, ?> failover = (Map<?, ?>) ((List<?>) projected.body().get("role_failovers")).get(0);
+        check.eq("measurement failover events retain the ordered API fallback policy", fallbacks,
+                failover.get("api_fallback_profiles"));
+        check.that("allowing API fallback policy does not copy adjacent raw content",
+                !Json.write(projected.body()).contains(SECRET));
+        local.put("api_fallback_profiles", List.of("review-tertiary", "review-secondary"));
+        check.that("API fallback order changes the measurement content hash",
+                !projected.contentHash().equals(MeasurementProjector.project(local).contentHash()));
     }
 
     private void noRawContent(Check check, Path sandbox) throws Exception {

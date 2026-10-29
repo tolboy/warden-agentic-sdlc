@@ -164,3 +164,50 @@ Loop B round 2 tokens and cost:
 - Targeted suites after the later fixes, all 0 failed: model-check 68, coding-relay 62, verified-opencode 28, interruption-guard 9, the task-routing-loop suite, and vendor-call-failed wording.
 - Final full `./test.sh` at 419bd53 (2026-10-28, about 20:05 CDT): **6041 passed, 0 failed**, exit 0.
 - Final full `./test.sh` at 29f9f7d (2026-10-29, about 03:30 CDT): **6080 passed, 0 failed**, exit 0. Targeted suites after fd74184: opencode-limits 35, verified-opencode 32, coding-relay 62.
+
+## Follow-up — 2026-10-29, Windows automated coverage
+
+Continued on `codex/agent-loop-priority` from `8e25674`. No additional live acceptance
+run or paid provider call was made, and the test project's pending decisions were untouched.
+
+- `shutdown-resume` starts a child JVM running the real `TaskLoop`, with deterministic
+  local role fixtures. After the writer and gates finish and review starts, the controller
+  calls `System.exit(130)`. The production shutdown hooks write `controller_interrupted`
+  with a pending decision and retain the candidate. A retry continuation reuses implement,
+  reruns gates and completes the unfinished review; the writer's dispatch count stays one.
+  This exercises actual JVM shutdown on Windows. The review executor is injected, so
+  provider-process cleanup and external signal delivery remain outside this fixture.
+- `api-fallback-loop` uses a local HTTP server and the real `ApiExecutor` inside `TaskLoop`.
+  It covers HTTP 502 followed by an explicitly permitted backup, and two consecutive
+  human-confirmed switches through `ApprovalStore` and `Main.continuation`. The completed
+  writer is reused, failed endpoints are not called again, switch limits and call accounting
+  survive continuation, and the successful candidate still stops at the pending human gate.
+- Stage 2's remaining ordered fallback policy is implemented; see the
+  [Stage 2 note](NOTE-STAGE2-API-RESILIENCE-2026-10-28.md) and
+  [configuration](API-CONNECTIONS.md#ordered-role-fallback). Cancellation during API retry
+  backoff now reports `role_api_interrupted`, preserving the original attempt log, so a
+  cancelled transport failure cannot open provider fallback. Each failed endpoint retains
+  its structured API/relay receipt after a later successor succeeds.
+- Windows fixture repairs preserve the assertions: an incomplete-body server now sends an
+  orderly TCP EOF instead of an abortive reset that could discard unread headers; OpenCode
+  limits use a platform-absolute executable path and canonical slash-separated permission
+  inputs. Production path admission and body-phase classification are unchanged.
+
+Verification (Windows, JDK 25.0.2, Java release 21):
+
+- Clean `cmd /c build.cmd`: exit 0.
+- Full `java -cp out/test-classes dev.warden.testing.TestMain`: **6201 passed, 1 failed**,
+  exit 1. The sole failure was the POSIX-only `/opt/opencode` fixture in `opencode-limits`.
+  All other suites, including the new fallback, HTTP continuation and shutdown cases, ran
+  in this full execution. Log: `out/stage2-stage3-full-2026-10-29.log`.
+- After the fixture-only portability fix and another clean build, `opencode-limits`:
+  **31 passed, 0 failed**, exit 0. The Linux-only mount-namespace assertions do not run on
+  Windows. Log: `out/stage2-stage3-opencode-limits-2026-10-29.log`.
+- The full suite was not repeated after that test-only correction. Separately, the strict
+  incomplete-body assertion passed in three consecutive `api-resilience` runs, each
+  **102 passed, 0 failed**. `git diff --check`: exit 0.
+
+Live Loop B stop/resume remains open. Further reruns can be performed locally; the box
+follow-up was stopped. This Windows follow-up used automated fixtures. External Linux
+signal delivery, GonkaRouter/JoinGonka reliability and live ordered provider fallback
+remain unverified here.

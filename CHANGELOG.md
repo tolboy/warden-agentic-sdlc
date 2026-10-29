@@ -22,6 +22,11 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Explicit ordered API role fallback through `roles.<role>.api_fallback_profiles`, bounded by
+  the existing failure policy, switch limit and task budget. Transient network, timeout,
+  rate-limit and provider failures can select only listed, admitted profiles; auth, identity,
+  cancellation and configuration failures still stop. Confirmed continuations keep the list
+  restriction and spent switch count. Live provider fallback remains unverified.
 - Checkout-wide execution leases cover workflows, preparation, standalone roles and machine
   gates. Linked worktrees remain independent; projects beneath one checkout share admission.
   Vendor PID/start-time receipts and launch intent survive crashes. `warden recover` releases
