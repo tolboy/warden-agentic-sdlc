@@ -108,7 +108,7 @@ Retry policies are fixed in code and capped at 2 extra attempts (3 in total):
 | Writing and reviewing roles (`ApiExecutor`), OpenCode relay upstream | `not_sent_only` | only `not_sent`, backoff 0.5 s × attempt |
 | Pong checks (`ModelCheck`) | `check` | `not_sent`; 429 with a whole-second `Retry-After` ≤ 10 s; 502/503; backoff 1 s |
 
-An unknown outcome, an auth refusal, a model mismatch, a truncated answer and a cancel are never resent. A role call therefore cannot send the same turn twice, and the relay forwards at most one upstream request per OpenCode request, so a tool call (file edit) is never duplicated by a retry. Cancelling during backoff stops at once.
+An unknown outcome, an auth refusal, a model mismatch, a truncated answer and a cancel are never resent. Separately, a pong check whose HTTP 200 answer is unreadable (`invalid_json` or `missing_text`; reasoning models sometimes answer in prose) is pinged exactly once more; the receipt then carries `ping_answers: 2` and `first_pong_failure`. A wrong nonce, a tool call or a truncated pong is not re-asked. A role call therefore cannot send the same turn twice, and the relay forwards at most one upstream request per OpenCode request, so a tool call (file edit) is never duplicated by a retry. Cancelling during backoff stops at once.
 
 ### Continuing after an API failure
 

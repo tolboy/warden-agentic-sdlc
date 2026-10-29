@@ -158,7 +158,23 @@ public final class ModelCheck {
         return api(profile, connection, settings, connection == null ? null : URI.create(connection.endpoint()));
     }
 
+    /**
+     * A reasoning model sometimes answers the ping in prose instead of the asked JSON. That says
+     * nothing about the key or the route, so an unreadable answer earns exactly one more ping;
+     * a second unreadable answer, or any other failure, stands.
+     */
     private Map<String, Object> api(Profile profile, Connection connection, CheckSettings settings, URI endpoint) throws Exception {
+        Map<String, Object> first = apiOnce(profile, connection, settings, endpoint);
+        if (!UNREADABLE_PONG.contains(String.valueOf(first.get("pong_failure")))) return first;
+        Map<String, Object> second = apiOnce(profile, connection, settings, endpoint);
+        second.put("ping_answers", 2L);
+        second.put("first_pong_failure", first.get("pong_failure"));
+        return second;
+    }
+
+    private static final Set<String> UNREADABLE_PONG = Set.of("invalid_json", "missing_text");
+
+    private Map<String, Object> apiOnce(Profile profile, Connection connection, CheckSettings settings, URI endpoint) throws Exception {
         if (connection == null) return failure("check_connection_missing");
         if (!connection.enabled()) return failure("check_connection_disabled");
         String token;
