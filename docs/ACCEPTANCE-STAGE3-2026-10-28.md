@@ -125,4 +125,4 @@ Interrupt that run during `[3/6]`, approve retry, then continue it as `s3-loopB-
 
 - Last full `./test.sh` (after b5a6d86): 6021 passed, 0 failed.
 - Targeted suites after the later fixes, all 0 failed: model-check 68, coding-relay 62, verified-opencode 28, interruption-guard 9, the task-routing-loop suite, and vendor-call-failed wording.
-- A final full run is recorded below.
+- Final full `./test.sh` at 419bd53 (2026-10-28, about 20:05 CDT): **6041 passed, 0 failed**, exit 0.
