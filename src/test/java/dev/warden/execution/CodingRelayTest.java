@@ -252,6 +252,10 @@ public final class CodingRelayTest implements Suite {
                         post(relay, relay.bearer(), Map.of("model", "model-one")).statusCode());
                 check.eq("turn cap prevents another upstream charge", 8, hits.get());
                 check.eq(
+                        "the stop names the turn cap, not the clock",
+                        "probe_turn_limit",
+                        relay.evidence().get("failure"));
+                check.eq(
                         "limit stop cannot yield a successful identity receipt",
                         false,
                         relay.evidence().get("identity_confirmed"));

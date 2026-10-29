@@ -135,7 +135,7 @@ final class CodingRelay implements AutoCloseable {
                 return;
             }
             if (failure != null || turns >= maxRequests || System.nanoTime() >= deadline) {
-                if (failure == null) failure = "probe_turn_or_time_limit";
+                if (failure == null) failure = turns >= maxRequests ? "probe_turn_limit" : "probe_time_limit";
                 // This dispatch cannot resume. A retryable status would make the SDK wait
                 // and would obscure the first upstream failure without permitting progress.
                 send(

@@ -217,6 +217,14 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                 VerifiedOpenCodeExecutor.processFailure(
                         Map.of("failure", "probe_upstream_http_503")));
         check.eq(
+                "running out of relay turns is named as the turn limit",
+                "role_harness_turn_limit",
+                VerifiedOpenCodeExecutor.processFailure(Map.of("failure", "probe_turn_limit")));
+        check.eq(
+                "running out of relay time is named as the time limit",
+                "role_harness_time_limit",
+                VerifiedOpenCodeExecutor.processFailure(Map.of("failure", "probe_time_limit")));
+        check.eq(
                 "a served-model mismatch stays a harness failure",
                 "role_harness_process_failed",
                 VerifiedOpenCodeExecutor.processFailure(
