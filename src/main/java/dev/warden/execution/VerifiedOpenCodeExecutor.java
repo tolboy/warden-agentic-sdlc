@@ -371,6 +371,9 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             if (code.startsWith("role_api_")) return code;
             if (code.equals("probe_upstream_http_429")) return "role_api_rate_limited";
             if (code.startsWith("probe_upstream_http_5")) return "role_api_provider_error";
+            // The relay's own bounds, not a broken harness: say which one ran out.
+            if (code.equals("probe_turn_limit")) return "role_harness_turn_limit";
+            if (code.equals("probe_time_limit")) return "role_harness_time_limit";
         }
         return "role_harness_process_failed";
     }
