@@ -163,3 +163,4 @@ Loop B round 2 tokens and cost:
 - Last full `./test.sh` (after b5a6d86): 6021 passed, 0 failed.
 - Targeted suites after the later fixes, all 0 failed: model-check 68, coding-relay 62, verified-opencode 28, interruption-guard 9, the task-routing-loop suite, and vendor-call-failed wording.
 - Final full `./test.sh` at 419bd53 (2026-10-28, about 20:05 CDT): **6041 passed, 0 failed**, exit 0.
+- Final full `./test.sh` at 29f9f7d (2026-10-29, about 03:30 CDT): **6080 passed, 0 failed**, exit 0. Targeted suites after fd74184: opencode-limits 35, verified-opencode 32, coding-relay 62.
