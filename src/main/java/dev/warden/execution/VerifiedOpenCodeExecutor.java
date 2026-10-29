@@ -17,6 +17,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
     private final boolean verification;
     private final java.util.function.Function<String, String> environment;
     private final List<String> commandPrefix;
+    private final boolean sandbox;
 
     public VerifiedOpenCodeExecutor(ProcessRunner processes, GitRepository git) {
         this(processes, false, System::getenv, null);
@@ -27,6 +28,16 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             boolean verification,
             java.util.function.Function<String, String> environment,
             List<String> commandPrefix) {
+        this(processes, verification, environment, commandPrefix, true);
+    }
+
+    VerifiedOpenCodeExecutor(
+            ProcessRunner processes,
+            boolean verification,
+            java.util.function.Function<String, String> environment,
+            List<String> commandPrefix,
+            boolean sandbox) {
+        this.sandbox = sandbox;
         this.processes = processes;
         this.verification = verification;
         this.environment = environment;
@@ -89,9 +100,10 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
         evidence.put("connection_fingerprint", connection.fingerprint());
         evidence.put("profile_fingerprint", fingerprint);
         evidence.put("model_requested", profile.model());
-        int outputLimit = Math.min(2048, profile.maxOutputTokens());
+        int outputLimit = CodingAttestation.outputLimit(profile);
+        int requestLimit = CodingAttestation.requestLimit(profile);
         Duration limit = CodingRelay.budget(profile.wallClockMinutes());
-        evidence.put("max_requests", CodingAttestation.MAX_REQUESTS);
+        evidence.put("max_requests", requestLimit);
         evidence.put("max_output_tokens", outputLimit);
         evidence.put("time_budget_seconds", limit.toSeconds());
         String secret;
@@ -101,7 +113,22 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             return fail("role_api_key_missing", started, evidence, "");
         }
         Files.createDirectories(request.runDirectory());
-        Path state = Files.createTempDirectory(request.runDirectory(), "opencode-state-");
+        // Everything this dispatch shares with OpenCode lives in one exchange directory. The
+        // rest of the run tree is hidden from the implementer (RunArtifactShield).
+        Path exchange = Files.createTempDirectory(request.runDirectory(), "opencode-io-");
+        Path state = Files.createDirectories(exchange.resolve("state"));
+        RunArtifactShield shield =
+                RunArtifactShield.plan(
+                        request.projectRoot(),
+                        profile.apiSettings().home(),
+                        exchange,
+                        List.of(binary),
+                        sandbox);
+        Map<String, Object> permission =
+                RunArtifactShield.permissions(
+                        request.projectRoot(), exchange, profile.apiSettings().home());
+        evidence.put("run_artifacts_hidden", shield.mode());
+        evidence.put("hidden_paths", shield.hiddenPaths());
         Map<String, String> env = isolatedEnvironment(state);
         Set<String> removals = new HashSet<>();
         for (String name : System.getenv().keySet()) {
@@ -129,28 +156,25 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
         if (!version.ok() || !CodingAttestation.SUPPORTED_VERSION.equals(version.stdout().strip()))
             return fail("role_harness_version_unproven", started, evidence, "");
         evidence.put("opencode_version", version.stdout().strip());
-        Path artifact =
-                request.runDirectory()
-                        .resolve("harness-artifact.json")
-                        .toAbsolutePath()
-                        .normalize();
-        Files.deleteIfExists(artifact);
+        Path artifact = exchange.resolve("harness-artifact.json").toAbsolutePath().normalize();
+        Path kept = request.runDirectory().resolve("harness-artifact.json");
+        Files.deleteIfExists(kept);
         try (CodingRelay relay =
                 new CodingRelay(
                         connection,
                         profile.model(),
                         secret,
                         limit,
-                        CodingAttestation.MAX_REQUESTS,
+                        requestLimit,
                         outputLimit)) {
             env.put("WARDEN_PROBE_RELAY_KEY", relay.bearer());
             env.put(
                     "OPENCODE_CONFIG_CONTENT",
-                    CodingProbe.config(relay.baseUrl(), profile.model()));
+                    CodingProbe.config(relay.baseUrl(), profile.model(), outputLimit, permission));
             var scoped = clean.withEnvironment(env);
             var debug =
                     scoped.runVendor(
-                            command(binary, "debug", "config", "--pure"),
+                            shield.wrap(command(binary, "debug", "config", "--pure")),
                             request.projectRoot(),
                             Duration.ofSeconds(25),
                             256 * 1024,
@@ -159,12 +183,13 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             if (!debug.ok()
                     || debug.stdoutTruncated()
                     || debug.stderrTruncated()
-                    || !CodingProbe.validConfig(debug.stdout(), relay.baseUrl(), profile.model()))
+                    || !CodingProbe.validConfig(
+                            debug.stdout(), relay.baseUrl(), profile.model(), permission))
                 return fail("role_harness_config_unproven", started, evidence, "");
             evidence.put("effective_config_checked", true);
             // Paths and schema are in a run-owned file. The shell never transports JSON quotes.
             Path instruction =
-                    Files.createTempFile(request.runDirectory(), "opencode-dispatch-", ".md");
+                    Files.createTempFile(exchange, "opencode-dispatch-", ".md");
             String contract = Files.readString(request.promptFile(), StandardCharsets.UTF_8);
             String schema = Files.readString(request.schemaFile(), StandardCharsets.UTF_8);
             if (contract.length() > 256 * 1024 || schema.length() > 64 * 1024)
@@ -179,7 +204,9 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
                             + "Return one JSON object matching the schema below. Write the JSON"
                             + " file directly; do not build it through shell quoting. This file"
                             + " destination overrides any instruction to print only to stdout. Do"
-                            + " not edit any task contract or checks. Do not commit.\n\n"
+                            + " not edit any task contract or checks. Do not commit. Warden's"
+                            + " run records (.warden/runs) are not part of the task and are not"
+                            + " readable.\n\n"
                             + contract
                             + "\n\n## Required final JSON schema\n"
                             + schema,
@@ -191,7 +218,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             try {
                 run =
                         scoped.runVendor(
-                                command(
+                                shield.wrap(command(
                                         binary,
                                         "run",
                                         "Read the attached Warden dispatch file and execute its"
@@ -200,7 +227,7 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
                                         "--format",
                                         "json",
                                         "--file",
-                                        instruction.toAbsolutePath().toString()),
+                                        instruction.toAbsolutePath().toString())),
                                 request.projectRoot(),
                                 Duration.ofNanos(remaining),
                                 256 * 1024,
@@ -240,8 +267,11 @@ public final class VerifiedOpenCodeExecutor implements RoleExecutor {
             String text = Files.readString(artifact, StandardCharsets.UTF_8);
             if (secret != null && text.contains(secret)) {
                 Files.writeString(artifact, redact(text, secret, relay.bearer()));
+                Files.writeString(kept, redact(text, secret, relay.bearer()));
                 return fail("role_harness_credential_reflected", started, evidence, safe);
             }
+            // The run keeps its copy beside the other evidence.
+            Files.writeString(kept, text, StandardCharsets.UTF_8);
             Map<String, Object> result;
             try {
                 result = Json.parseObject(text);

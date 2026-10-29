@@ -123,6 +123,8 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                     """
                             .formatted(binary.toString().replace('\\', '/'));
             Profile profile = Profile.parse(yaml, "runtime-test").withConnection(connection, home);
+            Path earlier = Files.createDirectories(home.resolve("project/.warden/runs/earlier"));
+            Files.writeString(earlier.resolve("review.json"), "{\"verdict\":\"fail\"}");
             ProcessRunner processes = new ProcessRunner().withEnvironment(Map.of(KEY, SECRET));
             var normal = new VerifiedOpenCodeExecutor(processes, false, name -> SECRET, command());
             var refused = normal.execute(request(home, profile, "unadmitted"));
@@ -150,6 +152,21 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
                     "the child's process tree settled",
                     true,
                     accepted.evidence().get("process_tree_settled"));
+            check.eq(
+                    "the dispatch records how run evidence was hidden",
+                    RunArtifactShield.bubblewrapWorks() ? "mount_namespace" : "permission_rules",
+                    accepted.evidence().get("run_artifacts_hidden"));
+            check.eq(
+                    "the dispatch records its relay turn limit",
+                    8,
+                    accepted.evidence().get("max_requests"));
+            if (RunArtifactShield.bubblewrapWorks())
+                check.that(
+                        "the implementer cannot see an earlier run's evidence",
+                        accepted.rawOutput().contains("runs_visible=false"));
+            check.that(
+                    "the run keeps a copy of the artifact beside its evidence",
+                    Files.exists(home.resolve("project/accepted/harness-artifact.json")));
             check.that(
                     "fixture child saw no upstream service credential",
                     accepted.rawOutput().contains("upstream_key_present=false"));
@@ -351,6 +368,8 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
         if (!args[0].equals("run"))
             throw new IllegalArgumentException("unexpected fixture invocation");
         System.out.println("upstream_key_present=" + (System.getenv(KEY) != null));
+        System.out.println(
+                "runs_visible=" + Files.exists(Path.of(".warden/runs/earlier/review.json")));
         Map<String, Object> config = Json.parseObject(System.getenv("OPENCODE_CONFIG_CONTENT"));
         Map<?, ?> provider = (Map<?, ?>) ((Map<?, ?>) config.get("provider")).get("warden");
         String base = (String) ((Map<?, ?>) provider.get("options")).get("baseURL");

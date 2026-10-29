@@ -75,7 +75,8 @@ final class CodingRelay implements AutoCloseable {
             int maxRequests,
             int maxOutputTokens)
             throws IOException {
-        if (maxRequests < 1 || maxRequests > 8 || maxOutputTokens < 1 || maxOutputTokens > 2048)
+        if (maxRequests < 1 || maxRequests > dev.warden.config.CodingAttestation.REQUEST_CEILING
+                || maxOutputTokens < 1 || maxOutputTokens > dev.warden.config.CodingAttestation.OUTPUT_CEILING)
             throw new IllegalArgumentException("unsupported coding relay limits");
         this.maxRequests = maxRequests;
         this.maxOutputTokens = maxOutputTokens;

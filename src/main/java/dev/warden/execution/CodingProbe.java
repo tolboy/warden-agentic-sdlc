@@ -263,8 +263,18 @@ public final class CodingProbe {
     }
 
     static String config(String base, String model) {
+        return config(base, model, 2048);
+    }
+
+    /** The output limit OpenCode plans for matches the relay's per-turn cap. */
+    static String config(String base, String model, int output) {
+        return config(base, model, output, permissions());
+    }
+
+    /** A dispatch passes its own rules, for example those that hide Warden's run evidence. */
+    static String config(String base, String model, int output, Map<String, Object> permission) {
         Map<String, Object> definition =
-                Map.of("name", model, "limit", Map.of("context", 32000, "output", 2048));
+                Map.of("name", model, "limit", Map.of("context", 32000, "output", output));
         Map<String, Object> provider =
                 Map.of(
                         "npm",
@@ -290,7 +300,7 @@ public final class CodingProbe {
                         "mcp",
                         Map.of(),
                         "permission",
-                        permissions()));
+                        permission));
     }
 
     private static Map<String, Object> permissions() {
@@ -317,13 +327,19 @@ public final class CodingProbe {
     }
 
     static boolean validConfig(String json, String base, String model) {
+        return validConfig(json, base, model, permissions());
+    }
+
+    /** OpenCode applies the last matching rule, so the echoed rules must keep their order. */
+    static boolean validConfig(String json, String base, String model, Map<String, Object> permission) {
         try {
             Map<String, Object> value = Json.parseObject(json);
             if (!("warden/" + model).equals(value.get("model"))
                     || !List.of("warden").equals(value.get("enabled_providers"))) return false;
             if (!("warden/" + model).equals(value.get("small_model"))) return false;
             if (!(value.get("permission") instanceof Map<?, ?> rules)
-                    || !permissions().equals(rules)
+                    || !permission.equals(rules)
+                    || !Json.write(permission).equals(Json.write(rules))
                     || !"*".equals(rules.keySet().iterator().next())) return false;
             for (String name : List.of("agent", "mode", "command"))
                 if (value.get(name) instanceof Map<?, ?> entries && !entries.isEmpty())
