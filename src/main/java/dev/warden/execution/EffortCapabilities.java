@@ -22,7 +22,7 @@ public final class EffortCapabilities {
 
     private final Path home;
     private final UserConfig user;
-    private final Map<String, Optional<Map<String, List<String>>>> catalogs = new HashMap<>();
+    private final Map<String, Optional<VendorSettingsService.CatalogEfforts>> catalogs = new HashMap<>();
 
     public EffortCapabilities(Path home, UserConfig user) { this.home = home; this.user = user; }
 
@@ -32,14 +32,31 @@ public final class EffortCapabilities {
         if (home != null && user != null) {
             var catalog = catalogs.computeIfAbsent(VendorSettingsService.displayVendorId(profile),
                     id -> Optional.ofNullable(VendorSettingsService.catalogEfforts(home, user, profile)));
-            var listed = catalog.map(models -> models.get(model)).orElse(null);
-            if (listed != null && !listed.isEmpty()) return ordered(listed);
+            var listed = catalog.map(models -> models.levels().get(model)).orElse(null);
+            if (listed != null) return ordered(listed);
         }
         return builtIn(profile, model);
     }
 
     /** Same as {@link #levels} for the profile's configured model. */
     public List<String> levels(Profile profile) { return profile == null ? List.of() : levels(profile, profile.model()); }
+
+    /** Capability provenance is separate from proof that a particular dispatch sent a value. */
+    public Map<String,Object> describe(Profile profile) {
+        var levels=levels(profile);
+        var result=new LinkedHashMap<String,Object>();
+        result.put("levels",levels);
+        result.put("delivery",!launchBound(profile)?"unsupported":
+                "orca".equals(profile.runner())?"orca_launch_setting":"cli_argument_template");
+        var catalog=profile==null?null:catalogs.get(VendorSettingsService.displayVendorId(profile));
+        var entry=catalog==null?null:catalog.orElse(null);
+        boolean listed=entry!=null && entry.levels().containsKey(profile.model());
+        result.put("source",listed?"model_catalog":levels.isEmpty()?"unavailable":"builtin_compatibility_table");
+        result.put("source_description",listed?entry.source():null);
+        result.put("observed_at",listed?entry.fetchedAt():null);
+        result.put("provider_confirmed",false);
+        return result;
+    }
 
     /**
      * Throws {@link Unsupported} unless {@code effort} is valid for {@code model}. A level that

@@ -1,5 +1,19 @@
 # Jev task classification and effort routing
 
+Stage 4 capability follow-up (2026-10-29): routing receipts include
+`stage_capabilities`, with supported levels, delivery mechanism, source and catalog
+observation date. A missing date stays null; catalog data and the built-in compatibility
+table do not establish provider confirmation. Explicit empty effort lists suppress
+built-in fallback. The high-risk floor selects only supported levels at least `high`;
+when none exists, routing retains the configured effort instead of inventing `high`.
+
+This is the registry/routing portion of Stage 4. API and OpenCode effort delivery,
+per-dispatch transmission/confirmation evidence, and classifier calibration remain open.
+Preparatory planning continues to use its own configured effort.
+Validation: clean build; `role-roster-editor`, `decision-routing`, and
+`task-routing-loop`: 135 checks passed, none failed. No live model calls were made
+for this capability change.
+
 Jev is a decision model, not a coding worker. Warden calls the OpenRouter Decisions API with typed
 questions and receives choices and probabilities. It does not ask Jev to generate JSON through chat,
 and does not delegate worker/model switching to the separate Jev Router.

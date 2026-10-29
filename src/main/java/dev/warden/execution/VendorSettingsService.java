@@ -131,7 +131,8 @@ public final class VendorSettingsService {
         return hash(user.profiles().values().stream().filter(p->id.equals(displayVendorId(p))).map(VendorSettingsService::vendorId).distinct().sorted().toList().toString());
     }
     /** Model id to catalog effort levels from this profile's service catalog, or null when no current catalog is loaded. */
-    static Map<String,List<String>> catalogEfforts(Path home,UserConfig user,Profile profile){
+    record CatalogEfforts(Map<String,List<String>> levels,String source,String fetchedAt) {}
+    static CatalogEfforts catalogEfforts(Path home,UserConfig user,Profile profile){
         String id=displayVendorId(profile);if(UNMAPPED.equals(id))return null;
         String configuration=catalogConfiguration(user,profile);if(configuration==null)return null;
         var catalog=read(home.resolve("vendors").resolve(id+"-catalog.json"));
@@ -139,7 +140,7 @@ public final class VendorSettingsService {
         var result=new LinkedHashMap<String,List<String>>();
         for(Object value:models)if(value instanceof Map<?,?> model && model.get("id") instanceof String modelId && model.get("efforts") instanceof List<?> efforts)
             result.put(modelId,efforts.stream().filter(String.class::isInstance).map(String.class::cast).toList());
-        return result;
+        return new CatalogEfforts(Map.copyOf(result),safe(catalog.get("source")),safe(catalog.get("fetched_at")));
     }
     /**
      * Public service identity: one card per authenticating service. Clients, Orca, roles and

@@ -41,6 +41,7 @@ public interface TaskRouting {
                     Profile p=target.profile();if(p==null)continue;
                     var description=new LinkedHashMap<String,Object>();description.put("stage",target.stage());description.put("role",target.role());
                     description.put("profile",p.name());description.put("model",p.model());description.put("configured_effort",p.effort());descriptions.add(description);
+                    description.put("effort_capabilities",capabilities.describe(p));
                     // The router chooses only among the model's levels that the classifier policy can name.
                     List<String> levels=supportedEfforts(capabilities.levels(p));
                     if(levels.isEmpty())continue;
@@ -49,6 +50,7 @@ public interface TaskRouting {
                     var options=policy.options("effort",levels);
                     questions.put(key,DecisionClient.choice(policy.effortInstructions(target.stage(),target.role()),options));
                 }
+                report.put("stage_capabilities",descriptions);
                 progress.accept("route "+profile.name()+" · classifying task and effort …");
                 var result=client.decide(profile,user,Map.of("task",task.goal(),"risk",task.risk(),"stages",descriptions),questions);
                 if(Thread.currentThread().isInterrupted())throw new InterruptedException("classification cancelled");
@@ -69,7 +71,8 @@ public interface TaskRouting {
                     // medium. Use a supported lower quantile, rejecting broadly spread advice.
                     String effort=chooseEffort(answer,settings.minConfidence(),supportedEfforts(capabilities.levels(entry.getValue().profile())));
                     if(effort==null){uncertain.add(entry.getValue().stage());continue;}
-                    if("high".equals(task.risk()) && List.of("low","medium").contains(effort))effort="high";
+                    effort=applyRiskFloor(effort,task.risk(),supportedEfforts(capabilities.levels(entry.getValue().profile())));
+                    if(effort==null){uncertain.add(entry.getValue().stage());continue;}
                     var proposed=new RunOverride(Map.of(),Map.of(entry.getValue().stage(),effort),Map.of());
                     if(proposed.problem(entry.getValue().stage(),entry.getValue().profile(),user.profiles())==null){
                         efforts.put(entry.getValue().stage(),effort);
@@ -89,6 +92,13 @@ public interface TaskRouting {
     static List<String> supportedEfforts(Profile profile){return supportedEfforts(new dev.warden.execution.EffortCapabilities(null,null).levels(profile));}
     /** Routable levels: the shared capability list narrowed to what the classifier policy defines, weakest first. */
     public static List<String> supportedEfforts(List<String> capability){return capability.stream().filter(JevRoutingPolicy.EFFORTS::contains).toList();}
+    /** A risk floor may raise a proposal only to a level the actual model supports. */
+    public static String applyRiskFloor(String proposed,String risk,List<String> levels){
+        if(!levels.contains(proposed))return null;
+        if(!"high".equals(risk)||!List.of("none","minimal","low","medium").contains(proposed))return proposed;
+        for(String level:levels)if(List.of("high","xhigh","max","ultra").contains(level))return level;
+        return null; // No supported high-risk level: preserve the operator's configuration.
+    }
     /**
      * A warning for a Jev-chosen effort that is the model's strongest routable level or stronger
      * than the profile's configured effort; null when neither holds. Trusting Jev includes its top

@@ -120,6 +120,16 @@ public final class DecisionRoutingTest implements Suite {
             check.eq("edited classifier is not blessed by an old in-flight response","classifier_configuration_changed",client.ping(profile,user).get("code"));
         }
         var ultraLevels=List.of("low","medium","high","xhigh","max","ultra");
+        check.eq("risk floor uses an available level rather than inventing high","xhigh",
+                TaskRouting.applyRiskFloor("medium","high",List.of("low","medium","xhigh")));
+        check.eq("no supported risk floor keeps configured effort",null,
+                TaskRouting.applyRiskFloor("low","high",List.of("low","medium")));
+        check.eq("risk floor never accepts unsupported proposals",null,
+                TaskRouting.applyRiskFloor("max","medium",List.of("low","high")));
+        check.eq("ordinary risk preserves a supported proposal","low",
+                TaskRouting.applyRiskFloor("low","medium",List.of("low","high")));
+        check.eq("high risk does not reduce an already supported top level","ultra",
+                TaskRouting.applyRiskFloor("ultra","high",ultraLevels));
         check.eq("ultra is routable where the capability list offers it",ultraLevels,TaskRouting.supportedEfforts(ultraLevels));
         check.that("the default rubric describes ultra",JevRoutingPolicy.DEFAULT.criteria().get("effort").containsKey("ultra"));
         var older=JevRoutingPolicy.parse("version: 1\ncriteria:\n  effort:\n    low: \"Tiny edits.\"\n");
