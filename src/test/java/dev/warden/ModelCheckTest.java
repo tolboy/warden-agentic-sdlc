@@ -93,10 +93,24 @@ public final class ModelCheckTest implements Suite {
             result=service.run(user,home,Set.of(api.name()),ignored->{});
             check.eq("missing assistant text is distinct from malformed JSON","missing_text",row(result).get("pong_failure"));
             stub.missingText=false;stub.invalidJson=true;
+            int unreadableBefore=stub.calls.get();
             result=service.run(user,home,Set.of(api.name()),ignored->{});
             check.eq("non-JSON text has a safe fixed diagnostic","invalid_json",row(result).get("pong_failure"));
             check.that("invalid assistant content is not reflected in receipt",!Json.write(result).contains("synthetic-secret-content"));
-            stub.invalidJson=false;stub.choices=0;
+            check.eq("a persistently unreadable answer is asked only twice",2,stub.calls.get()-unreadableBefore);
+            stub.invalidJson=false;stub.proseFirst=1;
+            int proseBefore=stub.calls.get();
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("one prose answer earns exactly one more ping and passes",true,result.get("ok"));
+            check.eq("with exactly one more request",2,stub.calls.get()-proseBefore);
+            check.eq("the receipt says the ping needed two answers",2L,row(result).get("ping_answers"));
+            check.eq("and why the first did not count","invalid_json",row(result).get("first_pong_failure"));
+            check.that("the prose is not reflected in receipt",!Json.write(result).contains("synthetic-secret-prose"));
+            stub.pong=false;
+            proseBefore=stub.calls.get();
+            result=service.run(user,home,Set.of(api.name()),ignored->{});
+            check.eq("a wrong nonce is not asked again",1,stub.calls.get()-proseBefore);
+            stub.pong=true;stub.choices=0;
             result=service.run(user,home,Set.of(api.name()),ignored->{});
             check.eq("empty choices are explicit","missing_choice",row(result).get("pong_failure"));
             stub.choices=2;
@@ -189,7 +203,7 @@ public final class ModelCheckTest implements Suite {
     }
     private static final class Stub implements AutoCloseable {
         final HttpServer server; final AtomicInteger calls = new AtomicInteger();
-        int status = 200,choices=1,failFirst; String served = "test/model", body,finish="stop"; boolean pong = true, toolCall,emptyTools,fenced,missingText,invalidJson;
+        int status = 200,choices=1,failFirst,proseFirst; String served = "test/model", body,finish="stop"; boolean pong = true, toolCall,emptyTools,fenced,missingText,invalidJson;
         Stub() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/v1/chat/completions", exchange -> {
@@ -201,6 +215,7 @@ public final class ModelCheckTest implements Suite {
                 if (toolCall) message.put("tool_calls", List.of(Map.of("id", "x")));
                 if(missingText)message.remove("content");
                 if(invalidJson)message.put("content","synthetic-secret-content");
+                if(proseFirst>0){proseFirst--;message.put("content","synthetic-secret-prose");}
                 var answers=new java.util.ArrayList<Map<String,Object>>();for(int i=0;i<choices;i++)answers.add(Map.of("finish_reason",finish,"message",message));
                 String response = status == 200 ? Json.write(Map.of("model", served, "choices", answers))
                         : "{\"error\":{\"message\":\"synthetic-secret\"}}";
