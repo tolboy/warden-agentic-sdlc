@@ -68,6 +68,7 @@ public final class TestMain {
                 new dev.warden.CodingAttestationTest(),
                 new dev.warden.HarnessFailureClassificationTest(),
                 new dev.warden.execution.VerifiedOpenCodeExecutorTest(),
+                new dev.warden.execution.OpenCodeLimitsTest(),
                 new dev.warden.ConnectionServiceTest(),
                 new dev.warden.ConnectionSettingsUiTest(),
                 new dev.warden.DashboardConnectionsTest(),

@@ -18,7 +18,12 @@ import java.util.Set;
 public final class CodingAttestation {
     public static final String ADAPTER = "opencode-relay-v1";
     public static final String SUPPORTED_VERSION = "1.19.4";
+    /** Default relay turns per dispatch when a profile declares no limits.max_requests. */
     public static final int MAX_REQUESTS = 8;
+    /** Ceilings a profile may raise its turns and output tokens to. */
+    public static final int REQUEST_CEILING = 32;
+    public static final int OUTPUT_CEILING = 8192;
+    public static final int GONKAROUTER_OUTPUT_CEILING = 4096;
     private static final int MAX_RECEIPT_BYTES = 64 * 1024;
     private static final Set<String> PROOFS =
             Set.of(
@@ -50,7 +55,17 @@ public final class CodingAttestation {
      * The declared profile remains part of the fingerprint even when execution uses a tighter cap.
      */
     public static int outputLimit(Profile profile) {
-        return Math.min(profile.maxOutputTokens(), 2048);
+        int limit = Math.min(profile.maxOutputTokens(), OUTPUT_CEILING);
+        // GonkaRouter refuses a max_tokens above 4096 (see docs/API-CONNECTIONS.md).
+        Connection connection = profile.apiConnection();
+        if (connection != null && "gonkarouter".equals(connection.provider()))
+            limit = Math.min(limit, GONKAROUTER_OUTPUT_CEILING);
+        return limit;
+    }
+
+    /** Relay turns the profile declared, bounded by the ceiling. Part of the fingerprint. */
+    public static int requestLimit(Profile profile) {
+        return Math.max(1, Math.min(profile.maxRequests(), REQUEST_CEILING));
     }
 
     public static long timeLimitSeconds(Profile profile) {
@@ -108,7 +123,7 @@ public final class CodingAttestation {
         receipt.put("binary_sha256", binaryDigest);
         receipt.put("opencode_version", SUPPORTED_VERSION);
         receipt.put("model_served", profile.model());
-        receipt.put("max_requests", (long) MAX_REQUESTS);
+        receipt.put("max_requests", (long) requestLimit(profile));
         receipt.put("max_output_tokens", (long) outputLimit(profile));
         receipt.put("time_budget_seconds", timeLimitSeconds(profile));
         for (String proof : PROOFS) receipt.put(proof, true);
@@ -183,7 +198,7 @@ public final class CodingAttestation {
                 || !profile.apiConnection()
                         .fingerprint()
                         .equals(evidence.get("connection_fingerprint"))
-                || !number(evidence.get("max_requests"), MAX_REQUESTS)
+                || !number(evidence.get("max_requests"), requestLimit(profile))
                 || !number(evidence.get("max_output_tokens"), outputLimit(profile))
                 || !number(evidence.get("time_budget_seconds"), timeLimitSeconds(profile)))
             return false;
