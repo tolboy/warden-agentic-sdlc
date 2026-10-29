@@ -207,7 +207,59 @@ Verification (Windows, JDK 25.0.2, Java release 21):
   incomplete-body assertion passed in three consecutive `api-resilience` runs, each
   **102 passed, 0 failed**. `git diff --check`: exit 0.
 
-Live Loop B stop/resume remains open. Further reruns can be performed locally; the box
-follow-up was stopped. This Windows follow-up used automated fixtures. External Linux
-signal delivery, GonkaRouter/JoinGonka reliability and live ordered provider fallback
-remain unverified here.
+At this point live Loop B stop/resume remained open. The box follow-up was stopped;
+local reruns were allowed. The live Windows follow-up below subsequently demonstrated
+interruption and implementation reuse with real OpenCode/API and CLI roles.
+
+## Live local Loop B recovery — 2026-10-29
+
+Recreated the recovery scenario in `out/stage3-loopb-local-20261029/project`, using
+an isolated configuration home beside it. Personal profiles and the remote candidate
+were not modified. This is a fresh small version-function task, rather than a copy of
+the remote HTTP endpoint project. Jev and the second reviewer were omitted to isolate
+the remaining interruption/reuse criterion; their earlier acceptance results stand.
+
+- Implementer: OpenCode 1.19.4, OpenRouter `deepseek/deepseek-v4-flash-0731`,
+  four-minute wall clock, at most 30 relay requests, output cap 8192.
+- Reviewer: actual `codex-review` CLI profile, `gpt-6.1-sol`, requested effort medium.
+- Fresh coding verification passed: real reads, edits, shell tools, unchanged test,
+  model identity and schema-valid artifact; six relay requests. Both profiles passed
+  fresh model checks before execution.
+- One zero-role-call preflight (`local-b-interrupted`) refused the verification probe
+  directory left in the project. Moved it to the adjacent `probe-evidence` directory.
+
+| Run | Result |
+| --- | --- |
+| `local-b-stop` | DeepSeek implemented in 46.7 s with six relay requests; syntax and version tests passed. Sent external Windows `CTRL_C_EVENT` five seconds into real CLI review. JVM exited 130 and durably recorded `controller_interrupted`, finished implementation, unchanged candidate and pending decision. |
+| `local-b-resumed` | Recorded retry. Baseline and implementation reused; gates reran and passed. CLI review stopped because atomic replacement of `.git/warden-execution.json` was denied. Correctly fenced the checkout as `worktree_recovery_required`. |
+| `local-b-complete` | After the receipt fix and inspection/recovery, recorded retry and continued. Baseline and implementation reused again; gates reran; Codex review passed in 31.4 s. Reached `ready_for_human` with pending accept/reject and a released execution lease. |
+
+Exactly one implementation dispatch exists across the chain. Its candidate fingerprint
+is `35dc30c16c2ff3ed34b8f32fc78e8e0ed6d349f1a8b24d98900ce2c94a5aa3e5` throughout.
+The chain receipt accounts for four role calls, including interrupted/failed reviews;
+verification and model-check calls are separate. No acceptance or landing was performed.
+
+The Windows replacement failure was reproduced with a real reader holding the destination
+without delete sharing (`AccessDeniedException`). `JsonFile` now retries access-denied
+atomic replacement for at most 500 ms, preserving the previous complete receipt.
+Persistent denial still fails closed and cancellation preserves the interrupt flag.
+Before `recover --confirm-stopped`, inspected the failed run's 23 process identities:
+none remained alive; one PID had been reused by a newer unrelated process and was left alone.
+
+Verification after the fix: clean `cmd /c build.cmd` passed; `json-file` **13 passed,
+0 failed**; `worktree lease` plus `shutdown-resume` **97 passed, 0 failed**; live final
+continuation passed. The full suite was not repeated. OpenCode's Windows shield used
+permission rules, not Linux mount namespaces.
+
+Local evidence under `out/stage3-loopb-local-20261029/`:
+`result.json`, `interrupt.json`, `recovery-process-survey.json`, `verify.log`,
+`interrupted.log`, `resumed.log`, `complete.log`, `run_interrupt.py`, and project
+`.warden/runs/<run-id>/task-run.json`, role receipts and pending decision.
+The signal helper starts Java in its own hidden console, attaches to that console and
+sends Ctrl+C; it does not inject an executor or call `System.exit` inside the controller.
+
+The remaining Loop B recovery criterion is now demonstrated locally. External Linux
+signal delivery, current GonkaRouter/JoinGonka reliability and live ordered provider
+fallback are still unverified by this follow-up. OpenRouter's raw implementation usage
+reports about $0.001497, but the aggregate role/chain cost remains unknown/unpriced;
+the displayed $0 charged is not evidence of a free run or a strict monetary cap.

@@ -95,6 +95,11 @@ that exists in code but has never been run live says so.
 
 ### Fixed
 
+- Atomic JSON receipts tolerate a short Windows delete-sharing lock for up to 500 ms,
+  retaining atomic replacement and failing closed on persistent denial. Verified with real
+  sharing-lock tests and a live OpenCode/OpenRouter implementation followed by interrupted
+  CLI review, implementation reuse and successful continuation to the human gate.
+
 - A finding id belongs to the stage that filed it. Another stage that reports the
   same id with a different category or severity does not replace that record; the
   round is `finding_protocol_failure`. Waive of the shared id is refused while the
