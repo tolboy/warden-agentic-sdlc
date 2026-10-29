@@ -85,6 +85,31 @@ warden run version-endpoint --run-id s3-loopB-4 --continue s3-loopB-3 --use impl
 
 Interrupt that run during `[3/6]`, approve retry, then continue it as `s3-loopB-5`.
 
+## Loop B, round 2 — 2026-10-29
+
+Tol decided to raise the relay limits and to hide run records from the implementer, then allowed up to 2 more Loop B runs.
+
+Changes before the runs:
+- **e7f958e**: per-profile relay limits and hidden run records.
+  - New `limits.max_requests` (OpenCode profiles only, ceiling 32). `max_output_tokens` is capped at 8192, and at 4096 on a GonkaRouter connection because GonkaRouter refuses `max_tokens` above 4096.
+  - The request limit is part of the profile fingerprint, so changing it needs re-verification.
+  - New `RunArtifactShield`:
+    - OpenCode permission rules deny `read`/`edit` of `.warden/runs/` (relative and absolute) and shell commands that name `.warden/runs` or the Warden home.
+    - On Linux, when bubblewrap works, the harness also runs in a mount namespace with a tmpfs over `<project>/.warden/runs` and the Warden home. Only this dispatch's own exchange directory (`opencode-io-*`, holding the dispatch file, OpenCode state and the artifact) is bound back.
+    - The evidence records `run_artifacts_hidden` (`mount_namespace` or `permission_rules`) and `hidden_paths`.
+  - New suite `opencode-limits`. `verified-opencode` checks that the fixture cannot see the run tree.
+- Profiles (backup in `~/.warden/backups/`): `gonkarouter-coder` and `joingonka-coder` now have `max_requests: 30`, `max_output_tokens: 8192`, `wall_clock_minutes: 12`.
+- Re-verification:
+  - `gonkarouter-coder` verified 2026-10-29: 6 relay requests, 30645/800 tokens, `mount_namespace`, `effective_config_checked: true`, effective output cap 4096. `warden check` gave pong.
+  - `joingonka-coder` verified 2026-10-29: 8 relay requests, 41721/1080 tokens, about $0.0003.
+
+| Run | Provider | What happened | Result |
+| --- | --- | --- | --- |
+| B-4 | GonkaRouter `deepseek-ai/DeepSeek-V4-Flash-0731` via `gonkarouter-coder` | Fresh branch `stage3-loopB2` from ec5566f. Reproduction red as expected. The implementer worked 20 OpenCode steps in about 7 min and wrote `serve.mjs` (+13) and `test/version.test.mjs`. Two problems: (1) **shield bug**: OpenCode matches paths inside the project in project-relative form, so the absolute allow rule for the exchange directory never matched, and the `.warden/runs/*` deny blocked the implementer's own artifact write 6 times; (2) relay step 21 hung for about 2.5 min and GonkaRouter answered **HTTP 502 Bad Gateway**. I also sent SIGINT at about 02:57; the run ended at 9m16s as `role_api_timeout`. | `role_timed_out`, 1 vendor call, tokens not reported; left pending (not continued). Led to fix fd74184. |
+
+- **fd74184**: the exchange directory is also allowed by its project-relative path, after the denies. The test evaluates the rules last-match-wins, as OpenCode does, for relative and absolute forms (earlier runs stay denied, own artifact allowed). `opencode-limits` now has 35 checks.
+- **Provider switch.** GonkaRouter was unstable again (a 502 after a hang, the same ~110 s+ gateway failure as before), so per the steering, the remaining run uses OpenRouter. The new profile `openrouter-coder` uses the same harness and limits (`max_requests: 30`, `max_output_tokens: 8192`, 12 min), connection `openrouter-personal` (`env:OPENROUTER_API_KEY`), and model `deepseek/deepseek-v4-flash-0731`, the same model family as on GonkaRouter. It was verified 2026-10-29: 6 relay requests, 30739/792 tokens, $0.0011, `mount_namespace`, `effective_config_checked: true`. `warden check` gave pong ($0.000014).
+
 ## Bugs found and fixed (all on `grok/acceptance-stage3`, each with tests)
 
 | Commit | Fix | Found by |
@@ -97,6 +122,8 @@ Interrupt that run during `[3/6]`, approve retry, then continue it as `s3-loopB-
 | 3716542 | A `vendor_call_failed` stop from an API role is worded as an API call failure that points to `api_attempts`, not to a process/stderr. | A-3 |
 | 4559ac5 | The model check pings once more when an API model answers the pong in prose (`invalid_json`/`missing_text`). The receipt records `ping_answers: 2` and `first_pong_failure`. A wrong nonce or a truncated pong is never asked again. | A-5, A-7 (DeepSeek failed about 1 in 3 pings) |
 | 419bd53 | The relay names its own stop: `role_harness_turn_limit` or `role_harness_time_limit` instead of `role_harness_process_failed`. | B-3 |
+| e7f958e | Per-profile relay limits (`max_requests`, output up to 8192, 4096 on GonkaRouter) and `RunArtifactShield` (permission rules plus bubblewrap mount namespace hide `.warden/runs/` and the Warden home from the OpenCode implementer). | B-3, Tol's decision |
+| fd74184 | The shield also allows the exchange directory by its project-relative path, so the implementer can write its own artifact. | B-4 |
 
 ## Other problems observed (not Warden code)
 
