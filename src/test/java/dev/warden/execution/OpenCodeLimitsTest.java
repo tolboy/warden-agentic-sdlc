@@ -111,6 +111,17 @@ public final class OpenCodeLimitsTest implements Suite {
         }
     }
 
+    /** OpenCode's evaluation: '*' matches any run of characters, the last matching rule wins. */
+    private static Object lastMatch(Map<?, ?> rules, String path) {
+        Object action = null;
+        for (var rule : rules.entrySet()) {
+            String regex = java.util.Arrays.stream(rule.getKey().toString().split("\\*", -1))
+                    .map(java.util.regex.Pattern::quote).collect(java.util.stream.Collectors.joining(".*"));
+            if (path.matches(regex)) action = rule.getValue();
+        }
+        return action;
+    }
+
     private static void shield(Check check) throws Exception {
         Path base = Files.createTempDirectory("warden-shield-").toRealPath();
         Path project = Files.createDirectories(base.resolve("project"));
@@ -124,8 +135,21 @@ public final class OpenCodeLimitsTest implements Suite {
         List<?> read = List.copyOf(((Map<?, ?>) rules.get("read")).keySet());
         check.eq("reads of the run tree are denied", "deny",
                 ((Map<?, ?>) rules.get("read")).get(".warden/runs/*"));
-        check.eq("the exchange directory is allowed last, so it wins", exchange + "/*",
+        check.eq("the exchange directory is allowed last, so it wins", ".warden/runs/now/opencode-io-1/*",
                 read.get(read.size() - 1));
+        Map<?, ?> readRules = (Map<?, ?>) rules.get("read");
+        // OpenCode reports paths inside the project relative to it, others absolute.
+        check.eq("the artifact can be written by its project-relative path", "allow",
+                lastMatch(readRules, ".warden/runs/now/opencode-io-1/harness-artifact.json"));
+        check.eq("the artifact can be written by its absolute path", "allow",
+                lastMatch(readRules, exchange + "/harness-artifact.json"));
+        check.eq("an earlier run stays unreadable by relative path", "deny",
+                lastMatch(readRules, ".warden/runs/earlier/review.json"));
+        check.eq("an earlier run stays unreadable by absolute path", "deny",
+                lastMatch(readRules, project + "/.warden/runs/earlier/review.json"));
+        check.eq("this run's own records outside the exchange stay unreadable", "deny",
+                lastMatch(readRules, ".warden/runs/now/review.json"));
+        check.eq("project files stay readable", "allow", lastMatch(readRules, "serve.mjs"));
         check.eq("edits follow the same rules", rules.get("read"), rules.get("edit"));
         check.eq("shell commands naming the run tree are denied", "deny",
                 ((Map<?, ?>) rules.get("bash")).get("*.warden/runs*"));

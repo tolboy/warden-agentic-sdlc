@@ -107,7 +107,12 @@ final class RunArtifactShield {
         rules.put(RUNS + "/*", "deny");
         rules.put("*/" + RUNS + "/*", "deny");
         rules.put(slash(real(projectRoot).resolve(RUNS)) + "/*", "deny");
-        rules.put(slash(real(exchange)) + "/*", "allow");
+        Path root = real(projectRoot);
+        Path io = real(exchange);
+        rules.put(slash(io) + "/*", "allow");
+        // OpenCode matches paths inside the project in their project-relative form, so the
+        // exchange directory, which lives under the run tree, needs that form allowed as well.
+        if (io.startsWith(root) && !io.equals(root)) rules.put(slash(root.relativize(io)) + "/*", "allow");
         return rules;
     }
 
