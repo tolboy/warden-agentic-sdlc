@@ -4,6 +4,7 @@ import dev.warden.config.ConfigFileStore;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Profile;
 import dev.warden.config.ProjectConfig;
+import dev.warden.config.Profile;
 import dev.warden.config.RunOverride;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
@@ -112,9 +113,9 @@ public final class NextRun {
         if (!(raw instanceof Map<?, ?>)) throw new IllegalArgumentException("override must be a mapping");
         @SuppressWarnings("unchecked")
         RunOverride overlay = RunOverride.fromMap((Map<String, Object>) raw);
-        Map<String, Boolean> found = new LinkedHashMap<>();
+        Map<Profile, Boolean> found = new LinkedHashMap<>();
         RoleResolver.Availability cached = profile -> found.computeIfAbsent(
-                profile.runner() + "|" + profile.command(), ignored -> availability.available(profile));
+                profile, ignored -> availability.available(profile));
         Map<String, Object> result = new LinkedHashMap<>(TaskLoop.settingsPreview(
                 project, state.loaded(), state.user(), overlay, cached));
         // Catch edits and rotation changes made while availability was being checked.
@@ -178,10 +179,12 @@ public final class NextRun {
         versions.put("project_root", project.toRealPath().toString());
         versions.put("config_home", home.toRealPath().toString());
         version(versions, "policy", home.resolve("policy.yaml"), false);
-        Path profiles = home.resolve("profiles");
-        if (Files.isDirectory(profiles)) try (var listing = Files.list(profiles)) {
-            for (Path file : listing.filter(p -> p.getFileName().toString().endsWith(".yaml"))
-                    .sorted().toList()) version(versions, "profile/" + file.getFileName(), file, false);
+        for (String directory : List.of("profiles", "connections")) {
+            Path entries = home.resolve(directory);
+            if (Files.isDirectory(entries)) try (var listing = Files.list(entries)) {
+                for (Path file : listing.filter(p -> p.getFileName().toString().endsWith(".yaml"))
+                        .sorted().toList()) version(versions, directory + "/" + file.getFileName(), file, false);
+            }
         }
         Path realProject = project.toRealPath();
         for (String file : List.of(".warden/project.yaml", ".warden/tasks/" + taskId + ".yaml",

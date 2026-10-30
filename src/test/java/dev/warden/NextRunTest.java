@@ -63,6 +63,12 @@ public final class NextRunTest implements Suite {
                     override, RunOverride.fromArgs(((List<?>) preview.get("run_argv")).stream()
                             .map(String::valueOf).toArray(String[]::new)).toMap());
 
+            NextRun perProfile = new NextRun(root, home, p -> !p.name().equals("reader-c"));
+            Map<String, Object> unavailable = perProfile.preview(request(description, override));
+            check.eq("availability is checked for each profile even when commands match", false,
+                    unavailable.get("settings_ok"));
+            check.eq("an unavailable profile cannot export a launch command", null, unavailable.get("run_command"));
+
             Map<String, Object> blocked = next.preview(request(description,
                     Map.of("profile", Map.of("review", "reader-a"))));
             check.eq("same-vendor reader is refused before any writer", false, blocked.get("settings_ok"));
@@ -93,6 +99,18 @@ public final class NextRunTest implements Suite {
             check.rejects("even a comment edit invalidates a preview", "Settings changed",
                     () -> next.preview(request(description, override)));
             Files.writeString(profile, original);
+            Path connection = home.resolve("connections/preview.yaml");
+            Files.createDirectories(connection.getParent());
+            String connectionText = "version: 1\nconnection: preview\nprovider: custom\n"
+                    + "protocol: openai_chat\nbase_url: http://127.0.0.1:9/v1\nauth: { type: none }\nenabled: true\n";
+            Files.writeString(connection, connectionText);
+            check.rejects("adding a connection invalidates an existing preview", "Settings changed",
+                    () -> next.preview(request(description, override)));
+            Map<String, Object> connected = next.describe("hello");
+            Files.writeString(connection, connectionText.replace("enabled: true", "enabled: false"));
+            check.rejects("connection edits invalidate reviewed settings", "Settings changed",
+                    () -> next.preview(request(connected, override)));
+            Files.delete(connection);
             Files.createDirectories(root.resolve(".warden/runs"));
             Files.writeString(root.resolve(".warden/runs/rotation.json"), "{\"reviewer\":1}\n");
             check.rejects("rotation changes invalidate the selection", "Settings changed",
