@@ -1,3 +1,7 @@
+# Historical offline contract from 2026-10-26, retained for compatibility checks.
+# Not a recommended personal coding profile and not eligible for execution.
+# For the verified native path start with joingonka-coder.yaml and read
+# docs/API-CONNECTIONS.md#verified-opencode-implementer before configuring your own connection.
 version: 1
 profile: opencode-implementer
 role: implementer

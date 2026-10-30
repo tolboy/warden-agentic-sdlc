@@ -20,9 +20,12 @@ Java, **ноль зависимостей**, сборка одним `javac`. И
 Собирается с `--release 21` (это пол, а не потолок: байткод запускается на любой более новой
 JVM). Переопределяется переменной `WARDEN_JAVA_RELEASE`.
 
-Read-only текстовые роли могут использовать общие API-подключения OpenRouter, GonkaRouter
-или совместимого сервиса вместе с CLI-подписками. Настройка ссылок на ключи из env,
-проверка профиля и текущие ограничения описаны в [API connections](docs/API-CONNECTIONS.md).
+Read-only текстовые роли и проверенные native OpenCode implementer-профили могут
+использовать общие личные API-подключения наряду с CLI-подписками. Для coding-допуска
+нужна собственная capability-квитанция; сохранённый legacy offline-пример её не выдаёт.
+См. [API connections](docs/API-CONNECTIONS.md),
+[маршрутизацию Jev](docs/JEV-ROUTING.md) и
+[назначение примеров](examples/README.md).
 
 ## Первый запуск
 

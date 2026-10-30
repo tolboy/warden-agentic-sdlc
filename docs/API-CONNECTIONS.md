@@ -81,6 +81,30 @@ This is an explicit, potentially paid inference: one bounded synthetic text/arti
 
 After verification, explicitly add the profile to the intended role in `~/.warden/policy.yaml`. A normal dry run shows connection and credential readiness without sending inference.
 
+## Catalog refresh and manual models
+
+The settings service cards separate catalog membership from account access and native
+profile verification. Refresh only retrieves metadata: OpenRouter/compatible API model
+lists, Codex `app-server` `model/list`, or Grok `models` where available. It never sends
+a worker prompt or starts a coding turn. Codex reports when its CLI list was queried;
+the CLI does not guarantee an upstream cache refresh, so freshness remains unknown.
+Other CLI clients expose their available local cache, source date and update instructions.
+A cache file's modification time is shown separately and is not its source freshness.
+
+Source observations older than 24 hours are stale. Missing or invalid source dates stay
+unknown. A failed refresh may retain the previous list as stale data, with a diagnostic.
+API effort requires current, dated metadata for the exact connection. Catalog listing
+does not prove that a particular key can use a model; explicit checks and native
+verification retain their separate roles.
+
+Configured models absent from a current list remain selectable with `missing` or
+`removed` diagnostics; an unavailable source gives `unknown`. Manual model IDs stay
+editable when discovery fails. Refresh never replaces a model with the latest entry,
+changes a saved effort, edits the role roster or grants verification. An unsupported
+saved effort requires an explicit correction rather than a silent replacement.
+See [Stage 6 validation](NOTE-STAGE6-CATALOGS-2026-10-29.md) and
+[new Jev version confirmation](JEV-ROUTING.md#confirm-a-new-jev-version-stage-6).
+
 ## Model effort
 
 Refresh the service model catalog before selecting API/OpenCode effort. For OpenRouter

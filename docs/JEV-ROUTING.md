@@ -48,6 +48,33 @@ model counts as pong. `classify` evaluates a task without starting workers; its 
 target stages. Explicit classify works even when automatic routing is disabled. Panel reads never
 infer. Both actions can use API tokens independently of worker call limits.
 
+## Confirm a new Jev version (Stage 6)
+
+An explicit Jev version or dated snapshot can be configured without a Warden release.
+Saving it does not authorize routing. Except for the original built-in compatibility
+pairs, normal checks and classification refuse it with `classifier_compatibility_required`
+until an explicit compatibility challenge succeeds. Catalog refresh never grants this
+admission and never changes `model` or `reported_model`.
+
+After reviewing and saving the intended exact returned identity, use the classifier's
+confirmation button in settings, or:
+
+```text
+warden profiles --verify jev-classifier --confirm --reported-model typesafe/jev-1.14-20261014
+```
+
+Substitute the exact pin saved in that profile. This sends one bounded, typed Decisions
+nonce question and can spend API tokens. Both the Choice response schema and the exact
+returned identity must match. A mismatch reports a safe observed Jev identity for review;
+it never adopts that identity automatically. Edit and save the pin explicitly before
+confirming again. `latest` aliases and unrelated model families are rejected.
+
+Successful confirmation writes `classifiers/NAME.compatibility.json`, bound to the profile,
+connection and exact confirmed identity. Changing either configuration invalidates the
+receipt. Ordinary checks do not create it, and edits during the challenge cannot stamp
+the changed configuration. Incompatible versions retain the normal routing fallback or
+an explicit refusal. See [Stage 6 validation](NOTE-STAGE6-CATALOGS-2026-10-29.md).
+
 ## Automatic routing
 
 The shared `~/.warden/settings.yaml` enables classification for actual `run`/`do` execution and decision

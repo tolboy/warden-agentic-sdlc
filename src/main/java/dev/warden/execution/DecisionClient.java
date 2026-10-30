@@ -15,6 +15,9 @@ public final class DecisionClient {
     public DecisionClient(Function<String,String> environment){this.environment=environment;}
 
     public Result decide(DecisionProfile profile,UserConfig user,Object state,Map<String,Map<String,Object>> questions) throws Exception {
+        return decide(profile,user,state,questions,false);
+    }
+    private Result decide(DecisionProfile profile,UserConfig user,Object state,Map<String,Map<String,Object>> questions,boolean compatibilityProbe) throws Exception {
         Map<String,Object> evidence=new LinkedHashMap<>(); evidence.put("cost_status","unknown");
         evidence.put("model_requested",profile.model()); evidence.put("vendor_turn_started",false);
         Connection c=user.connections().get(profile.connection());
@@ -22,6 +25,7 @@ public final class DecisionClient {
         boolean openrouter="openrouter".equals(c.provider());
         if(!openrouter && !("custom".equals(c.provider()) && Set.of("127.0.0.1","localhost","::1","[::1]").contains(URI.create(c.baseUrl()).getHost())))
             return fail("classifier_endpoint_unsupported",evidence);
+        if(!compatibilityProbe&&!DecisionCompatibility.admitted(profile,user))return fail("classifier_compatibility_required",evidence);
         String serialized=Json.write(state);
         if(serialized.length()>profile.maxInputCharacters() || questions.isEmpty() || questions.size()>16)
             return fail("classifier_input_limit",evidence);
@@ -38,6 +42,9 @@ public final class DecisionClient {
         catch(ApiExecutor.CallFailure failure){return fail(failure.code,evidence);}
         var parsed=ApiExecutor.object(response.body()); String error=ApiExecutor.errorCode(response.status(),parsed);
         if(error!=null)return fail(error,evidence);
+        if(parsed!=null && parsed.get("model") instanceof String reported
+                && reported.matches("typesafe/jev-[1-9][0-9]*\\.[0-9]+(?:\\.[0-9]+)?(?:-[0-9]{8})?")
+                && reported.length()<128 && (token==null||!reported.contains(token)))evidence.put("model_reported",reported);
         if(parsed==null || !profile.reportedModel().equals(parsed.get("model")))return fail("classifier_model_mismatch",evidence);
         evidence.put("model_reported",profile.reportedModel());
         if(parsed.get("usage") instanceof Map<?,?> usage){
@@ -73,9 +80,15 @@ public final class DecisionClient {
         return new Result(true,"classifier_answered",validated,evidence);
     }
     public Map<String,Object> ping(DecisionProfile profile,UserConfig user) throws Exception {
+        return ping(profile,user,false);
+    }
+    public Map<String,Object> probeCompatibility(DecisionProfile profile,UserConfig user)throws Exception{
+        return ping(profile,user,true);
+    }
+    private Map<String,Object> ping(DecisionProfile profile,UserConfig user,boolean compatibilityProbe) throws Exception {
         String marker="pong_"+UUID.randomUUID().toString().replace("-","");
         var result=decide(profile,user,Map.of("expected_choice",marker),Map.of("availability",choice(
-                "Select the option equal to state.expected_choice.",Map.of(marker,"The marker equals state.expected_choice.","not_ready","The marker does not equal state.expected_choice."))));
+                "Select the option equal to state.expected_choice.",Map.of(marker,"The marker equals state.expected_choice.","not_ready","The marker does not equal state.expected_choice."))),compatibilityProbe);
         boolean ok=result.ok() && marker.equals(result.answers().get("availability").get("choice"));
         Map<String,Object> report=new LinkedHashMap<>(result.evidence());report.put("ok",ok);
         report.put("code",ok?"pong":result.ok()?"classifier_no_pong":result.code());report.put("identity","provider_response_pinned_decision_model");return report;

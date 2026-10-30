@@ -25,6 +25,7 @@ public final class ModelSettingsService {
     private final Path home;
     private final Path project;
     private final ModelCheck checks;
+    private final Function<String,String> environment;
     private final dev.warden.execution.VendorSettingsService vendors;
     private final AtomicBoolean checking = new AtomicBoolean();
 
@@ -35,7 +36,7 @@ public final class ModelSettingsService {
         this(home,project,checks,System::getenv);
     }
     private ModelSettingsService(Path home,Path project,ModelCheck checks,Function<String,String> environment){
-        this.home = home.toAbsolutePath().normalize(); this.project = project; this.checks = checks;
+        this.home = home.toAbsolutePath().normalize(); this.project = project; this.checks = checks; this.environment=environment;
         this.vendors=new dev.warden.execution.VendorSettingsService(this.home,project,environment,checks,Path.of(System.getProperty("user.home")));
     }
 
@@ -70,7 +71,8 @@ public final class ModelSettingsService {
         for(var classifier:DecisionProfile.load(home).values()){
             var row=new LinkedHashMap<String,Object>();row.put("name",classifier.name());row.put("role","classifier");row.put("kind","classifier");
             row.put("model",classifier.model());row.put("reported_model",classifier.reportedModel());row.put("vendor","typesafe");row.put("connection",classifier.connection());
-            row.put("runner","decisions");row.put("verified",false);row.put("revision",revision(DecisionProfile.file(home,classifier.name())));
+            row.put("runner","decisions");row.put("verified",dev.warden.execution.DecisionCompatibility.admitted(classifier,user));row.put("revision",revision(DecisionProfile.file(home,classifier.name())));
+            row.put("compatibility_status",dev.warden.execution.DecisionCompatibility.status(classifier,user));
             var connection=user.connections().get(classifier.connection());
             row.put("configuration",connection==null?"unbound":classifier.fingerprint(connection));profiles.add(row);
         }
@@ -123,6 +125,16 @@ public final class ModelSettingsService {
                 if (!checking.compareAndSet(false, true)) return refused(409, "check_already_running");
                 try { return new Outcome(200, checks.run(UserConfig.load(home), project, names, ignored -> {})); }
                 finally { checking.set(false); }
+            }
+            if("verify-classifier".equals(action)){
+                requireKeys(payload,Set.of("name","revision","reported_model","confirm"));
+                String name=text(payload,"name");expectRevision(DecisionProfile.file(home,name),payload);
+                var user=UserConfig.load(home);var profile=DecisionProfile.load(home).get(name);if(profile==null)throw new Invalid();
+                if(!Boolean.TRUE.equals(payload.get("confirm")) || !profile.reportedModel().equals(text(payload,"reported_model")))
+                    return refused(400,"classifier_confirmation_required");
+                if(!checking.compareAndSet(false,true))return refused(409,"check_already_running");
+                try{return new Outcome(200,dev.warden.execution.DecisionCompatibility.verify(new dev.warden.execution.DecisionClient(environment),profile,user,
+                        text(payload,"reported_model"),true));}finally{checking.set(false);}
             }
             if ("verify".equals(action)) {
                 requireKeys(payload, Set.of("name", "revision"));

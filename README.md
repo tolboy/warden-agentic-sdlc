@@ -21,9 +21,13 @@ chain in behind it — and it should build with no network.
 Compiled with `--release 21` — a floor, not a ceiling: the bytecode runs on any newer JVM.
 Override with `WARDEN_JAVA_RELEASE`.
 
-API-backed read-only text roles can share OpenRouter, GonkaRouter or custom connections
-alongside CLI subscriptions. See [API connections](docs/API-CONNECTIONS.md) for environment
-credential references, native verification and the current execution limits.
+API-backed read-only text roles and verified native OpenCode implementers can share
+user-owned connections alongside CLI subscriptions. OpenCode coding admission requires
+its own capability receipt; the retained legacy offline example does not grant it.
+See [API connections](docs/API-CONNECTIONS.md) for credential references, native
+verification and execution limits, and [Jev routing](docs/JEV-ROUTING.md) for optional
+model and effort selection. [Examples](examples/README.md) distinguish current templates
+from historical eval evidence.
 
 ## Try it in ten seconds, spending nothing
 

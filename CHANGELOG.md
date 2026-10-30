@@ -22,6 +22,13 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Catalog refresh uses non-inference CLI metadata where supported, with source dates,
+  explicit stale/unknown states and cache update instructions elsewhere. Removed or
+  unknown models keep their manual configuration; refresh never changes roles, effort
+  or access admission. New Jev versions require an explicit exact identity confirmation
+  and a successful typed Decisions compatibility challenge before routing can use them.
+  Historical OpenCode and evaluation examples now link current verified setup guidance.
+
 - Separate opt-in Jev model choice within admitted role rosters, with explicit override
   priority, fresh candidate availability checks when enabled, joint independent-review
   validation and configured-order fallback. Continuations retain selected profiles;

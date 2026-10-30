@@ -6,6 +6,7 @@ import java.nio.file.*;
 import java.util.*;
 
 public final class RoleRosterEditorTest implements Suite {
+    private static final String OBSERVED_AT=java.time.Instant.now().toString();
     public String name(){return "role-roster-editor";}
     public void run(Check check)throws Exception {
         Path home=Files.createTempDirectory("warden-role-roster-");new UserSetup().run(home);
@@ -25,7 +26,7 @@ public final class RoleRosterEditorTest implements Suite {
         // The shared capability list: the service catalog lists levels unordered, including the top ultra level Jev may pick.
         var user=UserConfig.load(home);
         Files.createDirectories(home.resolve("vendors"));
-        Files.writeString(home.resolve("vendors/cli-provider-openai-catalog.json"),dev.warden.json.Json.write(Map.of("status","available","source","fixture catalog","fetched_at","2026-10-29T00:00:00Z",
+        Files.writeString(home.resolve("vendors/cli-provider-openai-catalog.json"),dev.warden.json.Json.write(Map.of("status","available","source","fixture catalog","fetched_at",OBSERVED_AT,
                 "configuration",dev.warden.execution.VendorSettingsService.catalogConfiguration(user,user.profiles().get("primary")),
                 "models",List.of(Map.of("id","gpt-6-empty","efforts",List.of()),Map.of("id","old-model","efforts",List.of("medium","high")),Map.of("id","new-model","efforts",List.of("ultra","high","medium","low")),Map.of("id","next-model","efforts",List.of("medium","high"))))));
         var capabilities=new dev.warden.execution.EffortCapabilities(home,UserConfig.load(home));
@@ -35,7 +36,7 @@ public final class RoleRosterEditorTest implements Suite {
         check.eq("explicitly empty catalog overrides built-in levels",List.of(),capabilities.levels(user.profiles().get("primary"),"gpt-6-empty"));
         var described=capabilities.describe(user.profiles().get("primary"));
         check.eq("capability source is recorded","model_catalog",described.get("source"));
-        check.eq("catalog observation date is preserved","2026-10-29T00:00:00Z",described.get("observed_at"));
+        check.eq("catalog observation date is preserved",OBSERVED_AT,described.get("observed_at"));
         check.eq("catalog support is not provider confirmation",false,described.get("provider_confirmed"));
         var cliOverlay=new RunOverride(Map.of(),Map.of("review","ultra"),Map.of());
         check.that("explicit CLI override respects known catalog levels",

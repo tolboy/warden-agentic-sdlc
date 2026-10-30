@@ -8,6 +8,7 @@ import java.util.*;
 
 /** Model/connection admission and exact gateway level discovery, without paid calls. */
 public final class EffortCapabilitiesTest implements Suite {
+    private static final String OBSERVED_AT=java.time.Instant.now().toString();
     public String name(){return "effort-capabilities";}
     public void run(Check check)throws Exception {
         Path home=Files.createTempDirectory("warden-effort-catalog-");
@@ -40,7 +41,7 @@ public final class EffortCapabilitiesTest implements Suite {
         var capabilities=new EffortCapabilities(home,user);
         check.eq("catalog levels reach API registry",List.of("low","medium","max"),capabilities.levels(profile));
         check.eq("registry records transport","openrouter_reasoning",capabilities.describe(profile).get("delivery"));
-        check.eq("registry retains observation date","2026-10-29T00:00:00Z",capabilities.describe(profile).get("observed_at"));
+        check.eq("registry retains observation date",OBSERVED_AT,capabilities.describe(profile).get("observed_at"));
         check.eq("supported explicit effort is admitted",null,EffortCapabilities.problem(profile.withEffort("max")));
         check.eq("unsupported effort fails before dispatch","role_effort_unsupported",EffortCapabilities.problem(profile.withEffort("high")));
         var override=new RunOverride(Map.of(),Map.of("review","max"),Map.of());
@@ -90,6 +91,6 @@ public final class EffortCapabilitiesTest implements Suite {
         Files.createDirectories(home.resolve("vendors"));
         Files.writeString(home.resolve("vendors/api-fixture-catalog.json"),Json.write(Map.of(
                 "status","available","stale",stale,"configuration",connection.fingerprint(),
-                "source","fixture models endpoint","fetched_at","2026-10-29T00:00:00Z","models",List.of(model))));
+                "source","fixture models endpoint","fetched_at",OBSERVED_AT,"models",List.of(model))));
     }
 }

@@ -164,7 +164,7 @@ public final class ApiEffortTransportTest implements Suite {
 
     private static void catalog(Path path,String configuration)throws Exception {
         Files.writeString(path,Json.write(Map.of("status","available","configuration",configuration,"source","loopback fixture",
-                "fetched_at","2026-10-29T00:00:00Z","models",List.of(Map.of("id","test/model","efforts",List.of("low","medium","high","max"),
+                "fetched_at",java.time.Instant.now().toString(),"models",List.of(Map.of("id","test/model","efforts",List.of("low","medium","high","max"),
                         "effort_delivery","openrouter_reasoning")))));
     }
     private static Profile profile(Connection c,Path home) {

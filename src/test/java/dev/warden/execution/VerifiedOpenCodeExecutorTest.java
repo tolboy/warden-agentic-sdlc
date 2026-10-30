@@ -197,7 +197,7 @@ public final class VerifiedOpenCodeExecutorTest implements Suite {
             Files.createDirectories(home.resolve("vendors"));
             Files.writeString(home.resolve("vendors/api-local-catalog.json"), Json.write(Map.of(
                     "status", "available", "configuration", connection.fingerprint(), "source", "loopback fixture",
-                    "fetched_at", "2026-10-29T00:00:00Z", "models", List.of(Map.of("id", MODEL,
+                    "fetched_at", java.time.Instant.now().toString(), "models", List.of(Map.of("id", MODEL,
                             "efforts", List.of("low", "medium", "high"), "effort_delivery", "openrouter_reasoning")))));
             // This is the real verified executor and a fixture child, not just the relay seam.
             var effortAccepted = probe.execute(request(home, profile.withEffort("medium"), "effort"));

@@ -331,7 +331,7 @@ public final class Main {
     private static int profiles(String[] args) throws Exception {
         if (java.util.Arrays.asList(args).contains("migrate-services")) return migrateServices(args);
         String verify = option(args, "--verify", null);
-        if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"));
+        if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"),option(args,"--reported-model",null));
 
         UserConfig user = UserConfig.load();
         List<Object> rows = new ArrayList<>();
@@ -470,9 +470,14 @@ public final class Main {
      * writes gets `role_violated_read_only` and its artifact discarded, whatever any flag or
      * date claimed.
      */
-    private static int verifyProfile(String name, boolean confirm) throws Exception {
+    private static int verifyProfile(String name, boolean confirm,String reportedModel) throws Exception {
         Map<Path, dev.warden.config.ConfigFileStore.Snapshot> sources = new LinkedHashMap<>();
         UserConfig user = UserConfig.load(UserConfig.defaultHome(), sources);
+        var classifier=dev.warden.config.DecisionProfile.load(user.home()).get(name);
+        if(classifier!=null){
+            var result=dev.warden.execution.DecisionCompatibility.verify(new dev.warden.execution.DecisionClient(),classifier,user,reportedModel,confirm);
+            System.out.println(Json.write(result));return Boolean.TRUE.equals(result.get("ok"))?0:1;
+        }
         Profile profile = user.profiles().get(name);
         if (profile == null) {
             Map<String, Object> unknown = new LinkedHashMap<>();
@@ -2838,6 +2843,7 @@ public final class Main {
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                                           Jev updates require --confirm --reported-model EXACT
                   warden check [--all]         fresh bounded model reply via each configured CLI/API
                   warden check --profile N     check one profile without granting role verification
                   warden check --task TASK     check the task's selected models

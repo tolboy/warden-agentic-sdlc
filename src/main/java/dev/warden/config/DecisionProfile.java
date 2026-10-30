@@ -11,11 +11,18 @@ public record DecisionProfile(String name, String connection, String model, Stri
                               int timeoutSeconds, int maxInputCharacters, boolean enabled) {
     public DecisionProfile {
         Connection.requireId(name); Connection.requireId(connection);
-        if (model == null || !model.matches("typesafe/jev-1\\.(13|14)")) throw new IllegalArgumentException("pin a supported Jev version");
-        if (reportedModel == null || !(reportedModel.equals(model) || reportedModel.matches(java.util.regex.Pattern.quote(model) + "-[0-9]{8}")))
+        if (model == null || !model.matches("typesafe/jev-[1-9][0-9]*\\.[0-9]+(?:\\.[0-9]+)?(?:-[0-9]{8})?"))
+            throw new IllegalArgumentException("pin an explicit Jev version");
+        if (reportedModel == null || !(reportedModel.equals(model) || !model.matches(".*-[0-9]{8}$")
+                && reportedModel.matches(java.util.regex.Pattern.quote(model) + "-[0-9]{8}")))
             throw new IllegalArgumentException("pin the reported Jev snapshot");
         if (timeoutSeconds < 1 || timeoutSeconds > 30 || maxInputCharacters < 256 || maxInputCharacters > 12000)
             throw new IllegalArgumentException("invalid classifier bounds");
+    }
+    /** Compatibility built into the original integration; future snapshots need an explicit probe. */
+    public boolean legacyCompatible(){
+        return (Set.of("typesafe/jev-1.13","typesafe/jev-1.14").contains(model)&&model.equals(reportedModel))
+                || "typesafe/jev-1.14".equals(model)&&"typesafe/jev-1.14-20261014".equals(reportedModel);
     }
     public static Path file(Path home, String name) { Connection.requireId(name); return home.resolve("classifiers").resolve(name + ".yaml"); }
     public static DecisionProfile parse(String text) {
