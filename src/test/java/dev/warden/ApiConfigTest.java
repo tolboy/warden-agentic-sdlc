@@ -6,6 +6,7 @@ import dev.warden.config.ConnectionCommand;
 import dev.warden.config.Policy;
 import dev.warden.config.Profile;
 import dev.warden.config.ProfileVerifier;
+import dev.warden.config.ConfigFileStore;
 import dev.warden.config.UserConfig;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
@@ -153,8 +154,21 @@ public final class ApiConfigTest implements Suite {
         Map<String, Object> receipt = Json.parseObject(Files.readString(probe.transcript()));
         check.eq("verification explicitly excludes coding capabilities", "text_artifact_only", receipt.get("verification_scope"));
         check.that("a successful probe alone does not stamp the profile", !requireProfile(home).verified());
+        ConfigFileStore.Snapshot tested = ConfigFileStore.read(file);
+        Files.writeString(file, tested.text() + "# edit during API probe\n");
+        check.eq("API stamps reject even a comment edit after the probe", "config_conflict",
+                verifier.stamp(file, profile, LocalDate.of(2026, 10, 26), tested.sha256()).code());
+        Files.writeString(file, tested.text().replace("\n", "\r\n"));
+        ConfigFileStore.Snapshot crlf = ConfigFileStore.read(file);
         check.that("stamping the successful configuration writes its fingerprint",
-                verifier.stamp(file, profile, LocalDate.of(2026, 10, 26)).written());
+                verifier.stamp(file, profile, LocalDate.of(2026, 10, 26), crlf.sha256()).written());
+        check.that("API stamping preserves CRLF", !Files.readString(file).replace("\r\n", "").contains("\n"));
+        try (var entries = Files.list(file.getParent())) {
+            Path backup = entries.filter(path -> path.getFileName().toString()
+                    .startsWith(file.getFileName() + ".before-verify-")).findFirst().orElseThrow();
+            check.eq("API stamp backs up the exact probed bytes", crlf.text(), Files.readString(backup));
+        }
+        Files.writeString(file, Files.readString(file).replace("\r\n", "\n"));
         Profile verified = requireProfile(home);
         check.that("the unchanged bound profile becomes eligible after stamping", verified.verified());
         String verifiedFingerprint = verified.apiFingerprint();
@@ -221,6 +235,14 @@ public final class ApiConfigTest implements Suite {
                 .replace("verification:", "verification:\n  status: unverified"));
         Profile stale = requireProfile(home);
         check.that("a stale API stamp is not accepted by load", !stale.verified());
+        Path editedConnection = home.resolve("connections/probe-api.yaml");
+        String beforeEdit = Files.readString(editedConnection);
+        Files.writeString(editedConnection, beforeEdit.replace(api.base(), api.base() + "/changed-during-probe"));
+        String beforeRefusal = Files.readString(file);
+        check.eq("API stamps reject a connection edited since the probe", "config_conflict",
+                verifier.stamp(file, stale, LocalDate.of(2026, 10, 26)).code());
+        check.eq("a refused connection stamp preserves the profile", beforeRefusal, Files.readString(file));
+        Files.writeString(editedConnection, beforeEdit);
         check.that("stamping a stale block replaces its old keys", verifier.stamp(file, stale, LocalDate.of(2026, 10, 26)).written());
         String replaced = Files.readString(file);
         check.eq("stamping keeps exactly one date", 1L, replaced.lines().filter(line -> line.stripLeading().startsWith("verified_on:")).count());

@@ -170,7 +170,11 @@ public final class ProfileVerifier {
         catch (ConfigFileStore.Refused refused) {
             return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
         }
-        if (!Profile.parse(source.text(), profileFile.toString()).equals(profile)) {
+        Profile parsed = Profile.parse(source.text(), profileFile.toString());
+        if (profile.apiConnection() != null && parsed.connectionRef() != null) {
+            parsed = parsed.withConnection(profile.apiConnection(), profile.apiSettings().home());
+        }
+        if (!parsed.equals(profile)) {
             return new Stamp(false, "config_conflict", "profile changed since the probe; reload and verify again", profileFile, null);
         }
         if (profile.harness() != null && !CodingAttestation.valid(profile)) {
@@ -208,16 +212,17 @@ public final class ProfileVerifier {
             }
             lines.add(header + 1, "  connection_fingerprint: \"" + profile.apiFingerprint() + "\"");
             lines.add(header + 1, "  verified_on: \"" + date + "\"");
-            // Validate before replacement; a stale stamp must not produce duplicate YAML keys.
-            String updated = String.join(System.lineSeparator(), lines) + System.lineSeparator();
-            Profile.parse(updated, profileFile.toString());
-            Path temporary = Files.createTempFile(profileFile.getParent(), ".api-profile-", ".tmp");
             try {
-                Files.writeString(temporary, updated, StandardCharsets.UTF_8);
-                Files.move(temporary, profileFile, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } finally {
-                Files.deleteIfExists(temporary);
+                new ConfigFileStore().save(source, document.render(),
+                        candidate -> Profile.parse(candidate, profileFile.toString()), "verify", () -> {
+                            Profile current = UserConfig.load(profile.apiSettings().home()).profiles().get(profile.name());
+                            if (!profile.equals(current)) {
+                                throw new ConfigFileStore.Refused("config_conflict",
+                                        "API configuration changed since the probe; reload and verify again", null);
+                            }
+                        });
+            } catch (ConfigFileStore.Refused refused) {
+                return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
             }
             return new Stamp(true, "verified", profile.harness()!=null
                     ? "Coding capability verified for this profile, connection and executable"
