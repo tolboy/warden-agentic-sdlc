@@ -28,6 +28,7 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
     private static final long TIMEOUT_SECONDS = 30;
     private static final Object LOCK = new Object();
     private static Path helperDir;
+    private static CurrentUser currentUser;
     private static List<String> lastCommand = List.of();
 
     private volatile Boolean available;
@@ -147,7 +148,7 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
                 if (!available) lastFailure = "probe exit " + probe.code;
             } catch (RuntimeException failure) {
                 available = false;
-                lastFailure = failure.getMessage();
+                lastFailure = failureReason(lastFailure, failure);
             }
             return available;
         }
@@ -187,6 +188,11 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
     static List<String> lastCommandForTest() { return lastCommand; }
 
     static String lastFailureForTest() { return lastFailure; }
+
+    static String failureReason(String previous, RuntimeException failure) {
+        String message = failure.getMessage();
+        return previous != null && closed().getMessage().equals(message) ? previous : message;
+    }
 
     private static void requireTarget(String target) {
         if (target == null || !TARGET.matcher(target).matches()) throw closed();
@@ -234,6 +240,7 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
             }
             if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 destroy(process);
+                lastFailure = "credential helper timed out";
                 throw closed();
             }
             outThread.join(1000);
@@ -241,6 +248,7 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
             return new Outcome(process.exitValue(), stdout.bytes, stderr.bytes, stdout.overflow || stderr.overflow);
         } catch (IOException | InterruptedException failure) {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+            lastFailure = "credential helper invocation failed: " + failure.getMessage();
             throw closed();
         }
     }
@@ -248,6 +256,7 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
     private static Path helper() {
         synchronized (LOCK) {
             try {
+                if (currentUser == null) currentUser = resolveCurrentUser();
                 if (helperDir == null || !Files.isDirectory(helperDir)) helperDir = createHelper();
                 verifyOwnerOnly(helperDir);
                 Path script = helperDir.resolve("store.ps1");
@@ -274,19 +283,26 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         } catch (IOException | InterruptedException | RuntimeException failure) {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             deleteTree(dir);
-            throw new IOException("credential helper directory cannot be locked");
+            throw new IOException("credential helper directory cannot be locked: " + failure.getMessage(), failure);
         }
     }
 
     private static void lockToOwner(Path dir) throws IOException, InterruptedException {
-        // A short user.name can resolve to a different local/domain account with the same
-        // basename. Bind the ACL to the owner of this newly created directory instead.
-        String user = aclGrantPrincipal(Files.getOwner(dir, LinkOption.NOFOLLOW_LINKS));
+        // Elevated administrators can create directories owned by the Administrators group.
+        // Both ownership and the grant must identify the process user, never that group.
+        String user = "*" + currentUser.sid();
         String root = System.getenv("SystemRoot");
         if (root == null || root.isBlank()) throw new IOException("credential helper directory cannot be locked");
         Path icacls = Path.of(root, "System32", "icacls.exe");
-        ProcessBuilder builder = new ProcessBuilder(icacls.toString(), dir.toString(),
-                "/inheritance:r", "/grant:r", user + ":(OI)(CI)F");
+        runAclCommand(icacls, dir, "/setowner", user);
+        runAclCommand(icacls, dir, "/inheritance:r", "/grant:r", user + ":(OI)(CI)F");
+    }
+
+    private static void runAclCommand(Path icacls, Path dir, String... arguments)
+            throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of(icacls.toString(), dir.toString()));
+        command.addAll(List.of(arguments));
+        ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
         builder.redirectError(ProcessBuilder.Redirect.DISCARD);
         Process process = builder.start();
@@ -296,17 +312,60 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         }
     }
 
+    private static CurrentUser resolveCurrentUser() throws IOException {
+        // Query the Windows access token and emit UTF-8 explicitly so non-ASCII account
+        // names work regardless of the runner's console code page.
+        Process process = new ProcessBuilder(powershell().toString(), "-NoProfile", "-NonInteractive", "-Command",
+                "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); "
+                + "$u = [System.Security.Principal.WindowsIdentity]::GetCurrent(); "
+                + "[Console]::WriteLine($u.User.Value); [Console]::WriteLine($u.Name)")
+                .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        Capture output = new Capture();
+        Thread reader = drain(process.getInputStream(), output);
+        try {
+            process.getOutputStream().close();
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                throw new IOException("credential helper current user lookup timed out");
+            }
+            reader.join(1000);
+            if (process.exitValue() != 0 || reader.isAlive() || output.overflow) {
+                throw new IOException("credential helper current user lookup failed");
+            }
+            String[] identity = parseCurrentUser(new String(output.bytes, StandardCharsets.UTF_8));
+            UserPrincipal principal = Path.of(".").getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName(identity[1]);
+            aclGrantPrincipal(principal); // Fail closed if lookup unexpectedly resolves a group.
+            return new CurrentUser(identity[0], principal);
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw new IOException("credential helper current user lookup interrupted", failure);
+        } finally {
+            if (process.isAlive()) destroy(process);
+        }
+    }
+
+    static String[] parseCurrentUser(String output) throws IOException {
+        String[] lines = output.strip().split("\\R");
+        if (lines.length != 2 || !lines[0].matches("S-1-(?:\\d+-)+\\d+")
+                || !qualifiedPrincipalName(lines[1]) || lines[1].indexOf('\\') < 0) {
+            throw new IOException("credential helper current user identity is invalid");
+        }
+        return lines;
+    }
+
     private static void verifyOwnerOnly(Path dir) throws IOException {
         AclFileAttributeView view = Files.getFileAttributeView(dir, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
         if (view == null) throw new IOException("credential helper directory has no ACL");
-        UserPrincipal owner = Files.getOwner(dir);
-        if (owner instanceof GroupPrincipal) {
-            throw new IOException("credential helper directory owner is not an individual user");
+        verifyCurrentUserOnly(currentUser.principal(), view.getOwner(), view.getAcl());
+    }
+
+    static void verifyCurrentUserOnly(UserPrincipal user, UserPrincipal owner, List<AclEntry> entries) throws IOException {
+        if (!samePrincipal(user, owner)) {
+            throw new IOException("credential helper directory owner is not the current user");
         }
-        List<AclEntry> entries = view.getAcl();
         if (entries.isEmpty()) throw new IOException("credential helper directory ACL is empty");
         for (AclEntry entry : entries) {
-            if (entry.type() != AclEntryType.ALLOW || !samePrincipal(owner, entry.principal())) {
+            if (entry.type() != AclEntryType.ALLOW || !samePrincipal(user, entry.principal())) {
                 throw new IOException("credential helper directory ACL is not limited to the current user");
             }
         }
@@ -411,4 +470,6 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
     }
 
     private record Outcome(int code, byte[] stdout, byte[] stderr, boolean overflow) {}
+
+    private record CurrentUser(String sid, UserPrincipal principal) {}
 }

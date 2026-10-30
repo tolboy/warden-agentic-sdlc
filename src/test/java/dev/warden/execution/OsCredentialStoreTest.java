@@ -17,6 +17,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.AclEntry;
+import java.nio.file.attribute.AclEntryPermission;
+import java.nio.file.attribute.AclEntryType;
+import java.nio.file.attribute.GroupPrincipal;
+import java.nio.file.attribute.UserPrincipal;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -35,6 +40,7 @@ public final class OsCredentialStoreTest implements Suite {
 
     @Override public void run(Check check) throws Exception {
         qualifiedAclPrincipals(check);
+        currentUserAcl(check);
         references(check);
         resolverStaysOnItsSource(check);
         commandRoundTrip(check);
@@ -65,6 +71,51 @@ public final class OsCredentialStoreTest implements Suite {
                 WindowsOsCredentialStore.aclGrantPrincipal(administrators));
         check.that("a group principal is never accepted as the current user",
                 !WindowsOsCredentialStore.samePrincipal(administrators, administrators));
+    }
+
+    private void currentUserAcl(Check check) throws Exception {
+        UserPrincipal user = () -> "MACHINE\\alice";
+        UserPrincipal other = () -> "DOMAIN\\alice";
+        GroupPrincipal administrators = () -> "BUILTIN\\Administrators";
+        AclEntry grant = AclEntry.newBuilder().setType(AclEntryType.ALLOW).setPrincipal(user)
+                .setPermissions(AclEntryPermission.READ_DATA).build();
+        AclEntry groupGrant = AclEntry.newBuilder(grant).setPrincipal(administrators).build();
+        AclEntry otherGrant = AclEntry.newBuilder(grant).setPrincipal(other).build();
+        WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of(grant));
+        check.that("a directory owned by and granted only to the process user is accepted", true);
+        check.rejects("an elevated directory must be reassigned to the process user", "owner is not the current user", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, administrators, List.of(grant)));
+        check.rejects("a different individual owner is rejected", "owner is not the current user", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, other, List.of(grant)));
+        check.rejects("an administrator group grant is rejected even for the correct owner", "ACL is not limited", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of(grant, groupGrant)));
+        check.rejects("another account with the same basename is rejected", "ACL is not limited", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of(grant, otherGrant)));
+        check.rejects("an empty helper ACL is rejected", "ACL is empty", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of()));
+        check.rejects("non-allow entries are rejected", "ACL is not limited", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, user,
+                        List.of(AclEntry.newBuilder(grant).setType(AclEntryType.DENY).build())));
+
+        String sid = "S-1-5-21-123-456-789-1001";
+        String[] identity = WindowsOsCredentialStore.parseCurrentUser(sid + "\r\nMACHINE\\alïce\r\n");
+        check.eq("the token user SID is preserved", sid, identity[0]);
+        check.eq("qualified Unicode token account names are preserved", "MACHINE\\alïce", identity[1]);
+        check.rejects("a malformed token SID fails closed", "identity is invalid", () ->
+                WindowsOsCredentialStore.parseCurrentUser("not-a-sid\nMACHINE\\alice"));
+        check.rejects("an ambiguous token account fails closed", "identity is invalid", () ->
+                WindowsOsCredentialStore.parseCurrentUser(sid + "\nalice"));
+        check.rejects("extra token output fails closed", "identity is invalid", () ->
+                WindowsOsCredentialStore.parseCurrentUser(sid + "\nMACHINE\\alice\nextra"));
+
+        var closed = new IllegalStateException("connection credential source is unavailable");
+        String reason = "credential helper directory owner is not the current user";
+        check.eq("the availability catch preserves a specific helper failure", reason,
+                WindowsOsCredentialStore.failureReason(reason, closed));
+        check.eq("the availability catch keeps a generic failure when no detail exists", closed.getMessage(),
+                WindowsOsCredentialStore.failureReason(null, closed));
+        check.eq("a new specific failure replaces an earlier failure", "new detail",
+                WindowsOsCredentialStore.failureReason(reason, new IllegalStateException("new detail")));
     }
 
     private void references(Check check) {
