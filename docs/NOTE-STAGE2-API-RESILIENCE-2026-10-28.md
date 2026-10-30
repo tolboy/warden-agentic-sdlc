@@ -56,8 +56,12 @@ in a separate document, not in the automated suite.
   roles and the relay use `not_sent_only`, checks use `check`.
 - `ModelCheck`: reasoning-model ping floor, `role_api_output_truncated`, truncation advice before
   auth advice, attempts recorded.
-- `TaskLoop.infrastructureReason` maps `role_api_*` transport codes so a continuation reuses the
-  implementer stage.
+- `TaskLoop.infrastructureReason` explicitly maps API timeout, network/provider/protocol,
+  rate/quota, auth/access, response/identity/artifact and cancellation failures to stops that
+  say nothing about the work. `role_api_interrupted` maps to `controller_interrupted`, for
+  cancellation during either retry backoff or an HTTP wait. A continuation can reuse the
+  implementer only when the candidate, contract and roster still match. Configuration failures
+  are outside this map; their contract checks decide reuse.
 - Follow-up, 2026-10-29: ordered per-role fallback is implemented as
   `roles.<role>.api_fallback_profiles`, an explicit subset of the existing roster. Only transient
   API network/timeout/rate-limit/provider failures may switch, under the existing
@@ -72,7 +76,8 @@ in a separate document, not in the automated suite.
   after a successor succeeds.
 
 Tests: `ApiResilienceTest` (suite `api-resilience`), `ModelCheckTest` (reasoning limit, truncation,
-502 retry, auth once), `TaskLoopTest.apiReviewerResumeChecks`, and the new suites
+502 retry, auth once), `TaskLoopTest.apiReviewerResumeChecks` (502),
+`TaskLoopTest.apiReviewerInterruptedResumeChecks` (backoff and HTTP cancellation), and the new suites
 `api-fallback`, `api-fallback-loop`, `shutdown-resume` plus fallback-policy/contract/projection
 checks in `workflow` and `home-corpus`. Current verification counts are recorded in the
 [Stage 3 follow-up](ACCEPTANCE-STAGE3-2026-10-28.md#follow-up--2026-10-29-windows-automated-coverage).

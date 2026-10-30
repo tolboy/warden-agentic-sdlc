@@ -362,7 +362,7 @@ public final class TaskLoop {
 
     /** A passing run whose readers found the acceptance too weak, sent to the planner. */
     public static final String CONTRACT_AMENDMENT = "contract_amendment_requested";
-    /** The stop reason of a controller stopped by a signal before the run concluded. */
+    /** The stop reason of a controller interrupted by a signal or a cancelled API call. */
     public static final String CONTROLLER_INTERRUPTED = "controller_interrupted";
 
     /**
@@ -510,6 +510,7 @@ public final class TaskLoop {
             // passed stage and paid it to write the same change again. Configuration codes
             // (a profile or connection edited since dispatch, a missing key variable) stay off
             // this list: the role contract check already decides reuse for those.
+            Map.entry("role_api_interrupted", CONTROLLER_INTERRUPTED),
             Map.entry("role_api_timeout", "role_timed_out"),
             Map.entry("role_api_network_error", "vendor_call_failed"),
             Map.entry("role_api_provider_error", "vendor_call_failed"),
@@ -531,6 +532,7 @@ public final class TaskLoop {
 
     /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
     private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
+            CONTROLLER_INTERRUPTED, "cancelled",
             "role_timed_out", "timeout",
             "vendor_call_failed", "call_failed",
             "vendor_protocol_failed", "protocol",
@@ -685,7 +687,8 @@ public final class TaskLoop {
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                        Map<String, String> authorizedFailover, Continuation carried) throws Exception {
-        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+        try (var interruption = new ApiInterruption();
+             var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
                 : dev.warden.execution.WorktreeLease.acquire(loaded.root(), runId)) {
             // Orca's adapter owns exact attach/reconciliation. With an Orca route available,
             // defer worker admission to that adapter (local roles and machine gates still
@@ -693,12 +696,29 @@ public final class TaskLoop {
             if (!dryRun && user.profiles().values().stream().noneMatch(p -> "orca".equals(p.runner()))) {
                 dev.warden.execution.WorktreeLease.requireLocalDispatch(loaded.root());
             }
-            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried);
+            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried, interruption);
+        }
+    }
+
+    /** Defer an API interrupt until receipts and the worktree lease have been persisted. */
+    private static final class ApiInterruption implements AutoCloseable {
+        private boolean interrupted;
+
+        void defer() {
+            if (Thread.currentThread().isInterrupted()) {
+                interrupted = true;
+                Thread.interrupted();
+            }
+        }
+
+        @Override public void close() {
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
 
     private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
-                             Map<String, String> authorizedFailover, Continuation carried) throws Exception {
+                             Map<String, String> authorizedFailover, Continuation carried,
+                             ApiInterruption interruption) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
@@ -790,7 +810,18 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
-        if (executors != null) roles.withExecutors(executors);
+        roles.withExecutors((profile, runner, repository) -> {
+            dev.warden.execution.Executors.Factory factory = executors == null
+                    ? dev.warden.execution.Executors::forProfile : executors;
+            var executor = factory.forProfile(profile, runner, repository);
+            return request -> {
+                var result = executor.execute(request);
+                // The executor has already cancelled its pending call and excluded retry.
+                // Clear the flag before RoleRunner writes receipts or fingerprints the tree.
+                if ("role_api_interrupted".equals(result.code())) interruption.defer();
+                return result;
+            };
+        });
         if (availability != null) roles.availability(availability);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {

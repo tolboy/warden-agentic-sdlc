@@ -265,6 +265,8 @@ public final class TaskLoopTest implements Suite {
             reusedJudgementChecks(check, sandbox, home);
             infrastructureResumeChecks(check, sandbox, home);
             apiReviewerResumeChecks(check, sandbox, home);
+            apiReviewerInterruptedResumeChecks(check, sandbox, home, true);
+            apiReviewerInterruptedResumeChecks(check, sandbox, home, false);
             chainBudgetChecks(check, sandbox, home);
             provenanceChecks(check, sandbox, home);
             gateTtlAndStrictCapChecks(check, sandbox, home);
@@ -3395,25 +3397,7 @@ public final class TaskLoopTest implements Suite {
             new dev.warden.config.ConnectionCommand(ignored -> null).run(home, new String[] {"connections", "add",
                     "resume-api", "--provider", "custom", "--base-url",
                     "http://127.0.0.1:" + api.getAddress().getPort() + "/v1", "--no-auth"});
-            Files.writeString(profileFile, """
-                    version: 1
-                    profile: loop-api-review
-                    role: reviewer
-                    model_vendor: deepseek
-                    model: test/api-reader
-                    runner: api
-                    connection: resume-api
-                    read_only: true
-                    limits: { wall_clock_minutes: 1, max_output_tokens: 256 }
-                    prompt_template: prompts/reviewer.md
-                    json_schema: schemas/reviewer.json
-                    artifact:
-                      required_fields: [role, task_id, status, verdict, summary, findings]
-                    verification:
-                      what_to_check: [text artifact only]
-                    """);
-            new dev.warden.config.ProfileVerifier(new ProcessRunner()).stamp(profileFile,
-                    UserConfig.load(home).profiles().get("loop-api-review"), java.time.LocalDate.of(2026, 10, 28));
+            writeApiReviewerProfile(home, profileFile);
             policy(home, "loop-api-review", "loop-impl", "stop");
 
             TaskLoop.Outcome stopped = loop(project, home, "ar1");
@@ -3454,6 +3438,161 @@ public final class TaskLoopTest implements Suite {
             } catch (IOException ignored) { }
             writeProfiles(home, sandbox, "infra-restore", 1, 1);
         }
+    }
+
+    /** Cancellation during either transport wait must preserve the same candidate on --continue. */
+    private void apiReviewerInterruptedResumeChecks(Check check, Path sandbox, Path home,
+                                                   boolean backoff) throws Exception {
+        String label = "api cancel " + (backoff ? "backoff" : "http");
+        String prefix = backoff ? "acb" : "ach";
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var requestReceived = new java.util.concurrent.CountDownLatch(1);
+        var releaseResponse = new java.util.concurrent.CountDownLatch(1);
+        var result = new java.util.concurrent.atomic.AtomicReference<TaskLoop.Outcome>();
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var interruptPreserved = new java.util.concurrent.atomic.AtomicBoolean();
+        var handlers = java.util.concurrent.Executors.newCachedThreadPool();
+        var api = com.sun.net.httpserver.HttpServer.create();
+        // A closed loopback port produces a real not_sent failure and the production backoff.
+        int port;
+        try (var reservation = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+            port = reservation.getLocalPort();
+        }
+        api.setExecutor(handlers);
+        api.createContext("/", exchange -> {
+            try (exchange) {
+                exchange.getRequestBody().readAllBytes();
+                int read = reads.incrementAndGet();
+                if (!backoff && read == 1) {
+                    requestReceived.countDown();
+                    try { releaseResponse.await(); }
+                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+                }
+                String artifact = Json.write(Map.of("role", "reviewer", "task_id", "hello", "status", "completed",
+                        "verdict", "pass", "summary", "api review", "findings", List.of()));
+                byte[] body = Json.write(Map.of("model", "test/api-reader", "choices", List.of(Map.of(
+                        "finish_reason", "stop", "message", Map.of("content", artifact)))))
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } catch (IOException cancelled) {
+                // The cancelled HTTP client closes its first connection before the reply.
+            }
+        });
+        Path profileFile = home.resolve("profiles/loop-api-review.yaml");
+        Thread worker = null;
+        try {
+            if (!backoff) {
+                api.bind(new java.net.InetSocketAddress("127.0.0.1", port), 0);
+                api.start();
+            }
+            Path project = newProject(sandbox, prefix);
+            writeProfiles(home, sandbox, prefix, 1, 1);
+            new dev.warden.config.ConnectionCommand(ignored -> null).run(home, new String[] {"connections", "add",
+                    "resume-api", "--provider", "custom", "--base-url", "http://127.0.0.1:" + port + "/v1", "--no-auth"});
+            writeApiReviewerProfile(home, profileFile);
+            policy(home, "loop-api-review", "loop-impl", "stop");
+            worker = new Thread(() -> {
+                try { result.set(loop(project, home, prefix + "1")); }
+                catch (Throwable thrown) { failure.set(thrown); }
+                finally { interruptPreserved.set(Thread.currentThread().isInterrupted()); }
+            }, "api-review-cancellation");
+            worker.start();
+            boolean waiting = backoff ? awaitApiBackoff(worker)
+                    : requestReceived.await(15, java.util.concurrent.TimeUnit.SECONDS);
+            check.that(label + ": reached the intended wait", waiting);
+            if (!waiting) throw new AssertionError(label + ": review never reached wait; failure=" + failure.get());
+            worker.interrupt();
+            worker.join(15_000);
+            check.that(label + ": interrupted loop finishes promptly", !worker.isAlive());
+            if (worker.isAlive()) throw new AssertionError(label + ": interrupted loop did not finish");
+            if (failure.get() != null) throw new AssertionError(label + ": interrupted loop threw", failure.get());
+            TaskLoop.Outcome stopped = result.get();
+            check.eq(label + ": cancellation is recorded, not a reviewer verdict",
+                    TaskLoop.CONTROLLER_INTERRUPTED, stopped.reason());
+            check.that(label + ": reason says nothing about the work", !TaskLoop.isAboutTheWork(stopped.reason()));
+            Map<String, Object> stored = Json.parseObject(Files.readString(stopped.summary()));
+            check.eq(label + ": cancellation reason is durable", TaskLoop.CONTROLLER_INTERRUPTED, stored.get("reason"));
+            check.eq(label + ": failed step retains the API cancellation code", List.of("role_api_interrupted"),
+                    steps(stopped).stream().filter(step -> Boolean.FALSE.equals(step.get("ok")))
+                            .map(step -> step.get("code")).toList());
+            check.eq(label + ": no extra HTTP request before continuation", backoff ? 0 : 1, reads.get());
+            check.that(label + ": controller interrupt status is preserved", interruptPreserved.get());
+            // Repair old generic summaries too: no need to rewrite the earlier ledger.
+            var legacy = new java.util.LinkedHashMap<>(stored);
+            legacy.put("reason", "reviewer_failed");
+            check.eq(label + ": old reviewer_failed summary is reclassified on continuation",
+                    TaskLoop.CONTROLLER_INTERRUPTED, TaskLoop.reasonForContinuation(legacy));
+            String candidate = Files.readString(project.resolve("src/result.txt"));
+            String writerCalls = Files.readString(sandbox.resolve(prefix + "-impl.count"));
+            var store = new dev.warden.approval.ApprovalStore(project);
+            check.that(label + ": cancellation opens a decision", store.read(prefix + "1") != null);
+            store.resolve(prefix + "1", store.read(prefix + "1").updatedAt().toString(), "retry", "operator",
+                    "resume cancelled review");
+            releaseResponse.countDown();
+            if (backoff) {
+                api.bind(new java.net.InetSocketAddress("127.0.0.1", port), 0);
+                api.start();
+            }
+            TaskLoop.Outcome resumed = new TaskLoop(new ProcessRunner())
+                    .run(new ConfigLoader().load(project, "hello"), UserConfig.load(home), prefix + "2",
+                            false, Map.of(), new TaskLoop.Continuation(prefix + "1", null, true));
+            check.that(label + ": continuation reaches the human gate", resumed.ok());
+            check.eq(label + ": completed implement stage is reused",
+                    Map.of("from", prefix + "1", "stages", List.of("implement")),
+                    resumed.summaryReport().get("reused_judgements"));
+            check.eq(label + ": only one new role call", 1L, resumed.summaryReport().get("role_runs"));
+            check.eq(label + ": no implementer dispatch in continuation", List.of(),
+                    steps(resumed).stream().filter(step -> "implementer".equals(step.get("role"))
+                            && step.get("reused_from") == null).map(step -> step.get("profile")).toList());
+            check.eq(label + ": implementer invocation count is unchanged", writerCalls,
+                    Files.readString(sandbox.resolve(prefix + "-impl.count")));
+            check.eq(label + ": candidate bytes are unchanged", candidate, Files.readString(project.resolve("src/result.txt")));
+            check.eq(label + ": exactly one new review request", backoff ? 1 : 2, reads.get());
+        } finally {
+            releaseResponse.countDown();
+            if (worker != null && worker.isAlive()) { worker.interrupt(); worker.join(15_000); }
+            api.stop(0);
+            handlers.shutdownNow();
+            Files.deleteIfExists(profileFile);
+            Files.deleteIfExists(home.resolve("connections/resume-api.yaml"));
+            writeProfiles(home, sandbox, "infra-restore", 1, 1);
+        }
+    }
+
+    private static boolean awaitApiBackoff(Thread worker) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (worker.isAlive() && System.nanoTime() < deadline) {
+            if (worker.getState() == Thread.State.TIMED_WAITING
+                    && java.util.Arrays.stream(worker.getStackTrace()).anyMatch(frame ->
+                        "dev.warden.execution.ApiRetry".equals(frame.getClassName())
+                            && "send".equals(frame.getMethodName()))) return true;
+            Thread.sleep(1);
+        }
+        return false;
+    }
+
+    private void writeApiReviewerProfile(Path home, Path profileFile) throws Exception {
+        Files.writeString(profileFile, """
+                version: 1
+                profile: loop-api-review
+                role: reviewer
+                model_vendor: deepseek
+                model: test/api-reader
+                runner: api
+                connection: resume-api
+                read_only: true
+                limits: { wall_clock_minutes: 1, max_output_tokens: 256 }
+                prompt_template: prompts/reviewer.md
+                json_schema: schemas/reviewer.json
+                artifact:
+                  required_fields: [role, task_id, status, verdict, summary, findings]
+                verification:
+                  what_to_check: [text artifact only]
+                """);
+        new dev.warden.config.ProfileVerifier(new ProcessRunner()).stamp(profileFile,
+                UserConfig.load(home).profiles().get("loop-api-review"), java.time.LocalDate.of(2026, 10, 28));
     }
 
     /**
