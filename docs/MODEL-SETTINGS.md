@@ -26,8 +26,10 @@ contracts. There is no second settings database.
   that may call a model; autosaving never runs a probe. Launch remains blocked until admission.
   Reordering alone does not re-probe admitted channels. Existing CLI profiles use their own
   authentication; API coding still requires a real OpenCode tool probe.
-- **Jev:** enabling automatic effort hides manual effort selectors. The fallback remains the
-  saved effort; explicit task/run overrides win. Questions and criteria are editable as YAML
+- **Jev:** the role-card effort selector stays visible and is saved while automatic
+  routing is on. That saved level is the fallback when Jev is uncertain, fails, or routing
+  is off; a confident choice may apply another supported level for one run. Explicit
+  task/run overrides win. Questions and criteria are editable as YAML
   in the panel and `~/.warden/jev-routing-policy.yaml`. Numeric decision probabilities come
   from Jev. The application threshold remains `routing.min_confidence` in settings.yaml.
 

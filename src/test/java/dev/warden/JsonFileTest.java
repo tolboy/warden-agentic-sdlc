@@ -1,6 +1,5 @@
 package dev.warden;
 
-import com.sun.nio.file.ExtendedOpenOption;
 import dev.warden.json.Json;
 import dev.warden.json.JsonFile;
 import dev.warden.testing.Check;
@@ -25,8 +24,7 @@ public final class JsonFileTest implements Suite {
             try (var pool = Executors.newSingleThreadExecutor()) {
                 Future<?> writer;
                 var entered = new CountDownLatch(1);
-                try (var held = Files.newByteChannel(target,
-                        Set.of(StandardOpenOption.READ, ExtendedOpenOption.NOSHARE_DELETE))) {
+                try (var held = Files.newByteChannel(target, noShareDeleteRead())) {
                     writer = pool.submit(() -> {
                         entered.countDown();
                         JsonFile.writeAtomically(target, Map.of("state", "new"));
@@ -42,8 +40,7 @@ public final class JsonFileTest implements Suite {
             }
             check.eq("replacement succeeds after reader releases", "new",
                     Json.parseObject(Files.readString(target)).get("state"));
-            try (var held = Files.newByteChannel(target,
-                    Set.of(StandardOpenOption.READ, ExtendedOpenOption.NOSHARE_DELETE))) {
+            try (var held = Files.newByteChannel(target, noShareDeleteRead())) {
                 long start = System.nanoTime();
                 check.rejects("permanent sharing denial fails closed", null,
                         () -> JsonFile.writeAtomically(target, Map.of("state", "lost")));
@@ -76,5 +73,12 @@ public final class JsonFileTest implements Suite {
             }
             Files.deleteIfExists(directory);
         }
+    }
+
+    /** Windows read handle without FILE_SHARE_DELETE. The option is internal, so load it by name. */
+    private static Set<OpenOption> noShareDeleteRead() throws ReflectiveOperationException {
+        OpenOption noShareDelete = (OpenOption) Class.forName("com.sun.nio.file.ExtendedOpenOption")
+                .getField("NOSHARE_DELETE").get(null);
+        return Set.of(StandardOpenOption.READ, noShareDelete);
     }
 }

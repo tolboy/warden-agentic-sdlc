@@ -49,6 +49,8 @@ public final class ModelSelectionTest implements Suite {
             check.that("catalog/policy snapshot is reconstructible",String.valueOf(selection.get("catalog_snapshot")).matches("[0-9a-f]{64}"));
             var decisions=(List<?>)selection.get("decisions");
             check.that("refused roster alternatives remain in receipt",Json.write(decisions).contains("profile_unverified"));
+            check.eq("accepted model choice records classifier_selected","classifier_selected",stage(decisions,"implement").get("reason"));
+            check.eq("accepted model choice records the selected profile","alternate",stage(decisions,"implement").get("selected_profile"));
             check.that("unknown cost is explicit rather than zero/free",Json.write(decisions).contains("\"cost_status\":\"unknown\""));
             stub.probability=0.55;
             var uncertain=TaskRouting.using(client).route(user,home,task,List.of(writer,reader),ignored->{});
@@ -64,6 +66,16 @@ public final class ModelSelectionTest implements Suite {
             var unsafe=TaskRouting.using(client).route(user,home,task,List.of(writer,readerChoices),ignored->{});
             check.that("joint dependent writer/reviewer choices are discarded",unsafe.overrides().isEmpty());
             check.contains("joint safety rejection is explained",Json.write(unsafe.report()),"dependent_selection");
+            var unsafeSelection=(Map<?,?>)unsafe.report().get("model_selection");
+            var unsafeRows=(List<?>)unsafeSelection.get("decisions");
+            check.eq("joint rejection is the selection outcome","dependent_selection",unsafeSelection.get("code"));
+            check.eq("joint rejection falls back to the configured cast","configured_fallback",unsafeSelection.get("joint_validation"));
+            check.that("rejected joint selection does not claim classifier_selected",!Json.write(unsafeRows).contains("classifier_selected"));
+            check.eq("rejected writer keeps the configured profile","first",stage(unsafeRows,"implement").get("selected_profile"));
+            check.eq("rejected writer records dependent selection","dependent_selection",stage(unsafeRows,"implement").get("reason"));
+            check.eq("rejected reviewer keeps the configured profile","safe-review",stage(unsafeRows,"review").get("selected_profile"));
+            check.eq("rejected reviewer records dependent selection","dependent_selection",stage(unsafeRows,"review").get("reason"));
+            check.that("rejected writer still records the classifier answer",stage(unsafeRows,"implement").get("answer") instanceof Map<?,?>);
             stub.unauthorized=true;
             var foreign=TaskRouting.using(client).route(user,home,task,List.of(writer,reader),ignored->{});
             check.that("classifier cannot add a profile outside typed roster",foreign.overrides().isEmpty());
@@ -79,6 +91,10 @@ public final class ModelSelectionTest implements Suite {
         }
     }
     private static Map<String,Object> answer(String selected,double a,double b){return Map.of("choice",selected,"probabilities",Map.of("candidate_0",a,"candidate_1",b));}
+    private static Map<?,?> stage(List<?> decisions,String stage){
+        for(Object item:decisions){var row=(Map<?,?>)item;if(stage.equals(row.get("stage")))return row;}
+        return Map.of();
+    }
     private static Profile profile(String name,String role,String vendor,boolean readOnly){return Profile.parse("version: 1\nprofile: "+name+"\nrole: "+role+"\nvendor: "+vendor+"\nmodel: gpt-6.1-sol\neffort: medium\ncommand: codex\nargs: ['--effort','{{effort}}']\nread_only: "+readOnly+"\nverification: {verified_on: '2026-10-29'}\n","fixture");}
     private static final class Stub implements AutoCloseable{
         final HttpServer server;int calls,status=200;double probability=0.9;boolean unauthorized;Set<?> modelOptions=Set.of();Runnable beforeReply=()->{};

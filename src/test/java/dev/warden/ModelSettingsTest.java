@@ -217,6 +217,9 @@ public final class ModelSettingsTest implements Suite {
             check.contains("model choice is included in routing autosave",html.body(),"model_selection_enabled:el('routing-model-selection-enabled').checked");
             check.contains("model choice participates in concurrent-tab merge",html.body(),"['enabled','model_selection_enabled','classifier','min_confidence']");
             check.contains("model selection does not implicitly enable effort routing",html.body(),"function automatic(){return el('routing-enabled').checked}");
+            check.contains("automatic routing still shows the saved effort",html.body(),"Усилие на карточке роли остаётся видимым и сохраняется при включённом автоматическом подборе");
+            check.contains("role save includes effort while automatic routing is on",html.body(),"...(s.effort?{effort:s.effort}:{})");
+            check.that("effort selector is not hidden while automatic routing is on",!html.body().contains("!automatic()"));
             check.that("ordinary settings omit per-model ping buttons",!html.body().contains("Проверить все модели"));
             check.that("ordinary settings omit separate capability verification button",!html.body().contains("Проверить допуск"));
             check.that("template substitutions are complete", !html.body().contains("{{MODEL_SETTINGS}}"));

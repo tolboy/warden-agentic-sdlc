@@ -72,6 +72,7 @@ public final class ModelSelection {
         if(!snapshot.equals(snapshot(user,targets)))return finish(targets,Map.of(),report,true,"configuration_changed");
         if(!result.ok())return finish(targets,Map.of(),report,true,result.code());
         var selected=new LinkedHashMap<String,String>();
+        var picks=new LinkedHashMap<String,Profile>();
         for(var question:asked.entrySet()){
             var target=question.getValue();var options=optionsByStage.get(target.stage());
             var answer=result.answers().get(question.getKey());
@@ -79,19 +80,24 @@ public final class ModelSelection {
             decision.put("answer",answer);
             String chosen=choose(answer,settings.minConfidence(),options.keySet());
             if(chosen==null){decision.put("reason","classifier_uncertain");continue;}
-            Profile pick=options.get(chosen);
-            selected.put(target.stage(),pick.name());decision.put("reason","classifier_selected");
-            decision.put("selected_profile",pick.name());decision.put("selected_model",pick.model());
+            picks.put(target.stage(),options.get(chosen));
         }
         var effective=new ArrayList<TaskRouting.Target>();
         for(var target:targets){
-            Profile chosen=target.profile();String name=selected.get(target.stage());
-            if(name!=null)chosen=optionsByStage.get(target.stage()).values().stream().filter(p->name.equals(p.name())).findFirst().orElseThrow();
+            Profile chosen=picks.getOrDefault(target.stage(),target.profile());
             effective.add(new TaskRouting.Target(target.stage(),target.role(),chosen,target.candidates(),target.rejected(),target.profilePinned()));
         }
         if(!independent(user,effective)){
+            // The combined cast is discarded. A stage row must not say the classifier's
+            // profile was selected, and the recorded profile stays the configured one.
+            for(var decision:decisions)if(picks.containsKey(decision.get("stage")))decision.put("reason","dependent_selection");
             report.put("joint_validation","configured_fallback");
             return finish(targets,Map.of(),report,false,"dependent_selection");
+        }
+        for(var decision:decisions){
+            Profile pick=picks.get(decision.get("stage"));if(pick==null)continue;
+            selected.put(String.valueOf(decision.get("stage")),pick.name());decision.put("reason","classifier_selected");
+            decision.put("selected_profile",pick.name());decision.put("selected_model",pick.model());
         }
         report.put("joint_validation","passed");
         return finish(List.copyOf(effective),Map.copyOf(selected),report,false,selected.isEmpty()?"model_selection_kept_configured":"models_selected");
