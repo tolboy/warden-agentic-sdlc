@@ -39,7 +39,10 @@ public final class DecisionClient {
         evidence.put("vendor_turn_started",true);
         ApiExecutor.HttpReply response;
         try {response=ApiExecutor.call(c,"POST",URI.create(endpoint),bodyJson,token,Duration.ofSeconds(profile.timeoutSeconds()));}
-        catch(ApiExecutor.CallFailure failure){return fail(failure.code,evidence);}
+        catch(ApiExecutor.CallFailure failure){
+            if(failure.notSent())evidence.put("vendor_turn_started",false);
+            return fail(failure.code,evidence);
+        }
         var parsed=ApiExecutor.object(response.body()); String error=ApiExecutor.errorCode(response.status(),parsed);
         if(error!=null)return fail(error,evidence);
         if(parsed!=null && parsed.get("model") instanceof String reported

@@ -33,6 +33,7 @@ public final class DecisionRoutingTest implements Suite {
             var user=UserConfig.load(home);var client=new DecisionClient(ignored->"test-secret");
             var result=client.ping(profile,user);
             check.eq("typed challenge proves Jev is answering",true,result.get("ok"));
+            check.eq("answered decision request starts a vendor turn",true,result.get("vendor_turn_started"));
             check.eq("dated Jev snapshot is checked",profile.reportedModel(),result.get("model_reported"));
             check.eq("missing provider money does not prevent readiness","unknown",result.get("cost_status"));
             check.eq("same connection credential reaches only decisions endpoint","Bearer test-secret",stub.authorization);
@@ -43,6 +44,7 @@ public final class DecisionRoutingTest implements Suite {
             check.eq("invented or malformed probability does not become advice","classifier_response_invalid",result.get("code"));stub.badProbabilities=false;
             stub.status=401;result=client.ping(profile,user);
             check.eq("auth error has a typed cause","role_api_auth_invalid",result.get("code"));
+            check.eq("provider refusal still starts a vendor turn",true,result.get("vendor_turn_started"));
             check.that("provider auth error body is not persisted",!Json.write(result).contains("test-secret"));stub.status=200;
             int calls=stub.calls.get();
             check.eq("missing credential fails before sending","classifier_auth_missing",new DecisionClient(ignored->null).ping(profile,user).get("code"));
@@ -119,6 +121,19 @@ public final class DecisionRoutingTest implements Suite {
             stub.beforeReply=()->{try{Files.writeString(DecisionProfile.file(home,profile.name()),profile.yaml().replace("enabled: true","enabled: false"));}catch(Exception e){throw new RuntimeException(e);}};
             check.eq("edited classifier is not blessed by an old in-flight response","classifier_configuration_changed",client.ping(profile,user).get("code"));
         }
+        // A closed loopback endpoint proves a call never left, without a provider request.
+        int closedPort;
+        try(var socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1"))){
+            closedPort=socket.getLocalPort();
+        }
+        var offlineConnection=new Connection("offline-decisions","custom","openai_chat",
+                "http://127.0.0.1:"+closedPort+"/v1",null,true);
+        new ConnectionStore(home).add(offlineConnection);
+        var offlineProfile=new DecisionProfile("offline-jev",offlineConnection.id(),"typesafe/jev-1.14",
+                "typesafe/jev-1.14-20261014",3,8000,true);
+        var offline=new DecisionClient(ignored->null).ping(offlineProfile,UserConfig.load(home));
+        check.eq("connection refused has a typed transport failure","role_api_network_error",offline.get("code"));
+        check.eq("decision request that never left starts no vendor turn",false,offline.get("vendor_turn_started"));
         var ultraLevels=List.of("low","medium","high","xhigh","max","ultra");
         var levels=List.of("low","medium","high","xhigh","max");
         check.eq("one supported effort can be selected","high",TaskRouting.chooseEffort(
