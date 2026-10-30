@@ -9,11 +9,14 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.AclEntry;
+import java.nio.file.attribute.AclEntryFlag;
+import java.nio.file.attribute.AclEntryPermission;
 import java.nio.file.attribute.AclEntryType;
 import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.UserPrincipal;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -296,6 +299,22 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         Path icacls = Path.of(root, "System32", "icacls.exe");
         runAclCommand(icacls, dir, "/setowner", user);
         runAclCommand(icacls, dir, "/inheritance:r", "/grant:r", user + ":(OI)(CI)F");
+        // icacls /grant:r only replaces this user's entries; explicit entries for other principals
+        // (for example the Administrators group on an elevated runner) survive it. Write the whole
+        // DACL so it holds exactly one entry, then keep it protected from parent inheritance.
+        AclFileAttributeView view = Files.getFileAttributeView(dir, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        if (view == null) throw new IOException("credential helper directory has no ACL");
+        view.setAcl(List.of(currentUserOnlyEntry(currentUser.principal())));
+        runAclCommand(icacls, dir, "/inheritance:r");
+    }
+
+    static AclEntry currentUserOnlyEntry(UserPrincipal user) {
+        return AclEntry.newBuilder()
+                .setType(AclEntryType.ALLOW)
+                .setPrincipal(user)
+                .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+                .setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT)
+                .build();
     }
 
     private static void runAclCommand(Path icacls, Path dir, String... arguments)
@@ -366,7 +385,9 @@ final class WindowsOsCredentialStore implements OsCredentialStore {
         if (entries.isEmpty()) throw new IOException("credential helper directory ACL is empty");
         for (AclEntry entry : entries) {
             if (entry.type() != AclEntryType.ALLOW || !samePrincipal(user, entry.principal())) {
-                throw new IOException("credential helper directory ACL is not limited to the current user");
+                String who = entry.principal() == null ? "unknown" : entry.principal().getName();
+                throw new IOException("credential helper directory ACL is not limited to the current user ("
+                        + entry.type() + " " + who + ")");
             }
         }
     }

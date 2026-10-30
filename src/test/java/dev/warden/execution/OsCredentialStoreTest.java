@@ -96,6 +96,13 @@ public final class OsCredentialStoreTest implements Suite {
         check.rejects("non-allow entries are rejected", "ACL is not limited", () ->
                 WindowsOsCredentialStore.verifyCurrentUserOnly(user, user,
                         List.of(AclEntry.newBuilder(grant).setType(AclEntryType.DENY).build())));
+        AclEntry written = WindowsOsCredentialStore.currentUserOnlyEntry(user);
+        WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of(written));
+        check.that("the rewritten helper ACL grants only the process user", written.principal() == user
+                && written.type() == AclEntryType.ALLOW
+                && written.permissions().containsAll(java.util.EnumSet.allOf(AclEntryPermission.class)));
+        check.rejects("a leftover group entry is named in the failure", "ALLOW BUILTIN\\Administrators", () ->
+                WindowsOsCredentialStore.verifyCurrentUserOnly(user, user, List.of(written, groupGrant)));
 
         String sid = "S-1-5-21-123-456-789-1001";
         String[] identity = WindowsOsCredentialStore.parseCurrentUser(sid + "\r\nMACHINE\\alïce\r\n");
