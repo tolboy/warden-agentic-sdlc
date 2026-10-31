@@ -57,6 +57,7 @@ public final class OrcaRunIdentityTest implements Suite {
             aContinuationKeepsTheChainsRun(check, root);
             anAnswerRenamesTheTabFromAnotherProcess(check, root);
             aStageTheRunAbandonsIsClosedAsFailed(check, root);
+            aSecondWatchOpensNoSecondTab(check, root);
         } finally {
             deleteTree(root);
         }
@@ -179,6 +180,23 @@ public final class OrcaRunIdentityTest implements Suite {
         check.eq("as failed", "failed", FakeOrca.option(settled.getFirst(), "--status"));
         board.stageEnded(true, "late");
         check.eq("and is not closed twice", 1, orca.calls("orchestration task-update").size());
+    }
+
+    /**
+     * `warden do --watch` with a planner, and replan, ask for the window before the planner
+     * and again when the loop starts on the same workspace. One tab follows the run.
+     */
+    private void aSecondWatchOpensNoSecondTab(Check check, Path root) throws Exception {
+        FakeOrca orca = new FakeOrca(root);
+        Workspace board = OrcaWorkspace.attach(orca.client(), root);
+        Path narration = root.resolve(".warden/runs/run-6/narration.log");
+        board.watch(narration, "run-6");
+        String tab = new OrcaLifecycle(root, "run-6").read().watchTerminal();
+        board.watch(narration, "run-6");
+        check.eq("preparation and the loop open one narration tab", 1,
+                orca.calls("terminal create").size());
+        check.eq("and the lifecycle keeps the first tab's handle", tab,
+                new OrcaLifecycle(root, "run-6").read().watchTerminal());
     }
 
     private static RoleExecutor.Request request(Path root, String runId) throws Exception {

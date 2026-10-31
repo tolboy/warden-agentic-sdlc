@@ -235,6 +235,10 @@ public final class OrcaWorkspace implements Workspace {
      */
     @Override
     public void watch(Path narration, String runId) {
+        // Preparation (planner, replan) and the loop both ask for the narration window on the
+        // same workspace. The first tab already follows this run; a second create would open
+        // another one and abandon the handle of the first.
+        if (this.terminal != null) return;
         try {
             if (!Files.isRegularFile(narration)) {
                 Files.createDirectories(narration.getParent());
