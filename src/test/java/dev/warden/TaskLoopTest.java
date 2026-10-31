@@ -6910,6 +6910,38 @@ public final class TaskLoopTest implements Suite {
         check.that("and what it cost, because a phone cannot run warden report",
                 board.anyNote("call(s)"));
 
+        // The loop wraps every executor to defer an API interruption. RoleRunner dispatches
+        // through the two-argument execute, so the wrapper must forward the activity sink;
+        // a one-method lambda fell back to execute(request) and a direct CLI's tool and
+        // output events never reached the card on loop dispatches.
+        Path live = newProject(sandbox, "watched-live");
+        writeProfiles(home, sandbox, "watched-live", 1, 1);
+        Board liveBoard = new Board();
+        TaskLoop.Outcome liveRun = new TaskLoop(new ProcessRunner()).withWorkspace(liveBoard)
+                .withExecutors((profile, processes, git) -> {
+                    var direct = dev.warden.execution.Executors.forProfile(profile, processes, git);
+                    return new dev.warden.execution.RoleExecutor() {
+                        @Override public Result execute(Request request) throws Exception {
+                            return direct.execute(request);
+                        }
+
+                        @Override public Result execute(Request request,
+                                java.util.function.Consumer<dev.warden.execution.ExecutionActivity.Update> activity)
+                                throws Exception {
+                            activity.accept(new dev.warden.execution.ExecutionActivity.Update(
+                                    dev.warden.execution.ExecutionActivity.Kind.TOOL_FINISHED,
+                                    "shell", 0, 0, 0));
+                            return direct.execute(request, activity);
+                        }
+                    };
+                }).run(new ConfigLoader().load(live, "hello"), UserConfig.load(home), "wb7", false);
+        check.that("a run whose adapter streams activity still reaches the human gate", liveRun.ok());
+        check.that("a direct adapter's tool event reaches the workspace on a loop dispatch",
+                liveBoard.activity.stream().anyMatch(event ->
+                        event.update().kind() == dev.warden.execution.ExecutionActivity.Kind.TOOL_FINISHED
+                                && "shell".equals(event.update().tool())
+                                && "loop-impl".equals(event.attempt().profile())));
+
         // A preview has not produced anything a person could act on, so it must not move a
         // card into a column that says one of them is waiting.
         Path previewed = newProject(sandbox, "previewed");

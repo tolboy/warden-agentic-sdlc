@@ -716,6 +716,14 @@ public final class TaskLoop {
         }
     }
 
+    // The executor has already cancelled its pending call and excluded retry. Clear the flag
+    // before RoleRunner writes receipts or fingerprints the tree.
+    private static dev.warden.execution.RoleExecutor.Result deferApiInterruption(
+            dev.warden.execution.RoleExecutor.Result result, ApiInterruption interruption) {
+        if ("role_api_interrupted".equals(result.code())) interruption.defer();
+        return result;
+    }
+
     private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                              Map<String, String> authorizedFailover, Continuation carried,
                              ApiInterruption interruption) throws Exception {
@@ -814,12 +822,19 @@ public final class TaskLoop {
             dev.warden.execution.Executors.Factory factory = executors == null
                     ? dev.warden.execution.Executors::forProfile : executors;
             var executor = factory.forProfile(profile, runner, repository);
-            return request -> {
-                var result = executor.execute(request);
-                // The executor has already cancelled its pending call and excluded retry.
-                // Clear the flag before RoleRunner writes receipts or fingerprints the tree.
-                if ("role_api_interrupted".equals(result.code())) interruption.defer();
-                return result;
+            // Both methods are forwarded. RoleRunner dispatches through the two-argument form,
+            // and a one-method lambda would drop the activity sink there, so direct CLI tool
+            // and output events would never reach the workspace card.
+            return new dev.warden.execution.RoleExecutor() {
+                @Override public Result execute(Request request) throws Exception {
+                    return deferApiInterruption(executor.execute(request), interruption);
+                }
+
+                @Override public Result execute(Request request,
+                        java.util.function.Consumer<dev.warden.execution.ExecutionActivity.Update> activity)
+                        throws Exception {
+                    return deferApiInterruption(executor.execute(request, activity), interruption);
+                }
             };
         });
         if (availability != null) roles.availability(availability);
