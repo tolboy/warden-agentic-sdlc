@@ -2,6 +2,9 @@ package dev.warden;
 
 import dev.warden.execution.orca.OrcaClient;
 import dev.warden.execution.orca.OrcaDesktop;
+import dev.warden.execution.orca.OrcaWatchedDesktop;
+import dev.warden.execution.orca.OrcaWorkspace;
+import dev.warden.testing.FakeOrca;
 import dev.warden.execution.ExecutionActivity;
 import dev.warden.json.Json;
 import dev.warden.run.Workspace;
@@ -122,6 +125,73 @@ public final class OrcaDesktopTest implements Suite {
         check.that("no automatic terminal close, including after disconnect", List.of(ready, wrongPath, cold, refused, lost).stream()
                 .flatMap(f -> f.calls.stream()).noneMatch(a -> a.contains("close")));
         liveActivity(check, root, interactive);
+        watchedDesktop(check, interactive);
+    }
+
+    /**
+     * `--watch` adds the narration tab to the desktop projection; it does not replace it. The
+     * tab came from one board and the card, its live activity and `desktop.json` from the other,
+     * and swapping them dropped every direct-CLI event the loop forwarded.
+     */
+    private void watchedDesktop(Check check, OrcaDesktop.Policy interactive) throws Exception {
+        Path root = Files.createTempDirectory("warden-watched-desktop-").toRealPath();
+        Fake card = new Fake(root);
+        FakeOrca tabs = new FakeOrca(root);
+        Workspace board = OrcaWatchedDesktop.compose(
+                OrcaDesktop.attach(card.client(), root, interactive, text -> {}),
+                OrcaWorkspace.attach(tabs.client(), root));
+        Path narration = root.resolve(".warden/runs/watched/narration.log");
+        // Preparation asks for the view, and the loop asks again on the same board.
+        board.watch(narration, "watched");
+        board.watch(narration, "watched");
+        board.note("implement running");
+        board.state(Workspace.State.RUNNING);
+        var attempt = new ExecutionActivity.Attempt("implement", "implementer", "grok-implement", "grok",
+                "grok-4.7", "high", 1, "implementer");
+        board.activity(new ExecutionActivity(attempt, ExecutionActivity.Update.of(ExecutionActivity.Kind.DISPATCHING), 0));
+        board.activity(new ExecutionActivity(attempt,
+                new ExecutionActivity.Update(ExecutionActivity.Kind.TOOL_FINISHED, "shell", 0, 0, 0), 10));
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (card.calls.stream().noneMatch(call -> call.stream().anyMatch(v -> v.contains("tool shell finished")))
+                && System.nanoTime() < deadline) Thread.sleep(20);
+        check.that("with --watch a direct tool event reaches the desktop card", card.calls.stream()
+                .anyMatch(call -> call.contains("--comment") && call.stream().anyMatch(v -> v.contains("tool shell finished"))));
+        long journalDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        Map<String, Object> saved = receipt(root, "watched");
+        while (!retains(saved, "tool_finished") && System.nanoTime() < journalDeadline) {
+            Thread.sleep(20);
+            saved = receipt(root, "watched");
+        }
+        check.that("and the desktop.json activity journal", retains(saved, "tool_finished"));
+        check.eq("the journal is the desktop card's", "workspace_card", saved.get("projection"));
+        check.eq("with --watch exactly one narration tab is opened", 1, tabs.calls("terminal create").size());
+        check.eq("and the card is written once, by the desktop, not by the tab's board", 0,
+                tabs.calls("worktree set").size());
+        board.stage("[1/3] implement");
+        check.eq("the tab's board still keeps the stage rows", 1, tabs.calls("orchestration task-create").size());
+        board.state(Workspace.State.WAITING_FOR_HUMAN);
+        check.that("and still names the tab for what the run wants", tabs.calls("terminal rename").stream()
+                .anyMatch(call -> "warden watched - NEEDS YOU".equals(FakeOrca.option(call, "--title"))));
+
+        // A refused desktop (quiet, headless, SSH) keeps its journal and leaves the card to the
+        // tab's board, which is what `--watch` did on its own.
+        Path quietRoot = Files.createTempDirectory("warden-watched-quiet-").toRealPath();
+        Fake unused = new Fake(quietRoot);
+        FakeOrca quietTabs = new FakeOrca(quietRoot);
+        Workspace quiet = OrcaWatchedDesktop.compose(
+                OrcaDesktop.attach(unused.client(), quietRoot, new OrcaDesktop.Policy(true, false, true), text -> {}),
+                OrcaWorkspace.attach(quietTabs.client(), quietRoot));
+        quiet.watch(quietRoot.resolve(".warden/runs/headless/narration.log"), "headless");
+        quiet.note("implement running");
+        check.eq("a headless desktop is still refused under --watch", "headless", receipt(quietRoot, "headless").get("reason"));
+        check.that("and makes no desktop RPC", unused.calls.isEmpty());
+        check.eq("the tab's board writes the card instead", 1, quietTabs.calls("worktree set").size());
+        check.eq("and opens its one tab", 1, quietTabs.calls("terminal create").size());
+    }
+
+    private static boolean retains(Map<String, Object> receipt, String kind) {
+        return receipt.get("activity_events_retained") instanceof List<?> events
+                && events.stream().anyMatch(event -> event instanceof Map<?, ?> map && kind.equals(map.get("kind")));
     }
 
     private void liveActivity(Check check, Path root, OrcaDesktop.Policy policy) throws Exception {
@@ -182,7 +252,7 @@ public final class OrcaDesktopTest implements Suite {
         return Json.parseObject(Files.readString(root.resolve(".warden/runs/" + id + "/desktop.json")));
     }
 
-    private static final class Fake {
+    static final class Fake {
         final Path root;
         final List<List<String>> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<Duration> timeouts = new java.util.concurrent.CopyOnWriteArrayList<>();

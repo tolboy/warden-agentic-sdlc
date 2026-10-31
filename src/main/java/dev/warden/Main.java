@@ -1465,15 +1465,29 @@ public final class Main {
     }
 
     /** Automatic observation is resolved only once the actual execution worktree is known. */
-    private static dev.warden.run.Workspace.Source observationBoard(String[] args) {
+    static dev.warden.run.Workspace.Source observationBoard(String[] args) {
         if (hasFlag(args, "--no-workspace-status") || hasFlag(args, "--dry-run")) {
             return dev.warden.run.Workspace.Source.NONE;
         }
-        if (hasFlag(args, "--watch")) return boards;
         var policy = dev.warden.execution.orca.OrcaDesktop.Policy.current(hasFlag(args, "--quiet"));
-        return worktree -> dev.warden.execution.orca.OrcaDesktop.attach(
-                new OrcaClient(new ProcessRunner()), worktree, policy, narration(args));
+        boolean watch = hasFlag(args, "--watch");
+        return worktree -> {
+            var desktop = desktops.attach(worktree, policy, narration(args));
+            // `--watch` adds the narration tab; it does not replace the card and its journal.
+            return watch ? dev.warden.execution.orca.OrcaWatchedDesktop.compose(desktop, boards.at(worktree))
+                    : desktop;
+        };
     }
+
+    /** Where the automatic desktop projection comes from. Tests put one over a fake Orca here. */
+    @FunctionalInterface
+    interface Desktops {
+        dev.warden.execution.orca.OrcaDesktop attach(java.nio.file.Path worktree,
+                dev.warden.execution.orca.OrcaDesktop.Policy policy, dev.warden.run.Progress progress);
+    }
+
+    static Desktops desktops = (worktree, policy, progress) -> dev.warden.execution.orca.OrcaDesktop.attach(
+            new OrcaClient(new ProcessRunner()), worktree, policy, progress);
 
     private static boolean hasFlag(String[] args, String name) {
         for (String argument : args) if (argument.equals(name)) return true;

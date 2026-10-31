@@ -171,6 +171,9 @@ public final class OrcaDesktop implements Workspace {
         persist();
     }
 
+    /** Whether this board is writing the workspace card now; false once refused or failed. */
+    public synchronized boolean projecting() { return selector != null; }
+
     @Override public synchronized void note(String text) {
         lastNote = clip(text);
         displayedActivity = null;

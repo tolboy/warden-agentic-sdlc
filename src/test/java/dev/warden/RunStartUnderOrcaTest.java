@@ -2,6 +2,7 @@ package dev.warden;
 
 import dev.warden.approval.ApprovalStore;
 import dev.warden.approval.HumanDecision;
+import dev.warden.execution.orca.OrcaDesktop;
 import dev.warden.execution.orca.OrcaLifecycle;
 import dev.warden.execution.orca.OrcaWorkspace;
 import dev.warden.json.Json;
@@ -134,8 +135,13 @@ public final class RunStartUnderOrcaTest implements Suite {
         HumanDecision retry = store.resolve("page-1", pending.updatedAt().toString(), "retry",
                 "orca-decision-page", "");
         FakeOrca orca = new FakeOrca(root);
+        OrcaDesktopTest.Fake desktop = new OrcaDesktopTest.Fake(root.toRealPath());
         var before = Main.boards;
+        var beforeDesktops = Main.desktops;
         Main.boards = worktree -> OrcaWorkspace.attach(orca.client(), worktree);
+        // As on the operator's laptop: an interactive terminal, so the desktop projects.
+        Main.desktops = (worktree, policy, progress) -> OrcaDesktop.attach(desktop.client(), worktree,
+                new OrcaDesktop.Policy(true, false, false), progress);
         Map<String, Object> started;
         try {
             Main.ApproveEnv env = new Main.ApproveEnv(System::currentTimeMillis, millis -> { },
@@ -144,6 +150,7 @@ public final class RunStartUnderOrcaTest implements Suite {
                     new String[] {"--watch", "--no-orca-gate", "--quiet"}, env);
         } finally {
             Main.boards = before;
+            Main.desktops = beforeDesktops;
         }
         check.eq("the answer starts the next run: " + started, true, started.get("started"));
         check.eq("which is not refused as a duplicate of itself", null, started.get("code"));
@@ -152,6 +159,17 @@ public final class RunStartUnderOrcaTest implements Suite {
         check.eq("on the chain's Run", "orca-run-page", lifecycle(root, "page-2").orcaRunId());
         check.eq("with the tab it opened on record", "terminal-1", lifecycle(root, "page-2").watchTerminal());
         check.eq("and one tab opened", 1, orca.calls("terminal create").size());
+        Map<String, Object> journal = Json.parseObject(
+                Files.readString(root.resolve(".warden/runs/page-2/desktop.json")));
+        check.eq("--watch keeps the desktop card and its journal", "workspace_card", journal.get("projection"));
+        check.that("the desktop wrote the card", desktop.calls.stream()
+                .anyMatch(call -> call.size() > 1 && call.get(0).equals("worktree") && call.get(1).equals("set")));
+        check.eq("and the tab's board did not write it a second time", 0, orca.calls("worktree set").size());
+        for (String[] off : List.of(new String[] {"--watch", "--dry-run"},
+                new String[] {"--watch", "--no-workspace-status"})) {
+            check.that("--watch with " + off[1] + " still resolves to no workspace",
+                    Main.observationBoard(off) == dev.warden.run.Workspace.Source.NONE);
+        }
     }
 
     /**

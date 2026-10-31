@@ -68,6 +68,14 @@ public final class OrcaWorkspace implements Workspace {
      */
     private volatile boolean stopped;
 
+    /**
+     * True while another board owns the card. With `--watch` the automatic desktop
+     * projection writes the card and its activity journal, and this board keeps the tab, its
+     * name and the stage rows. When that projection is refused or fails, this board writes
+     * the card again, as it did before the two were composed.
+     */
+    private volatile java.util.function.BooleanSupplier cardElsewhere = () -> false;
+
     private OrcaWorkspace(OrcaClient orca, Path worktree, String selector) {
         this.orca = orca;
         this.worktree = worktree;
@@ -282,6 +290,11 @@ public final class OrcaWorkspace implements Workspace {
         } catch (Exception notOurProblem) {
             return false;
         }
+    }
+
+    /** Leave the card to another board while {@code elsewhere} says it is writing it. */
+    void leaveCardTo(java.util.function.BooleanSupplier elsewhere) {
+        this.cardElsewhere = elsewhere == null ? () -> false : elsewhere;
     }
 
     /**
@@ -514,6 +527,7 @@ public final class OrcaWorkspace implements Workspace {
 
     private void set(List<String> fields) {
         try {
+            if (cardElsewhere.getAsBoolean()) return;
             java.util.List<String> args = new java.util.ArrayList<>(
                     List.of("worktree", "set", "--worktree", selector));
             args.addAll(fields);
