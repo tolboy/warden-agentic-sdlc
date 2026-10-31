@@ -239,6 +239,11 @@ public final class OrcaWorkspace implements Workspace {
         // same workspace. The first tab already follows this run; a second create would open
         // another one and abandon the handle of the first.
         if (this.terminal != null) return;
+        // Another board for the same run (preparation and the loop in different processes,
+        // or a board rebuilt in this one) may already have opened the tab. The lifecycle file
+        // is the only state they share, so the handle recorded there is reused while Orca
+        // still knows it; a stale handle is an ordinary restart and gets a fresh tab.
+        if (reuseRecordedTerminal(runId)) return;
         try {
             if (!Files.isRegularFile(narration)) {
                 Files.createDirectories(narration.getParent());
@@ -260,6 +265,22 @@ public final class OrcaWorkspace implements Workspace {
             }
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
+        }
+    }
+
+    private boolean reuseRecordedTerminal(String runId) {
+        if (runId == null) return false;
+        try {
+            String recorded = new OrcaLifecycle(worktree, runId).read().watchTerminal();
+            if (recorded == null || recorded.isBlank()) return false;
+            OrcaClient.Rpc shown = orca.invoke(worktree, TIMEOUT,
+                    List.of("terminal", "show", "--terminal", recorded));
+            if (!shown.ok()) return false;
+            this.runId = runId;
+            this.terminal = recorded;
+            return true;
+        } catch (Exception notOurProblem) {
+            return false;
         }
     }
 
