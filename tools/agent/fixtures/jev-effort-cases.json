@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "purpose": "Small reviewable smoke set for rubric and threshold sensitivity, not a model-quality benchmark.",
+  "levels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "thresholds": [
+    0.5,
+    0.6,
+    0.75
+  ],
+  "cases": [
+    {
+      "id": "simple-copy",
+      "group": "simple",
+      "risk": "low",
+      "goal": "In README.md replace the misspelling recieve with receive. Change only that word. No program behavior changes.",
+      "expected_band": [
+        "low",
+        "medium"
+      ]
+    },
+    {
+      "id": "simple-constant",
+      "group": "simple",
+      "risk": "low",
+      "goal": "Change the UI label constant from Save file to Save document in src/labels.ts. Existing tests identify the exact label. Update that one expectation and run the label tests.",
+      "expected_band": [
+        "low",
+        "medium"
+      ]
+    },
+    {
+      "id": "complex-recovery",
+      "group": "complex",
+      "risk": "high",
+      "goal": "Design and implement durable recovery for a distributed job executor across controller crash, worker crash and network partition. Preserve exactly-once external effects through idempotency keys, fencing, transactional state transitions and reconciliation. Prove no duplicate writer starts while an old lease can still execute. Add fault-injection tests for races.",
+      "expected_band": [
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "complex-migration",
+      "group": "complex",
+      "risk": "high",
+      "goal": "Migrate a multitenant payment ledger from mutable balances to double-entry accounting with concurrent writes and zero downtime. Define invariants, reversible deployment phases, backfill reconciliation, isolation and rollback. Existing financial totals must remain unchanged through crash/retry scenarios.",
+      "expected_band": [
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "ambiguous-speed",
+      "group": "ambiguous",
+      "risk": "medium",
+      "goal": "Make the application faster. No slow operation, profile, latency goal, workload or acceptance test has been provided.",
+      "expected_band": []
+    },
+    {
+      "id": "ambiguous-failure",
+      "group": "ambiguous",
+      "risk": "medium",
+      "goal": "Users sometimes say it did not work. The affected component, reproduction, logs and intended result are unknown. Investigate what evidence is needed before choosing an implementation.",
+      "expected_band": []
+    }
+  ]
+}

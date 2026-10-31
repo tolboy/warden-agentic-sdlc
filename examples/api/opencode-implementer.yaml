@@ -1,0 +1,22 @@
+# Historical offline contract from 2026-10-26, retained for compatibility checks.
+# Not a recommended personal coding profile and not eligible for execution.
+# For the verified native path start with joingonka-coder.yaml and read
+# docs/API-CONNECTIONS.md#verified-opencode-implementer before configuring your own connection.
+version: 1
+profile: opencode-implementer
+role: implementer
+runner: direct
+harness: opencode
+connection: openrouter-personal
+model_vendor: z-ai
+# Catalog snapshot 2026-10-26. The model id is the developer model, not an OpenCode provider id.
+model: z-ai/glm-5.3-flash
+read_only: false
+prompt_template: prompts/implementer.md
+json_schema: schemas/implementer.json
+enforce_schema: true
+limits:
+  wall_clock_minutes: 20
+verification:
+  status: unverified
+  note: Offline contract only. Coding tools are not proven, and profiles --verify will not stamp this file.

@@ -82,6 +82,13 @@ public final class ProfileVerifier {
      */
     public Probe run(Profile profile, Path home, Duration timeout, Path worktree)
             throws IOException, InterruptedException {
+        if (profile.harness() != null) {
+            if(profile.harnessExecutable()!=null)
+                return new HarnessProfileVerifier().run(profile,home,timeout,worktree);
+            throw new IllegalStateException("profile '" + profile.name() + "' uses harness "
+                    + profile.harness() + "; coding tools are not proven and a probe cannot stamp them");
+        }
+        if ("api".equals(profile.runner())) return new ApiProfileVerifier().run(profile, home, timeout);
         String declared = profile.verificationProbe();
         if (declared == null || declared.isBlank()) {
             throw new IllegalStateException("profile '" + profile.name() + "' declares no "
@@ -106,7 +113,15 @@ public final class ProfileVerifier {
                 throw new IOException(failed.getMessage(), failed);
             }
         } else {
-            result = processes.run(shell(command), home, timeout, 256 * 1024);
+            java.util.Set<String> connectionVariables;
+            try {
+                connectionVariables = new ConnectionStore(home).load().connections().values().stream()
+                        .map(Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                        .collect(java.util.stream.Collectors.toSet());
+            } catch (IOException unavailable) {
+                throw new IOException("cannot inspect connection credential references before a CLI probe");
+            }
+            result = processes.withoutEnvironment(connectionVariables).run(shell(command), home, timeout, 256 * 1024);
         }
 
         Path directory = home.resolve("verification");
@@ -155,8 +170,18 @@ public final class ProfileVerifier {
         catch (ConfigFileStore.Refused refused) {
             return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
         }
-        if (!Profile.parse(source.text(), profileFile.toString()).equals(profile)) {
+        Profile parsed = Profile.parse(source.text(), profileFile.toString());
+        if (profile.apiConnection() != null && parsed.connectionRef() != null) {
+            parsed = parsed.withConnection(profile.apiConnection(), profile.apiSettings().home());
+        }
+        if (!parsed.equals(profile)) {
             return new Stamp(false, "config_conflict", "profile changed since the probe; reload and verify again", profileFile, null);
+        }
+        if (profile.harness() != null && !CodingAttestation.valid(profile)) {
+            return new Stamp(false, "harness_coding_unproven",
+                    "profile '" + profile.name() + "' uses harness " + profile.harness()
+                            + "; coding tools are not proven and a probe cannot stamp them",
+                    profileFile, null);
         }
         if (profile.verified()) {
             return new Stamp(false, "already_verified",
@@ -175,9 +200,48 @@ public final class ProfileVerifier {
                             + "; add one with a probe rather than having Warden invent its shape",
                     profileFile, null);
         }
+        if ("api".equals(profile.runner()) || profile.harness()!=null) {
+            if (profile.apiFingerprint() == null) throw new IOException("API connection must be resolved before stamping");
+            int end = header + 1;
+            while (end < lines.size() && (lines.get(end).isBlank()
+                    || Character.isWhitespace(lines.get(end).charAt(0)))) end++;
+            for (int index = end - 1; index > header; index--) {
+                String content = lines.get(index).stripLeading();
+                if (content.startsWith("verified_on:") || content.startsWith("connection_fingerprint:")
+                        || isStatus(content)) lines.remove(index);
+            }
+            lines.add(header + 1, "  connection_fingerprint: \"" + profile.apiFingerprint() + "\"");
+            lines.add(header + 1, "  verified_on: \"" + date + "\"");
+            try {
+                new ConfigFileStore().save(source, document.render(),
+                        candidate -> Profile.parse(candidate, profileFile.toString()), "verify", () -> {
+                            Profile current = UserConfig.load(profile.apiSettings().home()).profiles().get(profile.name());
+                            if (!profile.equals(current)) {
+                                throw new ConfigFileStore.Refused("config_conflict",
+                                        "API configuration changed since the probe; reload and verify again", null);
+                            }
+                        });
+            } catch (ConfigFileStore.Refused refused) {
+                return new Stamp(false, refused.code(), refused.getMessage(), profileFile, null);
+            }
+            return new Stamp(true, "verified", profile.harness()!=null
+                    ? "Coding capability verified for this profile, connection and executable"
+                    : "API text artifact transport verified for this configuration", profileFile, date.toString());
+        }
         // Match the indentation the operator already used inside the block, and append at its
         // end rather than at its top: a comment sits above the key it explains, so inserting
         // after the header would file the date under somebody else's explanation.
+        // A hand-written `status: unverified` next to a fresh stamp made the file say both.
+        for (int index = lines.size() - 1; index > header; index--) {
+            String line = lines.get(index);
+            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) continue;
+            boolean inBlock = true;
+            for (int above = index - 1; above > header; above--) {
+                String prior = lines.get(above);
+                if (!prior.isBlank() && !Character.isWhitespace(prior.charAt(0))) { inBlock = false; break; }
+            }
+            if (inBlock && isStatus(line.stripLeading())) lines.remove(index);
+        }
         String indent = "  ";
         int insertAt = header + 1;
         for (int index = header + 1; index < lines.size(); index++) {
@@ -198,6 +262,11 @@ public final class ProfileVerifier {
         }
         return new Stamp(true, "verified", "verification.verified_on set to " + stamped,
                 profileFile, stamped);
+    }
+
+    /** A verification-block status line; the stamp itself is the status once the probe passed. */
+    private static boolean isStatus(String content) {
+        return content.startsWith("status:");
     }
 
     /** The report both paths print, so the evidence looks the same whether or not it stamped. */

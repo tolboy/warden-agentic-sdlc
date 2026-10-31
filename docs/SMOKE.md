@@ -14,7 +14,14 @@ This document is the **cross-project boundary** smoke and predates the full loop
 end to end with live vendors, read [`LIVE-CYCLE.md`](LIVE-CYCLE.md); for a version that needs
 no vendor, no key and no network at all, run [`examples/demo/run.sh`](../examples/demo/README.md).
 The dated sections below are kept as they were written, because a transcript that gets edited
-after the fact stops being evidence.
+after the fact stops being evidence. Their model IDs, CLI flags, account names and
+prices are historical observations, not recommended current personal settings. Do not
+copy a dated eval profile into `~/.warden` as a default. Use the current
+[setup](SETUP.md), [API execution guide](API-CONNECTIONS.md) and
+[Jev routing guide](JEV-ROUTING.md); later live acceptance is recorded in
+[Stage 3](ACCEPTANCE-STAGE3-2026-10-28.md),
+[Stage 4](ACCEPTANCE-STAGE4-2026-10-29.md) and
+[Stage 5](NOTE-STAGE5-MODEL-SELECTION-2026-10-29.md).
 
 ## 1. Prerequisites
 

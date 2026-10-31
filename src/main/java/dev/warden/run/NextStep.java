@@ -44,6 +44,16 @@ public final class NextStep {
         step.put("consequences", consequences(kind, summary));
         step.put("findings", "fix_contract".equals(kind) || "resolve_blockers".equals(kind)
                 || "repair_or_retry".equals(kind) ? findings : List.of());
+        if ("model_check_failed".equals(reason)) {
+            boolean strictCheck = summary.get("model_check") instanceof Map<?, ?> checked
+                    && "check_strict_cost_unproven".equals(checked.get("code"));
+            step.put("summary", strictCheck
+                    ? "The strict task cap cannot admit diagnostic inference: a monetary reservation for checks is not supported yet. To retain this cap, explicitly disable automatic checks in personal settings. No new working role was dispatched."
+                    : "Restore the CLI login or API model access shown in model_check, then retry. No new working role was dispatched.");
+            List<String> commands = new ArrayList<>();
+            commands.add("warden check --task " + taskId); commands.addAll(carryOn(runId, taskId));
+            step.put("commands", commands); step.put("edits", List.of());
+        }
         return step;
     }
 
@@ -101,7 +111,7 @@ public final class NextStep {
             };
             case "quota_exhausted", "rate_limited" -> "wait_or_add_vendor";
             case "failover_requires_confirmation" -> "confirm_failover";
-            case "role_timed_out", "vendor_call_failed", "vendor_unavailable",
+            case "model_check_failed", "role_timed_out", "vendor_call_failed", "vendor_unavailable",
                     "vendor_protocol_failed", "prompt_undeliverable", "turn_ceiling_reached",
                     "orca_worker_not_started" -> "retry_infrastructure";
             case "plan_review_findings_remain" -> "revise_plan";

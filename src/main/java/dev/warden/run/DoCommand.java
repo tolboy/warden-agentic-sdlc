@@ -88,6 +88,13 @@ public final class DoCommand {
     private final boolean watch;
     private final boolean orcaGate;
     private final dev.warden.config.RunOverride override;
+    private RunReadiness readiness;
+    private TaskRouting taskRouting;
+    public DoCommand withTaskRouting(TaskRouting next){taskRouting=next;return this;}
+
+    public DoCommand withReadiness(RunReadiness next) { readiness = next; return this; }
+
+    private DoCommand keepReadiness(DoCommand copy) { copy.readiness = readiness; copy.taskRouting=taskRouting; return copy; }
 
     public DoCommand(ProcessRunner processes) { this(processes, Progress.SILENT); }
 
@@ -117,11 +124,11 @@ public final class DoCommand {
 
     /** Publish the run's pending decision to Orca as a gate, so it can be answered elsewhere. */
     public DoCommand withOrcaGate(boolean publish) {
-        return new DoCommand(processes, progress, board, watch, publish, override);
+        return keepReadiness(new DoCommand(processes, progress, board, watch, publish, override));
     }
 
     public DoCommand withOverride(dev.warden.config.RunOverride next) {
-        return new DoCommand(processes, progress, board, watch, orcaGate, next);
+        return keepReadiness(new DoCommand(processes, progress, board, watch, orcaGate, next));
     }
 
     /**
@@ -130,7 +137,7 @@ public final class DoCommand {
      * worktree partway through and the operator's own checkout is the wrong one to write on.
      */
     public DoCommand withWorkspace(Workspace.Source source, boolean watch) {
-        return new DoCommand(processes, progress, source, watch, orcaGate, override);
+        return keepReadiness(new DoCommand(processes, progress, source, watch, orcaGate, override));
     }
 
     /**
@@ -374,6 +381,27 @@ public final class DoCommand {
         CallPlan preparationPlan = null;
         long preparationCap = 1;
         if (dispatchPlanner) {
+            if (!options.dryRun() && readiness != null) {
+                List<dev.warden.config.Profile> checks = new java.util.ArrayList<>();
+                var measured = measureForReservation(root, project, taskId, options.goal(), scope, risk, contractExists);
+                java.util.Set<String> checkRoles = new java.util.LinkedHashSet<>(Preparation.payingStages(user));
+                if (!options.draftOnly()) for (var stage : user.policy().workflow().stages())
+                    if (stage.kind() == dev.warden.config.Workflow.Kind.ROLE) checkRoles.add(stage.role());
+                for (String role : checkRoles) {
+                    var spec = user.policy().roles().get(role);
+                    if (spec != null) for (String name : spec.profiles()) {
+                        var profile = user.profiles().get(name);
+                        if (profile != null && profile.verified() && profile.role().equals(role)) checks.add(profile);
+                    }
+                }
+                Map<String, Object> checked = readiness.check(user, root, checks, measured.budget().strictCostCap(), progress::line);
+                if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                    Map<String, Object> report = new LinkedHashMap<>();
+                    report.put("ok", false); report.put("code", "model_check_failed");
+                    report.put("model_check", checked); report.put("run_id", runId);
+                    return new Outcome(false, "model_check_failed", requested, root, taskId, report);
+                }
+            }
             // Setup first so the planner reads the tree a later implementer would, not an
             // empty worktree whose checks cannot run. The --prepare off path below is left
             // in the historical order so TaskDraft's bytes do not move.
@@ -613,6 +641,8 @@ public final class DoCommand {
         TaskLoop.Outcome loop;
         try {
             loop = new TaskLoop(processes)
+                    .withTaskRouting(taskRouting)
+                    .withReadiness(readiness)
                     .withProgress(Progress.tee(progress, Progress.toFile(narration)))
                     .withWorkspace(card)
                     .withWatch(watch ? narration : null)

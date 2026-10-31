@@ -45,7 +45,8 @@ public final class MeasurementProjector {
             "vendor_attempt", "vendor_attempt_id", "candidate_fingerprint",
             "ok", "code", "reason", "next_action", "verdict",
             "profile", "vendor", "model", "model_requested", "model_reported", "runner",
-            "effort_requested", "read_only", "strategy", "independence_required",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification", "read_only", "strategy", "independence_required",
             "rotation_counter", "workflow_run_id",
             "duration_millis", "duration_ms", "cost_usd", "attempts_cost_usd", "budget_charged",
             "tokens", "num_turns", "timed_out", "exit_code", "stop_reason",
@@ -55,10 +56,10 @@ public final class MeasurementProjector {
             "decision", "source", "wait_millis", "created_at", "decided_at", "updated_at",
             "lands", "kind", "finding_id", "waived_findings",
             "from_profile", "from_vendor", "to_profile", "to_vendor", "cause", "authorized_by",
-            "role_code", "policy_setting",
+            "role_code", "policy_setting", "api_fallback_profiles",
             "failed_over_from", "exhausted_profiles", "role_failovers",
             "role_contract", "measurement_context", "vendor_attempts", "quota",
-            "vendor_unavailable",
+            "vendor_unavailable", "relay", "task_routing", "stage_capabilities",
             "vision_capability", "findings", "finding_registry", "finding_history", "steps",
             "accounting", "outcomes", "budget_plan", "budget_plan_at_reservation",
             "reservation_matched_contract", "plan_review",
@@ -76,13 +77,14 @@ public final class MeasurementProjector {
 
     private static final Set<String> ROLE_CONTRACT = Set.of(
             "stage", "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "api_fallback_profiles",
             "profile", "vendor", "model", "effort", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
             "on_fail", "on_findings", "recheck_after_fix", "fix_with", "evidence");
 
     private static final Set<String> LABEL = Set.of("value", "source");
 
-    private static final Set<String> TRIPLE = Set.of("requested", "effective", "reported");
+    private static final Set<String> TRIPLE = Set.of("requested", "effective", "reported", "transmitted");
 
     private static final Set<String> CONTEXT = Set.of(
             "schema_version", "warden_version", "adapter_version",
@@ -95,9 +97,57 @@ public final class MeasurementProjector {
 
     private static final Set<String> ATTEMPT = Set.of(
             "attempt", "profile", "vendor", "runner", "model", "model_requested", "model_reported",
-            "effort_requested", "ok", "code", "duration_millis", "duration_ms",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification", "ok", "code", "duration_millis", "duration_ms",
             "cost_usd", "tokens", "inherited_unfinished_work", "budget_charged",
-            "vendor_attempt_id");
+            "vendor_attempt_id", "relay");
+
+    private static final Set<String> RELAY = Set.of(
+            "requests", "responses", "identity_confirmed", "cost_status",
+            "effort_requested", "effort_transmitted", "effort_reported", "effort_delivery",
+            "effort_transmission", "effort_verification");
+
+    private static final Set<String> RELAY_RESPONSE = Set.of(
+            "model", "finish_reason", "effort_requested", "effort_transmitted", "effort_reported",
+            "effort_delivery", "effort_transmission", "effort_verification");
+
+    private static final Set<String> ROUTING = Set.of(
+            "ok", "code", "mode", "classifier", "policy_hash", "stage_capabilities",
+            "roles_changed", "effort_policy", "fallback", "model_selection",
+            "suggested_profiles", "applied_profiles", "effective_profiles",
+            "selection_reused_from", "model_selection_rejected",
+            "operator_overrides_take_precedence");
+
+    private static final Set<String> MODEL_SELECTION = Set.of(
+            "enabled", "code", "policy_hash", "catalog_snapshot", "decisions",
+            "joint_validation", "classifier");
+
+    private static final Set<String> MODEL_DECISION = Set.of(
+            "stage", "role", "configured_profile", "selected_profile", "selected_model",
+            "reason", "profile_pinned", "candidates", "rejected", "answer");
+
+    private static final Set<String> MODEL_CANDIDATE = Set.of(
+            "option", "profile", "model", "vendor", "runner", "read_only", "effort",
+            "capability_hash", "cost_status");
+
+    private static final Set<String> MODEL_ANSWER = Set.of(
+            "type", "choice", "confidence", "probabilities");
+
+    private static final Set<String> CLASSIFIER = Set.of(
+            "configuration", "model_requested", "model_reported", "vendor_turn_started",
+            "tokens", "cost_usd", "cost_status");
+
+    /** Warden labels explain the choice; arbitrary generated rationale stays local. */
+    private static final Set<String> MODEL_SELECTION_REASONS = Set.of(
+            "explicit_profile", "configured_only_candidate", "no_admissible_candidates",
+            "candidate_limit", "classifier_uncertain", "classifier_selected", "classifier_failed",
+            "configuration_changed", "dependent_selection");
+
+    private static final Set<String> STAGE_CAPABILITY = Set.of(
+            "stage", "role", "profile", "model", "configured_effort", "effort_capabilities");
+
+    private static final Set<String> EFFORT_CAPABILITY = Set.of(
+            "levels", "delivery", "source", "source_description", "observed_at", "provider_confirmed");
 
     private static final Set<String> FINDING = Set.of(
             "id", "severity", "status", "stage", "supersedes", "closed",
@@ -161,7 +211,7 @@ public final class MeasurementProjector {
     private static final Set<String> FAILOVER = Set.of(
             "role", "stage", "from_profile", "from_vendor", "to_profile", "to_vendor",
             "from", "to", "cause", "authorized_by", "policy_setting", "role_code",
-            "role_invocation_id");
+            "role_invocation_id", "api_fallback_profiles");
 
     private static final Set<String> VISION = Set.of("verified", "delivery");
 
@@ -183,6 +233,16 @@ public final class MeasurementProjector {
             Map.entry("role_contract", ROLE_CONTRACT),
             Map.entry("measurement_context", CONTEXT),
             Map.entry("vendor_attempts", ATTEMPT),
+            Map.entry("relay", RELAY),
+            Map.entry("responses", RELAY_RESPONSE),
+            Map.entry("task_routing", ROUTING),
+            Map.entry("model_selection", MODEL_SELECTION),
+            Map.entry("decisions", MODEL_DECISION),
+            Map.entry("candidates", MODEL_CANDIDATE),
+            Map.entry("answer", MODEL_ANSWER),
+            Map.entry("classifier", CLASSIFIER),
+            Map.entry("stage_capabilities", STAGE_CAPABILITY),
+            Map.entry("effort_capabilities", EFFORT_CAPABILITY),
             Map.entry("findings", FINDING),
             Map.entry("finding_registry", FINDING),
             Map.entry("finding_history", FINDING_HISTORY),
@@ -215,7 +275,8 @@ public final class MeasurementProjector {
             Map.entry("effort", TRIPLE),
             Map.entry("requested", LABEL),
             Map.entry("effective", LABEL),
-            Map.entry("reported", LABEL));
+            Map.entry("reported", LABEL),
+            Map.entry("transmitted", LABEL));
 
     public record Projection(
             Map<String, Object> body,
@@ -247,6 +308,22 @@ public final class MeasurementProjector {
         for (Map.Entry<String, Object> entry : source.entrySet()) {
             String key = entry.getKey();
             if (!allowed.contains(key) || NEVER.contains(key)) continue;
+            if(allowed==ROUTING && "selection_reused_from".equals(key)
+                    && (!(entry.getValue() instanceof String id)||!id.matches("[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")))continue;
+            if(allowed==ROUTING && "model_selection_rejected".equals(key)
+                    && !"final_cast_not_admissible".equals(entry.getValue()))continue;
+            if (allowed == MODEL_DECISION && "reason".equals(key)
+                    && (!(entry.getValue() instanceof String reason) || !MODEL_SELECTION_REASONS.contains(reason))) continue;
+            if (allowed == MODEL_SELECTION && "joint_validation".equals(key)
+                    && (!(entry.getValue() instanceof String validation)
+                    || !Set.of("passed", "configured_fallback").contains(validation))) continue;
+            if ((allowed == MODEL_CANDIDATE && "option".equals(key)
+                    || allowed == MODEL_ANSWER && "choice".equals(key))
+                    && (!(entry.getValue() instanceof String option) || !option.matches("candidate_[0-9]{1,3}"))) continue;
+            if (allowed == MODEL_ANSWER && "type".equals(key) && !"choice".equals(entry.getValue())) continue;
+            if (allowed == MODEL_ANSWER && "confidence".equals(key)
+                    && (!(entry.getValue() instanceof Number n) || !Double.isFinite(n.doubleValue())
+                    || n.doubleValue() < 0 || n.doubleValue() > 1)) continue;
             Object projected = projectValue(key, entry.getValue());
             if (projected != SKIP) out.put(key, projected);
         }
@@ -259,6 +336,9 @@ public final class MeasurementProjector {
         if (value == null) return null;
         if (NEVER.contains(key)) return SKIP;
         if (value instanceof Map<?, ?> map) {
+            if ("probabilities".equals(key)) return probabilities(map);
+            if (Set.of("suggested_profiles", "applied_profiles", "effective_profiles", "rejected").contains(key))
+                return identifiers(key, map);
             Set<String> nested = NESTED.get(key);
             if (nested == null) return SKIP;
             @SuppressWarnings("unchecked")
@@ -290,6 +370,29 @@ public final class MeasurementProjector {
         }
         if (value instanceof Number || value instanceof Boolean) return value;
         return SKIP;
+    }
+
+    private static Map<String, Object> probabilities(Map<?, ?> source) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String option) || !option.matches("candidate_[0-9]{1,3}")) continue;
+            if (!(entry.getValue() instanceof Number number) || !Double.isFinite(number.doubleValue())
+                    || number.doubleValue() < 0 || number.doubleValue() > 1) continue;
+            out.put(option, number);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> identifiers(String key, Map<?, ?> source) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || !name.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")) continue;
+            if (!(entry.getValue() instanceof String value) || isUnsafeString(key, value)) continue;
+            // Rejection codes may carry a resolver qualifier, but never a provider sentence.
+            String pattern = "rejected".equals(key) ? "[a-z][a-z0-9_:-]{0,159}" : "[A-Za-z0-9][A-Za-z0-9_-]{0,63}";
+            if (value.matches(pattern)) out.put(name, value);
+        }
+        return out;
     }
 
     private static boolean isUnsafeString(String key, String text) {

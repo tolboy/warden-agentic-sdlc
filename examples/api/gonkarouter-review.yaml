@@ -1,0 +1,18 @@
+version: 1
+profile: gonkarouter-review
+role: reviewer
+runner: api
+connection: gonkarouter-personal
+model_vendor: deepseek
+# IDs are gateway-specific. Catalog snapshot 2026-10-26.
+model: deepseek-ai/DeepSeek-V4-Flash-0731
+read_only: true
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+enforce_schema: true
+limits:
+  wall_clock_minutes: 5
+  max_output_tokens: 2048
+verification:
+  status: unverified
+  note: Native API probe; output includes reasoning. Model fallback is disabled.

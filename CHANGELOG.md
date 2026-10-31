@@ -22,6 +22,32 @@ that exists in code but has never been run live says so.
 
 ### Added
 
+- Catalog refresh uses non-inference CLI metadata where supported, with source dates,
+  explicit stale/unknown states and cache update instructions elsewhere. Removed or
+  unknown models keep their manual configuration; refresh never changes roles, effort
+  or access admission. New Jev versions require an explicit exact identity confirmation
+  and a successful typed Decisions compatibility challenge before routing can use them.
+  Historical OpenCode and evaluation examples now link current verified setup guidance.
+
+- Separate opt-in Jev model choice within admitted role rosters, with explicit override
+  priority, fresh candidate availability checks when enabled, joint independent-review
+  validation and configured-order fallback. Continuations retain selected profiles;
+  typed distributions, alternatives and snapshot identities are preserved in safe receipts.
+  A live Jev-selected Grok implementation passed gates and independent AGY review and
+  reached the pending human gate.
+
+- Capability-driven effort for catalog-admitted API and verified OpenCode profiles, with exact
+  per-request delivery and separate requested/transmitted/provider-reported receipts. Settings,
+  Jev and explicit run overrides share known model constraints. Fresh OpenRouter DeepSeek API
+  and real OpenCode verification passed with low; provider effort confirmation was not supplied.
+  Stage 4 includes six live Jev calibration samples and retains the configurable 0.6 threshold
+  provisionally. Preparatory planning keeps its explicit effort settings.
+
+- Explicit ordered API role fallback through `roles.<role>.api_fallback_profiles`, bounded by
+  the existing failure policy, switch limit and task budget. Transient network, timeout,
+  rate-limit and provider failures can select only listed, admitted profiles; auth, identity,
+  cancellation and configuration failures still stop. Confirmed continuations keep the list
+  restriction and spent switch count. Live provider fallback remains unverified.
 - Checkout-wide execution leases cover workflows, preparation, standalone roles and machine
   gates. Linked worktrees remain independent; projects beneath one checkout share admission.
   Vendor PID/start-time receipts and launch intent survive crashes. `warden recover` releases
@@ -89,6 +115,11 @@ that exists in code but has never been run live says so.
   `on_vendor_failure`. Not yet run live. Suite `task loop`.
 
 ### Fixed
+
+- Atomic JSON receipts tolerate a short Windows delete-sharing lock for up to 500 ms,
+  retaining atomic replacement and failing closed on persistent denial. Verified with real
+  sharing-lock tests and a live OpenCode/OpenRouter implementation followed by interrupted
+  CLI review, implementation reuse and successful continuation to the human gate.
 
 - A finding id belongs to the stage that filed it. Another stage that reports the
   same id with a different category or severity does not replace that record; the

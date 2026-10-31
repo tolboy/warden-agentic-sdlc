@@ -179,7 +179,7 @@ public final class SettingsEditor {
                     loaded.project(), parsed, parsed.resolve(loaded.project(), path.toString()));
         } else {
             Policy parsed = Policy.parse(candidate, path.toString());
-            user = new UserConfig(user.home(), parsed, user.profiles(), user.problems(), true);
+            user = new UserConfig(user.home(), parsed, user.profiles(), user.problems(), true, user.connections());
         }
         Map<String, Object> preview = TaskLoop.settingsPreview(next.project, loaded, user, RunOverride.NONE, next.availability);
         if (!next.read(task).revision().equals(revision)) throw new NextRun.Conflict();

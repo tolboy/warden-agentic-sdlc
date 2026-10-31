@@ -1,9 +1,11 @@
 package dev.warden.json;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -44,10 +46,32 @@ public final class JsonFile {
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
-            Files.move(temporary, target,
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            replace(temporary, target);
         } finally {
             Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static void replace(Path temporary, Path target) throws IOException {
+        // Windows denies atomic replacement while a reader omits FILE_SHARE_DELETE.
+        // A short-lived reader must not abort a live vendor's process receipt. Keep the
+        // old file and atomicity throughout; permanent denial still fails closed.
+        long deadline = System.nanoTime() + java.time.Duration.ofMillis(500).toNanos();
+        while (true) {
+            try {
+                Files.move(temporary, target,
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (AccessDeniedException denied) {
+                if (System.nanoTime() >= deadline) throw denied;
+                try { Thread.sleep(25); }
+                catch (InterruptedException cancelled) {
+                    Thread.currentThread().interrupt();
+                    var failure = new InterruptedIOException("atomic JSON replacement interrupted");
+                    failure.initCause(denied);
+                    throw failure;
+                }
+            }
         }
     }
 

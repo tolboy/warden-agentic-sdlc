@@ -85,6 +85,16 @@ public final class DirectCaptureTest implements Suite {
                 }
             }
 
+            Path absentRun = Files.createDirectories(scratch.resolve("cannot-start"));
+            Path absentPrompt = absentRun.resolve("prompt.md");
+            Files.writeString(absentPrompt, "never sent");
+            RoleExecutor.Result absent = new DirectCliExecutor(runner, new GitRepository(scratch, runner))
+                    .execute(request("cannot-start", scratch, absentRun, absentPrompt));
+            check.eq("missing executable fails before effort transmission", "role_command_failed", absent.code());
+            check.eq("failed spawn does not claim sent effort", "not_sent", absent.evidence().get("effort_transmission"));
+            check.eq("failed spawn retains requested effort", "low", absent.evidence().get("effort_requested"));
+            check.eq("failed spawn has no transmitted effort", null, absent.evidence().get("effort_transmitted"));
+
             Path capOut = scratch.resolve("capped.stdout");
             Path capErr = scratch.resolve("capped.stderr");
             ProcessRunner.Result capped = runner.runVendor(command("jsonl"), scratch,
@@ -129,8 +139,9 @@ public final class DirectCaptureTest implements Suite {
     }
 
     private static RoleExecutor.Request request(String mode, Path project, Path run, Path prompt) {
-        List<String> command = command(mode);
-        Profile profile = new Profile("synthetic", "reviewer", "stub", "stub", null,
+        List<String> command = mode.equals("cannot-start")
+                ? List.of(project.resolve("missing-executable").toString(), "--effort", "{{effort}}") : command(mode);
+        Profile profile = new Profile("synthetic", "reviewer", "stub", "stub", mode.equals("cannot-start") ? "low" : null,
                 command.get(0), command.subList(1, command.size()), false, 1, null, null, null, false,
                 List.of("status", "summary", "verdict", "findings"), List.of(), "stdin", null, null,
                 "direct", null, null, null, List.of(), false);

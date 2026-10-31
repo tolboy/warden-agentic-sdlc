@@ -15,6 +15,7 @@ public final class OperatorContinuationTest implements Suite {
         proposals(check);
         aliasedProject(check);
         supervisor(check);
+        amendmentReadiness(check);
         Path fake = Files.createTempFile("warden-fake-image", ".png");
         Files.write(fake, new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13});
         check.that("a PNG header is not visual evidence", !dev.warden.run.AgentImageEvidence.isImage(fake));
@@ -38,6 +39,29 @@ public final class OperatorContinuationTest implements Suite {
                 acceptance: [old-check]
                 """);
         return root;
+    }
+
+    private void amendmentReadiness(Check check) throws Exception {
+        Path root = project(), home = Files.createTempDirectory("warden-amend-check-");
+        new dev.warden.config.UserSetup().run(home);
+        String runId = "amend-check";
+        Path file = root.resolve(".warden/runs/" + runId + "/task-run.json");
+        Files.createDirectories(file.getParent());
+        Map<String, Object> summary = new LinkedHashMap<>(Map.of("run_id", runId, "task_id", "task",
+                "reason", dev.warden.run.TaskLoop.CONTRACT_AMENDMENT));
+        Files.writeString(file, Json.write(summary));
+        new ApprovalStore(root).createFailure(runId, "task", "contract_gap", file, null);
+        int[] calls = {0};
+        var env = new Main.ApproveEnv(() -> 0L, ignored -> {}, (path, gate) -> null, home,
+                (user, project, profiles, strict, progress) -> {
+                    calls[0]++; return Map.of("ok", false, "code", "model_check_failed");
+                });
+        Map<String, Object> result = Main.amendContract(root, runId, summary, new String[]{"--quiet"}, env);
+        check.eq("automatic contract amendment checks access before planner dispatch", 1, calls[0]);
+        check.eq("failed model check is visible in amendment result", "model_check_failed",
+                ((Map<?, ?>) result.get("contract_amendment")).get("code"));
+        check.that("failed check does not consume the one paid amendment attempt",
+                !Files.exists(file.getParent().resolve(dev.warden.run.TaskLoop.AMENDMENT_RECEIPT)));
     }
 
     private void aliasedProject(Check check) throws Exception {

@@ -5,6 +5,7 @@ import dev.warden.approval.HumanDecision;
 import dev.warden.config.ConfigLoader;
 import dev.warden.config.Policy;
 import dev.warden.config.RunOverride;
+import dev.warden.config.RoutingSettings;
 import dev.warden.config.TaskSpec;
 import dev.warden.config.UserConfig;
 import dev.warden.config.WardenTree;
@@ -147,6 +148,13 @@ public final class TaskLoop {
     /** How a profile becomes an executor; the suite stands in for a vendor it cannot wait out. */
     private Executors.Factory executors;
     private RoleResolver.Availability availability;
+    private RunReadiness readiness;
+    private TaskRouting taskRouting;
+
+    public TaskLoop withTaskRouting(TaskRouting next){
+        TaskLoop copy=keepClock(new TaskLoop(processes,visualCheck,progress,workspace,orcaGate,preparation,override));
+        copy.taskRouting=next;return copy;
+    }
     /** The narration `--watch` asked the board to follow, or null for no live view. */
     private Path watchNarration;
 
@@ -198,6 +206,14 @@ public final class TaskLoop {
         return copy;
     }
 
+    /** Live inference is wired by launchers; embedded/offline loops explicitly own this seam. */
+    public TaskLoop withReadiness(RunReadiness next) {
+        TaskLoop copy = keepClock(new TaskLoop(processes, visualCheck, progress, workspace,
+                orcaGate, preparation, override));
+        copy.readiness = next;
+        return copy;
+    }
+
     /**
      * The same loop, dispatching through {@code next} instead of the profile's own runner.
      *
@@ -230,6 +246,8 @@ public final class TaskLoop {
         copy.watchNarration = watchNarration;
         copy.executors = executors;
         copy.availability = availability;
+        copy.readiness = readiness;
+        copy.taskRouting = taskRouting;
         return copy;
     }
 
@@ -344,6 +362,8 @@ public final class TaskLoop {
 
     /** A passing run whose readers found the acceptance too weak, sent to the planner. */
     public static final String CONTRACT_AMENDMENT = "contract_amendment_requested";
+    /** The stop reason of a controller interrupted by a signal or a cancelled API call. */
+    public static final String CONTROLLER_INTERRUPTED = "controller_interrupted";
 
     /**
      * Failures that were never about the work.
@@ -355,7 +375,7 @@ public final class TaskLoop {
      * twenty minutes for a defect that was in Warden itself.
      */
     private static final java.util.Set<String> NOT_ABOUT_THE_WORK = java.util.Set.of(
-            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope",
+            "visual_qa_unavailable", "visual_qa_port_occupied", "preflight_outside_scope", "model_check_failed",
             // A visual role that brought no pixels, or a vendor whose MCP configuration file
             // is missing, is the tooling failing, not a verdict on the candidate; the readings
             // before it stand.
@@ -407,6 +427,10 @@ public final class TaskLoop {
             "output_limit_exceeded",
             "prompt_undeliverable",
             "orca_worker_not_started",
+            // Ctrl+C or SIGTERM of the controller says nothing about the candidate. The stage
+            // that was running is not in the summary; the ones before it are, with their
+            // fingerprints, and the continuation still checks those against the tree.
+            CONTROLLER_INTERRUPTED,
             // The candidate passed; what is being fixed is what it was judged by. The writer's
             // product is carried into the amended run, and every reading is taken again there.
             CONTRACT_AMENDMENT);
@@ -441,6 +465,14 @@ public final class TaskLoop {
      * {@link #reusableJudgements} still applies, and the stage that failed has no passing row
      * to reuse, so it is always dispatched again.
      */
+    /**
+     * The stop reason a role failure code maps to when it says nothing about the work, or
+     * null when it is not an infrastructure failure. Public for the API resilience tests.
+     */
+    public static String infrastructureReason(String code) {
+        return code == null ? null : INFRASTRUCTURE_REASONS.get(code);
+    }
+
     private static final Map<String, String> INFRASTRUCTURE_REASONS = Map.ofEntries(
             Map.entry("role_timeout", "role_timed_out"),
             Map.entry("role_process_unsettled", "worktree_recovery_required"),
@@ -471,10 +503,36 @@ public final class TaskLoop {
             Map.entry("role_orca_unavailable", "orca_worker_not_started"),
             Map.entry("role_orca_no_worktree", "orca_worker_not_started"),
             Map.entry("role_orca_worker_active", "orca_worker_not_started"),
-            Map.entry("role_orca_timeout", "role_timed_out"));
+            Map.entry("role_orca_timeout", "role_timed_out"),
+            // An API reader that the network, the provider or its own output limit stopped
+            // has said nothing about the candidate. They used to become `reviewer_failed`, so a
+            // `--continue` after a GonkaRouter 502 on the review declined the implementer's
+            // passed stage and paid it to write the same change again. Configuration codes
+            // (a profile or connection edited since dispatch, a missing key variable) stay off
+            // this list: the role contract check already decides reuse for those.
+            Map.entry("role_api_interrupted", CONTROLLER_INTERRUPTED),
+            Map.entry("role_api_timeout", "role_timed_out"),
+            Map.entry("role_api_network_error", "vendor_call_failed"),
+            Map.entry("role_api_provider_error", "vendor_call_failed"),
+            Map.entry("role_api_protocol_error", "vendor_call_failed"),
+            Map.entry("role_api_model_or_parameter_unsupported", "vendor_call_failed"),
+            Map.entry("role_api_rate_limited", "rate_limited"),
+            Map.entry("role_api_credits_exhausted", "quota_exhausted"),
+            Map.entry("role_api_budget_exhausted", "quota_exhausted"),
+            Map.entry("role_api_auth_invalid", "vendor_unavailable"),
+            Map.entry("role_api_access_denied", "vendor_unavailable"),
+            Map.entry("role_api_response_too_large", "vendor_protocol_failed"),
+            Map.entry("role_api_response_unreadable", "vendor_protocol_failed"),
+            Map.entry("role_api_output_truncated", "vendor_protocol_failed"),
+            Map.entry("role_api_model_mismatch", "vendor_protocol_failed"),
+            Map.entry("role_api_effort_mismatch", "vendor_protocol_failed"),
+            Map.entry("role_api_model_identity_unknown", "vendor_protocol_failed"),
+            Map.entry("role_api_tools_unsupported", "vendor_protocol_failed"),
+            Map.entry("role_api_artifact_failure", "vendor_protocol_failed"));
 
     /** What kind of trouble each infrastructure stop was, for a reader who wants one word. */
     private static final Map<String, String> INFRASTRUCTURE_CAUSES = Map.of(
+            CONTROLLER_INTERRUPTED, "cancelled",
             "role_timed_out", "timeout",
             "vendor_call_failed", "call_failed",
             "vendor_protocol_failed", "protocol",
@@ -629,7 +687,8 @@ public final class TaskLoop {
 
     public Outcome run(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
                        Map<String, String> authorizedFailover, Continuation carried) throws Exception {
-        try (var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
+        try (var interruption = new ApiInterruption();
+             var execution = dryRun ? dev.warden.execution.WorktreeLease.preview()
                 : dev.warden.execution.WorktreeLease.acquire(loaded.root(), runId)) {
             // Orca's adapter owns exact attach/reconciliation. With an Orca route available,
             // defer worker admission to that adapter (local roles and machine gates still
@@ -637,12 +696,29 @@ public final class TaskLoop {
             if (!dryRun && user.profiles().values().stream().noneMatch(p -> "orca".equals(p.runner()))) {
                 dev.warden.execution.WorktreeLease.requireLocalDispatch(loaded.root());
             }
-            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried);
+            return runOwned(loaded, user, runId, dryRun, authorizedFailover, carried, interruption);
+        }
+    }
+
+    /** Defer an API interrupt until receipts and the worktree lease have been persisted. */
+    private static final class ApiInterruption implements AutoCloseable {
+        private boolean interrupted;
+
+        void defer() {
+            if (Thread.currentThread().isInterrupted()) {
+                interrupted = true;
+                Thread.interrupted();
+            }
+        }
+
+        @Override public void close() {
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
 
     private Outcome runOwned(ConfigLoader.Loaded loaded, UserConfig user, String runId, boolean dryRun,
-                             Map<String, String> authorizedFailover, Continuation carried) throws Exception {
+                             Map<String, String> authorizedFailover, Continuation carried,
+                             ApiInterruption interruption) throws Exception {
         Path root = loaded.root();
         TaskSpec.ResolvedTask task = loaded.resolved();
         EvidenceLedger ledger = new EvidenceLedger(root, runId, user.home());
@@ -700,7 +776,7 @@ public final class TaskLoop {
         // or a deleted scenario file are all terms the run would then be judged by.
         Map<String, String> configSnapshot = WardenTree.snapshot(root, runId);
         String contractHash = WardenTree.digest(configSnapshot);
-        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().maxCostUsd(),
+        Budget budget = new Budget(task.budget().maxRoleRuns(), task.budget().enforcedMaxCostUsd(),
                 task.budget().maxElapsedMinutes(), clock);
         budget.alreadySpent(prior.roleRuns(), prior.costUsd(), prior.unpriced());
         // Only a continuation that carries verdicts continues the chain; see Chain.
@@ -734,7 +810,18 @@ public final class TaskLoop {
         RoleRunner roles = new RoleRunner(processes, dispatchGate, diffBaseCommit, runId,
                 authorizedFailover, progress);
         if (sleeper != null) roles.withSleeper(sleeper);
-        if (executors != null) roles.withExecutors(executors);
+        roles.withExecutors((profile, runner, repository) -> {
+            dev.warden.execution.Executors.Factory factory = executors == null
+                    ? dev.warden.execution.Executors::forProfile : executors;
+            var executor = factory.forProfile(profile, runner, repository);
+            return request -> {
+                var result = executor.execute(request);
+                // The executor has already cancelled its pending call and excluded retry.
+                // Clear the flag before RoleRunner writes receipts or fingerprints the tree.
+                if ("role_api_interrupted".equals(result.code())) interruption.defer();
+                return result;
+            };
+        });
         if (availability != null) roles.availability(availability);
         if (carried.continuesRun() && !authorizedFailover.isEmpty()
                 && "switch".equals(new ApprovalStore(root).read(carried.fromRunId()).decision())) {
@@ -788,7 +875,9 @@ public final class TaskLoop {
         // the tree or the contract may have changed — and it still has to keep the pin.
         // A fresh `warden run --continue` and the decision page's own continuation do not
         // retype --use/--host; the previous run's summary is where those choices live.
-        RunOverride overlay = loaded.task().use()
+        RunOverride inheritedSelection=carried.continuesRun()?priorModelSelection(root,carried.fromRunId(),user):RunOverride.NONE;
+        RunOverride overlay = inheritedSelection
+                .merged(loaded.task().use())
                 .merged(carried.continuesRun() ? priorOverride(root, carried.fromRunId()) : RunOverride.NONE)
                 .merged(handedOver(root, runId))
                 .merged(this.override);
@@ -997,7 +1086,8 @@ public final class TaskLoop {
             if (!dryRun) return stop(ledger, summary, stopReason, steps, 0, budget);
             summary.putIfAbsent("would_stop", stopReason);
         }
-        Map<String, Object> readerGap = readerGap(root, workflow, user, task, reviewByRisk, roles);
+        boolean selectModels=!dryRun && taskRouting!=null && !task.budget().strictCostCap() && modelSelectionEnabled(user);
+        Map<String, Object> readerGap = selectModels?null:readerGap(root, workflow, user, task, reviewByRisk, roles);
         if (readerGap != null) {
             summary.put("unavailable_role", readerGap);
             summary.put("resolution", String.valueOf(readerGap.get("message")));
@@ -1008,16 +1098,130 @@ public final class TaskLoop {
         }
         String candidateFingerprint = git.sourceFingerprint(diffBaseCommit);
         summary.put("candidate_fingerprint", candidateFingerprint);
-        Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
-                ? reusableJudgements(root, carried.fromRunId(), contractHash,
-                        String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
-                        workflow, user, summary, overlay, authorizedFailover)
-                : Map.of();
         // After the preflights, so a stage nobody can fill has already been reported as the
         // fault it is rather than as a blank in a table, and before the header, because the
         // header is the last thing printed before money starts being spent.
         List<Map<String, Object>> cast = cast(root, workflow, user, task, reviewByRisk, roles, overlay);
         summary.put("cast", cast);
+        List<Map<String,Object>> effortWarnings=List.of();
+        if(!dryRun && taskRouting!=null){
+            List<TaskRouting.Target> targets=new ArrayList<>();
+            RunOverride configuredSelection=RunOverride.NONE;
+            if(selectModels){
+                var active=new ArrayList<Workflow.Stage>();
+                for(var stage:workflow.stages())if(stage.kind()==Workflow.Kind.ROLE && skipReason(stage,user,task,reviewByRisk)==null)active.add(stage);
+                var prepared=ModelRoutingPlan.prepare(root,user,task,active,workflow,roles,overlay,readiness,progress::line,carried.continuesRun()?carried.fromRunId():null);
+                summary.put("model_selection_checks",prepared.checks());
+                if(prepared.gap()!=null){
+                    summary.put("unavailable_role",prepared.gap());
+                    return stop(ledger,summary,"model_selection_unavailable",steps,0,budget);
+                }
+                targets.addAll(prepared.targets());
+                var defaults=new LinkedHashMap<String,String>();
+                for(var target:targets)defaults.put(target.stage(),target.profile().name());
+                configuredSelection=new RunOverride(defaults,Map.of(),Map.of());
+            } else for(var stage:workflow.stages()){
+                if(stage.kind()!=Workflow.Kind.ROLE || skipReason(stage,user,task,reviewByRisk)!=null)continue;
+                var selected=roles.peek(root,user,stage.name(),stage.role(),RoleResolver.Writers.NONE,workflow.rotationPositionOf(stage));
+                if(selected!=null)targets.add(new TaskRouting.Target(stage.name(),stage.role(),selected));
+            }
+            var routed=taskRouting.route(user,root,task,targets,progress::line);
+            var routeReport=new LinkedHashMap<String,Object>(routed.report());
+            boolean profileAdvice=routed.overrides().toMap().get("profile") instanceof Map<?,?> pins&&!pins.isEmpty();
+            if(selectModels?!ModelRoutingPlan.permitted(routed.overrides(),targets,overlay,user,task):profileAdvice){
+                routeReport.put("model_selection_rejected","final_cast_not_admissible");
+                routeReport.put("applied_profiles",Map.of());routeReport.put("applied_efforts",Map.of());
+                routed=new TaskRouting.Result(RunOverride.NONE,routeReport);
+            }
+            if(!routed.overrides().isEmpty() || !configuredSelection.isEmpty()){
+                // Explicit task/CLI/handover choices remain authoritative over classifier advice.
+                overlay=configuredSelection.merged(routed.overrides()).merged(overlay).withWriterFixes(workflow);overlay.pin(roles);roles.overlay(overlay);
+                cast=cast(root,workflow,user,task,reviewByRisk,roles,overlay);summary.put("cast",cast);
+                Map<String,Object> effective=new LinkedHashMap<>();
+                for(var row:cast)if(row.get("effort")!=null)effective.put(String.valueOf(row.get("stage")),row.get("effort"));
+                routeReport.put("effective_efforts",effective);routeReport.put("operator_overrides_take_precedence",true);
+                var suggested=routeReport.get("applied_efforts");routeReport.put("suggested_efforts",suggested);
+                Map<String,Object> applied=new LinkedHashMap<>();
+                if(suggested instanceof Map<?,?> levels)for(var entry:levels.entrySet())
+                    if(java.util.Objects.equals(effective.get(entry.getKey()),entry.getValue()))applied.put(String.valueOf(entry.getKey()),entry.getValue());
+                routeReport.put("applied_efforts",applied);
+            }
+            cast=cast(root,workflow,user,task,reviewByRisk,roles,overlay);summary.put("cast",cast);
+            var effectiveProfiles=new LinkedHashMap<String,Object>();
+            for(var row:cast)if(row.get("profile")!=null)effectiveProfiles.put(String.valueOf(row.get("stage")),row.get("profile"));
+            Object suggestions=routeReport.get("suggested_profiles");
+            if(suggestions==null)suggestions=routeReport.getOrDefault("applied_profiles",Map.of());
+            routeReport.put("suggested_profiles",suggestions);routeReport.put("effective_profiles",effectiveProfiles);
+            var appliedProfiles=new LinkedHashMap<String,Object>();
+            if(suggestions instanceof Map<?,?> proposed)for(var entry:proposed.entrySet())
+                if(java.util.Objects.equals(entry.getValue(),effectiveProfiles.get(entry.getKey())))appliedProfiles.put(String.valueOf(entry.getKey()),entry.getValue());
+            routeReport.put("applied_profiles",appliedProfiles);
+            if(selectModels){
+                summary.put("model_selection_override",Map.of("profile",effectiveProfiles));
+                if(!inheritedSelection.isEmpty())routeReport.put("selection_reused_from",carried.fromRunId());
+            }
+            // Only levels that survive explicit overrides are warned about; printed before the header.
+            Object appliedNow=routeReport.get("applied_efforts");
+            effortWarnings=TaskRouting.keptWarnings(routeReport.get("effort_warnings"),appliedNow instanceof Map<?,?> m?m:Map.of());
+            routeReport.put("effort_warnings",effortWarnings);
+            if(!effortWarnings.isEmpty())summary.put("effort_warnings",effortWarnings);
+            summary.put("task_routing",routeReport);
+            dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("task-routing.json"),Json.write(routeReport));
+            if(selectModels&&!ModelRoutingPlan.permitted(RunOverride.NONE,targets,overlay,user,task)){
+                summary.put("unavailable_role",Map.of("code","final_cast_not_admissible"));
+                return stop(ledger,summary,"independent_review_unavailable",steps,0,budget);
+            }
+        }
+        if(selectModels){
+            var finalGap=readerGap(root,workflow,user,task,reviewByRisk,roles);
+            if(finalGap!=null){summary.put("unavailable_role",finalGap);return stop(ledger,summary,"independent_review_unavailable",steps,0,budget);}
+        }
+        // After routing, because routing can set the effort a stage runs at, and a kept verdict
+        // has to be compared with the effort this run would dispatch. Measured 2026-10-28: a
+        // continuation built the pool against the profile's default `xhigh`, declined the
+        // implementer that had run at Jev's `medium`, and paid for it again at `medium`.
+        Map<String, Map<String, Object>> reusable = carried.reuseJudgements()
+                ? reusableJudgements(root, carried.fromRunId(), contractHash,
+                        String.valueOf(summary.get("acceptance_sha256")), candidateFingerprint,
+                        workflow, user, summary, overlay, authorizedFailover)
+                : Map.of();
+        if (!dryRun && readiness != null) {
+            List<dev.warden.config.Profile> checks = new ArrayList<>();
+            for (Workflow.Stage stage : workflow.stages()) {
+                if (stage.kind() != Workflow.Kind.ROLE || skipReason(stage, user, task, reviewByRisk) != null) continue;
+                dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
+                        RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
+                if (chosen != null) checks.add(chosen);
+                if (stage.fixWith() != null) {
+                    dev.warden.config.Profile fixer = roles.peek(root, user, stage.name() + "/fix", stage.fixWith(),
+                            RoleResolver.Writers.NONE, RoleRunner.UNSTAGED);
+                    if (fixer != null) checks.add(fixer);
+                    var fixSpec = user.policy() == null ? null : user.policy().roles().get(stage.fixWith());
+                    if (!selectModels && fixSpec != null) for (String name : fixSpec.profiles()) {
+                        var alternative = user.profiles().get(name);
+                        if (alternative != null && !roles.excludedForRouting(alternative.name()) && alternative.verified() && alternative.role().equals(stage.fixWith())
+                                && (fixer == null || !alternative.name().equals(fixer.name()))) checks.add(alternative);
+                    }
+                }
+                // All verified roster alternatives for an active role can be selected by rotation
+                // or explicit failover. A failed ping never changes that routing automatically.
+                var spec = user.policy() == null ? null : user.policy().roles().get(stage.role());
+                if (!selectModels && spec != null) for (String name : spec.profiles()) {
+                    var alternative = user.profiles().get(name);
+                    if (alternative != null && !roles.excludedForRouting(alternative.name()) && alternative.verified() && alternative.role().equals(stage.role())
+                            && (chosen == null || !alternative.name().equals(chosen.name()))) checks.add(alternative);
+                }
+            }
+            Map<String, Object> checked = readiness.check(user, root, checks, task.budget().strictCostCap(), progress::line);
+            if(!effortWarnings.isEmpty()){checked=new LinkedHashMap<>(checked);checked.put("effort_warnings",effortWarnings);}
+            summary.put("model_check", checked);
+            dev.warden.execution.ModelCheck.atomicWrite(ledger.runDirectory().resolve("model-check.json"), Json.write(checked));
+            if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                progress.line("check stopped the run; restore authentication/model access and check again");
+                return stop(ledger, summary, "model_check_failed", steps, 0, budget);
+            }
+        }
+        for (var warning : effortWarnings) progress.line("warn  " + warning.get("message"));
         header(task, runId, workflow, dryRun, callPlan, budget, cast);
         if (carried.carriesRejection()) {
             progress.line("note  starting from the rejection recorded on " + carried.fromRunId()
@@ -1168,8 +1372,14 @@ public final class TaskLoop {
         Engine engine = new Engine(loaded, user, roles, gates, ledger, runId, dryRun,
                 configSnapshot, diffBaseCommit, steps, summary, budget, task, workflow, reviewByRisk,
                 progress, carried, reusable, callPlan);
+        try (InterruptionGuard guard = new InterruptionGuard(
+                () -> recordInterruption(ledger, summary, steps, engine.attempt(), budget), !dryRun)) {
         try {
-            engine.run();
+            try {
+                engine.run();
+            } finally {
+                if (!guard.conclude()) InterruptionGuard.yieldToShutdown();
+            }
         } catch (StopException stopped) {
             if ("contract_mutated".equals(stopped.reason())) {
                 recordContractChanges(loaded, configSnapshot, summary);
@@ -1193,6 +1403,7 @@ public final class TaskLoop {
                     "message", String.valueOf(unexpected.getMessage())));
             return stop(ledger, summary, "unexpected_error", steps, engine.attempt(), budget);
         }
+        }
         int attempt = engine.attempt();
         summary.putIfAbsent("skipped_stages", engine.skipped());
 
@@ -1203,6 +1414,7 @@ public final class TaskLoop {
 
         summary.put("attempts_used", (long) attempt);
         summary.put("total_cost_usd", budget.spent());
+        summary.put("cost_status",budget.unpriced()>0?(budget.spent()>0?"partial":"unknown"):"reported");
         summary.put("role_runs", (long) budget.runs());
         summary.put("unpriced_calls", (long) budget.unpriced());
         if (budget.unpricedCharge() > 0) {
@@ -1688,7 +1900,7 @@ public final class TaskLoop {
                 // be describing a dispatch that is not going to happen.
                 if (overlay.stages().contains(stage.name())) {
                     row.put("from_overlay",
-                            overlay.problem(stage.name(), chosen, user.profiles()) == null);
+                            overlay.problem(stage.name(), chosen, user.profiles(),user) == null);
                 }
                 written = withPreviewWriter(written, chosen);
             }
@@ -1767,7 +1979,7 @@ public final class TaskLoop {
                 row.put("judged_against", judgedBy.profiles().stream().sorted().toList());
             }
             if (overlay.stages().contains(stage.name())) {
-                String problem = overlay.problem(stage.name(), chosen, user.profiles());
+                String problem = overlay.problem(stage.name(), chosen, user.profiles(),user);
                 row.put("from_overlay", problem == null);
                 if (problem != null) {
                     row.put("refused", "run_override_undeliverable");
@@ -1900,6 +2112,47 @@ public final class TaskLoop {
         }
     }
 
+    private static boolean modelSelectionEnabled(UserConfig user){
+        try{return RoutingSettings.load(user.home()).modelSelectionEnabled();}catch(Exception invalid){return false;}
+    }
+    /** Manual classification inspects the same admitted roster without dispatching roles or pinging models. */
+    public static List<TaskRouting.Target> classificationTargets(Path root,ConfigLoader.Loaded loaded,UserConfig user,
+                                                               RoleResolver.Availability available)throws Exception{
+        var targets=new ArrayList<TaskRouting.Target>();
+        if(!modelSelectionEnabled(user)){
+            for(var row:dispatchPreview(root,loaded,user,available)){
+                if(!(row.get("profile") instanceof String name))continue;
+                var profile=user.profiles().get(name);if(profile==null)continue;
+                if(row.get("effort") instanceof String effort)profile=profile.withEffort(effort);
+                targets.add(new TaskRouting.Target(String.valueOf(row.get("stage")),String.valueOf(row.get("role")),profile));
+            }
+            return targets;
+        }
+        var workflow=user.policy().workflow();if(loaded.resolved().visualQa().agentEvidence())workflow=workflow.forAgentEvidence();
+        var overlay=loaded.task().use().withWriterFixes(workflow);
+        var roles=new RoleRunner(new ProcessRunner()).availability(available);overlay.pin(roles);roles.overlay(overlay);
+        var active=new ArrayList<Workflow.Stage>();
+        for(var stage:workflow.stages())if(stage.kind()==Workflow.Kind.ROLE&&skipReason(stage,user,loaded.resolved(),user.policy().reviewRequired(loaded.resolved().risk()))==null)active.add(stage);
+        var prepared=ModelRoutingPlan.prepare(root,user,loaded.resolved(),active,workflow,roles,overlay,null,text->{},null);
+        if(prepared.gap()!=null)throw new IllegalArgumentException("classification has no admitted candidates: "+prepared.gap());
+        return prepared.targets();
+    }
+    private static RunOverride priorModelSelection(Path root,String runId,UserConfig user)throws java.io.IOException{
+        Path file=root.resolve(".warden/runs").resolve(runId).resolve("task-run.json");
+        if(!Files.isRegularFile(file))return RunOverride.NONE;
+        var summary=Json.parseObject(Files.readString(file));Object raw=summary.get("model_selection_override");
+        if(!(raw instanceof Map<?,?> map) || !(map.get("profile") instanceof Map<?,?> pins))return RunOverride.NONE;
+        var allowed=new LinkedHashMap<String,String>();
+        for(var entry:pins.entrySet()){
+            String stage=String.valueOf(entry.getKey()),name=String.valueOf(entry.getValue());
+            var definition=user.policy().workflow().stages().stream().filter(s->s.name().equals(stage)).findFirst().orElse(null);
+            if(definition==null || definition.role()==null)return RunOverride.NONE;
+            var roster=user.policy().roles().get(definition.role());
+            if(roster==null || !roster.profiles().contains(name))return RunOverride.NONE;
+            allowed.put(stage,name);
+        }
+        return new RunOverride(allowed,Map.of(),Map.of());
+    }
     public static RunOverride priorOverride(Path root, String runId) throws java.io.IOException {
         Map<String, Object> summary = Json.parseObject(Files.readString(root.resolve(".warden/runs")
                 .resolve(runId).resolve("task-run.json")));
@@ -1983,7 +2236,7 @@ public final class TaskLoop {
             dev.warden.config.Profile chosen = roles.peek(root, user, stage.name(), stage.role(),
                     RoleResolver.Writers.NONE, workflow.rotationPositionOf(stage));
             if (chosen == null) continue;
-            String problem = overlay.problem(stage.name(), chosen, user.profiles());
+            String problem = overlay.problem(stage.name(), chosen, user.profiles(),user);
             if (problem == null) continue;
             Map<String, Object> gap = new LinkedHashMap<>();
             gap.put("stage", stage.name());
@@ -2135,7 +2388,8 @@ public final class TaskLoop {
     /** True when another implementer call cannot safely repair the role runner itself. */
     public static boolean roleFailureRequiresOperator(String code) {
         return code != null && (ROLE_OPERATOR_MUST_RESOLVE.contains(code)
-                || code.startsWith("role_orca_"));
+                || code.startsWith("role_orca_") || code.startsWith("role_api_")
+                || code.startsWith("role_harness_") || "harness_coding_unproven".equals(code));
     }
 
     /**
@@ -4662,7 +4916,7 @@ public final class TaskLoop {
      */
     public static RoleRunner.DispatchGate amendmentGate(Path root, String runId, TaskSpec.Budget ceilings,
                                                         java.util.function.LongSupplier nanos) {
-        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.maxCostUsd(),
+        Budget budget = new Budget(ceilings.maxRoleRuns(), ceilings.enforcedMaxCostUsd(),
                 ceilings.maxElapsedMinutes(), nanos);
         budget.inherit(Chain.after(root, runId));
         return new RoleRunner.DispatchGate() {
@@ -5225,9 +5479,10 @@ public final class TaskLoop {
         progress.line("plan  " + String.join(" -> ", names));
         printCast(cast);
         progress.line("bound " + task.budget().maxRoleRuns() + " vendor call(s), "
-                + Progress.money(task.budget().maxCostUsd())
+                + ("off".equals(task.budget().costCap()) ? "cost tracking only"
+                : Progress.money(task.budget().maxCostUsd())
                 + (task.budget().maxCostUsd() == 0 ? " (money limit disabled)"
-                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend") + ", fix rounds <= "
+                : task.budget().strictCostCap() ? " strict cost cap" : " of reported spend")) + ", fix rounds <= "
                 + task.maxFixAttempts()
                 + (task.budget().maxElapsedMinutes() == null ? ""
                         : ", " + task.budget().maxElapsedMinutes() + " min of execution"));
@@ -5803,6 +6058,33 @@ public final class TaskLoop {
     }
 
     /**
+     * Concludes a run whose controller is being stopped by a signal. The stages that finished
+     * are written with their receipts and a failure decision is opened, so {@code --continue}
+     * can keep what was already judged instead of refusing an unknown run.
+     */
+    private void recordInterruption(EvidenceLedger ledger, Map<String, Object> summary,
+                                    List<Map<String, Object>> steps, int attempt, Budget budget) {
+        List<Map<String, Object>> finished = null;
+        for (int tries = 0; finished == null && tries < 5; tries++) {
+            try {
+                finished = new ArrayList<>(steps);
+            } catch (java.util.ConcurrentModificationException moving) {
+                Thread.onSpinWait();
+            }
+        }
+        if (finished == null) finished = List.of();
+        summary.put("interrupted", Map.of(
+                "at", java.time.Instant.now().toString(),
+                "detail", "the controller was stopped by a signal while a stage was running; "
+                        + "stages that had finished keep their receipts"));
+        try {
+            stop(ledger, summary, CONTROLLER_INTERRUPTED, finished, attempt, budget);
+        } catch (Exception failed) {
+            throw new IllegalStateException(failed.getMessage(), failed);
+        }
+    }
+
+    /**
      * A run that gave up owes the same accounting as one that finished. Without it the
      * summary of a failure said what went wrong but not what it cost to find out, which is
      * the number an operator needs before deciding to run it again.
@@ -6049,10 +6331,7 @@ public final class TaskLoop {
                     + "repository whether to trust it, and Codex asks to update. The role report's "
                     + "agent_screen_tail and agent_blocked_on say which. Answer it once in an Orca "
                     + "tab in this worktree, then: " + carryOn + kept(summary);
-            case "vendor_call_failed" -> "the " + failedProfile(summary) + " process failed "
-                    + "without a recognised cause (a login, the network, the CLI itself). Read "
-                    + "stderr_tail and stdout_tail in its role report, fix what they name, "
-                    + "then: " + carryOn + kept(summary);
+            case "vendor_call_failed" -> vendorCallFailed(summary) + carryOn + kept(summary);
             case "vendor_unavailable" -> "the " + failedProfile(summary) + " account cannot use "
                     + "this vendor here (a location or eligibility refusal, often HTTP 403). "
                     + "It is not a verdict on the work. That profile is skipped for the rest of "
@@ -6144,6 +6423,26 @@ public final class TaskLoop {
     }
 
     /** The profile behind an infrastructure stop, for a sentence that names it. */
+    /**
+     * What to do about a vendor call that failed, worded for how the call was made. An API
+     * profile has no process, stderr or login; telling the operator to read them sent them
+     * looking for a CLI that never ran when the cause was an HTTP 502 from the gateway.
+     */
+    static String vendorCallFailed(Map<String, Object> summary) {
+        Object code = summary.get("infrastructure_failure") instanceof Map<?, ?> failure
+                ? failure.get("role_code") : null;
+        if (code instanceof String role && role.startsWith("role_api_")) {
+            return "the " + failedProfile(summary) + " API call failed at the provider or on the "
+                    + "way to it (" + role + "). Read api_attempts (http_status, failure_phase, "
+                    + "delivery) in its role report; wait for the service to recover or switch "
+                    + "the stage to another profile, then: ";
+        }
+        return "the " + failedProfile(summary) + " process failed "
+                + "without a recognised cause (a login, the network, the CLI itself). Read "
+                + "stderr_tail and stdout_tail in its role report, fix what they name, "
+                + "then: ";
+    }
+
     private static String failedProfile(Map<String, Object> summary) {
         if (summary.get("infrastructure_failure") instanceof Map<?, ?> failure
                 && failure.get("profile") != null) {

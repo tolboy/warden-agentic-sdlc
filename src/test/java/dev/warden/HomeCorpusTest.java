@@ -53,6 +53,8 @@ public final class HomeCorpusTest implements Suite {
             failingStore(check, sandbox);
             neighbourPendingAndIndexFailure(check, sandbox);
             noRawContent(check, sandbox);
+            apiFallbackProjection(check);
+            modelSelectionProjection(check);
             measurementContext(check, sandbox);
             localLedgerUnchanged(check, sandbox);
         } finally {
@@ -697,6 +699,30 @@ public final class HomeCorpusTest implements Suite {
         return evidence;
     }
 
+    private void apiFallbackProjection(Check check) {
+        List<String> fallbacks = List.of("review-secondary", "review-tertiary");
+        Map<String, Object> local = new LinkedHashMap<>();
+        local.put("type", "role_run");
+        local.put("api_fallback_profiles", fallbacks);
+        local.put("role_contract", Map.of("api_fallback_profiles", fallbacks, "prompt", SECRET));
+        local.put("role_failovers", List.of(Map.of("from_profile", "review-primary",
+                "to_profile", "review-secondary", "api_fallback_profiles", fallbacks,
+                "message", SECRET)));
+        MeasurementProjector.Projection projected = MeasurementProjector.project(local);
+        check.eq("measurement retains the ordered API fallback policy", fallbacks,
+                projected.body().get("api_fallback_profiles"));
+        check.eq("measurement role contracts retain the ordered API fallback policy", fallbacks,
+                ((Map<?, ?>) projected.body().get("role_contract")).get("api_fallback_profiles"));
+        Map<?, ?> failover = (Map<?, ?>) ((List<?>) projected.body().get("role_failovers")).get(0);
+        check.eq("measurement failover events retain the ordered API fallback policy", fallbacks,
+                failover.get("api_fallback_profiles"));
+        check.that("allowing API fallback policy does not copy adjacent raw content",
+                !Json.write(projected.body()).contains(SECRET));
+        local.put("api_fallback_profiles", List.of("review-tertiary", "review-secondary"));
+        check.that("API fallback order changes the measurement content hash",
+                !projected.contentHash().equals(MeasurementProjector.project(local).contentHash()));
+    }
+
     private void noRawContent(Check check, Path sandbox) throws Exception {
         Path home = sandbox.resolve("secret-home");
         Path project = sandbox.resolve("secret-project");
@@ -808,6 +834,122 @@ public final class HomeCorpusTest implements Suite {
         Map<String, Object> projectedRequested = (Map<String, Object>) projectedModel.get("requested");
         check.eq("the allowlist keeps model.requested.source", "profile",
                 projectedRequested.get("source"));
+
+        Map<String, Object> sent = new LinkedHashMap<>(first);
+        Map<String, Object> effortEvidence = Map.of("effort_requested", "low", "effort_transmitted", "low",
+                "effort_delivery", "cli_argument_template", "effort_transmission", "sent",
+                "effort_verification", "not_reported_by_provider");
+        sent.putAll(effortEvidence);
+        Map<String, Object> relayResponse = new LinkedHashMap<>(effortEvidence);
+        relayResponse.put("body", "PRIVATE_SOURCE_CODE");
+        relayResponse.put("usage", Map.of("prompt", "PRIVATE_SOURCE_CODE"));
+        Map<String, Object> relay = Map.of("requests", 1L, "responses", List.of(relayResponse));
+        sent.put("relay", relay);
+        Map<String, Object> attempted = new LinkedHashMap<>(effortEvidence);
+        attempted.put("relay", relay);
+        sent.put("vendor_attempts", List.of(attempted));
+        Map<String, Object> capabilities = Map.of("levels", List.of("low", "high"),
+                "delivery", "openrouter_reasoning", "source", "model_catalog",
+                "source_description", "provider_models_endpoint", "observed_at", "2026-10-29T00:00:00Z",
+                "provider_confirmed", false, "prompt", "PRIVATE_SOURCE_CODE");
+        sent.put("task_routing", Map.of("stage_capabilities", List.of(Map.of("stage", "implement",
+                "profile", "writer", "model", "fixture-model", "configured_effort", "low",
+                "effort_capabilities", capabilities)), "policy_file", "/private/path/policy.yaml",
+                "questions", Map.of("goal", "PRIVATE_SOURCE_CODE")));
+        var result = new dev.warden.execution.RoleExecutor.Result(true, "ok", java.time.Duration.ZERO,
+                "", null, effortEvidence);
+        sent.put("measurement_context", dev.warden.ledger.MeasurementContext.withReported(
+                object(first.get("measurement_context")), result));
+        Map<String, Object> measured = MeasurementProjector.project(sent).body();
+        check.eq("projection keeps transmitted effort", "low", measured.get("effort_transmitted"));
+        check.eq("projection keeps effort transmission status", "sent", measured.get("effort_transmission"));
+        check.eq("projection keeps lack of provider confirmation", "not_reported_by_provider", measured.get("effort_verification"));
+        Map<?, ?> attempt = (Map<?, ?>) ((List<?>) measured.get("vendor_attempts")).get(0);
+        check.eq("projection keeps per-attempt transmitted effort", "low", attempt.get("effort_transmitted"));
+        Map<?, ?> measuredEffort = (Map<?, ?>) ((Map<?, ?>) measured.get("measurement_context")).get("effort");
+        check.eq("projection preserves effort.transmitted separately", "low", ((Map<?, ?>) measuredEffort.get("transmitted")).get("value"));
+        check.eq("transmission does not fill unknown effective effort", null, ((Map<?, ?>) measuredEffort.get("effective")).get("value"));
+        check.eq("transmission does not fill unknown provider effort", null, ((Map<?, ?>) measuredEffort.get("reported")).get("value"));
+        Map<?, ?> measuredRelay = (Map<?, ?>) measured.get("relay");
+        Map<?, ?> measuredResponse = (Map<?, ?>) ((List<?>) measuredRelay.get("responses")).get(0);
+        check.eq("relay preserves the actual per-turn effort", "low", measuredResponse.get("effort_transmitted"));
+        Map<?, ?> routing = (Map<?, ?>) measured.get("task_routing");
+        Map<?, ?> stageCapability = (Map<?, ?>) ((List<?>) routing.get("stage_capabilities")).get(0);
+        Map<?, ?> safeCapability = (Map<?, ?>) stageCapability.get("effort_capabilities");
+        check.eq("capability model is retained for comparison", "fixture-model", stageCapability.get("model"));
+        check.eq("capability levels survive projection", List.of("low", "high"), safeCapability.get("levels"));
+        check.eq("capability source survives projection", "provider_models_endpoint", safeCapability.get("source_description"));
+        check.eq("capability observation date survives projection", "2026-10-29T00:00:00Z", safeCapability.get("observed_at"));
+        check.eq("catalog provenance does not become confirmation", false, safeCapability.get("provider_confirmed"));
+        check.that("new relay and routing projections exclude provider bodies, questions and paths",
+                !Json.write(measured).contains("PRIVATE_SOURCE_CODE") && !Json.write(measured).contains("/private/path"));
+    }
+
+    private void modelSelectionProjection(Check check) {
+        var candidate = new LinkedHashMap<String, Object>();
+        candidate.put("option", "candidate_1"); candidate.put("profile", "api-writer");
+        candidate.put("model", "deepseek/fixture"); candidate.put("vendor", "deepseek");
+        candidate.put("runner", "api"); candidate.put("read_only", false);
+        candidate.put("cost_status", "unknown"); candidate.put("capability_hash", "a".repeat(64));
+        candidate.put("prompt", SECRET); candidate.put("credentials", Map.of("api_key", SECRET));
+        candidate.put("private_endpoint", "https://private.example/" + SECRET);
+        var answer = new LinkedHashMap<String, Object>();
+        answer.put("type", "choice"); answer.put("choice", "candidate_1"); answer.put("confidence", 0.9);
+        answer.put("probabilities", Map.of("candidate_0", 0.1, "candidate_1", 0.9,
+                "private_free_text", SECRET, "candidate_999", Double.NaN));
+        answer.put("explanation", SECRET);
+        var decision = new LinkedHashMap<String, Object>();
+        decision.put("stage", "implement"); decision.put("role", "implementer");
+        decision.put("configured_profile", "cli-writer"); decision.put("selected_profile", "api-writer");
+        decision.put("selected_model", "deepseek/fixture"); decision.put("reason", "classifier_selected");
+        decision.put("profile_pinned", false); decision.put("candidates", List.of(candidate));
+        decision.put("rejected", Map.of("stale-writer", "profile_unverified", "private-message", SECRET));
+        decision.put("answer", answer); decision.put("goal", SECRET);
+        var selection = new LinkedHashMap<String, Object>();
+        selection.put("enabled", true); selection.put("code", "models_selected");
+        selection.put("policy_hash", "b".repeat(64)); selection.put("catalog_snapshot", "c".repeat(64));
+        selection.put("joint_validation", "passed"); selection.put("decisions", List.of(decision));
+        selection.put("classifier", Map.of("model_reported", "typesafe/fixture", "cost_status", "reported",
+                "tokens", Map.of("input", 30L, "output", 10L), "body", SECRET, "prompt", SECRET));
+        selection.put("task", SECRET); selection.put("policy_file", "/private/path/" + SECRET);
+        var routing = new LinkedHashMap<String, Object>();
+        routing.put("model_selection", selection); routing.put("classifier", "jev-classifier");
+        routing.put("suggested_profiles", Map.of("implement", "api-writer", "/private/path", SECRET));
+        routing.put("applied_profiles", Map.of("implement", "api-writer"));
+        routing.put("effective_profiles", Map.of("implement", "api-writer"));
+        routing.put("operator_overrides_take_precedence", true);
+        routing.put("selection_reused_from","previous-run");
+        Map<String, Object> event = Map.of("type", "task_run", "task_routing", routing);
+        var measured = MeasurementProjector.project(event).body();
+        var safeRouting = (Map<?, ?>) measured.get("task_routing");
+        check.eq("portable choice records continuation origin","previous-run",safeRouting.get("selection_reused_from"));
+        var safeSelection = (Map<?, ?>) safeRouting.get("model_selection");
+        var safeDecision = (Map<?, ?>) ((List<?>) safeSelection.get("decisions")).getFirst();
+        var safeCandidate = (Map<?, ?>) ((List<?>) safeDecision.get("candidates")).getFirst();
+        var safeAnswer = (Map<?, ?>) safeDecision.get("answer");
+        check.eq("model choice retains configured and selected identities", "api-writer", safeDecision.get("selected_profile"));
+        check.eq("model choice retains the selected model", "deepseek/fixture", safeDecision.get("selected_model"));
+        check.eq("model choice retains the typed reason", "classifier_selected", safeDecision.get("reason"));
+        check.eq("model choice preserves explicit-pin provenance", false, safeDecision.get("profile_pinned"));
+        check.eq("model choice retains policy hash", "b".repeat(64), safeSelection.get("policy_hash"));
+        check.eq("model choice retains candidate snapshot", "c".repeat(64), safeSelection.get("catalog_snapshot"));
+        check.eq("unknown model cost stays unknown", "unknown", safeCandidate.get("cost_status"));
+        check.eq("typed distribution survives without arbitrary keys", Map.of("candidate_0", 0.1, "candidate_1", 0.9), safeAnswer.get("probabilities"));
+        check.eq("typed rejection survives", Map.of("stale-writer", "profile_unverified"), safeDecision.get("rejected"));
+        check.eq("effective choice can be reconstructed", Map.of("implement", "api-writer"), safeRouting.get("effective_profiles"));
+        check.eq("classifier identity survives", "typesafe/fixture", ((Map<?, ?>) safeSelection.get("classifier")).get("model_reported"));
+        check.that("model selection measurements omit raw tasks, prompts, keys, paths and explanations", !Json.write(measured).contains(SECRET));
+
+        decision.put("reason", SECRET); answer.put("choice", SECRET); answer.put("confidence", Double.POSITIVE_INFINITY);
+        var malformed = MeasurementProjector.project(event).body();
+        var badSelection = (Map<?, ?>) ((Map<?, ?>) malformed.get("task_routing")).get("model_selection");
+        var badDecision = (Map<?, ?>) ((List<?>) badSelection.get("decisions")).getFirst();
+        check.that("generated rationale cannot replace a typed selection reason", !badDecision.containsKey("reason"));
+        check.that("malformed answer cannot smuggle arbitrary choice or confidence", !Json.write(malformed).contains(SECRET)
+                && !((Map<?, ?>) badDecision.get("answer")).containsKey("confidence"));
+        decision.put("reason", null); selection.put("joint_validation", null);
+        var incomplete = MeasurementProjector.project(event).body();
+        check.that("incomplete selection labels are safely omitted", !Json.write(incomplete).contains("\"joint_validation\""));
     }
 
     private void localLedgerUnchanged(Check check, Path sandbox) throws Exception {

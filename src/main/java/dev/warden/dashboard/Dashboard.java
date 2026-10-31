@@ -4,6 +4,9 @@ import com.sun.net.httpserver.HttpServer;
 import dev.warden.config.Profile;
 import dev.warden.config.ConfigFileStore;
 import dev.warden.config.UserConfig;
+import dev.warden.config.ConnectionService;
+import dev.warden.execution.OsCredentialStore;
+import dev.warden.execution.OsCredentialStores;
 import dev.warden.json.Json;
 import dev.warden.process.ProcessRunner;
 import dev.warden.role.RoleRunner;
@@ -24,11 +27,15 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Function;
 
 /**
  * Local projection and versioned settings editor. No dispatch, approval or terminal input.
  *
  * The next-run builder previews settings and exports commands without executing them.
+ * Connection settings are edited through the same user service as local commands.
  * For a pending decision, put up its decision page, or go to the one already up.
  * A decision used to outlive the only process that knew its page, and the way back was
  * `warden decide` typed in the worktree. The answer itself is still given on the decision
@@ -46,24 +53,54 @@ public final class Dashboard implements AutoCloseable {
 
     private final HttpServer server;
     private final String token;
+    private final ExecutorService requests;
+    private static final int MAX_SETTINGS_BODY = 16 * 1024;
 
     public Dashboard(Path project, int port) throws IOException {
         this(project, port, null);
     }
 
-    /** @param decisions null for a dashboard that offers no action at all */
+    /** @param decisions null when the dashboard does not offer decision-page actions */
     public Dashboard(Path project, int port, DecisionOpener decisions) throws IOException {
-        this(project, port, decisions, new NextRun(project, UserConfig.defaultHome(),
-                profile -> RoleRunner.executableFound(new ProcessRunner(), profile)));
+        this(project, port, decisions, UserConfig.defaultHome(), System::getenv, OsCredentialStores.platform());
+    }
+
+    /** Explicit user scope lets tests and embedded callers avoid the operator's configuration. */
+    public Dashboard(Path project, int port, DecisionOpener decisions, Path configHome,
+                     Function<String, String> environment) throws IOException {
+        this(project, port, decisions, configHome, environment, OsCredentialStores.unavailable());
+    }
+
+    /** A null vault keeps the environment-reference form and does not probe the OS. */
+    public Dashboard(Path project, int port, DecisionOpener decisions, Path configHome,
+                     Function<String, String> environment, OsCredentialStore credentials) throws IOException {
+        this(project, port, decisions, new NextRun(project, configHome,
+                profile -> RoleRunner.executableFound(new ProcessRunner(), profile)), environment, credentials);
     }
 
     public Dashboard(Path project, int port, DecisionOpener decisions, NextRun nextRun) throws IOException {
+        this(project, port, decisions, nextRun, System::getenv, OsCredentialStores.unavailable());
+    }
+
+    private Dashboard(Path project, int port, DecisionOpener decisions, NextRun nextRun,
+                      Function<String, String> environment, OsCredentialStore credentials) throws IOException {
+        Path home = nextRun.home;
         SettingsEditor settings = new SettingsEditor(nextRun);
         RunAnalytics analytics = new RunAnalytics(project);
+        OsCredentialStore vault = credentials == null ? OsCredentialStores.unavailable() : credentials;
+        ConnectionService connections = new ConnectionService(home, environment, vault);
+        var models = new dev.warden.config.ModelSettingsService(home, project, environment);
+        boolean osStore = vault.available();
         byte[] secret = new byte[24];
         new SecureRandom().nextBytes(secret);
         token = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        requests = Executors.newFixedThreadPool(4, task -> {
+            Thread thread = new Thread(task, "warden-dashboard-request");
+            thread.setDaemon(true);
+            return thread;
+        });
+        server.setExecutor(requests);
         server.createContext("/", exchange -> {
             String host = exchange.getRequestHeaders().getFirst("Host");
             String origin = exchange.getRequestHeaders().getFirst("Origin");
@@ -75,6 +112,44 @@ public final class Dashboard implements AutoCloseable {
             String location = null;
             if (!authority.equals(host) || (origin != null && !origin.equals("http://" + authority))) {
                 status = 403; body = "{}";
+            } else if ("POST".equals(exchange.getRequestMethod())
+                    && (path.startsWith("/api/connections/") || path.startsWith("/api/models/"))) {
+                String suppliedToken = exchange.getRequestHeaders().getFirst("X-Warden-Token");
+                String suppliedType = exchange.getRequestHeaders().getFirst("Content-Type");
+                if (suppliedToken == null || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+                        suppliedToken.getBytes(StandardCharsets.UTF_8))) {
+                    status = 403; body = Json.write(Map.of("ok", false, "code", "settings_token_invalid"));
+                } else if (suppliedType == null || !"application/json".equalsIgnoreCase(suppliedType.split(";", 2)[0].trim())) {
+                    status = 415; body = Json.write(Map.of("ok", false, "code", "settings_json_required"));
+                } else {
+                    int bodyLimit="/api/models/save-jev-policy".equals(path)?160*1024:MAX_SETTINGS_BODY;
+                    byte[] input = exchange.getRequestBody().readNBytes(bodyLimit + 1);
+                    if (input.length > bodyLimit) {
+                        status = 413; body = Json.write(Map.of("ok", false, "code", "settings_body_too_large"));
+                    } else {
+                        Map<String, Object> payload = null;
+                        try {
+                            String json = StandardCharsets.UTF_8.newDecoder()
+                                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                                    .decode(java.nio.ByteBuffer.wrap(input)).toString();
+                            payload = Json.parseObject(json);
+                        } catch (RuntimeException | java.nio.charset.CharacterCodingException invalid) {
+                            // Parser diagnostics may quote pasted credentials. Return a static error.
+                        }
+                        if (payload == null) {
+                            status = 400; body = Json.write(Map.of("ok", false, "code", "settings_json_invalid"));
+                        } else {
+                            if (path.startsWith("/api/models/")) {
+                                var outcome = models.apply(path.substring("/api/models/".length()), payload);
+                                status = outcome.status(); body = Json.write(outcome.report());
+                            } else {
+                                ConnectionService.Outcome outcome = connections.apply(path.substring("/api/connections/".length()), payload);
+                                status = outcome.status(); body = Json.write(outcome.report());
+                            }
+                        }
+                    }
+                }
             } else if ("POST".equals(exchange.getRequestMethod()) && path.startsWith("/decide/")) {
                 contentType = "text/html; charset=utf-8";
                 String runId = path.substring("/decide/".length());
@@ -127,8 +202,19 @@ public final class Dashboard implements AutoCloseable {
                 status = 405; body = "{}";
             } else if ("/".equals(path)) {
                 contentType = "text/html; charset=utf-8";
-                body = HTML.replace("{{TOKEN}}", token)
+                body = HTML.replace("{{CONNECTION_SETTINGS}}", ConnectionSettingsUi.html(osStore))
+                        .replace("{{MODEL_SETTINGS}}", ModelSettingsUi.html())
+                        .replace("{{SETTINGS_TOKEN}}", token)
+                        .replace("{{TOKEN}}", token)
                         .replace("{{ACTIONS}}", decisions == null ? "false" : "true");
+            } else if ("/api/models".equals(path)) {
+                try { body = Json.write(models.list()); }
+                catch (Exception failed) { status = 503; body = Json.write(Map.of("ok", false, "code", "settings_unavailable")); }
+            } else if ("/api/connections".equals(path)) {
+                try { body = Json.write(connections.list()); }
+                catch (RuntimeException unavailable) {
+                    status = 503; body = Json.write(Map.of("ok", false, "code", "connections_unavailable"));
+                }
             } else if ("/api/next-run".equals(path)) {
                 try {
                     body = Json.write(nextRun.describe(form(exchange.getRequestURI()
@@ -143,13 +229,13 @@ public final class Dashboard implements AutoCloseable {
             } else if ("/api/config".equals(path)) {
                 try {
                     ProcessRunner processes = new ProcessRunner();
-                    body = Json.write(ConfigView.of(project, UserConfig.load(nextRun.home),
-                            profile -> RoleRunner.executableFound(processes, profile)));
+                    body = Json.write(ConfigView.of(project, UserConfig.load(home),
+                            profile -> RoleRunner.executableFound(processes, profile), environment));
                 } catch (Exception failed) {
                     status = 503; body = Json.write(Map.of("error", "Settings unavailable; inspect Warden configuration"));
                 }
             } else if ("/api/state".equals(path)) {
-                try { body = Json.write(snapshot(project, UserConfig.load(nextRun.home))); }
+                try { body = Json.write(snapshot(project, UserConfig.load(home))); }
                 catch (Exception failed) { status = 503; body = Json.write(Map.of("error", "State unavailable; inspect Warden configuration")); }
             } else if ("/api/settings".equals(path)) {
                 try {
@@ -204,7 +290,7 @@ public final class Dashboard implements AutoCloseable {
 
     public void start() { server.start(); }
     public String url() { return "http://127.0.0.1:" + server.getAddress().getPort() + "/"; }
-    @Override public void close() { server.stop(0); }
+    @Override public void close() { server.stop(0); requests.shutdownNow(); }
 
     public static Map<String, Object> snapshot(Path project, UserConfig user) throws IOException {
         Map<String, Object> state = new LinkedHashMap<>();
@@ -513,6 +599,7 @@ public final class Dashboard implements AutoCloseable {
             @media(max-width:700px){.next-fields{grid-template-columns:1fr}#next-run{padding:10px}#next-run fieldset{padding:8px}}
             </style><h1>Warden <span class="muted">/ Agents</span></h1>
             <meta name="warden-token" content="{{TOKEN}}"><meta name="warden-actions" content="{{ACTIONS}}">
+            <meta name="warden-settings-token" content="{{SETTINGS_TOKEN}}">
             <div id="connection" role="status">Подключение…</div><p id="path" class="muted"></p>
             <nav aria-label="Разделы панели"><a href="#next-run">Задача и бюджеты</a><a href="#personal-settings">Личные настройки</a><a href="#analytics">Аналитика</a><a href="#runs">Запуски</a></nav>
             <h2>Ждут вашего решения</h2><p class="muted">Кнопка открывает страницу решения или возвращает к уже открытой. Если процесс, задавший вопрос, перестал ждать, панель поднимает страницу заново и продолжает работу после ответа.</p>
@@ -542,9 +629,11 @@ public final class Dashboard implements AutoCloseable {
             <button type="button" data-next-copy="next-yaml">Скопировать use:</button>
             </div></section>
             {{SETTINGS_HTML}}
+            {{MODEL_SETTINGS}}
+            <details id="api-auth-settings"><summary>Ключи и адреса API</summary>{{CONNECTION_SETTINGS}}</details>
             <h2>Состав по стадиям</h2><p class="muted">По политике, до настроек конкретной задачи: её <code>use:</code> может закрепить другой профиль, а <code>review_assurance</code> — допустить пару того же вендора. Что запустится для задачи, показывает столбец «Запустится» в таблице задач. Кто заполнит каждую стадию и почему остальные кандидаты не подходят — это ответы самого резолвера. Ридеры проверены против писателя, которого выбрал бы запуск. Источник: личное — ~/.warden, проект — .warden/project.yaml, задача — файл задачи, по умолчанию — встроенное значение Warden.</p>
             <p><button id="reload-config" type="button">Перечитать настройки</button> <span id="config-status" class="muted"></span></p>
-            <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · effort · runner</th><th>Проверен</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
+            <div class="scroll"><table><thead><tr><th>Кандидат · вендор</th><th>Модель · усилие · канал</th><th>Допуск подтверждён</th><th>Допуск</th><th>Стоимость</th></tr></thead><tbody id="stages"></tbody></table></div>
             <h2>Ограничения</h2><div class="scroll"><table><thead><tr><th>Параметр</th><th>Значение</th><th>Источник</th></tr></thead><tbody id="limits"></tbody></table></div>
             <h2>Задачи</h2><div class="scroll"><table><thead><tr><th>Задача</th><th>Риск</th><th>Вызовы</th><th>Деньги</th><th>Время</th><th>Фиксы</th><th>Visual QA</th><th>Запустится</th><th>Overlay</th></tr></thead><tbody id="tasks"></tbody></table><div id="tasks-empty" class="empty" hidden>Задач нет.</div></div>
             <h2>Запуски</h2><p class="muted">Каждый запуск со своей хронологией этапов, вердиктами, стоимостью и решением. Dry-run в этот список не входят.</p>
@@ -574,7 +663,7 @@ public final class Dashboard implements AutoCloseable {
             const td=document.createElement('td');if(actions){const form=document.createElement('form');form.method='post';form.action='/decide/'+encodeURIComponent(d.run_id);
             const hidden=document.createElement('input');hidden.type='hidden';hidden.name='token';hidden.value=token;const button=document.createElement('button');button.textContent=d.page_open?'Открыть решение':'Продолжить ожидание и открыть';form.append(hidden,button);td.append(form)}else td.textContent='warden decide '+d.run_id;
             tr.append(td);body.append(tr)}$('pending-empty').hidden=rows.length>0}
-            const reasons={profile_unverified:'не проверен (нет verified_on)',judge_not_read_only:'проверяющий с правом записи',vision_capability_unverified:'зрение не проверено',same_vendor_as_writer:'тот же вендор, что у писателя',shares_vendor_with_writer:'делит вендора с писателем',peer_not_allowed_by_task:'пара того же вендора не разрешена задачей',quota_exhausted_this_run:'квота исчерпана в этом запуске',executable_not_found:'программа не найдена',role_mismatch:'профиль другой роли',profile_not_found:'профиля нет',role_not_configured:'роль не настроена',no_eligible_profile:'некому заполнить стадию'};
+            const reasons={profile_unverified:'профиль не проверен',harness_coding_unproven:'инструменты coding harness не подтверждены',connection_unavailable:'подключение отсутствует или отключено',connection_credential_unavailable:'ключ подключения отсутствует или недоступен',judge_not_read_only:'проверяющий с правом записи',vision_capability_unverified:'зрение не проверено',same_vendor_as_writer:'тот же вендор, что у писателя',shares_vendor_with_writer:'делит вендора с писателем',peer_not_allowed_by_task:'пара того же вендора не разрешена задачей',quota_exhausted_this_run:'квота исчерпана в этом запуске',executable_not_found:'программа не найдена',role_mismatch:'профиль другой роли',profile_not_found:'профиля нет',role_not_configured:'роль не настроена',no_eligible_profile:'некому заполнить стадию'};
             const sources={personal:'личное',project:'проект',task:'задача',default:'по умолчанию'};
             function reason(code){if(!code)return 'допущен';const base=code.split(':')[0];return (reasons[base]??code)+(code.includes(':')?' ('+code.slice(base.length+1)+')':'')}
             function sourced(v){if(!v)return '—';const value=v.value==null?'нет':typeof v.value==='object'?JSON.stringify(v.value):String(v.value);return value+' · '+(sources[v.source]??v.source)}
@@ -619,12 +708,14 @@ public final class Dashboard implements AutoCloseable {
             let text=s.stage+(s.role?' · '+s.role:'')+' · '+(s.kind==='role'?('стратегия '+(s.strategy??'—')+(s.require_independent_vendor?' · нужен независимый вендор':'')+(s.same_vendor_peer?' · пара '+s.same_vendor_peer:'')+(s.judged_against?' · против писателя '+s.judged_against.profile+' ('+s.judged_against.vendor+')':'')):'механическая стадия: профиль не заполняет, overlay отвергается')+(s.when&&s.when.length?' · когда '+s.when.join(', '):'');
             if(s.unresolved)text+=' · '+reason(s.unresolved);td.textContent=text;td.style.fontWeight='600';head.append(td);stages.append(head);
             for(const c of s.candidates||[]){const tr=document.createElement('tr');const verdict=s.judged_against?c.rejected_after_writer:c.rejected;
-            [(c.would_run?'▶ ':'')+c.profile+' · '+(c.vendor??'вендор не задан'),[(c.model??(c.model_note==='agent_default'?'модель агента по умолчанию':'модель не задана')),c.effort??'effort не задан',c.runner].join(' · '),c.verified?'да':'нет',reason(verdict)+(c.assurance&&c.assurance!=='independent'&&!verdict?' · '+c.assurance:''),c.cost_reported===false?'неизвестна: Orca не сообщает':(c.max_cost_usd!=null?'граница $'+c.max_cost_usd:'по отчёту вендора')].forEach(v=>cell(tr,v));stages.append(tr)}}
+            [(c.would_run?'▶ ':'')+c.profile+' · '+(c.vendor??'вендор не задан'),[(c.model??(c.model_note==='agent_default'?'модель агента по умолчанию':'модель не задана')),c.effort??'effort не задан',c.runner,c.connection?('подключение '+c.connection):null,c.model_vendor?('вендор модели '+c.model_vendor):null,c.execution==='text_completion_only'?'текстовый completion':null].filter(Boolean).join(' · '),c.verified?'да':'нет',reason(verdict)+(c.assurance&&c.assurance!=='independent'&&!verdict?' · '+c.assurance:''),c.cost_reported===false?'неизвестна: Orca не сообщает':(c.max_cost_usd!=null?'граница $'+c.max_cost_usd:'по отчёту вендора')].forEach(v=>cell(tr,v));stages.append(tr)}}
             table('limits',(config.limits||[]).map(l=>[l.key,l.value==null?'—':typeof l.value==='object'?JSON.stringify(l.value):String(l.value),sources[l.source]??l.source]));
-            const tasks=config.tasks||[];table('tasks',tasks.map(t=>t.problem?[t.task,'ошибка: '+t.problem,'','','','','','','']:[t.task,sourced(t.risk),sourced(t.max_role_runs),(t.cost_cap?.value==='strict'?'строгий cap $':'порог $')+(t.max_cost_usd?.value??'—')+' · '+(sources[t.max_cost_usd?.source]??''),sourced(t.max_elapsed_minutes),sourced(t.max_fix_attempts),sourced(t.visual_qa),(t.would_run||[]).map(plannedDispatch).join('\\n')||'—',(t.overlay||[]).map(o=>o.stage+' '+o.what+'='+o.value+(o.refused?' (отвергнется: '+reason(o.refused)+')':o.skipped?' (стадия пропускается)':'')).join('; ')||'—']));
+            const tasks=config.tasks||[];table('tasks',tasks.map(t=>t.problem?[t.task,'ошибка: '+t.problem,'','','','','','','']:[t.task,sourced(t.risk),sourced(t.max_role_runs),(t.cost_cap?.value==='off'?'учёт без денежного лимита':(t.cost_cap?.value==='strict'?'строгий cap $':'порог $')+(t.max_cost_usd?.value??'—')+' · '+(sources[t.max_cost_usd?.source]??'')),sourced(t.max_elapsed_minutes),sourced(t.max_fix_attempts),sourced(t.visual_qa),(t.would_run||[]).map(plannedDispatch).join('\\n')||'—',(t.overlay||[]).map(o=>o.stage+' '+o.what+'='+o.value+(o.refused?' (отвергнется: '+reason(o.refused)+')':o.skipped?' (стадия пропускается)':'')).join('; ')||'—']));
             $('tasks-empty').hidden=tasks.length>0}
             async function loadConfig(){$('config-status').textContent='читаю…';try{const response=await fetch('/api/config',{cache:'no-store'});if(!response.ok)throw Error('unavailable');const config=await response.json();drawConfig(config);await nextTasks(config.tasks||[]);$('config-status').textContent='прочитано '+new Date().toLocaleTimeString()}catch(e){$('config-status').textContent='настройки недоступны'}}
             $('reload-config').addEventListener('click',loadConfig);loadConfig();
+            document.addEventListener('warden:connections-changed',loadConfig);
+            document.addEventListener('warden:config-saved',loadConfig);
             function drawRuns(){openRuns=new Set([...document.querySelectorAll('#runs details[open]')].map(d=>d.dataset.run));const body=$('runs');body.replaceChildren();const runs=data.runs||[];
             for(const r of runs){const tr=document.createElement('tr');const chain=r.chain||{},decision=r.decision||{},gate=r.orca_gate||{};
             const cost=chain.cost_usd??r.total_cost_usd,unpriced=chain.unpriced_calls??r.unpriced_calls;

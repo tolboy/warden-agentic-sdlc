@@ -393,6 +393,13 @@ a red gate and a rejection are verdicts and never take this path. `failover.max_
 (default 1) is how many times one dispatch may switch. A role may set its own
 `on_vendor_failure`; omitting it inherits the policy.
 
+API transport failures additionally require `roles.<role>.api_fallback_profiles`, an ordered
+subset of that role's `profiles`. It is empty by default. Only network, timeout, rate-limit
+and provider failures may use it; auth, identity, cancellation and configuration errors stop.
+Fallback order ignores roster rotation and retains all verification, independence and budget
+checks. See [ordered API fallback](API-CONNECTIONS.md#ordered-role-fallback) for configuration
+and continuation behavior.
+
 The look stage is that same path. List a second `visual_qa` profile, as `agy-opus-visual` then
 `claude-visual-qa` above, when the first account can be refused for where it is running. A
 403, `PERMISSION_DENIED`, "not eligible", or "not available in your location" is

@@ -39,8 +39,11 @@ public final class RoleContract {
     /** The keys compared on resume, in the order a person would want to hear about them. */
     private static final List<String> COMPARED = List.of(
             "role", "roster", "strategy", "require_independent_vendor", "same_vendor_peer",
+            "api_fallback_profiles",
             "profile", "vendor", "model", "effort", "runner", "read_only",
             "prompt_template_sha256", "json_schema_sha256", "mcp_config_sha256",
+            "api_connection_fingerprint", "model_vendor",
+            "harness", "harness_adapter", "harness_executable_sha256", "coding_tools_verified",
             // The stage's own routing. A stage name is stable across a workflow edit, so
             // `review` can keep its identity while changing what a finding from it does —
             // and a verdict reached under `on_findings: fix` is not evidence for a stage that
@@ -72,6 +75,11 @@ public final class RoleContract {
         contract.put("role", role);
         contract.put("roster", spec == null ? List.of() : List.copyOf(spec.profiles()));
         contract.put("strategy", spec == null ? null : spec.strategy());
+        // Omit the empty default so receipts written before API fallback existed still
+        // compare equal. A declared list, including its order, is a dispatch term.
+        if (spec != null && !spec.apiFallbackProfiles().isEmpty()) {
+            contract.put("api_fallback_profiles", spec.apiFallbackProfiles());
+        }
         contract.put("require_independent_vendor",
                 spec != null && spec.requireIndependentVendor());
         // A declared pair is a term of the reading: a verdict admitted under one pair is not
@@ -88,6 +96,19 @@ public final class RoleContract {
         // The tools a reader may reach are a term of its reading: a reviewer that could drive
         // a browser yesterday and cannot today is a different reviewer.
         contract.put("mcp_config_sha256", digestOf(user, profile.mcpConfig()));
+        if ("api".equals(profile.runner()) || profile.harness() != null) {
+            contract.put("api_connection_fingerprint", profile.apiFingerprint());
+            contract.put("model_vendor", profile.modelVendor());
+        }
+        if (profile.harness() != null) {
+            contract.put("harness", profile.harness());
+            contract.put("coding_tools_verified", profile.verified());
+            if(profile.harnessExecutable()!=null){
+                contract.put("harness_adapter",dev.warden.config.CodingAttestation.ADAPTER);
+                try{contract.put("harness_executable_sha256",dev.warden.config.CodingAttestation.binarySha256(profile.harnessExecutable()));}
+                catch(java.io.IOException unavailable){contract.put("harness_executable_sha256",null);}
+            }
+        }
         return contract;
     }
 

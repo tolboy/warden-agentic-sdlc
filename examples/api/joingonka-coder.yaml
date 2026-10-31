@@ -1,0 +1,22 @@
+version: 1
+profile: joingonka-coder
+role: implementer
+runner: direct
+harness: opencode
+# Set the absolute path to your pinned native executable before verification.
+harness_executable: 'C:/Tools/opencode-1.19.4/opencode.exe'
+connection: joingonka-personal
+model_vendor: z-ai
+model: zai-org/GLM-5.3-Flash
+read_only: false
+prompt_template: prompts/implementer.md
+json_schema: schemas/implementer.json
+enforce_schema: true
+artifact:
+  required_fields: [role, task_id, status, summary, files_changed]
+limits:
+  wall_clock_minutes: 4
+  max_output_tokens: 2048
+verification:
+  status: unverified
+  note: Run warden profiles --verify joingonka-coder from a disposable project. A date alone does not grant admission.

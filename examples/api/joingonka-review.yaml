@@ -1,0 +1,18 @@
+version: 1
+profile: joingonka-review
+role: reviewer
+runner: api
+connection: joingonka-personal
+model_vendor: z-ai
+# Catalog observed 2026-10-27; verify availability with your own connection.
+model: zai-org/GLM-5.3-Flash
+read_only: true
+prompt_template: prompts/reviewer.md
+json_schema: schemas/reviewer.json
+enforce_schema: true
+limits:
+  wall_clock_minutes: 3
+  max_output_tokens: 2048
+verification:
+  status: unverified
+  note: Requires a native text/artifact probe; this is not a coding profile.

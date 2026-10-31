@@ -144,9 +144,25 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
         }
     }
 
+    /**
+     * {@code apiFallbackProfiles} is an ordered subset of this role's roster, not another
+     * source of permission to dispatch profiles. It is empty unless explicitly declared,
+     * and {@code on_vendor_failure} still decides whether a permitted API fallback is
+     * automatic, confirmed by a person, or stopped.
+     */
     public record RoleSpec(String role, List<String> profiles, String strategy,
                            boolean requireIndependentVendor, PeerPair peer,
-                           String vendorFailureMode) {
+                           String vendorFailureMode, List<String> apiFallbackProfiles) {
+        public RoleSpec {
+            apiFallbackProfiles = List.copyOf(apiFallbackProfiles);
+        }
+
+        public RoleSpec(String role, List<String> profiles, String strategy,
+                        boolean requireIndependentVendor, PeerPair peer,
+                        String vendorFailureMode) {
+            this(role, profiles, strategy, requireIndependentVendor, peer, vendorFailureMode, List.of());
+        }
+
         public RoleSpec(String role, List<String> profiles, String strategy,
                         boolean requireIndependentVendor, PeerPair peer) {
             this(role, profiles, strategy, requireIndependentVendor, peer, null);
@@ -188,7 +204,7 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
             if (!readerRole.equals(reader.role())) {
                 return "'" + reviewer + "' fills role '" + reader.role() + "', not '" + readerRole + "'";
             }
-            if (!writer.vendor().equals(reader.vendor())) {
+            if (!writer.independenceVendor().equals(reader.independenceVendor())) {
                 return "the pair spans two vendors (" + writer.vendor() + ", " + reader.vendor()
                         + "); that is ordinary independence, not a same-vendor peer";
             }
@@ -250,7 +266,7 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
     public static final Set<String> FAILOVER_MODES = Set.of("confirm", "auto", "stop");
     private static final Set<String> ROLE_KEYS = Set.of(
             "profiles", "strategy", "require_independent_vendor", "same_vendor_peer",
-            "on_vendor_failure");
+            "on_vendor_failure", "api_fallback_profiles");
     private static final Set<String> PEER_KEYS = Set.of("implementer", "reviewer");
     private static final Set<String> REVIEW_KEYS =
             Set.of("required_for_risk", "repair_severities", "contract_gaps", "note");
@@ -290,8 +306,20 @@ public record Policy(Map<String, RoleSpec> roles, Set<String> reviewRequiredForR
             }
             String roleVendorFailure = spec.has("on_vendor_failure")
                     ? spec.requireEnum("on_vendor_failure", FAILOVER_MODES, "stop") : null;
+            List<String> apiFallbackProfiles = spec.optStringList("api_fallback_profiles", List.of());
+            Set<String> seenFallbacks = new java.util.LinkedHashSet<>();
+            for (String fallback : apiFallbackProfiles) {
+                if (!seenFallbacks.add(fallback)) {
+                    root.collector().add("roles." + roleName + ".api_fallback_profiles contains duplicate '"
+                            + fallback + "'");
+                }
+                if (!profiles.contains(fallback)) {
+                    root.collector().add("roles." + roleName + ".api_fallback_profiles '" + fallback
+                            + "' must be one of this role's profiles " + profiles);
+                }
+            }
             roles.put(roleName, new RoleSpec(roleName, profiles, strategy, independent, peer,
-                    roleVendorFailure));
+                    roleVendorFailure, apiFallbackProfiles));
         }
         if (roles.isEmpty()) {
             root.collector().add("roles must declare at least one role");

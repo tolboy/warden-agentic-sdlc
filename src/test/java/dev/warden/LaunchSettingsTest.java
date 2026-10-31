@@ -123,6 +123,11 @@ public final class LaunchSettingsTest implements Suite {
                 "HEAD", root, run, prompt, null, "", "reviewer", List.of());
         var result = new OrcaExecutor(client, new GitRepository(root, processes)).execute(request);
         check.eq("executor " + expected, expected, result.code());
+        boolean matchedLaunch = result.evidence().get("launch") instanceof Map<?, ?> receipt
+                && "matched".equals(receipt.get("status"));
+        check.eq("only a verified launch claims transmitted effort: " + expected,
+                matchedLaunch ? "max" : null, result.evidence().get("effort_transmitted"));
+        check.eq("launch receipt never impersonates provider confirmation", null, result.evidence().get("effort_reported"));
         if (!capability) check.eq("unsupported runtime makes no mutation", 1, calls.size());
         else {
             List<String> start = calls.stream().filter(a -> a.contains("worker-start")).findFirst().orElseThrow();
@@ -141,6 +146,7 @@ public final class LaunchSettingsTest implements Suite {
                 var resumed = new OrcaExecutor(client, new GitRepository(root, processes)).execute(new RoleExecutor.Request(
                         "run-1", "run-1", "reviewer", changed, task, "HEAD", root, run, prompt, null, "", "reviewer", List.of()));
                 check.eq("changed effort cannot relabel a resumed worker", "role_orca_launch_contract_changed", resumed.code());
+                check.eq("changed resumed contract claims no new effort transmission", null, resumed.evidence().get("effort_transmitted"));
                 check.that("changed contract launches no duplicate", calls.stream().noneMatch(a -> a.contains("worker-start")));
             }
         }

@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "purpose": "Deterministic distribution fixtures associated with smoke task categories. These probabilities are invented test inputs, not Jev outputs or ground truth.",
+  "levels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "thresholds": [
+    0.5,
+    0.6,
+    0.75
+  ],
+  "cases": [
+    {
+      "id": "simple-copy",
+      "group": "simple",
+      "risk": "low",
+      "goal": "In README.md replace the misspelling recieve with receive. Change only that word. No program behavior changes.",
+      "expected_band": [
+        "low",
+        "medium"
+      ],
+      "synthetic_probabilities": {
+        "low": 0.9,
+        "medium": 0.1,
+        "high": 0,
+        "xhigh": 0,
+        "max": 0
+      }
+    },
+    {
+      "id": "simple-constant",
+      "group": "simple",
+      "risk": "low",
+      "goal": "Change the UI label constant from Save file to Save document in src/labels.ts. Existing tests identify the exact label. Update that one expectation and run the label tests.",
+      "expected_band": [
+        "low",
+        "medium"
+      ],
+      "synthetic_probabilities": {
+        "low": 0.1,
+        "medium": 0.85,
+        "high": 0.05,
+        "xhigh": 0,
+        "max": 0
+      }
+    },
+    {
+      "id": "complex-recovery",
+      "group": "complex",
+      "risk": "high",
+      "goal": "Design and implement durable recovery for a distributed job executor across controller crash, worker crash and network partition. Preserve exactly-once external effects through idempotency keys, fencing, transactional state transitions and reconciliation. Prove no duplicate writer starts while an old lease can still execute. Add fault-injection tests for races.",
+      "expected_band": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "synthetic_probabilities": {
+        "low": 0,
+        "medium": 0.03,
+        "high": 0.03,
+        "xhigh": 0.45,
+        "max": 0.49
+      }
+    },
+    {
+      "id": "complex-migration",
+      "group": "complex",
+      "risk": "high",
+      "goal": "Migrate a multitenant payment ledger from mutable balances to double-entry accounting with concurrent writes and zero downtime. Define invariants, reversible deployment phases, backfill reconciliation, isolation and rollback. Existing financial totals must remain unchanged through crash/retry scenarios.",
+      "expected_band": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "synthetic_probabilities": {
+        "low": 0,
+        "medium": 0,
+        "high": 0.72,
+        "xhigh": 0.18,
+        "max": 0.1
+      }
+    },
+    {
+      "id": "ambiguous-speed",
+      "group": "ambiguous",
+      "risk": "medium",
+      "goal": "Make the application faster. No slow operation, profile, latency goal, workload or acceptance test has been provided.",
+      "expected_band": [],
+      "synthetic_probabilities": {
+        "low": 0.2,
+        "medium": 0.2,
+        "high": 0.2,
+        "xhigh": 0.2,
+        "max": 0.2
+      }
+    },
+    {
+      "id": "ambiguous-failure",
+      "group": "ambiguous",
+      "risk": "medium",
+      "goal": "Users sometimes say it did not work. The affected component, reproduction, logs and intended result are unknown. Investigate what evidence is needed before choosing an implementation.",
+      "expected_band": [],
+      "synthetic_probabilities": {
+        "low": 0.1,
+        "medium": 0.15,
+        "high": 0.3,
+        "xhigh": 0.3,
+        "max": 0.15
+      }
+    }
+  ]
+}

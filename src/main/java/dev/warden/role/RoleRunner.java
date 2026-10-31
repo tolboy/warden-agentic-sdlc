@@ -445,7 +445,14 @@ public final class RoleRunner {
         Map<String, String> rejected = new LinkedHashMap<>();
         if (profile == null) rejected.put(pinned, "profile_not_found");
         else if (!profile.role().equals(role)) rejected.put(pinned, "role_mismatch");
-        else if (RoleResolver.judges(role) && !profile.readOnly()) {
+        else if (profile.connectionRef() != null && (profile.apiConnection() == null
+                || !profile.apiConnection().enabled())) {
+            rejected.put(pinned, "connection_unavailable");
+        } else if (profile.harness() != null && !profile.verified()) {
+            rejected.put(pinned, "harness_coding_unproven");
+        } else if (dev.warden.execution.EffortCapabilities.problem(profile)!=null) {
+            rejected.put(pinned,"role_effort_unsupported");
+        } else if (RoleResolver.judges(role) && !profile.readOnly()) {
             rejected.put(pinned, RoleResolver.JUDGE_NOT_READ_ONLY);
         } else if ("visual_qa".equals(role) && !profile.hasVerifiedVision()) {
             rejected.put(pinned, "vision_capability_unverified");
@@ -546,6 +553,15 @@ public final class RoleRunner {
 
     /** Profiles this runner has seen run out, in the order they did. */
     public Set<String> exhaustedProfiles() { return Set.copyOf(exhausted); }
+
+    /** Initial model selection uses the ordinary admission and local-availability rules. */
+    public List<RoleResolver.Candidate> routingCandidates(UserConfig user,String role,RoleResolver.Writers writers) {
+        return new RoleResolver().candidates(role,user.policy(),user.profiles(),writers,this::available,
+                exhausted,Set.of(),unavailable);
+    }
+    public boolean pinnedForRouting(String stage,String role){return pinFor(stage,role)!=null;}
+    public void excludeForRouting(String profile){unavailable.add(profile);}
+    public boolean excludedForRouting(String profile){return unavailable.contains(profile);}
 
     /**
      * Whether anybody could still fill this role, asked without dispatching or rotating.
@@ -751,6 +767,13 @@ public final class RoleRunner {
         int vendorFailovers = vendorFailoversCarried.getOrDefault(stageKey, 0);
         vendorFailoversCarried.remove(stageKey);
         List<Map<String, Object>> roleFailovers = new ArrayList<>();
+        // Once an API failure opens this list, later failures must not widen it to the
+        // rotating roster (including when a named fallback is a CLI profile).
+        Map<String, Object> confirmedSwitch = confirmedVendorSwitches.get(stageKey);
+        boolean apiFallbackActive = confirmedSwitch != null
+                && !confirmedSwitchRecorded.contains(stageKey)
+                && confirmedSwitch.get("api_fallback_profiles") instanceof List<?> names
+                && !names.isEmpty();
 
         for (int attempt = 1; ; attempt++) {
             RoleResolver.Resolution resolution;
@@ -871,6 +894,24 @@ public final class RoleRunner {
             String prompt = PromptRenderer.render(template, values, templateFile.toString());
             boolean backfilled = backfillNeeded(role, task, template);
             if (backfilled) prompt = prompt + browserScenarioSection(values.get("visual_scenarios"));
+            if ("api".equals(profile.runner())) {
+                try {
+                    prompt += "\n\n" + dev.warden.execution.ApiContextBuilder.build(root, mergeBase, processes);
+                } catch (java.io.IOException unavailableContext) {
+                    Map<String, Object> refusal = new LinkedHashMap<>();
+                    refusal.put("ok", false);
+                    refusal.put("code", "role_api_context_unavailable");
+                    refusal.put("role", role);
+                    refusal.put("profile", profile.name());
+                    refusal.put("vendor", profile.vendor());
+                    refusal.put("vendor_turn_started", false);
+                    refusal.put("message", unavailableContext.getMessage());
+                    Path path = ledger.writeReport("role-" + role + "-context-refused", refusal);
+                    ledger.append("role_api_context_unavailable", refusal);
+                    return new Outcome(false, "role_api_context_unavailable", role, profile.name(),
+                            profile.vendor(), resolution.rejected(), path, refusal);
+                }
+            }
 
             Path promptDirectory = ledger.runDirectory().resolve("prompts");
             Files.createDirectories(promptDirectory);
@@ -890,6 +931,10 @@ public final class RoleRunner {
             report.put("stage", stageName == null ? role : stageName);
             report.put("read_only", profile.readOnly());
             report.put("runner", profile.runner());
+            if (profile.harness() != null) {
+                report.put("harness", profile.harness());
+                report.put("coding_tools_verified", profile.verified());
+            }
             // What the roster chose, beside what the overlay made of it. Recorded because a
             // reading is a reading by a named profile on a named channel, and "the operator
             // asked for this stage on Orca" is not visible from the dispatched profile alone.
@@ -928,8 +973,13 @@ public final class RoleRunner {
             report.put("prompt_sha256", GitRepository.sha256(promptFile));
             report.put("diff_base_commit", mergeBase);
             report.put("wall_clock_minutes", profile.wallClockMinutes());
-            if ("local".equals(profile.runner())) {
+            if ("local".equals(profile.runner()) || "api".equals(profile.runner())) {
                 report.put("dispatch_preview", dispatchPreview(profile));
+            } else if (profile.harness() != null) {
+                report.put("connection", profile.connectionRef());
+                report.put("command_preview", profile.harnessExecutable() == null
+                        ? List.of("opencode", "run", "--format", "json")
+                        : List.of(profile.harnessExecutable().toString(), "run", "--pure", "--format", "json"));
             } else if ("orca".equals(profile.runner())) {
                 List<String> preview = new ArrayList<>(List.of("orca", "orchestration", "worker-start",
                         "--task", "<orca-task-id>", "--worktree", "<current-worktree>"));
@@ -1018,7 +1068,20 @@ public final class RoleRunner {
             }
 
             Path schemaFile = profile.jsonSchema() == null ? null : user.resolve(profile.jsonSchema());
-            RoleExecutor executor = executors.forProfile(profile, processes, git);
+            Set<String> connectionVariables = user.connections().values().stream()
+                    .map(dev.warden.config.Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toSet());
+            // Registration may change in the panel while a long-running loop holds its
+            // initial user snapshot. Remove both old and newly registered names.
+            if (user.home() != null) {
+                Path connectionDirectory = user.home().resolve("connections");
+                if (!Files.exists(connectionDirectory) || Files.isDirectory(connectionDirectory)) {
+                    new dev.warden.config.ConnectionStore(user.home()).load().connections().values().stream()
+                            .map(dev.warden.config.Connection::apiKeyEnv).filter(java.util.Objects::nonNull)
+                            .forEach(connectionVariables::add);
+                }
+            }
+            RoleExecutor executor = executors.forProfile(profile, processes.withoutEnvironment(connectionVariables), git);
             RoleExecutor.Result result = executor.execute(new RoleExecutor.Request(
                     runId, workflowRunId != null ? workflowRunId : runId,
                     role, profile, task, mergeBase, root, ledger.runDirectory(), promptFile, schemaFile,
@@ -1127,7 +1190,9 @@ public final class RoleRunner {
                 quotaEvent.put("role_invocation_id", roleInvocationId);
                 quotaEvent.put("quota", result.evidence().getOrDefault("quota", Map.of()));
                 ledger.append("role_quota_exhausted", quotaEvent);
-                Profile candidate = failoverCandidate(role, user, writers, rotation);
+                Profile candidate = apiFallbackActive
+                        ? seekApiSuccessor(role, user, writers, vendorFailedThisDispatch).profile()
+                        : failoverCandidate(role, user, writers, rotation);
                 if (candidate != null) {
                     String mode = user.policy().failoverMode();
                     boolean preAuthorized = candidate.name().equals(authorizedFailover.get(
@@ -1159,6 +1224,7 @@ public final class RoleRunner {
                         // switches B→C on quota counts both.
                         Map<String, Object> failover = failoverEvent(role, profile, candidate,
                                 result, preAuthorized ? "human_switch_decision" : "policy_auto");
+                        if (apiFallbackActive) failover.put("api_fallback_profiles", spec.apiFallbackProfiles());
                         failover.put("role_invocation_id", roleInvocationId);
                         ledger.append("role_failover", failover);
                         roleFailovers.add(failover);
@@ -1168,6 +1234,7 @@ public final class RoleRunner {
                     if ("confirm".equals(mode)) {
                         Map<String, Object> pending = failoverEvent(role, profile, candidate,
                                 result, "pending_human_confirmation");
+                        if (apiFallbackActive) pending.put("api_fallback_profiles", spec.apiFallbackProfiles());
                         pending.put("independence_after_switch",
                                 independenceNote(candidate, writers));
                         pending.put("stage", stageName == null ? role : stageName);
@@ -1212,7 +1279,12 @@ public final class RoleRunner {
                         : "every profile able to fill this role reported a spent subscription; "
                           + "add a profile from another vendor, or wait for the quota window "
                           + "named in the vendor message and re-run");
-            } else if (!result.ok() && vendorFailure(result.code())) {
+            } else if (!result.ok() && ((transientApiFailure(result.code())
+                        && !Thread.currentThread().isInterrupted()
+                        && !"cancelled".equals(result.evidence().get("api_retry_stopped"))
+                        && !"cancel".equals(result.evidence().get("failure_phase")))
+                    || (vendorFailure(result.code()) && !"api".equals(profile.runner())
+                        && profile.harness() == null))) {
                 // A finding is a successful call. A gate failure and a human rejection never
                 // enter this method. This branch is only a call that left nothing a later
                 // stage can believe: the vendor did not answer, or the answer was not an artifact.
@@ -1226,8 +1298,10 @@ public final class RoleRunner {
                 int maxSwitches = user.policy().maxVendorFailovers();
                 String mode = user.policy().vendorFailureModeFor(role);
                 boolean bounded = vendorFailovers >= maxSwitches;
-                Successor next = seekSuccessor(role, user, writers, rotation,
-                        vendorFailedThisDispatch);
+                apiFallbackActive |= transientApiFailure(result.code());
+                Successor next = apiFallbackActive
+                        ? seekApiSuccessor(role, user, writers, vendorFailedThisDispatch)
+                        : seekSuccessor(role, user, writers, rotation, vendorFailedThisDispatch);
                 Profile candidate = next.profile();
                 boolean preAuthorized = candidate != null && (candidate.name().equals(
                         authorizedFailover.get(stageKey))
@@ -1235,6 +1309,9 @@ public final class RoleRunner {
                 String cause = vendorFailureCause(result.code());
                 String setting = spec.vendorFailureMode() != null
                         ? "roles." + role + ".on_vendor_failure" : "failover.on_vendor_failure";
+                if (apiFallbackActive) {
+                    report.put("api_fallback_profiles", spec.apiFallbackProfiles());
+                }
                 if (candidate != null && !bounded && ("auto".equals(mode) || preAuthorized)) {
                     if (!gate.hasRoom()) {
                         report.put("failover_declined_by_budget", candidate.name());
@@ -1251,6 +1328,7 @@ public final class RoleRunner {
                     }
                     Map<String, Object> failover = failoverEvent(role, profile, candidate, result,
                             preAuthorized ? "human_switch_decision" : "policy_auto", cause, setting);
+                    if (apiFallbackActive) failover.put("api_fallback_profiles", spec.apiFallbackProfiles());
                     failover.put("role_invocation_id", roleInvocationId);
                     ledger.append("role_failover", failover);
                     roleFailovers.add(failover);
@@ -1263,6 +1341,7 @@ public final class RoleRunner {
                 if (candidate != null && !bounded && "confirm".equals(mode)) {
                     Map<String, Object> pending = failoverEvent(role, profile, candidate, result,
                             "pending_human_confirmation", cause, setting);
+                    if (apiFallbackActive) pending.put("api_fallback_profiles", spec.apiFallbackProfiles());
                     pending.put("independence_after_switch", independenceNote(candidate, writers));
                     pending.put("stage", stageKey);
                     // Every profile that already failed this stage, not only the last one.
@@ -1313,7 +1392,9 @@ public final class RoleRunner {
                     report.put("resolution", "no other profile can fill this role: "
                             + next.rejected());
                 } else {
-                    report.put("resolution", "no other profile can fill this role");
+                    report.put("resolution", apiFallbackActive
+                            ? "no eligible profile remains in roles." + role + ".api_fallback_profiles"
+                            : "no other profile can fill this role");
                 }
             }
 
@@ -1404,6 +1485,34 @@ public final class RoleRunner {
 
     private record Successor(Profile profile, Map<String, String> rejected) {}
 
+    /** Explicit API fallback order, filtered through the ordinary admission rules. */
+    private Successor seekApiSuccessor(String role, UserConfig user, RoleResolver.Writers writers,
+                                      Set<String> vendorFailed) {
+        List<RoleResolver.Candidate> candidates = new RoleResolver().candidates(role,
+                user.policy(), user.profiles(), writers, profile -> {
+                    if (overlay.problem(stageName, profile, user.profiles()) != null) return false;
+                    return available(overlay.adapt(stageName, profile, user.profiles()));
+                }, exhausted, vendorFailed, unavailable);
+        Map<String, RoleResolver.Candidate> byName = new LinkedHashMap<>();
+        candidates.forEach(candidate -> byName.put(candidate.profile(), candidate));
+        Map<String, String> rejected = new LinkedHashMap<>();
+        for (String name : user.policy().roles().get(role).apiFallbackProfiles()) {
+            RoleResolver.Candidate candidate = byName.get(name);
+            if (candidate == null) rejected.put(name, "profile_not_in_roster");
+            else if (!candidate.eligible()) rejected.put(name, candidate.rejected());
+            else return new Successor(overlay.adapt(stageName, user.profiles().get(name),
+                    user.profiles()), rejected);
+        }
+        return new Successor(null, rejected);
+    }
+
+    // Auth, identity, truncation, parse, cancellation and admission/configuration errors
+    // are deliberately absent. A different provider cannot repair those safely.
+    private static boolean transientApiFailure(String code) {
+        return code != null && Set.of("role_api_network_error", "role_api_timeout",
+                "role_api_rate_limited", "role_api_provider_error").contains(code);
+    }
+
     /**
      * Codes that mean the vendor produced nothing a later stage can believe.
      *
@@ -1422,6 +1531,10 @@ public final class RoleRunner {
             "role_vendor_unavailable");
 
     private static boolean vendorFailure(String code) {
+        // Harness admission/configuration/identity failures describe the execution boundary.
+        // Paying another writer cannot repair it and may obscure edits from earlier turns.
+        if (code == null || code.startsWith("role_harness_")
+                || "harness_coding_unproven".equals(code)) return false;
         return VENDOR_FAILURE_CODES.contains(code);
     }
 
@@ -1433,8 +1546,9 @@ public final class RoleRunner {
     private static String vendorFailureCause(String code) {
         return switch (code) {
             case "role_command_failed", "role_local_endpoint_unreachable",
-                    "role_local_http_error" -> "vendor_call_failed";
-            case "role_timeout" -> "role_timeout";
+                    "role_local_http_error", "role_api_network_error",
+                    "role_api_provider_error", "role_api_rate_limited" -> "vendor_call_failed";
+            case "role_timeout", "role_api_timeout" -> "role_timeout";
             case "role_artifact_unparseable", "role_artifact_incomplete",
                     "role_artifact_schema_violation" -> "artifact_invalid";
             case "role_vendor_unavailable" -> "vendor_unavailable";
@@ -1471,6 +1585,9 @@ public final class RoleRunner {
         event.put("authorized_by", "human");
         event.put("policy_setting", "confirm");
         if (pending.get("role_code") != null) event.put("role_code", pending.get("role_code"));
+        if (pending.get("api_fallback_profiles") != null) {
+            event.put("api_fallback_profiles", pending.get("api_fallback_profiles"));
+        }
         event.put("role_invocation_id", roleInvocationId);
         ledger.append("role_failover", event);
         roleFailovers.add(event);
@@ -1550,7 +1667,8 @@ public final class RoleRunner {
         // Every other non-empty attempt list keeps the old reading: the role was already
         // failing over from quota when resolution gave out.
         boolean sawVendorFailure = attempts.stream()
-                .anyMatch(row -> vendorFailure(String.valueOf(row.get("code"))));
+                .anyMatch(row -> vendorFailure(String.valueOf(row.get("code")))
+                        || transientApiFailure(String.valueOf(row.get("code"))));
         boolean quota = !sawVendorFailure && (!attempts.isEmpty()
                 || failure.rejected().containsValue("quota_exhausted_this_run"));
         String code = quota ? "role_quota_exhausted"
@@ -1609,6 +1727,10 @@ public final class RoleRunner {
         entry.put("runner", profile.runner());
         entry.put("effort_requested", profile.effort());
         entry.put("model_requested", profile.model());
+        for (String key : List.of("effort_transmitted", "effort_reported", "effort_delivery",
+                "effort_transmission", "effort_verification")) {
+            if (result.evidence().containsKey(key)) entry.put(key, result.evidence().get(key));
+        }
         if (result.evidence().containsKey("launch")) entry.put("launch", result.evidence().get("launch"));
         Object reportedModel = result.evidence().get("model_reported");
         if (reportedModel instanceof String value && !value.isBlank()) {
@@ -1622,6 +1744,15 @@ public final class RoleRunner {
         if (cost != null) entry.put("cost_usd", cost);
         Object tokens = result.evidence().get("tokens");
         if (tokens != null) entry.put("tokens", tokens);
+        // A later success replaces the top-level API evidence. Keep each failed endpoint's
+        // structured receipt with its own attempt, including unknown cost and delivery.
+        for (String key : List.of("connection", "connection_fingerprint", "provider",
+                "model_requested", "model_reported", "model_served", "correlation_id",
+                "api_attempts", "api_attempt_count", "api_retries", "api_retry_policy",
+                "api_retry_stopped", "failure_phase", "delivery", "http_status",
+                "request_id", "cost_status", "unpriced_attempts", "reported_cost_usd_subtotal", "relay")) {
+            if (result.evidence().containsKey(key)) entry.put(key, result.evidence().get(key));
+        }
         Object raw = result.evidence().get("raw_stdout");
         if (raw != null) entry.put("raw_stdout", raw);
         Object quota = result.evidence().get("quota");
@@ -1775,9 +1906,9 @@ public final class RoleRunner {
         }
         builder.append("""
 
-                Its subscription ran out; it was not stopped for doing the wrong thing. The
-                worktree already contains edits it made, and those edits are unreviewed and may
-                be half of a larger change.
+                The previous attempt stopped before producing a completed result. The worktree
+                already contains edits it made, and those edits are unreviewed and may be half
+                of a larger change.
 
                 Read the current state of the files in scope before writing anything. Finish the
                 task as specified — do not restart it from scratch, and do not assume the
@@ -1879,6 +2010,13 @@ public final class RoleRunner {
         preview.put("method", "POST");
         preview.put("endpoint", profile.endpoint());
         preview.put("model", profile.model());
+        if ("api".equals(profile.runner())) {
+            preview.put("connection", profile.connectionRef());
+            preview.put("model_vendor", profile.modelVendor());
+            preview.put("max_output_tokens", (long) profile.maxOutputTokens());
+            preview.put("auth", new dev.warden.execution.CredentialResolver().status(profile.apiConnection()));
+            preview.put("execution", "text_completion_only");
+        }
         return preview;
     }
 
@@ -1907,7 +2045,21 @@ public final class RoleRunner {
     public static boolean executableFound(ProcessRunner processes, Profile profile) {
         // A local profile has no process to find: the model is already listening on HTTP.
         // Probing `command` would skip every local profile whose command is a label.
+        if ("api".equals(profile.runner())) {
+            if (profile.apiConnection() == null || !profile.apiConnection().enabled()) return false;
+            String state = String.valueOf(new dev.warden.execution.CredentialResolver()
+                    .status(profile.apiConnection()).get("state"));
+            return "ready".equals(state) || "not_required".equals(state);
+        }
         if ("local".equals(profile.runner())) return true;
+        if (profile.harness() != null) {
+            if (profile.harnessExecutable() == null || !Files.isExecutable(profile.harnessExecutable())
+                    || profile.apiConnection() == null || !profile.apiConnection().enabled()) return false;
+            String state = String.valueOf(new dev.warden.execution.CredentialResolver()
+                    .status(profile.apiConnection()).get("state"));
+            return "ready".equals(state) || "not_required".equals(state);
+        }
+        if (profile.command() == null) return false;
         String command = "orca".equals(profile.runner()) ? "orca" : profile.command();
         if (command.contains("/") || command.contains("\\")) return Files.isExecutable(Path.of(command));
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");

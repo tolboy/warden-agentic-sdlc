@@ -13,12 +13,81 @@ import java.time.Duration;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.LinkedHashSet;
 import java.util.concurrent.TimeUnit;
 
 /** Runs a bounded child process and always settles, including when descendants keep pipes open. */
 public final class ProcessRunner {
     public static final int DEFAULT_CAPTURE_BYTES = 64 * 1024;
     public static final long DEFAULT_RAW_BYTES = 64L * 1024 * 1024;
+
+    private final Set<String> removedEnvironment;
+    /** Applied after removals. The same name is put back, so one credential can be restored. */
+    private final Map<String, String> environmentOverrides;
+
+    public ProcessRunner() { this(Set.of(), Map.of()); }
+
+    private ProcessRunner(Set<String> removedEnvironment, Map<String, String> environmentOverrides) {
+        this.removedEnvironment = Set.copyOf(removedEnvironment);
+        this.environmentOverrides = Map.copyOf(environmentOverrides);
+    }
+
+    /** A dispatch-scoped copy; neither this runner nor the JVM's environment is changed. */
+    public ProcessRunner withoutEnvironment(Set<String> names) {
+        Set<String> combined = new LinkedHashSet<>(removedEnvironment);
+        combined.addAll(names);
+        return new ProcessRunner(combined, environmentOverrides);
+    }
+
+    /** A security boundary also drops earlier explicit overrides for removed credentials. */
+    public ProcessRunner withoutEnvironmentAndOverrides(Set<String> names) {
+        Set<String> combined = new LinkedHashSet<>(removedEnvironment);
+        combined.addAll(names);
+        Map<String,String> kept = new LinkedHashMap<>(environmentOverrides);
+        kept.keySet().removeIf(name -> combined.stream().anyMatch(removed -> windows()
+                ? removed.equalsIgnoreCase(name) : removed.equals(name)));
+        return new ProcessRunner(combined, kept);
+    }
+
+    /**
+     * A dispatch-scoped copy that installs these variables after removals.
+     * Values are credentials or generated config: never log the map.
+     * An override wins over a removal of the same name so a harness can drop every
+     * connection secret and then return exactly one.
+     */
+    public ProcessRunner withEnvironment(Map<String, String> overrides) {
+        Map<String, String> combined = new LinkedHashMap<>(environmentOverrides);
+        if (overrides != null) combined.putAll(overrides);
+        combined.values().removeIf(java.util.Objects::isNull);
+        return new ProcessRunner(removedEnvironment, combined);
+    }
+
+    private void removeEnvironment(Map<String, String> environment) {
+        if (removedEnvironment.isEmpty()) return;
+        if (windows()) {
+            // Windows environment names are case-insensitive; inherited spelling need not
+            // match the connection's reference. Never log names' associated values.
+            environment.keySet().removeIf(name -> removedEnvironment.stream().anyMatch(name::equalsIgnoreCase));
+        } else {
+            removedEnvironment.forEach(environment::remove);
+        }
+    }
+
+    private void applyEnvironment(Map<String, String> environment) {
+        if (environmentOverrides.isEmpty()) return;
+        for (Map.Entry<String, String> entry : environmentOverrides.entrySet()) {
+            if (entry.getValue() == null) continue;
+            if (windows()) {
+                environment.keySet().removeIf(name -> name.equalsIgnoreCase(entry.getKey()));
+            }
+            environment.put(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static boolean windows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+    }
 
     public static final class CaptureException extends IOException {
         private final boolean settled;
@@ -144,6 +213,16 @@ public final class ProcessRunner {
         }
     }
 
+    /**
+     * Vendor settlement with no raw spool. The caller redacts the bounded preview before
+     * any evidence file is written; a live spool would persist secret-bearing bytes first.
+     */
+    public Result runVendor(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
+                            String stdinText) throws IOException, InterruptedException {
+        return runCaptured(command, workingDirectory, timeout, captureBytes, stdinText,
+                null, null, DEFAULT_RAW_BYTES, true);
+    }
+
     /** Vendor calls settle their known descendants before returning to a failover caller. */
     public Result runVendor(List<String> command, Path workingDirectory, Duration timeout, int captureBytes,
                             String stdinText, Path stdoutFile, Path stderrFile, long rawBytes)
@@ -160,9 +239,12 @@ public final class ProcessRunner {
                                int captureBytes, String stdinText, OutputStream stdoutFile,
                                OutputStream stderrFile, long rawBytes, boolean vendor) throws IOException, InterruptedException {
         long started = System.nanoTime();
+        ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
+        removeEnvironment(builder.environment());
+        applyEnvironment(builder.environment());
         if (vendor) WorktreeLease.startingVendor();
         Process process;
-        try { process = new ProcessBuilder(command).directory(workingDirectory.toFile()).start(); }
+        try { process = builder.start(); }
         catch (IOException cannotStart) {
             if (vendor) WorktreeLease.vendorNotStarted();
             throw cannotStart;

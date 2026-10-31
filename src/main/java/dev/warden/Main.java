@@ -69,6 +69,10 @@ public final class Main {
                 case "visual-qa" -> visualQa(args);
                 case "setup" -> setup();
                 case "profiles" -> profiles(args);
+                case "connections" -> connections(args);
+                case "check", "ping" -> check(args);
+                case "classify" -> classify(args);
+                case "settings" -> dashboard(args);
                 case "roster" -> roster(args);
                 case "role" -> role(args);
                 case "run" -> runLoop(args);
@@ -208,11 +212,11 @@ public final class Main {
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", url)).ok());
         try (var dashboard = new dev.warden.dashboard.Dashboard(project, port, opener)) {
             dashboard.start();
-            // Read-only except for one action: putting up the page for a pending decision.
-            // The answer is given on that page, through the same path as `warden approve`.
+            // Decision answers stay on the decision page, through the same path as `warden approve`.
+            // Connection files are edited here through the same service as `warden connections`.
             System.out.println(Json.write(Map.of("ok", true, "url", dashboard.url(),
                     "project", project.toString(), "read_only", false,
-                    "actions", List.of("open_decision_page"))));
+                    "actions", List.of("open_decision_page", "manage_connections", "manage_models", "check_models"))));
             if (hasFlag(args, "--open-orca")) {
                 var opened = new OrcaClient(new ProcessRunner()).invoke(project, Duration.ofSeconds(20),
                         List.of("tab", "create", "--worktree", "path:" + project, "--url", dashboard.url()));
@@ -222,6 +226,29 @@ public final class Main {
             new java.util.concurrent.CountDownLatch(1).await();
         }
         return 0;
+    }
+
+    private static int check(String[] args) throws Exception {
+        Map<String, Object> report = dev.warden.config.CheckCommand.run(args, UserConfig.load(),
+                Path.of(".").toAbsolutePath().normalize(), new ProcessRunner(), narration(args)::line);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
+    }
+
+    private static int classify(String[] args)throws Exception{
+        if(args.length<2 || args[1].startsWith("--"))throw new IllegalArgumentException("classify requires a task id or YAML path");
+        for(int index=2;index<args.length;index++)if(!java.util.Set.of("--dry-run","--quiet").contains(args[index]))
+            throw new IllegalArgumentException("classify accepts TASK, --dry-run and --quiet");
+        var loaded=new ConfigLoader().load(Path.of("."),args[1]);var user=UserConfig.load();var processes=new ProcessRunner();
+        var targets=TaskLoop.classificationTargets(loaded.root(),loaded,user,p->RoleRunner.executableFound(processes,p));
+        if(hasFlag(args,"--dry-run")){
+            System.out.println(Json.write(Map.of("ok",true,"dry_run",true,"classifier",dev.warden.config.RoutingSettings.load(user.home()).classifier(),
+                    "task",loaded.resolved().id(),"target_stages",targets.stream().map(dev.warden.run.TaskRouting.Target::stage).toList())));return 0;
+        }
+        var result=dev.warden.run.TaskRouting.using(new dev.warden.execution.DecisionClient(),true)
+                .route(user,loaded.root(),loaded.resolved(),targets,narration(args)::line);
+        var report=new LinkedHashMap<String,Object>(result.report());boolean answered=!report.containsKey("fallback");
+        report.put("ok",answered);System.out.println(Json.write(report));return answered?0:1;
     }
 
     /**
@@ -302,8 +329,9 @@ public final class Main {
      * verify it, because "why did nothing run" is the question this command exists to answer.
      */
     private static int profiles(String[] args) throws Exception {
+        if (java.util.Arrays.asList(args).contains("migrate-services")) return migrateServices(args);
         String verify = option(args, "--verify", null);
-        if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"));
+        if (verify != null) return verifyProfile(verify, hasFlag(args, "--confirm"),option(args,"--reported-model",null));
 
         UserConfig user = UserConfig.load();
         List<Object> rows = new ArrayList<>();
@@ -318,11 +346,29 @@ public final class Main {
             // operator would have looked at the command for, so it is listed beside it.
             row.put("command", profile.command());
             row.put("runner", profile.runner());
-            if ("local".equals(profile.runner())) row.put("endpoint", profile.endpoint());
+            if ("local".equals(profile.runner()) || "api".equals(profile.runner())) row.put("endpoint", profile.endpoint());
+            if ("api".equals(profile.runner())) {
+                row.put("connection", profile.connectionRef());
+                row.put("model_vendor", profile.modelVendor());
+                row.put("api_fingerprint", profile.apiFingerprint());
+                row.put("auth", new dev.warden.execution.CredentialResolver().status(profile.apiConnection()));
+                row.put("execution", "text_completion_only");
+            }
             row.put("read_only", profile.readOnly());
             row.put("verified", profile.verified());
-            row.put("eligible", profile.verified());
-            if (!profile.verified()) {
+            row.put("eligible", profile.verified() && (!"api".equals(profile.runner())
+                    || RoleRunner.executableFound(new ProcessRunner(), profile)));
+            if (profile.harness() != null) {
+                row.put("harness", profile.harness());
+                row.put("connection", profile.connectionRef());
+                row.put("model_vendor", profile.modelVendor());
+                row.put("coding_tools_verified", profile.verified());
+                boolean ready=profile.verified() && RoleRunner.executableFound(new ProcessRunner(),profile);
+                row.put("eligible", ready);
+                row.put("harness_executable", profile.harnessExecutable()==null?null:profile.harnessExecutable().toString());
+                if(!profile.verified())row.put("blocked_because", "coding capability receipt is absent or stale; run warden profiles --verify "+profile.name());
+                else if(!ready)row.put("blocked_because","coding connection credential is unavailable");
+            } else if (!profile.verified()) {
                 row.put("blocked_because", "profile is unverified; fill verification.verified_on "
                         + "only after running its probe");
                 // The exact command that would settle it, next to the reason it is blocked.
@@ -337,11 +383,38 @@ public final class Main {
         result.put("home", user.home().toString());
         result.put("policy_present", user.policyPresent());
         result.put("profiles", rows);
+        result.put("classifier_profiles",dev.warden.config.DecisionProfile.load(user.home()).values().stream()
+                .map(p->Map.of("profile",p.name(),"model",p.model(),"reported_model",p.reportedModel(),"connection",p.connection(),"execution","typed_decisions_only")).toList());
         result.put("problems", user.problems());
         result.put("dangling_policy_references", user.danglingProfileReferences());
         if (!user.policyPresent()) result.put("hint", "run `warden setup` to create a starter configuration");
         System.out.println(Json.write(result));
         return Boolean.TRUE.equals(result.get("ok")) ? 0 : 1;
+    }
+
+    /**
+     * `warden profiles migrate-services [--apply] [--map NAME=SERVICE[:ACCOUNT]]... | --rollback ID`.
+     * Preview by default. Ambiguous profiles are bound only by an explicit --map.
+     */
+    private static int migrateServices(String[] args) throws Exception {
+        var migration = new dev.warden.config.ServiceMigration(UserConfig.defaultHome(), dev.warden.config.CodexConfig.load());
+        String rollback = option(args, "--rollback", null);
+        Map<String, Object> report;
+        try {
+            if (rollback != null) report = migration.rollback(rollback);
+            else {
+                List<dev.warden.config.ServiceMigration.Mapping> mappings = new ArrayList<>();
+                for (int i = 0; i < args.length; i++) {
+                    if ("--map".equals(args[i]) && i + 1 < args.length) mappings.add(dev.warden.config.ServiceMigration.Mapping.parse(args[++i]));
+                    else if (args[i].startsWith("--map=")) mappings.add(dev.warden.config.ServiceMigration.Mapping.parse(args[i].substring(6)));
+                }
+                report = hasFlag(args, "--apply") ? migration.apply(mappings) : migration.preview(mappings);
+            }
+        } catch (IllegalArgumentException | IllegalStateException refused) {
+            report = Map.of("ok", false, "code", "migration_refused", "error", String.valueOf(refused.getMessage()));
+        }
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     /**
@@ -353,6 +426,28 @@ public final class Main {
         if (outcome.text() != null) System.out.print(outcome.text());
         else System.out.println(Json.write(outcome.report()));
         return outcome.exitCode();
+    }
+
+    private static int connections(String[] args) throws Exception {
+        boolean hiddenCode = args.length >= 2 && "auth-login".equals(args[1]) && java.util.List.of(args).contains("--headless");
+        // Headless login prints its PKCE URL before opening the console prompt.
+        java.util.function.Supplier<java.io.InputStream> input = () -> {
+            if (args.length >= 2 && ("auth-set".equals(args[1]) || hiddenCode) && System.console() != null) {
+                char[] password = System.console().readPassword(hiddenCode
+                        ? "Authorization code (hidden; it is not written to the connection file): "
+                        : "Credential (hidden; it is not an argument and is not written to the connection file): ");
+                if (password == null) throw new IllegalArgumentException("credential input was closed");
+                byte[] bytes;
+                try { bytes = new String(password).getBytes(java.nio.charset.StandardCharsets.UTF_8); }
+                finally { java.util.Arrays.fill(password, '\0'); }
+                return new java.io.ByteArrayInputStream(bytes);
+            }
+            return System.in;
+        };
+        Map<String, Object> report = new dev.warden.config.ConnectionCommand()
+                .runWithInput(UserConfig.defaultHome(), args, input);
+        System.out.println(Json.write(report));
+        return Boolean.TRUE.equals(report.get("ok")) ? 0 : 1;
     }
 
     /**
@@ -375,9 +470,14 @@ public final class Main {
      * writes gets `role_violated_read_only` and its artifact discarded, whatever any flag or
      * date claimed.
      */
-    private static int verifyProfile(String name, boolean confirm) throws Exception {
+    private static int verifyProfile(String name, boolean confirm,String reportedModel) throws Exception {
         Map<Path, dev.warden.config.ConfigFileStore.Snapshot> sources = new LinkedHashMap<>();
         UserConfig user = UserConfig.load(UserConfig.defaultHome(), sources);
+        var classifier=dev.warden.config.DecisionProfile.load(user.home()).get(name);
+        if(classifier!=null){
+            var result=dev.warden.execution.DecisionCompatibility.verify(new dev.warden.execution.DecisionClient(),classifier,user,reportedModel,confirm);
+            System.out.println(Json.write(result));return Boolean.TRUE.equals(result.get("ok"))?0:1;
+        }
         Profile profile = user.profiles().get(name);
         if (profile == null) {
             Map<String, Object> unknown = new LinkedHashMap<>();
@@ -405,6 +505,18 @@ public final class Main {
         }
 
         Path file = user.home().resolve("profiles").resolve(name + ".yaml");
+        if ("api".equals(profile.runner()) || profile.harness()!=null) {
+            Profile current = UserConfig.load(user.home()).profiles().get(name);
+            Object checked = dev.warden.json.Json.parseObject(java.nio.file.Files.readString(probe.transcript()))
+                    .get("profile_fingerprint");
+            if (current == null || !java.util.Objects.equals(checked, current.apiFingerprint())) {
+                result.put("ok", false);
+                result.put("code", "role_api_profile_changed");
+                result.put("message", "API configuration changed during verification; nothing was stamped");
+                System.out.println(Json.write(result));
+                return 1;
+            }
+        }
         ProfileVerifier.Stamp stamp = verifier.stamp(file, profile, LocalDate.now(), sources.get(file).sha256());
         result.put("ok", stamp.written());
         result.put("code", stamp.code());
@@ -492,6 +604,8 @@ public final class Main {
             dev.warden.run.Workspace card = board(args).at(loaded.root());
             java.nio.file.Path narration = narrationFile(loaded.root(), runId);
             TaskLoop loop = new TaskLoop(new ProcessRunner())
+                    .withTaskRouting(dev.warden.run.TaskRouting.live())
+                    .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
@@ -707,6 +821,24 @@ public final class Main {
             report.put("message", String.valueOf(invalid.getMessage()));
             return report;
         }
+        if (replan && env.readiness != null) {
+            java.util.Set<String> names = new java.util.LinkedHashSet<>();
+            if (user.policy() != null) for (var spec : user.policy().roles().values()) names.addAll(spec.profiles());
+            List<Profile> models = names.stream().map(user.profiles()::get).filter(java.util.Objects::nonNull)
+                    .filter(Profile::verified).toList();
+            try {
+                Map<String, Object> checked = env.readiness.check(
+                        user, root, models, loaded.resolved().budget().strictCostCap(), narration(args)::line);
+                if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                    report.put("started", false); report.put("ok", false);
+                    report.put("code", "model_check_failed"); report.put("model_check", checked);
+                    return report;
+                }
+            } catch (Exception failed) {
+                report.put("started", false); report.put("ok", false); report.put("code", "model_check_failed");
+                return report;
+            }
+        }
         Map<String, Object> claimed;
         try {
             claimed = claimContinuation(root, resolved.runId(), nextId);
@@ -779,6 +911,8 @@ public final class Main {
                 loaded = new ConfigLoader().load(root, resolved.taskId());
             }
             TaskLoop.Outcome outcome = new TaskLoop(new ProcessRunner())
+                    .withTaskRouting(env.taskRouting)
+                    .withReadiness(env.readiness)
                     .withProgress(dev.warden.run.Progress.tee(narration(args),
                             dev.warden.run.Progress.toFile(narration)))
                     .withWorkspace(card)
@@ -1244,6 +1378,8 @@ public final class Main {
         DoCommand.Options options = DoCommand.parse(args);
         UserConfig user = UserConfig.load();
         DoCommand.Outcome outcome = new DoCommand(new ProcessRunner(), narration(args))
+                .withTaskRouting(dev.warden.run.TaskRouting.live())
+                .withReadiness(dev.warden.run.RunReadiness.live(new ProcessRunner()))
                 .withWorkspace(board(args), hasFlag(args, "--watch"))
                 .withOrcaGate(!hasFlag(args, "--no-orca-gate"))
                 .withOverride(dev.warden.config.RunOverride.fromArgs(args))
@@ -1342,7 +1478,8 @@ public final class Main {
         boolean machineGatesReady = javaSupported && projectConfig;
         UserConfig user = UserConfig.load();
         List<String> eligible = user.profiles().values().stream()
-                .filter(Profile::verified).map(Profile::name).toList();
+                .filter(Profile::verified).filter(profile -> !"api".equals(profile.runner())
+                        || RoleRunner.executableFound(new ProcessRunner(), profile)).map(Profile::name).toList();
         List<String> unverified = user.profiles().values().stream()
                 .filter(profile -> !profile.verified()).map(Profile::name).toList();
         boolean roleExecutionReady = user.policyPresent() && user.policy() != null
@@ -1378,6 +1515,8 @@ public final class Main {
         userSummary.put("unverified_profiles", unverified);
         userSummary.put("problems", user.problems());
         userSummary.put("dangling_policy_references", user.danglingProfileReferences());
+        userSummary.put("connections", user.connections().values().stream()
+                .map(connection -> dev.warden.config.ConnectionCommand.view(connection, System::getenv)).toList());
         result.put("user_config", userSummary);
         // The chain that will actually run, so an operator can read it back before paying
         // for a run rather than discovering the order from a summary afterwards.
@@ -1391,7 +1530,9 @@ public final class Main {
             result.put("role_execution_blocked_by", !user.policyPresent()
                     ? "no ~/.warden/policy.yaml — run `warden setup`"
                     : eligible.isEmpty()
-                        ? "every profile is unverified; run its probe, then set verification.verified_on"
+                        ? (unverified.size() == user.profiles().size()
+                            ? "every profile is unverified; run its verification probe"
+                            : "verified API profiles have unavailable connection credentials; inspect connections list")
                         : "policy references profiles that do not load: " + user.danglingProfileReferences());
         }
         result.put("direct_cli_ready", roleExecutionReady);
@@ -1604,16 +1745,30 @@ public final class Main {
         final Gates gates;
         /** Null means {@link UserConfig#load()}; tests pass an isolated home. */
         final Path configHome;
+        final dev.warden.run.RunReadiness readiness;
+        final dev.warden.run.TaskRouting taskRouting;
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates) {
             this(clock, sleeper, gates, null);
         }
 
         ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome) {
+            this(clock, sleeper, gates, configHome, null);
+        }
+
+        ApproveEnv(Clock clock, Sleeper sleeper, Gates gates, Path configHome,
+                   dev.warden.run.RunReadiness readiness) {
+            this(clock,sleeper,gates,configHome,readiness,null);
+        }
+
+        ApproveEnv(Clock clock,Sleeper sleeper,Gates gates,Path configHome,
+                   dev.warden.run.RunReadiness readiness,dev.warden.run.TaskRouting taskRouting){
             this.clock = clock;
             this.sleeper = sleeper;
             this.gates = gates;
             this.configHome = configHome;
+            this.readiness = readiness;
+            this.taskRouting = taskRouting;
         }
 
         UserConfig user() throws java.io.IOException {
@@ -1625,7 +1780,7 @@ public final class Main {
                     System::currentTimeMillis,
                     millis -> Thread.sleep(millis),
                     (root, gate) -> new OrcaDecisionGate(new ProcessRunner()).read(root, gate),
-                    null);
+                    null, dev.warden.run.RunReadiness.live(new ProcessRunner()),dev.warden.run.TaskRouting.live());
         }
     }
 
@@ -2116,6 +2271,23 @@ public final class Main {
             var project = dev.warden.config.ProjectConfig.parse(
                     java.nio.file.Files.readString(projectFile), projectFile.toString());
             var spec = dev.warden.config.TaskSpec.parse(before, taskFile.toString());
+            if (env.readiness != null) {
+                UserConfig user = env.user();
+                List<Profile> models = new java.util.ArrayList<>();
+                for (String role : Preparation.payingStages(user)) {
+                    var roster = user.policy() == null ? null : user.policy().roles().get(role);
+                    if (roster != null) for (String name : roster.profiles()) {
+                        Profile profile = user.profiles().get(name);
+                        if (profile != null && profile.verified()) models.add(profile);
+                    }
+                }
+                Map<String, Object> checked = env.readiness.check(user, root, models,
+                        spec.resolve(project, taskFile.toString()).budget().strictCostCap(), narration::line);
+                if (!Boolean.TRUE.equals(checked.get("ok"))) {
+                    report.put("contract_amendment", Map.of("ok", false, "code", "model_check_failed", "model_check", checked));
+                    return report;
+                }
+            }
             List<String> scopes = spec.scope().entries();
             List<Map<String, Object>> gaps = new java.util.ArrayList<>();
             List<Object> ids = new java.util.ArrayList<>();
@@ -2653,9 +2825,30 @@ public final class Main {
                                                a pending decision; an answer given there that
                                                continues the loop runs it from this process
                   warden profiles              which profiles load, which are eligible, and why not
+                  warden connections list      configured API endpoints and credential presence (no inference)
+                  warden connections add ID --provider openrouter|gonkarouter|joingonka --env VARIABLE
+                  warden connections coding-check ID --project DISPOSABLE_PROJECT --opencode EXE --model MODEL
+                  warden connections add ID --provider openrouter --os-store
+                                           reference Windows Credential Manager; the key is not an argument
+                  warden connections auth-set ID
+                                           read the key from stdin (hidden when a console is attached)
+                  warden connections auth-remove ID
+                                           delete the local vault entry; the provider key is not revoked
+                  warden connections auth-login ID
+                                           OpenRouter PKCE on 127.0.0.1; the issued key goes to the OS vault
+                  warden connections auth-login ID --headless
+                                           print the URL and read the pasted code from stdin
+                  warden connections check ID  native auth check where supported; no inference or model stamp
+                  warden connections enable|disable|remove ID
                   warden profiles --verify N   run profile N's own probe; stamps verified_on
                                            when it passes, so swapping a vendor is an edit and
                                            one command. Read the transcript it keeps anyway
+                                           Jev updates require --confirm --reported-model EXACT
+                  warden check [--all]         fresh bounded model reply via each configured CLI/API
+                  warden check --profile N     check one profile without granting role verification
+                  warden check --task TASK     check the task's selected models
+                  warden classify TASK         Jev task/effort advice without starting workers
+                  warden settings             connections, model checks and run settings in one panel
                   warden probe orca --agent A [--model M] [--effort E] [--image] [--worktree DIR]
                                            the probe a runner: orca profile names: one worker
                                            through Orca reads a word Warden just wrote, and
