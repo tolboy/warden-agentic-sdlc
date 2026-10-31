@@ -6863,10 +6863,12 @@ public final class TaskLoopTest implements Suite {
         private final List<String> notes = new java.util.ArrayList<>();
         private final List<State> states = new java.util.ArrayList<>();
         private final List<String> beats = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final List<dev.warden.execution.ExecutionActivity> activity = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         @Override public void note(String text) { notes.add(text); }
         @Override public void state(State state) { states.add(state); }
         @Override public void working(String who, long millis) { beats.add(who); }
+        @Override public void activity(dev.warden.execution.ExecutionActivity event) { activity.add(event); }
 
         State last() { return states.isEmpty() ? null : states.get(states.size() - 1); }
 
@@ -6889,6 +6891,12 @@ public final class TaskLoopTest implements Suite {
                 Workspace.State.WAITING_FOR_HUMAN, board.last());
         check.that("the run says it is running before it says it is done",
                 board.states.get(0) == Workspace.State.RUNNING);
+        check.that("actual dispatch metadata reaches the workspace projection", board.activity.stream().anyMatch(event ->
+                event.update().kind() == dev.warden.execution.ExecutionActivity.Kind.DISPATCHING
+                        && "loop-impl".equals(event.attempt().profile()) && "implvendor".equals(event.attempt().vendor())
+                        && event.attempt().number() == 1));
+        check.that("a completed attempt closes its projection", board.activity.stream().anyMatch(event ->
+                event.update().kind() == dev.warden.execution.ExecutionActivity.Kind.ATTEMPT_FINISHED));
         check.that("every stage reported itself to the card", board.anyNote("gates"));
         check.that("and the card names the role holding the loop, not only the stage",
                 board.anyNote("implement · implementer · running"));
@@ -6902,6 +6910,38 @@ public final class TaskLoopTest implements Suite {
         check.that("and what it cost, because a phone cannot run warden report",
                 board.anyNote("call(s)"));
 
+        // The loop wraps every executor to defer an API interruption. RoleRunner dispatches
+        // through the two-argument execute, so the wrapper must forward the activity sink;
+        // a one-method lambda fell back to execute(request) and a direct CLI's tool and
+        // output events never reached the card on loop dispatches.
+        Path live = newProject(sandbox, "watched-live");
+        writeProfiles(home, sandbox, "watched-live", 1, 1);
+        Board liveBoard = new Board();
+        TaskLoop.Outcome liveRun = new TaskLoop(new ProcessRunner()).withWorkspace(liveBoard)
+                .withExecutors((profile, processes, git) -> {
+                    var direct = dev.warden.execution.Executors.forProfile(profile, processes, git);
+                    return new dev.warden.execution.RoleExecutor() {
+                        @Override public Result execute(Request request) throws Exception {
+                            return direct.execute(request);
+                        }
+
+                        @Override public Result execute(Request request,
+                                java.util.function.Consumer<dev.warden.execution.ExecutionActivity.Update> activity)
+                                throws Exception {
+                            activity.accept(new dev.warden.execution.ExecutionActivity.Update(
+                                    dev.warden.execution.ExecutionActivity.Kind.TOOL_FINISHED,
+                                    "shell", 0, 0, 0));
+                            return direct.execute(request, activity);
+                        }
+                    };
+                }).run(new ConfigLoader().load(live, "hello"), UserConfig.load(home), "wb7", false);
+        check.that("a run whose adapter streams activity still reaches the human gate", liveRun.ok());
+        check.that("a direct adapter's tool event reaches the workspace on a loop dispatch",
+                liveBoard.activity.stream().anyMatch(event ->
+                        event.update().kind() == dev.warden.execution.ExecutionActivity.Kind.TOOL_FINISHED
+                                && "shell".equals(event.update().tool())
+                                && "loop-impl".equals(event.attempt().profile())));
+
         // A preview has not produced anything a person could act on, so it must not move a
         // card into a column that says one of them is waiting.
         Path previewed = newProject(sandbox, "previewed");
@@ -6909,6 +6949,7 @@ public final class TaskLoopTest implements Suite {
         Board untouched = new Board();
         dryLoop(previewed, home, "wb2", untouched);
         check.that("a dry run leaves the board alone", untouched.notes.isEmpty());
+        check.that("a dry run projects no vendor dispatch", untouched.activity.isEmpty());
         check.that("including its column", untouched.states.isEmpty());
         check.that("and it announces no working role, because none was dispatched",
                 untouched.beats.isEmpty());
@@ -6916,6 +6957,7 @@ public final class TaskLoopTest implements Suite {
         Path unlucky = newProject(sandbox, "unlucky");
         writeProfiles(home, sandbox, "unlucky", 1, 1);
         TaskLoop.Outcome survived = loop(unlucky, home, "wb3", new Workspace() {
+            @Override public void activity(dev.warden.execution.ExecutionActivity event) { throw new IllegalStateException("orca died"); }
             @Override public void note(String text) { throw new IllegalStateException("orca died"); }
             @Override public void state(State state) { throw new IllegalStateException("orca died"); }
             @Override public void working(String who, long millis) {

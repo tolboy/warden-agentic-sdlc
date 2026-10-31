@@ -68,6 +68,14 @@ public final class OrcaWorkspace implements Workspace {
      */
     private volatile boolean stopped;
 
+    /**
+     * True while another board owns the card. With `--watch` the automatic desktop
+     * projection writes the card and its activity journal, and this board keeps the tab, its
+     * name and the stage rows. When that projection is refused or fails, this board writes
+     * the card again, as it did before the two were composed.
+     */
+    private volatile java.util.function.BooleanSupplier cardElsewhere = () -> false;
+
     private OrcaWorkspace(OrcaClient orca, Path worktree, String selector) {
         this.orca = orca;
         this.worktree = worktree;
@@ -235,6 +243,15 @@ public final class OrcaWorkspace implements Workspace {
      */
     @Override
     public void watch(Path narration, String runId) {
+        // Preparation (planner, replan) and the loop both ask for the narration window on the
+        // same workspace. The first tab already follows this run; a second create would open
+        // another one and abandon the handle of the first.
+        if (this.terminal != null) return;
+        // Another board for the same run (preparation and the loop in different processes,
+        // or a board rebuilt in this one) may already have opened the tab. The lifecycle file
+        // is the only state they share, so the handle recorded there is reused while Orca
+        // still knows it; a stale handle is an ordinary restart and gets a fresh tab.
+        if (reuseRecordedTerminal(runId)) return;
         try {
             if (!Files.isRegularFile(narration)) {
                 Files.createDirectories(narration.getParent());
@@ -257,6 +274,27 @@ public final class OrcaWorkspace implements Workspace {
         } catch (Exception notOurProblem) {
             // A window that did not open is not a run that failed.
         }
+    }
+
+    private boolean reuseRecordedTerminal(String runId) {
+        if (runId == null) return false;
+        try {
+            String recorded = new OrcaLifecycle(worktree, runId).read().watchTerminal();
+            if (recorded == null || recorded.isBlank()) return false;
+            OrcaClient.Rpc shown = orca.invoke(worktree, TIMEOUT,
+                    List.of("terminal", "show", "--terminal", recorded));
+            if (!shown.ok()) return false;
+            this.runId = runId;
+            this.terminal = recorded;
+            return true;
+        } catch (Exception notOurProblem) {
+            return false;
+        }
+    }
+
+    /** Leave the card to another board while {@code elsewhere} says it is writing it. */
+    void leaveCardTo(java.util.function.BooleanSupplier elsewhere) {
+        this.cardElsewhere = elsewhere == null ? () -> false : elsewhere;
     }
 
     /**
@@ -489,6 +527,7 @@ public final class OrcaWorkspace implements Workspace {
 
     private void set(List<String> fields) {
         try {
+            if (cardElsewhere.getAsBoolean()) return;
             java.util.List<String> args = new java.util.ArrayList<>(
                     List.of("worktree", "set", "--worktree", selector));
             args.addAll(fields);

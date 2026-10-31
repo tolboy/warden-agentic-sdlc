@@ -379,6 +379,7 @@ public final class DoCommand {
         TaskLoop.Preparation preparation = new TaskLoop.Preparation(
                 options.prepare(), false, 0, 0, 0, false);
         CallPlan preparationPlan = null;
+        Workspace card = null;
         long preparationCap = 1;
         if (dispatchPlanner) {
             if (!options.dryRun() && readiness != null) {
@@ -444,7 +445,11 @@ public final class DoCommand {
                 return fail("run_id_exists", requested, root, taskId, duplicate.getMessage());
             }
             Preparation.Outcome prepared;
-            prepared = new Preparation(processes, progress).run(root, project, user, taskId,
+            if (!options.dryRun()) {
+                card = Workspace.guarded(this.board.at(root));
+                if (watch) card.watch(root.resolve(".warden/runs").resolve(runId).resolve("narration.log"), runId);
+            }
+            prepared = new Preparation(processes, progress).withWorkspace(card).run(root, project, user, taskId,
                     runId, options.goal(), scope, risk, PlannerDraft.Access.DO_DEFAULT,
                     options.dryRun());
             if (!prepared.ok()) {
@@ -549,7 +554,6 @@ public final class DoCommand {
         // document every later verdict is measured against; the operator gets to see it.
         // Resolved only when there is something to put on it. Finding the board asks Orca twice,
         // and a preview, a hand-drafted contract or a Conductor launch has nothing to say here.
-        Workspace card = dispatchPlanner && !options.dryRun() ? this.board.at(root) : null;
         if (card != null) {
             card.note("planner compiled " + taskId + " to .warden/tasks/" + taskId
                     + ".yaml; no writer has been dispatched");

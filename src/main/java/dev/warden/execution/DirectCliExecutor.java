@@ -63,6 +63,12 @@ public final class DirectCliExecutor implements RoleExecutor {
 
     @Override
     public Result execute(Request request) throws Exception {
+        return execute(request, null);
+    }
+
+    @Override
+    public Result execute(Request request, java.util.function.Consumer<ExecutionActivity.Update> activity)
+            throws Exception {
         Profile profile = request.profile();
         Path runDirectory = request.runDirectory();
         Map<String, Object> evidence = new LinkedHashMap<>();
@@ -152,7 +158,7 @@ public final class DirectCliExecutor implements RoleExecutor {
         evidence.put("raw_stderr", runDirectory.relativize(stderrFile).toString().replace('\\', '/'));
 
         ProcessRunner.Result process;
-        try {
+        try (LiveCliOutput live = LiveCliOutput.follow(stdoutFile, stderrFile, activity)) {
             process = processes.runVendor(command, request.projectRoot(),
                     Duration.ofMinutes(profile.wallClockMinutes()), PREVIEW_BYTES, stdinText,
                     stdoutFile, stderrFile, ProcessRunner.DEFAULT_RAW_BYTES);
@@ -623,11 +629,16 @@ public final class DirectCliExecutor implements RoleExecutor {
      * happens to print.
      */
     public static String resolveExecutable(String command, Path workingDirectory) {
+        return resolveExecutable(command, workingDirectory, Duration.ofSeconds(10));
+    }
+
+    /** Let bounded UI RPCs include executable discovery in their existing deadline. */
+    public static String resolveExecutable(String command, Path workingDirectory, Duration lookupTimeout) {
         if (command.contains("/") || command.contains("\\")) return command;
         if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return command;
         try {
             ProcessRunner.Result lookup = new ProcessRunner()
-                    .run(List.of("where.exe", command), workingDirectory, Duration.ofSeconds(10));
+                    .run(List.of("where.exe", command), workingDirectory, lookupTimeout);
             if (lookup.ok()) {
                 List<String> candidates = new ArrayList<>();
                 for (String line : lookup.stdout().split("\\R")) {

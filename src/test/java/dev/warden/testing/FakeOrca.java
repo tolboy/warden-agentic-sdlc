@@ -80,6 +80,14 @@ public final class FakeOrca {
         return this;
     }
 
+    /** Orca restarted: every terminal handle it gave out is now stale. */
+    public FakeOrca forgettingTerminals() {
+        this.terminalsForgotten = true;
+        return this;
+    }
+
+    private volatile boolean terminalsForgotten;
+
     public FakeOrca notAWorktree() {
         this.orcaWorktree = false;
         return this;
@@ -120,7 +128,10 @@ public final class FakeOrca {
                     : refused("not_an_orca_worktree");
             case "worktree set", "terminal rename", "terminal close", "orchestration worker-read",
                     "orchestration task-update", "orchestration run-use" -> ok(Map.of());
-            case "terminal create", "terminal show" -> ok(Map.of("terminal", Map.of("handle", next("terminal"))));
+            case "terminal show" -> terminalsForgotten ? refused("terminal_handle_stale")
+                    : ok(Map.of("terminal", Map.of("handle", args.contains("--terminal")
+                            ? option(args, "--terminal") : next("terminal"))));
+            case "terminal create" -> ok(Map.of("terminal", Map.of("handle", next("terminal"))));
             case "orchestration run-create" -> ok(Map.of("run", Map.of("id", next("run"))));
             case "orchestration task-create" -> ok(Map.of("task", Map.of("id", next("task"))));
             case "orchestration worker-list" -> ok(Map.of("workers", List.of()));

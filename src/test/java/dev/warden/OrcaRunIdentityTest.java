@@ -57,6 +57,8 @@ public final class OrcaRunIdentityTest implements Suite {
             aContinuationKeepsTheChainsRun(check, root);
             anAnswerRenamesTheTabFromAnotherProcess(check, root);
             aStageTheRunAbandonsIsClosedAsFailed(check, root);
+            aSecondWatchOpensNoSecondTab(check, root);
+            aSecondBoardReusesTheRunsTab(check, root);
         } finally {
             deleteTree(root);
         }
@@ -179,6 +181,50 @@ public final class OrcaRunIdentityTest implements Suite {
         check.eq("as failed", "failed", FakeOrca.option(settled.getFirst(), "--status"));
         board.stageEnded(true, "late");
         check.eq("and is not closed twice", 1, orca.calls("orchestration task-update").size());
+    }
+
+    /**
+     * `warden do --watch` with a planner, and replan, ask for the window before the planner
+     * and again when the loop starts on the same workspace. One tab follows the run.
+     */
+    private void aSecondWatchOpensNoSecondTab(Check check, Path root) throws Exception {
+        FakeOrca orca = new FakeOrca(root);
+        Workspace board = OrcaWorkspace.attach(orca.client(), root);
+        Path narration = root.resolve(".warden/runs/run-6/narration.log");
+        board.watch(narration, "run-6");
+        String tab = new OrcaLifecycle(root, "run-6").read().watchTerminal();
+        board.watch(narration, "run-6");
+        check.eq("preparation and the loop open one narration tab", 1,
+                orca.calls("terminal create").size());
+        check.eq("and the lifecycle keeps the first tab's handle", tab,
+                new OrcaLifecycle(root, "run-6").read().watchTerminal());
+    }
+
+    /**
+     * Two boards for one run share nothing but the run's lifecycle file: preparation and the
+     * loop in different processes, or a board rebuilt for the same worktree. The tab recorded
+     * there is reused while Orca still knows it, and replaced once it does not.
+     */
+    private void aSecondBoardReusesTheRunsTab(Check check, Path root) throws Exception {
+        FakeOrca orca = new FakeOrca(root);
+        Path narration = root.resolve(".warden/runs/run-7/narration.log");
+        OrcaWorkspace.attach(orca.client(), root).watch(narration, "run-7");
+        String tab = new OrcaLifecycle(root, "run-7").read().watchTerminal();
+        Workspace second = OrcaWorkspace.attach(orca.client(), root);
+        second.watch(narration, "run-7");
+        check.eq("two boards for one run open one narration tab", 1, orca.calls("terminal create").size());
+        check.eq("and the run keeps that tab's handle", tab,
+                new OrcaLifecycle(root, "run-7").read().watchTerminal());
+        second.state(Workspace.State.WAITING_FOR_HUMAN);
+        check.that("the second board names the tab it reused", orca.calls("terminal rename").stream()
+                .anyMatch(call -> tab.equals(FakeOrca.option(call, "--terminal"))
+                        && "warden run-7 - NEEDS YOU".equals(FakeOrca.option(call, "--title"))));
+
+        FakeOrca restarted = new FakeOrca(root).forgettingTerminals();
+        OrcaWorkspace.attach(restarted.client(), root).watch(narration, "run-7");
+        check.eq("a tab Orca no longer knows is replaced", 1, restarted.calls("terminal create").size());
+        check.eq("after asking Orca about the recorded one", List.of("terminal", "show", "--terminal", tab),
+                restarted.calls("terminal show").get(0));
     }
 
     private static RoleExecutor.Request request(Path root, String runId) throws Exception {
